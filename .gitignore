@@ -1,0 +1,12 @@
+/target
+*.swtmp
+.DS_Store
+
+# Cargo.lock is deliberately NOT ignored. Shoin is an application, not a
+# library, and Cargo's own guidance is to commit the lockfile for binaries so
+# everyone building from the repo gets the dependency versions that were
+# actually tested.
+
+# Local-only working notes and tooling config, not part of the published repo.
+/local
+/.claude
