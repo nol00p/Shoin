@@ -833,6 +833,53 @@ mod tests {
         assert_eq!(app.cache.borrow().verifications, walks + 1);
     }
 
+    /// A batch of edits absorbed between two frames costs ONE walk, not one
+    /// per edit — the property `App::step` buys by draining the event queue
+    /// before it draws.
+    ///
+    /// This is the freeze, stated as arithmetic. A verification walk is
+    /// O(lines), and a paste is one key event per character already sitting in
+    /// the queue. Drawing between two of them made the cost of a paste
+    /// O(characters x lines): 10 KB into a 5 000-line document took a minute of
+    /// terminal that answered nothing. Nobody could have read those frames
+    /// anyway — each was on screen only for as long as it took to compute the
+    /// next one.
+    ///
+    /// The assertion is deliberately on the WALK and not on wall-clock time:
+    /// what went wrong was never the speed of any one frame, it was how many
+    /// frames a paste asked for.
+    #[test]
+    fn a_batch_of_edits_costs_one_walk() {
+        let mut app = app_with(&doc());
+        sync(&mut app);
+        let walks = app.cache.borrow().verifications;
+
+        // 500 characters typed into the document with no frame between them,
+        // which is what a paste looks like from inside the event loop.
+        for i in 0..500 {
+            app.buffer.insert_str(Cursor::new(40, 0), "x");
+            assert_eq!(
+                app.cache.borrow().verifications,
+                walks,
+                "edit {i} must not walk the document on its own"
+            );
+        }
+
+        sync(&mut app);
+        assert_eq!(
+            app.cache.borrow().verifications,
+            walks + 1,
+            "the whole batch is one walk — a frame per edit is the freeze"
+        );
+
+        // …and the batch still lands in full. Coalescing changes WHEN the
+        // document is re-read, never what it says.
+        assert!(
+            app.buffer.line_text(40).starts_with(&"x".repeat(500)),
+            "every absorbed edit has to be in the buffer"
+        );
+    }
+
     /// The correctness twin: the fast path must never outlive the thing that
     /// justifies it. A changed measure, theme or embed mode re-parses even
     /// though the revision has not moved.

@@ -45,6 +45,28 @@ use crate::text::object;
 
 const TICK: Duration = Duration::from_millis(100);
 
+/// How long one iteration may spend absorbing input before it has to draw.
+///
+/// A frame costs O(lines): the render cache verifies every entry against its
+/// source line whenever the buffer revision moves, and the row index is rebuilt
+/// across the whole document. That is the right trade for ONE edit — but it is
+/// paid per edit, and input does not arrive one event at a time. A paste is
+/// thousands of key events already sitting in the queue, and drawing between
+/// each of them made a 10 KB paste into a 5 000-line document a minute of dead
+/// terminal. Draining what has already arrived and drawing the result once
+/// turns O(events × lines) back into O(lines).
+///
+/// The budget is what keeps a very large paste from going dark: whatever is
+/// still queued when it runs out waits for the next iteration, so the screen
+/// keeps up through an arbitrarily long one.
+const BATCH_BUDGET: Duration = Duration::from_millis(16);
+
+/// A hard ceiling on one batch, alongside the budget rather than instead of it.
+/// The budget is wall-clock and so cannot be reasoned about; this is the bound
+/// that says a batch ENDS, whatever the clock did — a suspended process whose
+/// `Instant` barely moved still has to give the screen back.
+const BATCH_MAX: usize = 4096;
+
 /// Cells a `<C-w>>` / `<C-w>+` press moves a pane edge. Wider than vim's single
 /// cell: a centered text measure is worth adjusting in visible steps.
 const WIDTH_STEP: i32 = 4;
@@ -723,7 +745,14 @@ impl App {
         }
     }
 
-    /// One iteration: wait for an event or tick, then handle it.
+    /// One iteration: wait for input, then absorb everything that has already
+    /// arrived with it before handing back to be drawn.
+    ///
+    /// The draining is the point. A key event is cheap — an edit on a rope and
+    /// a cursor clamp — but the frame that follows it is O(lines), so what
+    /// costs is drawing BETWEEN two events that were already both in the queue.
+    /// Nobody can read those intermediate frames anyway: they are on screen for
+    /// as long as it takes to compute the next one. See `BATCH_BUDGET`.
     fn step(&mut self) -> Result<()> {
         if self.watcher.as_ref().is_some_and(|w| w.changed()) {
             self.reload_config();
@@ -736,7 +765,46 @@ impl App {
             }
             return Ok(());
         }
-        match event::read()? {
+        // The first event is in hand; everything after it counts only if it has
+        // arrived too. ZERO, not TICK — waiting here would hold a finished
+        // frame back for input that may never come.
+        let mut first = Some(event::read()?);
+        self.absorb_batch(&mut || match first.take() {
+            Some(event) => Ok(Some(event)),
+            None => match event::poll(Duration::ZERO)? {
+                true => Ok(Some(event::read()?)),
+                false => Ok(None),
+            },
+        })?;
+        Ok(())
+    }
+
+    /// Apply events from `next` until it has none ready, the budget runs out,
+    /// or the editor is quitting. Returns how many were applied.
+    ///
+    /// Split out from `step` so the batching rule can be held to in a test:
+    /// here the source is crossterm's queue, and in the tests it is a `Vec`.
+    fn absorb_batch(
+        &mut self,
+        next: &mut impl FnMut() -> Result<Option<CtEvent>>,
+    ) -> Result<usize> {
+        let deadline = Instant::now() + BATCH_BUDGET;
+        let mut absorbed = 0usize;
+        while let Some(event) = next()? {
+            self.absorb(event);
+            absorbed += 1;
+            // `quit` first: whatever follows `:q` in the queue was typed at a
+            // buffer that is on its way out, and belongs to the shell now.
+            if self.quit || absorbed >= BATCH_MAX || Instant::now() >= deadline {
+                break;
+            }
+        }
+        Ok(absorbed)
+    }
+
+    /// Apply one terminal event to the editor's state, without drawing.
+    fn absorb(&mut self, event: CtEvent) {
+        match event {
             CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
                 self.on_key(key);
                 self.sync_after_input();
@@ -753,7 +821,6 @@ impl App {
             }
             _ => {}
         }
-        Ok(())
     }
 
     /// Enable or disable terminal mouse capture at runtime.
@@ -2098,6 +2165,12 @@ impl App {
 
     /// `gt`: flip a task checkbox, or add one to a plain list item.
     fn toggle_task(&mut self) {
+        // The block cache is refreshed by the RENDER path, so between two keys
+        // in one event batch it can still describe the line before the last
+        // edit — and `gt` on a line that only just became a list item would
+        // read the kind it had before. Same guard, and the same reason, as
+        // `open_line_break`; it early-returns when the revisions match.
+        self.refresh_blocks();
         let line = self.buffer.cursor.line;
         let chars: Vec<char> = self.buffer.line_text(line).chars().collect();
         let base = self.buffer.rope.line_to_char(line);
@@ -3612,6 +3685,67 @@ mod tests {
     fn esc(app: &mut App) {
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.sync_after_input();
+    }
+
+    /// A queue that is already full is drained in a handful of batches, not one
+    /// batch per event — the property that keeps a paste from freezing the
+    /// editor.
+    ///
+    /// Every frame is O(lines), so what a paste costs is not any single frame
+    /// but how many of them it asks for: one per character, drawn between two
+    /// events that were both already in the queue. 10 KB pasted into a
+    /// 5 000-line document took a minute of terminal that answered nothing.
+    ///
+    /// The bound is loose on purpose. One batch is the ordinary answer, but
+    /// `BATCH_BUDGET` is wall-clock, so a loaded machine is allowed several —
+    /// what must never come back is the batch-per-event that was the bug.
+    #[test]
+    fn a_full_queue_is_drained_in_batches_not_one_event_at_a_time() {
+        let mut app = app_with("hello\n");
+        feed(&mut app, "A"); // append, so the events below are typed text
+
+        const N: usize = 500;
+        let mut queue: std::collections::VecDeque<CtEvent> = (0..N)
+            .map(|_| CtEvent::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)))
+            .collect();
+
+        let mut batches = 0usize;
+        let mut absorbed = 0usize;
+        while !queue.is_empty() {
+            absorbed += app.absorb_batch(&mut || Ok(queue.pop_front())).unwrap();
+            batches += 1;
+            assert!(batches <= N, "the loop must make progress");
+        }
+
+        assert_eq!(absorbed, N, "every event has to be applied");
+        assert!(
+            batches <= 50,
+            "{N} queued events took {batches} batches — a frame per keystroke is the freeze"
+        );
+        assert!(
+            text(&app).starts_with(&format!("hello{}", "x".repeat(N))),
+            "coalescing changes WHEN the screen is drawn, never what the buffer says"
+        );
+    }
+
+    /// A batch stops at `:q`. Whatever was typed after it was typed at a buffer
+    /// that is on its way out, and must not be applied to it.
+    #[test]
+    fn a_batch_stops_at_quit() {
+        let mut app = app_with("hello\n");
+        // `:q!`, because `app_with` leaves the buffer modified and a plain `:q`
+        // would rightly refuse it — this test is about the batch, not the guard.
+        let mut queue: std::collections::VecDeque<CtEvent> = ":q!\rxxxxx"
+            .chars()
+            .map(|c| {
+                let code = if c == '\r' { KeyCode::Enter } else { KeyCode::Char(c) };
+                CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+            })
+            .collect();
+
+        app.absorb_batch(&mut || Ok(queue.pop_front())).unwrap();
+        assert!(app.quit, "`:q` still quits from inside a batch");
+        assert_eq!(queue.len(), 5, "the keys after it are left for the shell");
     }
 
     /// A file opened by bare name (`shoin notes.md`) has an EMPTY parent path, not
