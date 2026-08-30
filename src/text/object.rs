@@ -233,8 +233,14 @@ fn quote(buffer: &Buffer, cursor: Cursor, q: char, around: bool) -> Option<Objec
         .map(|(i, _)| i)
         .collect();
 
+    // `as_chunks::<2>()` rather than `chunks_exact(2)`: the items are
+    // `&[usize; 2]`, so `c[0]` and `c[1]` are checked when this compiles instead
+    // of at each call. `.1` is the odd trailing quote, which has no partner and
+    // so bounds nothing.
     let (open, close) = marks
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| (c[0], c[1]))
         .find(|(_, close)| cursor.col <= *close)?;
 
