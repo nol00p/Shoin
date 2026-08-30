@@ -621,14 +621,31 @@ mod tests {
 
         // Then wholesale, which is what catches a role the file OMITS — the
         // per-key loop can only check the keys that are there.
+        // AUTHORED, not `from_config`: the latter ends with `adapt(detect_depth())`,
+        // so it answers with the palette the DEVELOPER'S terminal can show while
+        // `Theme::default()` is always the authored one. On a 16-color terminal
+        // — which is what a CI runner is, with no COLORTERM and no TERM — every
+        // role downgrades onto an indexed slot and the two sides cannot match.
+        // The question this test asks is about two authored palettes; the
+        // terminal has no business in the answer.
         assert!(
-            Theme::from_config(&cfg).unwrap() == Theme::default(),
+            Theme::authored(&cfg).unwrap() == Theme::default(),
             "shoin/theme.conf and Theme::default() disagree — change both, or neither"
         );
     }
 
+    /// Overlaying is `authored`'s job — `from_config` is `authored` plus a
+    /// downgrade for the terminal — so this asks `authored` and gets the same
+    /// answer on every machine.
+    ///
+    /// It used to ask `from_config` and wrap the color assertions in
+    /// `if detect_depth() == TrueColor`, which meant they simply did not run on
+    /// a 256-color terminal, while the unguarded `background` line compared an
+    /// ADAPTED color against an unadapted `Theme::default()` and failed outright
+    /// anywhere below truecolor. A test that skips itself on one machine and
+    /// fails on another is worse than no test.
     #[test]
-    fn from_config_overlays_colors_and_styles() {
+    fn authored_overlays_colors_and_styles() {
         let toml = r##"
             text = "#010203"
             heading_1 = "#0a0b0c"
@@ -637,16 +654,24 @@ mod tests {
             heading_bold = false
         "##;
         let cfg: ThemeConfig = toml::from_str(toml).unwrap();
-        let theme = Theme::from_config(&cfg).unwrap();
-        // Overlaid over the default, in a truecolor test run.
-        if detect_depth() == ColorDepth::TrueColor {
-            assert_eq!(theme.text, Color::Rgb(1, 2, 3));
-            assert_eq!(theme.headings[0], Color::Rgb(0x0a, 0x0b, 0x0c));
-            assert_eq!(theme.indent_colors.len(), 2);
-        }
+        let theme = Theme::authored(&cfg).unwrap();
+        assert_eq!(theme.text, Color::Rgb(1, 2, 3));
+        assert_eq!(theme.headings[0], Color::Rgb(0x0a, 0x0b, 0x0c));
+        assert_eq!(theme.indent_colors.len(), 2);
         assert!(!theme.heading_bold);
         // A key we didn't set keeps the default.
         assert_eq!(theme.background, Theme::default().background);
+    }
+
+    /// …and `from_config` is exactly that, downgraded — which is the half the
+    /// test above deliberately leaves out, pinned here to a depth rather than
+    /// read from the environment.
+    #[test]
+    fn from_config_is_authored_then_adapted() {
+        let cfg = ThemeConfig::default();
+        let mut expected = Theme::authored(&cfg).unwrap();
+        expected.adapt(detect_depth());
+        assert!(Theme::from_config(&cfg).unwrap() == expected);
     }
 
     #[test]
