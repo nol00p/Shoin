@@ -35,6 +35,7 @@ use crate::render::focus::{FocusMode, FocusRegion};
 use crate::render::pane::{Dir, Node, Pane, PaneId};
 use crate::render::frame;
 use crate::render::markdown::block::{BlockCache, BlockKind, Marker};
+use crate::render::markdown::inline::{self, Inline};
 use crate::render::theme::Theme;
 use crate::fs::ops;
 use crate::export::Format;
@@ -42,6 +43,7 @@ use crate::text::buffer::Buffer;
 use crate::text::cursor::Cursor;
 use crate::text::motion::{self, Motion};
 use crate::text::object;
+use crate::transclude::{compile, link};
 
 const TICK: Duration = Duration::from_millis(100);
 
@@ -147,6 +149,14 @@ pub struct App {
     /// Every open document, in the order they were opened. `App` derefs to the
     /// one the FOCUSED PANE is showing.
     pub docs: Vec<BufferState>,
+
+    /// The document `<C-^>` goes back to — the one the focused pane was showing
+    /// before its current one.
+    ///
+    /// An INDEX, not a path, because an unnamed buffer has neither; the index
+    /// is fixed up in `close_buffer` the same way the panes' are, which is the
+    /// one place `docs` ever shrinks.
+    pub alternate: Option<usize>,
 
     /// The window layout: a tree of splits whose leaves are panes, each a view
     /// onto a document. One leaf until you split.
@@ -349,6 +359,67 @@ fn char_rfind(hay: &[char], needle: &[char], before: usize) -> Option<usize> {
     (0..=max).rev().find(|&i| hay[i..i + needle.len()] == needle[..])
 }
 
+/// Where the link under the cursor points.
+///
+/// Three cases because there are three ways to get there, not three syntaxes:
+/// a name the vault resolves, a path the document spells out, and an address
+/// only the desktop can reach. `[[note]]`, `![[note]]` and `[text](note.md)`
+/// all land in the first two.
+enum Dest {
+    /// A `[[…]]` target — a NAME, which `transclude::link` turns into a file.
+    Note(link::Link),
+    /// A path written out in a `[text](path)`, relative to the edited file.
+    Path { path: PathBuf, section: link::Section },
+    /// A URL. Nothing in the editor can open it.
+    Url(String),
+}
+
+/// Destinations `gx` will hand to the desktop, and the only ones `[text](…)`
+/// reads as a URL rather than as a path.
+///
+/// An allowlist rather than a general scheme parser, because the ambiguous
+/// cases all resolve the wrong way: `C:\notes\x.md` and `2:30 plan.md` both
+/// look like schemes, and a Windows drive letter reaching the system opener
+/// would be a surprise with no way to ask for the file instead.
+const URL_SCHEMES: &[&str] = &["http://", "https://", "mailto:"];
+
+fn is_url(s: &str) -> bool {
+    URL_SCHEMES
+        .iter()
+        .any(|p| s.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p)))
+}
+
+/// Extensions a dead link may CREATE. A missing note is a note to write; a
+/// missing `report.pdf` is a missing file, and touching an empty one in its
+/// place would answer a question nobody asked.
+const CREATABLE: &[&str] = &["md", "markdown", "txt"];
+
+/// A link target with no extension means a note — the same default
+/// `link::candidates` resolves with, so what `gf` creates is what the link
+/// finds next time.
+fn with_default_ext(path: PathBuf) -> PathBuf {
+    match path.extension() {
+        Some(_) => path,
+        None => path.with_extension("md"),
+    }
+}
+
+fn creatable(path: &Path) -> bool {
+    match path.extension() {
+        None => true,
+        Some(e) => CREATABLE.contains(&e.to_string_lossy().to_lowercase().as_str()),
+    }
+}
+
+/// How a section reads in a message: as the reader wrote it after the `#`.
+fn section_label(section: &link::Section) -> String {
+    match section {
+        link::Section::All => String::new(),
+        link::Section::Heading(h) => h.clone(),
+        link::Section::Block(b) => format!("^{b}"),
+    }
+}
+
 /// The terminal caret shape per mode. A visible modal cue: block in Normal, bar
 /// while inserting or typing a command, underline in Visual by default — each
 /// overridable via `[cursor]`.
@@ -450,6 +521,7 @@ impl App {
             },
             theme: Theme::from_config(&config.theme).unwrap_or_default(),
             docs: vec![BufferState::new(buffer)],
+            alternate: None,
             layout: Node::leaf(1, 0),
             focus_pane: 1,
             next_pane_id: 2,
@@ -1144,6 +1216,9 @@ impl App {
                 let root = self.root_dir(root);
                 self.toggle_tree(root);
             }
+            Action::FollowLink => self.follow_link(),
+            Action::OpenExternal => self.open_external(),
+            Action::AlternateBuffer => self.alternate_buffer(),
             Action::FindBuffer => self.open_buffer_switcher(),
             Action::FindFile { root } => {
                 let root = self.root_dir(root);
@@ -1552,6 +1627,202 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------- links
+
+    /// Where the link under the cursor points, if the cursor is on one.
+    fn link_dest(&self) -> Option<Dest> {
+        let line = self.buffer.line_text(self.buffer.cursor.line);
+        let span = inline::span_at(&line, self.buffer.cursor.col, &self.config.markdown)?;
+        let target = inline::target_of(&span, &line)?;
+        Some(match span.kind {
+            // A wiki target is a NAME, even when it looks like a path: §14.2
+            // resolution tries it relative to this file first anyway.
+            Inline::WikiLink => Dest::Note(link::Link::parse(&target)?),
+            Inline::Autolink => Dest::Url(target),
+            _ if is_url(&target) => Dest::Url(target),
+            // `Link::parse` rather than a hand-rolled split, so `note.md#Head`
+            // in a markdown link means the same thing it means in `[[…]]`.
+            _ => {
+                let l = link::Link::parse(&target)?;
+                Dest::Path {
+                    path: self.file_dir().join(&l.target),
+                    section: l.section,
+                }
+            }
+        })
+    }
+
+    /// The vault root bare-name resolution searches from, for the edited file.
+    fn link_root(&self) -> PathBuf {
+        compile::search_root(&self.link_from(), &self.config.transclude)
+    }
+
+    /// The file links are resolved RELATIVE to. An unnamed buffer has no path
+    /// of its own, so it borrows the working directory's — the same fallback
+    /// `file_dir` makes, and for the same reason.
+    fn link_from(&self) -> PathBuf {
+        match self.buffer.path.as_ref() {
+            Some(p) => self.absolute(p),
+            None => self.cwd().join("untitled.md"),
+        }
+    }
+
+    /// `gf` — open what the cursor is on.
+    fn follow_link(&mut self) {
+        match self.link_dest() {
+            None => self.notify("no link under the cursor", FlashKind::Error),
+            // Deliberately not "silently do the other thing". `gx` is one key
+            // away, and naming it here is how it gets learned.
+            Some(Dest::Url(u)) => {
+                self.notify(format!("{u} is a URL — gx opens it"), FlashKind::Info)
+            }
+            Some(Dest::Path { path, section }) => self.open_or_create(path, &section),
+            Some(Dest::Note(l)) => {
+                let (root, from) = (self.link_root(), self.link_from());
+                match link::resolve(&l, &from, &root) {
+                    Ok(path) => self.open_or_create(path, &l.section),
+                    // A name nothing answers to is a note not written YET.
+                    // Resolution is unchanged; what is new is that its miss is
+                    // a starting point rather than an error.
+                    Err(link::Unresolved::Missing(_)) => {
+                        let path = self.file_dir().join(&l.target);
+                        self.open_or_create(path, &l.section)
+                    }
+                    // The refusal becomes a choice: the finder already knows
+                    // how to pick one path out of several.
+                    Err(link::Unresolved::Ambiguous(_, paths)) => {
+                        let n = paths.len();
+                        self.finder = Some(Finder::from_paths(paths, &root));
+                        self.notify(
+                            format!("{n} notes are called {:?} — pick one", l.target),
+                            FlashKind::Info,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open `path`, writing an empty file first if it is a note that does not
+    /// exist yet.
+    ///
+    /// The creation is the point of following a link in a vault: `[[tomorrow]]`
+    /// is written before `tomorrow.md` is, and the link is how the note gets
+    /// started. It is created ON DISK rather than as an unnamed buffer so that
+    /// the link that made it resolves from now on — including from every other
+    /// note already pointing here.
+    fn open_or_create(&mut self, path: PathBuf, section: &link::Section) {
+        let path = if path.exists() { path } else { with_default_ext(path) };
+        if !path.exists() {
+            if !creatable(&path) {
+                self.notify(format!("no {}", path.display()), FlashKind::Error);
+                return;
+            }
+            if let Err(e) = ops::create(&path, false) {
+                self.notify(format!("{e}"), FlashKind::Error);
+                return;
+            }
+            if self.open_file(path.clone()) {
+                self.notify(format!("created {}", path.display()), FlashKind::Info);
+            }
+            return;
+        }
+        if self.open_file(path) {
+            self.jump_to_section(section);
+        }
+    }
+
+    /// Put the cursor on the heading or block a `#section` asked for.
+    ///
+    /// A section that is not there is reported but not refused — the note is
+    /// already open, and landing at its top beats not moving at all.
+    fn jump_to_section(&mut self, section: &link::Section) {
+        if matches!(section, link::Section::All) {
+            return;
+        }
+        let text = self.buffer.rope.to_string();
+        match link::section_line(&text, section) {
+            Some(line) => {
+                self.buffer.cursor = Cursor::new(line, 0);
+                self.sync_after_input();
+            }
+            None => self.notify(
+                format!("no {:?} in this note", section_label(section)),
+                FlashKind::Error,
+            ),
+        }
+    }
+
+    /// `gx` — hand the link under the cursor to the desktop.
+    ///
+    /// Works on a note or a picture too, not just a URL: `gx` on an
+    /// `![[photo.png]]` is how you see it at full size, and on a `[…](x.pdf)`
+    /// how you read it. It never CREATES — an external opener has nothing to
+    /// do with a note that does not exist.
+    fn open_external(&mut self) {
+        let arg = match self.link_dest() {
+            None => {
+                self.notify("no link under the cursor", FlashKind::Error);
+                return;
+            }
+            Some(Dest::Url(u)) => u,
+            Some(Dest::Path { path, .. }) if path.exists() => path.display().to_string(),
+            Some(Dest::Note(l)) => {
+                let (root, from) = (self.link_root(), self.link_from());
+                match link::resolve(&l, &from, &root) {
+                    Ok(p) => p.display().to_string(),
+                    Err(e) => {
+                        self.notify(format!("{e}"), FlashKind::Error);
+                        return;
+                    }
+                }
+            }
+            Some(Dest::Path { path, .. }) => {
+                self.notify(format!("no {}", path.display()), FlashKind::Error);
+                return;
+            }
+        };
+        self.spawn_opener(&arg);
+    }
+
+    /// Run the desktop's opener on one argument.
+    ///
+    /// Spawned directly, never through a shell, so nothing written in a note
+    /// can be read as a command. The leading-dash refusal closes the one hole
+    /// an argument vector does not: `open -a` is a FLAG, whatever it was meant
+    /// to be, and a document should not be able to reach one.
+    fn spawn_opener(&mut self, arg: &str) {
+        if arg.starts_with('-') {
+            self.notify("refusing a target that starts with '-'", FlashKind::Error);
+            return;
+        }
+        let cmd = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "windows") {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        let spawned = std::process::Command::new(cmd)
+            .arg(arg)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            // Reaped on a thread it outlives: these openers hand off and exit
+            // at once, and a session full of un-waited children would collect
+            // one zombie per `gx`.
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                self.notify(format!("opened {arg}"), FlashKind::Info);
+            }
+            Err(e) => self.notify(format!("{cmd}: {e}"), FlashKind::Error),
+        }
+    }
+
     // ---------------------------------------------------------------- panes
 
     /// The document the focused pane is showing. Every `self.buffer` in this
@@ -1669,6 +1940,14 @@ impl App {
         if i >= self.docs.len() {
             return;
         }
+        // Recorded HERE rather than at each caller: every way of reaching
+        // another document — `:b`, the switcher, following a link, closing a
+        // buffer — goes through this one function, and each of them is a move
+        // `<C-^>` should be able to undo.
+        let from = self.current();
+        if from != i {
+            self.alternate = Some(from);
+        }
         let cursor = self.docs[i].buffer.cursor;
         if let Some(pane) = self.layout.pane_mut(self.focus_pane) {
             pane.doc = i;
@@ -1743,8 +2022,19 @@ impl App {
                 pane.doc = pane.doc.min(self.docs.len() - 1);
             }
         }
+        // The alternate shifts with the panes, for the same reason — and the
+        // document that was closed stops being somewhere to go back to.
+        self.alternate = match self.alternate {
+            Some(a) if a == gone => None,
+            Some(a) if a > gone => Some(a - 1),
+            other => other,
+        };
         let to = gone.min(self.docs.len() - 1);
+        // `switch_to` would record the neighbour we are landing on, which is
+        // not where `<C-^>` should go back to after a close.
+        let keep = self.alternate;
         self.switch_to(to);
+        self.alternate = keep;
         self.notify(self.doc_summary(), FlashKind::Info);
     }
 
@@ -1828,6 +2118,28 @@ impl App {
     /// arrive as query text. Esc closes it — the same deal as the `:` box.
     fn open_finder(&mut self, root: PathBuf) {
         self.finder = Some(Finder::open(root));
+    }
+
+    /// `<C-^>` — back to the document this pane was showing before.
+    ///
+    /// Vim's alternate file, and the way back out of a link: `gf` opens a note
+    /// in a new document, and this returns to the one that linked to it.
+    /// Pressed twice it lands where it started, which is what makes it usable
+    /// for reading two notes against each other.
+    fn alternate_buffer(&mut self) {
+        // Never itself: closing the document you followed a link INTO leaves
+        // the alternate pointing at the one you land on, and "go back to where
+        // you are" is not somewhere to go.
+        let alt = self
+            .alternate
+            .filter(|a| *a < self.docs.len() && *a != self.current());
+        match alt {
+            Some(a) => {
+                self.switch_to(a);
+                self.notify(self.doc_summary(), FlashKind::Info);
+            }
+            None => self.notify("no alternate buffer", FlashKind::Error),
+        }
     }
 
     /// `<leader>fb`: the same overlay over the open buffers.
@@ -3746,6 +4058,259 @@ mod tests {
         app.absorb_batch(&mut || Ok(queue.pop_front())).unwrap();
         assert!(app.quit, "`:q` still quits from inside a batch");
         assert_eq!(queue.len(), 5, "the keys after it are left for the shell");
+    }
+
+    // ------------------------------------------------------------ gf / gx
+
+    /// A scratch vault: `note.md` holding `body`, plus whatever else the test
+    /// names. Returns the directory and an app editing the note.
+    fn vault(body: &str, files: &[(&str, &str)]) -> (PathBuf, App) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("shoin-gf-{t}-{n}"));
+        std::fs::create_dir_all(&d).unwrap();
+        for (rel, text) in files {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, text).unwrap();
+        }
+        let note = d.join("note.md");
+        std::fs::write(&note, body).unwrap();
+        let mut app = App::new(Config::default(), Some(note), None).unwrap();
+        app.refresh_blocks();
+        (d, app)
+    }
+
+    /// The file name of the buffer the app is showing.
+    fn shown(app: &App) -> String {
+        app.buffer
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// What the status line is currently saying.
+    fn flash_text(app: &App) -> String {
+        app.flash
+            .as_ref()
+            .and_then(|f| f.text.clone())
+            .unwrap_or_default()
+    }
+
+    /// Put the cursor on the first occurrence of `needle` in line `line`.
+    fn cursor_on(app: &mut App, line: usize, needle: &str) {
+        let text = app.buffer.line_text(line);
+        let col = text.find(needle).map(|b| text[..b].chars().count()).unwrap();
+        app.buffer.cursor = Cursor::new(line, col);
+        app.sync_after_input();
+    }
+
+    /// `gf` on a `[[link]]` opens the note it names.
+    #[test]
+    fn gf_opens_the_note_a_wikilink_names() {
+        let (_d, mut app) = vault("see [[target]] here\n", &[("target.md", "# Target\n")]);
+        cursor_on(&mut app, 0, "target");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "target.md", "the link's note is the open buffer");
+    }
+
+    /// The `!` of an unexpanded `![[…]]` is not part of the scanner's span —
+    /// `bracket_link` rejects it and the scan falls through to `wiki_at`. A
+    /// reader whose cursor is on the bang still means the embed.
+    #[test]
+    fn gf_follows_an_embed_from_its_bang() {
+        let (_d, mut app) = vault("![[frag]]\n", &[("frag.md", "# Frag\n")]);
+        cursor_on(&mut app, 0, "!");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "frag.md", "the bang belongs to the embed after it");
+    }
+
+    /// A link is written before its note is. Following a dead one WRITES the
+    /// note, so the link that made it resolves from then on.
+    #[test]
+    fn gf_creates_a_note_that_does_not_exist_yet() {
+        let (d, mut app) = vault("plan: [[tomorrow]]\n", &[]);
+        cursor_on(&mut app, 0, "tomorrow");
+        feed(&mut app, "gf");
+
+        let made = d.join("tomorrow.md");
+        assert!(made.is_file(), "the note is on disk, not just in a buffer");
+        assert_eq!(std::fs::read_to_string(&made).unwrap(), "", "and it is empty");
+        assert_eq!(shown(&app), "tomorrow.md", "and open");
+
+        // The point of writing it to disk: the same link now resolves.
+        let l = link::Link::parse("tomorrow").unwrap();
+        assert!(
+            link::resolve(&l, &app.link_from(), &app.link_root()).is_ok(),
+            "the link that created the note now finds it"
+        );
+    }
+
+    /// `#Heading` lands ON the heading, not at the top of the file.
+    #[test]
+    fn gf_lands_on_the_section_a_link_asks_for() {
+        let (_d, mut app) = vault(
+            "[[frag#Second]]\n",
+            &[("frag.md", "# First\n\nbody\n\n## Second\n\nmore\n")],
+        );
+        cursor_on(&mut app, 0, "frag");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "frag.md");
+        assert_eq!(
+            app.buffer.line_text(app.buffer.cursor.line).trim(),
+            "## Second",
+            "the cursor is on the heading the link named"
+        );
+    }
+
+    /// A heading that was renamed away still opens the note — landing at its
+    /// top beats refusing to move.
+    #[test]
+    fn a_missing_section_still_opens_the_note() {
+        let (_d, mut app) = vault("[[frag#Gone]]\n", &[("frag.md", "# First\n")]);
+        cursor_on(&mut app, 0, "frag");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "frag.md");
+        assert_eq!(app.buffer.cursor.line, 0);
+    }
+
+    /// `resolve` REFUSES a bare name several files answer to. The refusal is
+    /// turned into a choice rather than an error.
+    #[test]
+    fn an_ambiguous_name_opens_the_finder() {
+        let (_d, mut app) = vault(
+            "[[dup]]\n",
+            &[("a/dup.md", "# A\n"), ("b/dup.md", "# B\n")],
+        );
+        cursor_on(&mut app, 0, "dup");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "note.md", "nothing is opened until one is picked");
+        let f = app.finder.as_ref().expect("the finder is offering the candidates");
+        assert_eq!(f.file_count(), 2, "both notes are in it");
+    }
+
+    /// A markdown link is a PATH, resolved relative to the edited file.
+    #[test]
+    fn gf_opens_the_path_in_a_markdown_link() {
+        let (_d, mut app) = vault(
+            "see [the notes](sub/other.md)\n",
+            &[("sub/other.md", "# Other\n")],
+        );
+        cursor_on(&mut app, 0, "sub/other.md");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "other.md");
+    }
+
+    /// `gf` never launches anything. A URL is reported, and `gx` is named —
+    /// which is how the other key gets learned.
+    #[test]
+    fn gf_refuses_a_url_and_names_gx() {
+        let (_d, mut app) = vault("read https://example.com/x today\n", &[]);
+        cursor_on(&mut app, 0, "https");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "note.md", "the buffer did not change");
+        let flash = flash_text(&app);
+        assert!(flash.contains("gx"), "the message points at gx — got {flash:?}");
+    }
+
+    /// A dead link to something that is not text does NOT get an empty file
+    /// written in its place.
+    #[test]
+    fn a_missing_non_note_is_never_created() {
+        let (d, mut app) = vault("[the paper](out/paper.pdf)\n", &[]);
+        cursor_on(&mut app, 0, "out/paper.pdf");
+        feed(&mut app, "gf");
+        assert!(!d.join("out/paper.pdf").exists(), "no empty pdf was invented");
+        assert_eq!(shown(&app), "note.md");
+    }
+
+    /// Off a link, `gf` says so rather than guessing at the word under the
+    /// cursor.
+    #[test]
+    fn gf_off_a_link_does_nothing() {
+        let (_d, mut app) = vault("just some prose here\n", &[]);
+        cursor_on(&mut app, 0, "prose");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "note.md");
+        assert!(flash_text(&app).contains("no link"), "got {:?}", flash_text(&app));
+    }
+
+    /// `<C-^>` is the way back out of a followed link, and pressing it twice
+    /// lands where it started — which is what makes it usable for reading two
+    /// notes against each other.
+    #[test]
+    fn ctrl_caret_goes_back_and_forth() {
+        let (_d, mut app) = vault("[[target]]\n", &[("target.md", "# Target\n")]);
+        cursor_on(&mut app, 0, "target");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "target.md");
+
+        ctrl(&mut app, '^');
+        assert_eq!(shown(&app), "note.md", "back to the note that linked here");
+        ctrl(&mut app, '^');
+        assert_eq!(shown(&app), "target.md", "and back again");
+    }
+
+    /// Terminals disagree about which of the two chords they send.
+    #[test]
+    fn ctrl_6_is_the_same_binding() {
+        let (_d, mut app) = vault("[[target]]\n", &[("target.md", "# Target\n")]);
+        cursor_on(&mut app, 0, "target");
+        feed(&mut app, "gf");
+        ctrl(&mut app, '6');
+        assert_eq!(shown(&app), "note.md");
+    }
+
+    /// A `6` with CONTROL is a binding, not the start of a count — `as_char`
+    /// refuses a modified key, so `6G` still means line 6.
+    #[test]
+    fn ctrl_6_is_not_swallowed_as_a_count() {
+        let mut app = app_with("a\nb\nc\nd\ne\nf\ng\n");
+        feed(&mut app, "6G");
+        assert_eq!(app.buffer.cursor.line, 5, "6G is still line 6");
+    }
+
+    /// With nowhere to go back to, it says so rather than moving.
+    #[test]
+    fn ctrl_caret_with_no_alternate_says_so() {
+        let (_d, mut app) = vault("nothing here\n", &[]);
+        ctrl(&mut app, '^');
+        assert_eq!(shown(&app), "note.md");
+        assert!(flash_text(&app).contains("no alternate"), "got {:?}", flash_text(&app));
+    }
+
+    /// Closing a document must not leave the alternate pointing at it, nor at
+    /// whatever slid into its index.
+    #[test]
+    fn closing_a_buffer_clears_it_as_an_alternate() {
+        let (_d, mut app) = vault("[[target]]\n", &[("target.md", "# Target\n")]);
+        cursor_on(&mut app, 0, "target");
+        feed(&mut app, "gf");
+        assert_eq!(shown(&app), "target.md");
+
+        // Close target.md: the note that linked to it is all that is left, so
+        // there is nowhere to go back to.
+        app.close_buffer(true);
+        assert_eq!(shown(&app), "note.md");
+        ctrl(&mut app, '^');
+        assert_eq!(shown(&app), "note.md", "the closed document is not an alternate");
+        assert!(flash_text(&app).contains("no alternate"), "got {:?}", flash_text(&app));
+    }
+
+    /// Nothing written in a note can reach a flag on the opener's argv.
+    #[test]
+    fn gx_refuses_a_target_that_looks_like_a_flag() {
+        let (_d, mut app) = vault("x\n", &[]);
+        app.spawn_opener("-a/Applications/Anything.app");
+        let flash = flash_text(&app);
+        assert!(flash.contains("refusing"), "got {flash:?}");
     }
 
     /// A file opened by bare name (`shoin notes.md`) has an EMPTY parent path, not

@@ -107,6 +107,37 @@ impl Finder {
         f
     }
 
+    /// A finder over an EXPLICIT list of files, with no walk.
+    ///
+    /// The disambiguation picker: `link::resolve` refuses a bare name that
+    /// several files answer to, and returns the ones it found. Showing them in
+    /// the overlay the reader already knows turns that refusal into a choice —
+    /// the alternative is an error message listing paths they then have to go
+    /// and open by hand.
+    pub fn from_paths(paths: Vec<PathBuf>, root: &Path) -> Finder {
+        let files = paths
+            .into_iter()
+            .map(|p| {
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .into_owned();
+                Candidate::new(rel, p, 0)
+            })
+            .collect();
+        let mut f = Finder {
+            kind: Kind::Files,
+            files,
+            truncated: false,
+            query: String::new(),
+            matches: Vec::new(),
+            selected: 0,
+        };
+        f.refilter();
+        f
+    }
+
     /// The buffer index of the selected row, for `Kind::Buffers`.
     pub fn selected_id(&self) -> Option<usize> {
         let m = self.matches.get(self.selected)?;

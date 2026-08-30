@@ -210,6 +210,34 @@ pub fn extract(text: &str, section: &Section) -> Result<String> {
     }
 }
 
+/// The 0-based line where a `Section` STARTS, for jumping to it.
+///
+/// The twin of `extract`, and deliberately a separate walk. `extract` answers
+/// "which text does this link ask for", which is what an embed pastes into the
+/// document; this answers "where does that text begin", which is where a reader
+/// following the link should land. Sharing one function would mean returning
+/// both from every caller, and the embed path has no use for a line number.
+///
+/// `None` means the section is not in this file — a heading that was renamed,
+/// or a block id that never existed. The caller opens the file anyway: landing
+/// at the top of the right note beats refusing to move.
+pub fn section_line(text: &str, section: &Section) -> Option<usize> {
+    match section {
+        Section::All => Some(0),
+        Section::Heading(want) => {
+            let want = want.trim().to_lowercase();
+            text.lines()
+                .position(|l| heading_of(l).is_some_and(|(_, t)| t.trim().to_lowercase() == want))
+        }
+        // The same `ends_with` rule `block_with_id` matches on, so a link that
+        // resolves to a block lands on the line that block ends at.
+        Section::Block(id) => {
+            let marker = format!("^{id}");
+            text.lines().position(|l| l.trim_end().ends_with(&marker))
+        }
+    }
+}
+
 /// A heading and everything under it, to the next heading of the same or higher
 /// level. Matched case-insensitively on the trimmed title, as Obsidian does.
 fn heading_section(text: &str, want: &str) -> Result<String> {

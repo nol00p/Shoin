@@ -82,6 +82,11 @@ pub fn normal(key: Key) -> Option<Verb> {
         (KeyCode::Char('u'), false) => Verb::Act(Action::Undo),
         (KeyCode::Char('r'), true) => Verb::Act(Action::Redo),
         (KeyCode::Char('s'), true) => Verb::Act(Action::Save),
+        // Both spellings, as vim documents them: terminals disagree about
+        // whether the chord arrives as `^` or as the `6` the key is printed
+        // with, and a reader should not have to know which one theirs sends.
+        (KeyCode::Char('^'), true) => Verb::Act(Action::AlternateBuffer),
+        (KeyCode::Char('6'), true) => Verb::Act(Action::AlternateBuffer),
         (KeyCode::Char('/'), false) => Verb::Act(Action::SearchForward),
         (KeyCode::Char('?'), false) => Verb::Act(Action::SearchBackward),
         (KeyCode::Char('n'), false) => Verb::Act(Action::SearchNext { reverse: false }),
@@ -150,6 +155,8 @@ pub fn after_prefix(prefix: char, key: Key, visual_mode: bool) -> Option<Verb> {
         ('g', 'k') => Verb::Act(Action::ToggleCode),
         ('g', 'l') => Verb::Act(Action::InsertLink),
         ('g', 't') => Verb::Act(Action::ToggleTask),
+        ('g', 'f') => Verb::Act(Action::FollowLink),
+        ('g', 'x') => Verb::Act(Action::OpenExternal),
         ('g', 'p') => Verb::Act(Action::AppendParagraph),
         ('g', c @ '0'..='6') => Verb::Act(Action::SetHeading(c as u8 - b'0')),
         // `<C-w>` hands its second key straight to the window commands, so a
