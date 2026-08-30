@@ -329,7 +329,7 @@ impl ConcealMap {
 /// as a different rank at a glance. `depth` is the item's indent in COLUMNS.
 fn bullet_for(depth: u8, ctx: &ConcealCtx) -> String {
     let level = depth as usize / ctx.tab_width.max(1);
-    if level % 2 == 0 {
+    if level.is_multiple_of(2) {
         ctx.glyphs.bullet.clone()
     } else {
         ctx.glyphs.bullet_alt.clone()

@@ -8,8 +8,8 @@
 
 <p align="center">
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
-  <img alt="Rust 1.82+" src="https://img.shields.io/badge/rust-1.82%2B-orange.svg">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-374%20passing-brightgreen.svg">
+  <img alt="Rust 1.88+" src="https://img.shields.io/badge/rust-1.88%2B-orange.svg">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-439%20passing-brightgreen.svg">
 </p>
 
 <!-- SCREENSHOT: the editor with a document open — centered measure, wide margins,
@@ -43,6 +43,9 @@ desk built into a bay by the window, and nothing else in the room.
   `![[photo.png]]` embeds a picture, drawn as real pixels in a terminal that
   can. Write atomic ideas as separate files, order the links, and export the
   result as Markdown, plain text, self-contained HTML, or PDF.
+- **Links you can walk.** `gf` opens the note under the cursor — and writes it
+  first if it doesn't exist yet, because in a vault the link comes before the
+  note. `<C-^>` is the way back. `gx` hands a URL or a picture to the desktop.
 - **`.md` and `.txt` only.** Not a code editor — though a fenced block whose info
   string names a language is syntax-highlighted, in seventeen of them.
 
@@ -89,7 +92,7 @@ well with no config at all.
 
 | | |
 |---|---|
-| **Rust** | 1.82 or newer |
+| **Rust** | 1.88 or newer |
 | **Terminal** | truecolor (24-bit) support |
 | **Font** | a Nerd Font patched font — or set `glyphs.nerd_fonts = false` |
 | **PDF export only** | `pandoc` and a layout engine (`brew install pandoc typst`) |
@@ -179,7 +182,12 @@ single undo step.
   gi  *italic*        gl  wrap as a [link](url), cursor in the URL slot
   gh  ==highlight==   g1..g6  set the heading level    g0  strip it
   gk  `code`          gp  start the next paragraph
+
+  gf  follow the link under the cursor      gx  open it with the desktop
 ```
+
+`gl` writes a link and `gf` walks it — see [Compose notes into a
+text](#compose-notes-into-a-text).
 
 <!-- SCREENSHOT: a before/after of gb / gt / g2 applied to a line. -->
 <p align="center">
@@ -198,6 +206,7 @@ Everything below opens and closes with the same key. `<leader>` is Space.
 | `a` `r` `m` `d` (in the tree) | new, rename, move, delete |
 | `<leader>ff` / `fF` | fuzzy finder — this file's directory, or all of `$HOME` |
 | `<leader>fb` | switch buffer (`:ls`, `:b`, `:bn`, `:bp`, `:bd`) |
+| `<C-^>` / `<C-6>` | back to the previous buffer — press twice to return |
 | `<leader>sv` / `<leader>ss` | split beside / below |
 | `Ctrl-w` + `hjkl` | move between panes (`Ctrl-w q` closes, `=` evens them) |
 | `:e <path>` | open another file |
@@ -244,6 +253,26 @@ Obsidian syntax, so vaults stay portable — and moving a section becomes `dd` `
 `:embed [none|short|rec|full]` chooses how much to expand on screen; `full`
 shows the finished document with no seams. `:export [md|txt|html|pdf]` writes it
 out through a save dialog.
+
+#### Following a link
+
+`gf` opens whatever the cursor is on — a `[[note]]`, an `![[embed]]` you
+haven't expanded, or the path in a `[text](note.md)`. A `#Heading` or
+`#^blockid` lands on that line rather than at the top of the file, and a name
+that several notes answer to opens the finder rather than an error.
+
+**A link to a note that doesn't exist yet creates it**, empty, on disk. In a
+vault you write the link first and the note second — `[[tomorrow]]` is how
+tomorrow's note gets started. Writing it to disk rather than to a scratch
+buffer means every other note pointing at that name resolves from then on.
+(Only for notes: a dead `[chart](out/chart.pdf)` is reported, not invented.)
+
+`<C-^>` goes back to the note you came from, and again to return — the way
+back out of a link, and how you read two notes against each other.
+
+`gx` hands the target to the desktop instead: a URL to the browser, an
+`![[photo.png]]` or a `[paper](x.pdf)` to whatever opens those. It never
+creates anything.
 
 <!-- SCREENSHOT: a composition file with :embed full, showing the assembled text. -->
 <p align="center">
