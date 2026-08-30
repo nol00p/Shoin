@@ -1367,9 +1367,25 @@ mod tests {
 
     fn app_with(text: &str) -> App {
         let mut app = App::new(Config::default(), None, None).unwrap();
+        pin_theme(&mut app);
         app.buffer.insert_str(Cursor::new(0, 0), text);
         app.blocks = BlockCache::build(&app.buffer);
         app
+    }
+
+    /// Give the app the palette AS AUTHORED, instead of the one the developer's
+    /// terminal happens to support.
+    ///
+    /// `App::new` builds its theme with `Theme::from_config`, which ends in
+    /// `adapt(detect_depth())` — a read of `COLORTERM` and `TERM`. Several
+    /// tests below assert that two roles render in DIFFERENT colors, and that
+    /// is only true of the authored palette: downgraded to 16 colors, distinct
+    /// RGB roles legitimately collapse onto the same slot, and `assert_ne!`
+    /// fails with the two sides printing identically. A renderer test must test
+    /// the renderer, not the terminal it is being run from.
+    fn pin_theme(app: &mut App) {
+        let theme = crate::render::theme::Theme::authored(&app.config.theme).unwrap();
+        app.theme = theme;
     }
 
     fn render_to(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
@@ -1528,6 +1544,7 @@ mod tests {
         std::fs::write(&note, body).unwrap();
 
         let mut app = App::new(Config::default(), Some(note), None).unwrap();
+        pin_theme(&mut app);
         app.embed_mode = crate::transclude::Mode::Short;
         app.refresh_blocks();
         (d, app)
