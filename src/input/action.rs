@@ -116,6 +116,18 @@ pub enum Action {
     FindFile { root: Root },
     /// The same overlay over the open buffers.
     FindBuffer,
+    /// `<C-^>` — back to the document this pane was showing before. Vim's
+    /// alternate file, and the way back out of a followed link.
+    AlternateBuffer,
+
+    /// `gf` — open what the cursor is on: a `[[note]]`, an unexpanded
+    /// `![[embed]]`, or the path in a `[text](path)`. A note that does not
+    /// exist yet is CREATED — in a vault, the link is written before the note.
+    FollowLink,
+    /// `gx` — hand what the cursor is on to the operating system. Kept apart
+    /// from `FollowLink` on purpose: one key that sometimes opens a buffer and
+    /// sometimes launches a browser is a key you hesitate before pressing.
+    OpenExternal,
 
     /// Recognized key, deliberately does nothing.
     Nop,
@@ -176,6 +188,9 @@ impl Action {
             "file_tree_home" | "file_explorer_home" => Action::FileTree { root: Root::Home },
             "find_file" | "fuzzy_find" | "files" => Action::FindFile { root: Root::File },
             "find_file_home" | "fuzzy_find_home" => Action::FindFile { root: Root::Home },
+            "alternate_buffer" | "alternate" | "alt_buffer" => Action::AlternateBuffer,
+            "follow_link" | "follow" | "goto_file" => Action::FollowLink,
+            "open_external" | "open_url" | "xdg_open" => Action::OpenExternal,
             "find_buffer" | "buffers" | "switch_buffer" => Action::FindBuffer,
             "split_vertical" | "vsplit" => Action::ToggleSplit { vertical: true },
             "split_horizontal" | "split" => Action::ToggleSplit { vertical: false },

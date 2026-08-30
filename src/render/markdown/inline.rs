@@ -62,6 +62,48 @@ pub fn scan(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     spans
 }
 
+/// The link span the cursor sits in, if it sits in one.
+///
+/// `!` is not part of an unexpanded `![[…]]`'s span: `bracket_link` rejects it
+/// (no `(` follows the `]`), the scan falls through one character, and
+/// `wiki_at` matches the `[[…]]` alone. That is fine for styling — the bang is
+/// one dim character — but a reader whose cursor is ON the bang still means the
+/// embed, so the bang is accepted here as belonging to the span after it.
+pub fn span_at(line: &str, col: usize, cfg: &MarkdownConfig) -> Option<InlineSpan> {
+    let bang = line.chars().nth(col) == Some('!');
+    scan(line, cfg)
+        .into_iter()
+        .find(|s| s.outer.contains(&col) || (bang && s.outer.start == col + 1))
+}
+
+/// What a link span points AT — the note name or URL, never the display text.
+///
+/// Recovered from the line rather than stored on the span. `InlineSpan` is
+/// built for every construct on every visible line, and a destination is read
+/// only when someone follows a link; a third `Range` on the struct would cost
+/// that on every frame to serve one keystroke.
+///
+/// `None` for a span that is not a link, and for a link whose destination is
+/// empty — `[text]()` points nowhere.
+pub fn target_of(span: &InlineSpan, line: &str) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let slice = |r: std::ops::Range<usize>| -> Option<String> {
+        Some(chars.get(r)?.iter().collect())
+    };
+    let out = match span.kind {
+        Inline::WikiLink => slice(span.inner.clone())?,
+        // `[text](url)` — the destination is what sits between the `](` that
+        // closes the body and the `)` that closes the construct.
+        Inline::Link | Inline::Image => {
+            slice(span.inner.end + 2..span.outer.end.checked_sub(1)?)?
+        }
+        Inline::Autolink => slice(span.outer.clone())?,
+        _ => return None,
+    };
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
 /// Try every construct that can begin at `i`, in priority order.
 fn match_at(chars: &[char], i: usize, cfg: &MarkdownConfig) -> Option<InlineSpan> {
     match chars[i] {
@@ -457,6 +499,46 @@ mod tests {
         // Mid-word `#` is not a tag; a numeric-only tag is rejected.
         assert!(scan("foo#bar", &md()).is_empty());
         assert!(scan("#123", &md()).is_empty());
+    }
+
+    /// The span under the cursor is what a follow command acts on — including
+    /// from the `!` of an `![[…]]`, which is NOT inside the span the scanner
+    /// emits for it.
+    #[test]
+    fn span_at_finds_the_link_the_cursor_is_in() {
+        let cfg = MarkdownConfig::default();
+        let line = "see ![[frag#Head]] and [x](y.md) and https://a.example/b";
+
+        let bang = line.find('!').unwrap();
+        assert_eq!(span_at(line, bang, &cfg).unwrap().kind, Inline::WikiLink);
+        assert_eq!(span_at(line, bang + 3, &cfg).unwrap().kind, Inline::WikiLink);
+
+        let md = line.find("[x]").unwrap();
+        assert_eq!(span_at(line, md + 1, &cfg).unwrap().kind, Inline::Link);
+
+        let url = line.find("https").unwrap();
+        assert_eq!(span_at(line, url + 2, &cfg).unwrap().kind, Inline::Autolink);
+
+        assert!(span_at(line, 1, &cfg).is_none(), "plain prose is not a link");
+    }
+
+    /// A destination is never the display text.
+    #[test]
+    fn target_of_reads_the_destination_not_the_label() {
+        let cfg = MarkdownConfig::default();
+        let cases = [
+            ("[[frag#Head]]", "frag#Head"),
+            ("![[frag]]", "frag"),
+            ("[the label](notes/x.md)", "notes/x.md"),
+            ("https://a.example/b", "https://a.example/b"),
+        ];
+        for (line, want) in cases {
+            let span = span_at(line, line.len() / 2, &cfg).unwrap();
+            assert_eq!(target_of(&span, line).as_deref(), Some(want), "{line}");
+        }
+        // A link that points nowhere has no destination to follow.
+        let span = span_at("[label]()", 2, &cfg).unwrap();
+        assert_eq!(target_of(&span, "[label]()"), None);
     }
 
     #[test]
