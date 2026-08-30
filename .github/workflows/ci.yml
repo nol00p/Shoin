@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Only GitHub's own actions are used here. Every third-party action is a
+# credential-bearing dependency on someone else's repository, and everything
+# this workflow needs is two rustup lines.
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustc --version && cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - run: cargo build --all-targets
+
+      # Headless: the frame tests render into ratatui's TestBackend, so there
+      # is no terminal to allocate and nothing to install.
+      - run: cargo test
+
+      # THE BAR THIS PROJECT HOLDS: build and clippy at zero warnings.
+      #
+      # `cargo fmt --check` is deliberately NOT run. This codebase hand-formats
+      # wider than rustfmt's default and orders its imports its own way; running
+      # rustfmt reformats hundreds of lines nobody touched. Adding a fmt gate
+      # here would not tidy the code, it would fail every pull request.
+      #
+      # `-D warnings` means a future clippy release can fail a pull request that
+      # changed nothing. That is the accepted cost of the bar being zero rather
+      # than "no new ones" — the fix is to clear the lint, not to lower it.
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # `rust-version` in Cargo.toml is a CLAIM, and nothing was checking it: it
+  # said 1.82 long after ratatui 0.30 raised the real floor to 1.88. This job
+  # reads the field rather than hardcoding a number, so the claim is tested
+  # against the build instead of drifting away from it again.
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (from Cargo.toml rust-version)
+        run: |
+          msrv=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "Cargo.toml claims Rust $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+          rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: msrv-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: msrv-cargo-
+
+      - run: cargo build --all-targets

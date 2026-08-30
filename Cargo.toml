@@ -2,11 +2,17 @@
 name = "shoin"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+# 1.88 because `ratatui` 0.30 requires it. This was 1.82 — a number from before
+# the dependency bumped — and nothing checked it; the CI `msrv` job reads this
+# field now, so the claim and the build cannot drift apart again.
+rust-version = "1.88"
 description = "A no-clutter terminal Markdown editor with modal editing"
 license = "Apache-2.0"
 readme = "README.md"
-# Add `repository`, `homepage` and `keywords` before publishing to crates.io.
+repository = "https://github.com/nol00p/Shoin"
+homepage = "https://github.com/nol00p/Shoin"
+keywords = ["markdown", "editor", "tui", "vim", "notes"]
+categories = ["text-editors", "command-line-utilities"]
 
 [[bin]]
 name = "shoin"
