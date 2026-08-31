@@ -146,11 +146,21 @@ fn main() -> Result<()> {
     }
 
     let mut terminal = ratatui::init();
-    use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+    use ratatui::crossterm::event::{
+        DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+    };
     if mouse {
         let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
     }
+    // Focus reporting is what makes `[editor] autoreload` feel immediate: the
+    // moment you come back to the terminal is the moment the file is most
+    // likely to have changed. Unconditional, unlike mouse capture — it costs
+    // nothing, steals no terminal affordance from the user, and a terminal that
+    // does not implement it simply never sends the event (the 1-second poll
+    // covers that case).
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableFocusChange);
     let result = app.run_loop(&mut terminal);
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableFocusChange);
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 

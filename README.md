@@ -259,6 +259,35 @@ the status line, never overwritten while you weren't looking. A buffer with no
 filename yet is skipped rather than nagged about, and the clock restarts from
 every write, so `:w` and the timer never save the same seconds apart.
 
+### When something else edits the file
+
+Shoin watches the files you have open — on returning focus to the terminal, and
+once a second besides — and the answer turns on one question: **do you have
+unsaved changes?**
+
+- **You don't.** The file wins and the buffer takes its changes. There is
+  nothing of yours to lose, and it arrives as a single undo step, so `u` gives
+  you back what was on screen.
+- **You do.** Nothing is touched. The two versions diverged and only you can say
+  which wins, so the filename gets a ⚠ on the status line and waits for you:
+
+```
+  :w!        keep mine — write over what changed on disk
+  :revert!   take theirs — re-read the file, discarding my changes
+```
+
+An editor must never quietly pick between two versions of your work, which is
+the whole reason the second case does nothing at all.
+
+```
+  :set autoreload off       explicit :revert only
+```
+
+A `touch` that doesn't change a byte is absorbed in silence rather than throwing
+your cursor away, a file still being written is left for the next check instead
+of being read half-finished, and a file that was *deleted* leaves the buffer
+alone — `:w` recreates it.
+
 ---
 
 ## Compose notes into a text
@@ -378,6 +407,8 @@ leader = " "
 [editor]
 autosave          = false # write modified named buffers on a timer
 autosave_interval = 3     # minutes between them, 1–5
+autoreload        = true  # take a file's changes back when it is edited
+                          # elsewhere — only if you have nothing unsaved
 
 [tree]
 show_hidden = false       # dotfiles in the file tree (H toggles it live)

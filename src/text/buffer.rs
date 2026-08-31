@@ -75,6 +75,14 @@ pub struct Buffer {
     /// single rescan from there covers every change.
     pub dirty_line: Option<usize>,
 
+    /// The file changed on disk while this buffer had unsaved work.
+    ///
+    /// Only ever true for a MODIFIED buffer: a clean one is reloaded the moment
+    /// the change is noticed, so there is no lasting state to hold. It is
+    /// therefore not "is the buffer stale" but "the two diverged and only you
+    /// can say which wins" — `:w!` keeps yours, `:revert!` takes theirs.
+    pub conflict: bool,
+
     /// Char ranges that refuse edits. Always EMPTY, and deliberately kept.
     ///
     /// It was built for transclusion, which then did not need it: an embed
@@ -101,6 +109,7 @@ impl Buffer {
             saved_state: 0,
             revision: 0,
             dirty_line: None,
+            conflict: false,
             readonly_ranges: Vec::new(),
             words: std::cell::Cell::new(None),
         }
@@ -133,6 +142,7 @@ impl Buffer {
             saved_state: 0,
             revision: 0,
             dirty_line: None,
+            conflict: false,
             readonly_ranges: Vec::new(),
             words: std::cell::Cell::new(None),
         })
@@ -178,7 +188,70 @@ impl Buffer {
         self.history.split();
         self.saved_state = self.history.state();
         self.modified = false;
+        // The write settled whichever divergence there was: this text IS the
+        // file now. `:w!` is how a reader says "keep mine", so the marker has
+        // to come down here rather than needing its own command.
+        self.conflict = false;
         Ok(())
+    }
+
+    /// Re-read the file from disk, replacing the buffer's text.
+    ///
+    /// `Ok(false)` means the file's mtime moved but its CONTENT did not — a
+    /// `touch`, or a writer that rewrote identical bytes. The new mtime is
+    /// absorbed and nothing else happens, because throwing away the cursor to
+    /// replace text with itself is a worse outcome than the stale mtime was.
+    ///
+    /// Two things make this safe to do behind the user's back (`App::check_disk`
+    /// only ever calls it on a CLEAN buffer):
+    ///
+    /// - It reads through `fs::open::load`, the same function `Buffer::open`
+    ///   uses. Line-ending detection, the `final_newline` flag and the syntax
+    ///   choice therefore cannot drift from what opening the file would have
+    ///   given — a second read path would drift, and this repo has that scar
+    ///   already (preview and export once had two and the preview lied).
+    /// - The replacement is ONE undo step, so `u` gives back the pre-reload
+    ///   text and lands the cursor where the step began. That is what makes an
+    ///   automatic reload reversible rather than merely fast.
+    ///
+    /// Afterwards the buffer matches disk, so it takes the same three lines a
+    /// save does: seal the step, record it as the saved state, clear `modified`.
+    /// Undoing the reload therefore marks the buffer modified again, which is
+    /// correct — you are once more holding something the file does not have.
+    pub fn reload(&mut self, plain_text_exts: &[String]) -> Result<bool> {
+        let path = match &self.path {
+            Some(p) => p.clone(),
+            None => anyhow::bail!("no file to reload"),
+        };
+        let loaded = open::load(&path, plain_text_exts)?;
+        let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+
+        if loaded.rope == self.rope {
+            self.disk_mtime = mtime;
+            self.conflict = false;
+            return Ok(false);
+        }
+
+        let text = loaded.rope.to_string();
+        // One group, so the whole replacement is a single `u`.
+        self.history.begin_group(Some(self.cursor));
+        let len = self.rope.len_chars();
+        if len > 0 {
+            self.delete_chars(0, len);
+        }
+        if !text.is_empty() {
+            self.insert_str(Cursor::new(0, 0), &text);
+        }
+        self.history.end_group();
+
+        self.line_ending = loaded.line_ending;
+        self.final_newline = loaded.final_newline;
+        self.syntax = loaded.syntax;
+        self.disk_mtime = mtime;
+        self.saved_state = self.history.state();
+        self.modified = false;
+        self.conflict = false;
+        Ok(true)
     }
 
     /// Recompute `modified` from the revision the disk holds. Undoing back to
