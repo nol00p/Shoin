@@ -272,25 +272,38 @@ unsaved changes?**
   which wins, so the filename gets a ⚠ on the status line and waits for you:
 
 ```
-  :diff      show the two versions side by side and choose
+  :diff      merge the two versions, difference by difference
   :w!        keep mine — write over what changed on disk
   :revert!   take theirs — re-read the file, discarding my changes
 ```
 
 `:diff` aligns your buffer against the file, row for row, with a filler bar
-wherever one side has no line — so you can see what changed before deciding:
+wherever one side has no line. Every difference is set to **live**, **file** or
+**both**, and the divider points at whichever wins:
 
 ```
   live — in the editor             │ file — on disk
   # On attention                   │ # On attention
                                    │
   A draft paragraph                │ A draft paragraph
- ~my edited line                   ┃~their added line
- ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┃+their edited line
+ ~my edited line                   ◀~their edited line     ← live wins here
+ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◆+their added line      ← both are kept
   tail                             │ tail
-
-  l  keep live    f  keep file    n / p  next / previous    q  close
 ```
+
+```
+  n / p    move between differences
+  Tab      cycle this one:  live → file → both
+  l f b    set every difference to live / file / both
+  w        commit the merged text and write it
+  q  Esc   abort
+```
+
+The losing side is struck through, so the document you are about to get reads
+straight down the screen. **Nothing is written until `w`** — so `q` is a real
+abort — and the commit lands as a single undo step. `both` appends the editor's
+version and then the file's, which is what the left-to-right order on screen
+already showed you.
 
 An editor must never quietly pick between two versions of your work, which is
 the whole reason the second case does nothing at all.
