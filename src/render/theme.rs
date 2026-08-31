@@ -174,6 +174,15 @@ pub struct Theme {
     /// Operators and delimiters, which should recede rather than shout.
     pub syntax_punct: Color,
 
+    /// The conflict diff view (SPEC.md §10). Whole-line foregrounds, the way
+    /// `git diff` colours them, rather than background tints: a background
+    /// wash fights the concealment colours the left pane is already using.
+    pub diff_add: Color,
+    pub diff_remove: Color,
+    /// Both sides have a line here and they differ — the commonest row, so it
+    /// gets the colour that reads as "look at this" rather than as good or bad.
+    pub diff_change: Color,
+
     pub link: Color,
     pub wiki_link: Color,
     pub tag: Color,
@@ -263,6 +272,10 @@ impl Default for Theme {
             syntax_comment: rgb(0x56, 0x5f, 0x89),  // comment
             syntax_function: rgb(0x7a, 0xa2, 0xf7), // cornflower
             syntax_punct: rgb(0x9a, 0xa5, 0xce),    // fg_dark
+
+            diff_add: rgb(0x9e, 0xce, 0x6a),        // apple green
+            diff_remove: rgb(0xf7, 0x76, 0x8e),     // red
+            diff_change: rgb(0xe0, 0xaf, 0x68),     // yellow
 
             link: rgb(0x7a, 0xa2, 0xf7),
             wiki_link: rgb(0xbb, 0x9a, 0xf7),
@@ -399,6 +412,9 @@ impl Theme {
             "syntax_comment" => self.syntax_comment = c,
             "syntax_function" => self.syntax_function = c,
             "syntax_punct" => self.syntax_punct = c,
+            "diff_add" => self.diff_add = c,
+            "diff_remove" => self.diff_remove = c,
+            "diff_change" => self.diff_change = c,
             "link" => self.link = c,
             "wiki_link" => self.wiki_link = c,
             "tag" => self.tag = c,
@@ -440,7 +456,8 @@ impl Theme {
             background, text, text_dim, cursor, cursor_line, selection, search_match, bold,
             italic, strikethrough, highlight_bg, code, code_bg, fence_bar, syntax_keyword,
             syntax_type, syntax_string, syntax_literal, syntax_comment, syntax_function,
-            syntax_punct, link, wiki_link, tag, tag_bg, quote, quote_bar, list_bullet, task_done,
+            syntax_punct, diff_add, diff_remove, diff_change, link, wiki_link, tag, tag_bg,
+            quote, quote_bar, list_bullet, task_done,
             rule, table_border, status_fg, status_bg, error
         );
         for h in self.headings.iter_mut() {

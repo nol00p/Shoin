@@ -15,6 +15,7 @@
 
 mod app;
 mod config;
+mod diff;
 mod export;
 mod finder;
 mod fs;

@@ -272,8 +272,24 @@ unsaved changes?**
   which wins, so the filename gets a ⚠ on the status line and waits for you:
 
 ```
+  :diff      show the two versions side by side and choose
   :w!        keep mine — write over what changed on disk
   :revert!   take theirs — re-read the file, discarding my changes
+```
+
+`:diff` aligns your buffer against the file, row for row, with a filler bar
+wherever one side has no line — so you can see what changed before deciding:
+
+```
+  yours (buffer)                   │ on disk
+  # On attention                   │ # On attention
+                                   │
+  A draft paragraph                │ A draft paragraph
+ ~my edited line                   ┃~their added line
+ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┃+their edited line
+  tail                             │ tail
+
+  m  keep mine    t  keep theirs    ]c [c  next / previous    q  close
 ```
 
 An editor must never quietly pick between two versions of your work, which is
