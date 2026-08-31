@@ -69,6 +69,26 @@ const BATCH_BUDGET: Duration = Duration::from_millis(16);
 /// `Instant` barely moved still has to give the screen back.
 const BATCH_MAX: usize = 4096;
 
+/// How often the open documents' mtimes are checked for `[editor] autoreload`.
+///
+/// One `stat` per named document per second. The check is also run the moment
+/// the terminal regains focus, which is when it actually matters — you looked
+/// away, something else wrote the file, you looked back. This poll is what
+/// covers the rest: a terminal that does not report focus, and a file written
+/// by something in the same terminal that never took focus away.
+const DISK_POLL: Duration = Duration::from_secs(1);
+
+/// How long a file must have been left alone before it is read.
+///
+/// A writer that is not atomic — a `>` redirect, a slow `scp`, `git checkout`
+/// of a large file — can be observed MID-WRITE: truncated, or not yet valid
+/// UTF-8. Invalid UTF-8 is refused by `fs::open::load` and simply retried, but
+/// a truncated read that happens to be valid UTF-8 would load as real content.
+/// Requiring the mtime to be this old first means we only ever read a file that
+/// has settled, which costs up to one `DISK_POLL` of latency and removes the
+/// whole class.
+const DISK_SETTLE: Duration = Duration::from_millis(250);
+
 /// Cells a `<C-w>>` / `<C-w>+` press moves a pane edge. Wider than vim's single
 /// cell: a centered text measure is worth adjusting in visible steps.
 const WIDTH_STEP: i32 = 4;
@@ -299,6 +319,11 @@ pub struct App {
     /// `step` raises this for whatever it handled and the loop lowers it after
     /// painting — an idle editor does no work between ticks.
     needs_redraw: bool,
+
+    /// When the open documents' mtimes are next checked. Unlike `autosave_at`
+    /// this is never `None`: the poll is cheap enough to leave running, and
+    /// `check_disk` is the one place that asks whether the setting is on.
+    disk_check_at: Instant,
 
     /// When the next autosave is due, or `None` when `[editor] autosave` is off.
     ///
@@ -577,6 +602,7 @@ impl App {
             last_insert: None,
             zen: None,
             needs_redraw: true,
+            disk_check_at: Instant::now() + DISK_POLL,
             autosave_at: autosave,
         })
     }
@@ -586,7 +612,13 @@ impl App {
             self.term_size = (size.width, size.height);
         }
         while !self.quit {
-            // Before the draw, so its status line reaches the same frame.
+            // Before the draw, so their status lines reach the same frame.
+            // Disk before autosave: a clean buffer that just took the file's
+            // changes has nothing to write, and a conflicted one should be
+            // flagged before the timer tries and is refused.
+            if self.disk_tick() {
+                self.needs_redraw = true;
+            }
             if self.autosave_tick() {
                 self.needs_redraw = true;
             }
@@ -911,6 +943,16 @@ impl App {
                 self.term_size = (w, h);
                 self.needs_redraw = true;
             }
+            // Coming back to the terminal is exactly when a file is most likely
+            // to have changed under you, so this check jumps the poll's queue
+            // rather than waiting up to `DISK_POLL` for it.
+            CtEvent::FocusGained => {
+                // A binding, not a match guard: `check_disk` MUTATES, and a
+                // guard that returns false would have run it and then skipped
+                // the arm. Clippy suggests the guard; it is wrong here.
+                let changed = self.check_disk();
+                self.needs_redraw |= changed;
+            }
             _ => {}
         }
     }
@@ -967,6 +1009,129 @@ impl App {
         }
     }
 
+    /// Check the open documents' mtimes if the poll is due.
+    fn disk_tick(&mut self) -> bool {
+        if Instant::now() < self.disk_check_at {
+            return false;
+        }
+        self.disk_check_at = Instant::now() + DISK_POLL;
+        self.check_disk()
+    }
+
+    /// Take back what changed on disk, for every document that can have it.
+    ///
+    /// The two cases are decided by ONE question — does this buffer hold
+    /// unsaved work:
+    ///
+    /// - **Clean:** the file wins, and the buffer is reloaded. Nothing of the
+    ///   reader's is lost by definition, and `Buffer::reload` makes it one undo
+    ///   step, so even an unwanted reload is `u` away.
+    /// - **Modified:** nothing is touched. The two have diverged and only the
+    ///   reader can say which wins, so the buffer is flagged and the marker
+    ///   goes on the status line. `:w!` keeps theirs, `:revert!` takes the
+    ///   file's. This is the one thing an editor must never decide alone.
+    ///
+    /// A file that has been DELETED is not a change: `changed_externally`
+    /// answers `false` when it cannot stat the path, so the buffer keeps its
+    /// text and `:w` will recreate the file. Reloading emptiness over a
+    /// document because something removed it would be the worst of the
+    /// available behaviours.
+    fn check_disk(&mut self) -> bool {
+        if !self.config.editor.autoreload {
+            return false;
+        }
+        let exts = self.config.markdown.plain_text_extensions.clone();
+        let now = std::time::SystemTime::now();
+        let mut reloaded: Vec<String> = Vec::new();
+        let mut conflicted: Vec<String> = Vec::new();
+        let mut failed: Option<String> = None;
+
+        for doc in &mut self.docs {
+            let Some(path) = doc.buffer.path.clone() else {
+                continue;
+            };
+            if !crate::fs::save::changed_externally(&path, doc.buffer.disk_mtime) {
+                continue;
+            }
+            // Let a half-written file finish. An `Err` here means the clock
+            // disagrees with the filesystem (mtime in the future, which NFS
+            // does) — act rather than wait forever on a comparison that will
+            // never come true.
+            let settled = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .map(|m| now.duration_since(m).map(|age| age >= DISK_SETTLE).unwrap_or(true))
+                .unwrap_or(true);
+            if !settled {
+                continue;
+            }
+
+            if doc.buffer.modified {
+                // Announce a conflict ONCE. The status marker is what persists;
+                // re-flashing every second would bury everything else.
+                if !doc.buffer.conflict {
+                    doc.buffer.conflict = true;
+                    conflicted.push(doc.buffer.display_name());
+                }
+                continue;
+            }
+
+            match doc.buffer.reload(&exts) {
+                Ok(true) => reloaded.push(doc.buffer.display_name()),
+                // The mtime moved but the bytes did not. Absorbed in silence:
+                // there is nothing to tell the reader about a `touch`.
+                Ok(false) => {}
+                Err(e) if failed.is_none() => failed = Some(e.to_string()),
+                Err(_) => {}
+            }
+        }
+
+        // A conflict outranks a reload in the report: one of them needs a
+        // decision and the other is already finished.
+        match (failed, conflicted.len(), reloaded.len()) {
+            (Some(why), _, _) => self.notify(format!("reload: {why}"), FlashKind::Error),
+            (None, 1, _) => self.notify(
+                format!("{} changed on disk — :revert! or :w!", conflicted[0]),
+                FlashKind::Error,
+            ),
+            (None, n, _) if n > 1 => self.notify(
+                format!("{n} files changed on disk — see :ls"),
+                FlashKind::Error,
+            ),
+            (None, _, 0) => return false,
+            (None, _, 1) => self.notify(format!("reloaded {}", reloaded[0]), FlashKind::Info),
+            (None, _, n) => self.notify(format!("reloaded {n} files"), FlashKind::Info),
+        }
+        true
+    }
+
+    /// `:revert` — take what is on disk, discarding whatever is unsaved.
+    ///
+    /// The manual form of the same reload, and the "take theirs" answer to a
+    /// conflict. It needs the `!` for the same reason `:q` does: on a modified
+    /// buffer it throws work away, and that has to be typed deliberately.
+    fn revert(&mut self, force: bool) {
+        if self.buffer.path.is_none() {
+            return self.notify("no file to revert to", FlashKind::Error);
+        }
+        if self.buffer.modified && !force {
+            return self.notify(
+                "unsaved changes — :revert! to discard them",
+                FlashKind::Error,
+            );
+        }
+        let exts = self.config.markdown.plain_text_extensions.clone();
+        // Bound, not deref: a deref borrows all of `App`.
+        let i = self.current();
+        let doc = &mut self.docs[i];
+        let result = doc.buffer.reload(&exts);
+        let name = doc.buffer.display_name();
+        match result {
+            Ok(true) => self.notify(format!("reverted {name}"), FlashKind::Info),
+            Ok(false) => self.notify(format!("{name} already matches disk"), FlashKind::Info),
+            Err(e) => self.notify(format!("{e}"), FlashKind::Error),
+        }
+    }
+
     /// Arm — or disarm — the autosave deadline from the config as it stands.
     ///
     /// Called at every point the answer can have changed: a write, a `:set`, a
@@ -1019,6 +1184,13 @@ impl App {
         let mut refused: Option<String> = None;
         for doc in &mut self.docs {
             if !doc.buffer.modified || doc.buffer.path.is_none() {
+                continue;
+            }
+            // A conflicted buffer would be refused by the guard every single
+            // interval. The status marker already says the file diverged, and
+            // saying it again on a timer buries whatever else the line had.
+            // (Only reachable with `autoreload` on — nothing else sets this.)
+            if doc.buffer.conflict {
                 continue;
             }
             match doc.buffer.save(policy, false) {
@@ -3825,6 +3997,11 @@ impl App {
                 self.try_quit(true);
             }
             "reload" | "e!" => self.reload_config(),
+            // NOT `:e!`, which this editor already spends on the config. A
+            // command that re-reads the file needs its own name rather than a
+            // second meaning for one that is taken.
+            "revert" => self.revert(false),
+            "revert!" => self.revert(true),
             "help" | "h" => self.open_help(arg),
             "focus" => {
                 let mode = if arg.is_empty() {
@@ -3954,6 +4131,16 @@ impl App {
                 return match on {
                     true => self.notify(format!("autosave on · every {every} min"), FlashKind::Info),
                     false => self.notify("autosave off", FlashKind::Info),
+                };
+            }
+            "autoreload" => {
+                let on = resolve(val, self.config.editor.autoreload);
+                self.config.editor.autoreload = on;
+                return match on {
+                    true => self.notify("autoreload on", FlashKind::Info),
+                    // Leave any standing conflict flag alone: the files really
+                    // did diverge, and turning the watcher off does not undo it.
+                    false => self.notify("autoreload off", FlashKind::Info),
                 };
             }
             // Minutes, so it reports rather than toggles — like `measure`.
@@ -4632,6 +4819,264 @@ mod tests {
 
         // The write recorded a fresh mtime, so the next plain :w is fine again.
         app.buffer.save(SavePolicy::default(), false).expect("guard rearms against the new mtime");
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ----------------------------------------------------------- autoreload
+
+    /// Write `text` to `path` and backdate its mtime past `DISK_SETTLE`.
+    ///
+    /// Backdating is not a convenience: a file written THIS instant is
+    /// deliberately deferred by `check_disk`, so a test that skipped this would
+    /// be testing the settle window rather than the reload.
+    fn write_settled(path: &std::path::Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - Duration::from_secs(5))
+            .unwrap();
+    }
+
+    /// An app holding `text`, saved to a scratch path, clean and mtime-stamped.
+    fn app_on_disk(tag: &str, text: &str) -> (App, std::path::PathBuf) {
+        let mut app = app_with(text);
+        let path = saved_file(&mut app, tag);
+        (app, path)
+    }
+
+    /// Case 1: the file changed, the buffer did not — the file wins.
+    #[test]
+    fn a_clean_buffer_takes_the_file_changes() {
+        let (mut app, path) = app_on_disk("clean", "mine\n");
+        app.buffer.cursor = Cursor::new(0, 2);
+        write_settled(&path, "theirs\n");
+
+        assert!(app.check_disk(), "the change was noticed");
+        assert_eq!(text(&app), "theirs\n", "the file won");
+        assert!(!app.buffer.modified, "and the buffer matches disk, so it is clean");
+        assert!(!app.buffer.conflict, "nothing to resolve");
+        assert!(flash_text(&app).contains("reloaded"), "got: {}", flash_text(&app));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The reload is ONE undo step, which is what makes an automatic reload
+    /// reversible rather than merely fast. Undoing it also makes the buffer
+    /// modified again — you are once more holding what the file does not.
+    #[test]
+    fn an_automatic_reload_is_one_undo_step() {
+        let (mut app, path) = app_on_disk("undo", "one\ntwo\n");
+        write_settled(&path, "wholly different\n");
+
+        assert!(app.check_disk());
+        assert_eq!(text(&app), "wholly different\n");
+
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "one\ntwo\n", "one u, not one per line");
+        assert!(app.buffer.modified, "holding text the file does not have");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        app.sync_after_input();
+        assert_eq!(text(&app), "wholly different\n", "and redo takes it back");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Case 2's precondition: both changed, so NOTHING is touched. This is the
+    /// assertion the whole feature rests on — an editor may never silently
+    /// choose between two versions of your work.
+    #[test]
+    fn a_modified_buffer_is_never_reloaded_only_flagged() {
+        let (mut app, path) = app_on_disk("conflict", "shared\n");
+        feed(&mut app, "A mine");
+        esc(&mut app);
+        let before = text(&app);
+        write_settled(&path, "theirs\n");
+
+        assert!(app.check_disk(), "the divergence was noticed");
+        assert_eq!(text(&app), before, "the buffer is untouched");
+        assert!(app.buffer.modified, "and still unsaved");
+        assert!(app.buffer.conflict, "flagged for the reader to resolve");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theirs\n",
+            "and the file is untouched too"
+        );
+        let msg = flash_text(&app);
+        assert!(msg.contains("changed on disk"), "got: {msg}");
+
+        // Announced ONCE: a second check finds nothing new to say, or the
+        // status line would be buried every second.
+        app.flash = None;
+        assert!(!app.check_disk(), "the conflict is not re-announced");
+        assert_eq!(flash_text(&app), "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `:w!` is how a reader says "keep mine", so it settles the conflict.
+    #[test]
+    fn writing_over_the_change_clears_the_conflict() {
+        let (mut app, path) = app_on_disk("resolve", "shared\n");
+        feed(&mut app, "A mine");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        assert!(app.check_disk());
+        assert!(app.buffer.conflict);
+
+        app.write(None, true); // :w!
+        assert!(!app.buffer.conflict, "the write settled it");
+        assert!(!app.buffer.modified);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("mine"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A `touch` moves the mtime without changing a byte. Absorbing it in
+    /// silence is the point: replacing text with itself would throw the cursor
+    /// away and flash about nothing.
+    #[test]
+    fn an_identical_rewrite_is_absorbed_silently() {
+        let (mut app, path) = app_on_disk("touch", "same\n");
+        app.buffer.cursor = Cursor::new(0, 3);
+        write_settled(&path, "same\n");
+
+        assert!(!app.check_disk(), "nothing to redraw");
+        assert_eq!(flash_text(&app), "", "and nothing to say");
+        assert_eq!(app.buffer.cursor.col, 3, "the cursor stayed put");
+        // The mtime was taken, so it is not re-noticed every second.
+        assert!(
+            !crate::fs::save::changed_externally(&path, app.buffer.disk_mtime),
+            "the new mtime was absorbed"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A DELETED file is not a change to take. Reloading emptiness over a
+    /// document because something removed the file is the worst available
+    /// behaviour; the buffer keeps its text and `:w` recreates the file.
+    #[test]
+    fn a_deleted_file_leaves_the_buffer_alone() {
+        let (mut app, path) = app_on_disk("gone", "still here\n");
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(!app.check_disk());
+        assert_eq!(text(&app), "still here\n");
+        assert!(!app.buffer.conflict);
+
+        // And it can be written back out.
+        app.write(None, false);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "still here\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A file still being written is left for the next poll. Without this, a
+    /// truncated read that happens to be valid UTF-8 loads as real content.
+    #[test]
+    fn a_file_written_this_instant_waits_for_the_next_poll() {
+        let (mut app, path) = app_on_disk("settle", "mine\n");
+        // No backdating: mtime is now, so the writer may still be going.
+        std::fs::write(&path, "half-writ").unwrap();
+
+        assert!(!app.check_disk(), "not read while it is still warm");
+        assert_eq!(text(&app), "mine\n", "buffer untouched");
+
+        // Once it has settled, the same check takes it.
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - Duration::from_secs(5)).unwrap();
+        drop(f);
+        assert!(app.check_disk());
+        assert_eq!(text(&app), "half-writ");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Off means off — the `:w` guard is still there to catch it at write time.
+    #[test]
+    fn autoreload_off_does_nothing_at_all() {
+        let (mut app, path) = app_on_disk("off", "mine\n");
+        app.set_option("autoreload off");
+        assert!(!app.config.editor.autoreload);
+        write_settled(&path, "theirs\n");
+
+        assert!(!app.check_disk());
+        assert_eq!(text(&app), "mine\n");
+        assert!(!app.buffer.conflict);
+
+        app.set_option("autoreload");
+        assert!(app.config.editor.autoreload, "bare :set toggles it back on");
+        assert!(app.check_disk(), "and now it takes the change");
+        assert_eq!(text(&app), "theirs\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Every open document is checked, not just the visible one — and each is
+    /// judged on its OWN dirtiness.
+    #[test]
+    fn each_document_is_judged_on_its_own() {
+        let dir = two_files();
+        let mut app = app_with("scratch\n");
+        app.open_file(dir.join("one.md"));
+        app.open_file(dir.join("two.md"));
+        // Dirty the second one only.
+        feed(&mut app, "A mine");
+        esc(&mut app);
+
+        write_settled(&dir.join("one.md"), "one changed\n");
+        write_settled(&dir.join("two.md"), "two changed\n");
+
+        assert!(app.check_disk());
+        let by_name = |app: &App, name: &str| -> String {
+            app.docs
+                .iter()
+                .find(|d| d.buffer.display_name() == name)
+                .map(|d| d.buffer.rope.to_string())
+                .unwrap()
+        };
+        assert_eq!(by_name(&app, "one.md"), "one changed\n", "clean one reloaded");
+        assert!(
+            by_name(&app, "two.md").contains("mine"),
+            "the dirty one kept its unsaved text"
+        );
+        assert!(app.buffer.conflict, "and is flagged");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `:revert` needs the `!` on a modified buffer, exactly as `:q` does —
+    /// it throws unsaved work away, and that has to be deliberate.
+    #[test]
+    fn revert_takes_the_file_but_only_with_a_bang() {
+        let (mut app, path) = app_on_disk("revert", "mine\n");
+        feed(&mut app, "A edited");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+
+        app.revert(false);
+        assert!(text(&app).contains("edited"), "a plain :revert refuses");
+        assert!(flash_text(&app).contains(":revert!"), "and names the way past");
+
+        app.revert(true);
+        assert_eq!(text(&app), "theirs\n", ":revert! takes the file");
+        assert!(!app.buffer.modified);
+        assert!(!app.buffer.conflict);
+        assert!(flash_text(&app).contains("reverted"), "got: {}", flash_text(&app));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A conflicted buffer is skipped by autosave. The guard would refuse it
+    /// every interval, and the status marker already carries the message.
+    #[test]
+    fn autosave_leaves_a_conflicted_buffer_to_the_reader() {
+        let (mut app, path) = app_on_disk("both", "shared\n");
+        feed(&mut app, "A mine");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        assert!(app.check_disk());
+        assert!(app.buffer.conflict);
+
+        app.flash = None;
+        autosave_due(&mut app);
+        assert!(!app.autosave_tick(), "no repeated complaint on a timer");
+        assert_eq!(flash_text(&app), "");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theirs\n",
+            "and certainly not written over"
+        );
         let _ = std::fs::remove_file(path);
     }
 

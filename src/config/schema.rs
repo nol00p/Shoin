@@ -124,6 +124,12 @@ pub struct EditorConfig {
     /// Minutes between autosaves, 1–5. Read only when `autosave` is on, and
     /// kept when it goes off so turning it back on remembers the number.
     pub autosave_interval: u8,
+    /// Take a file's changes back when something else edits it. ON, unlike
+    /// `autosave`: it fires only on a buffer with NOTHING unsaved, so there is
+    /// nothing of the reader's to lose, and it is one undo step besides. A
+    /// buffer that HAS unsaved work is never reloaded — it is flagged as a
+    /// conflict for the reader to resolve.
+    pub autoreload: bool,
     pub undo_coalesce_ms: u64,
     pub scroll_off: u16,
 }
@@ -141,6 +147,7 @@ impl Default for EditorConfig {
             // Off, and 3 minutes when it goes on.
             autosave: false,
             autosave_interval: crate::fs::save::AutosaveInterval::DEFAULT,
+            autoreload: true,
             undo_coalesce_ms: 400,
             scroll_off: 3,
         }
@@ -243,6 +250,9 @@ pub struct GlyphConfig {
     pub folder: String,
     pub folder_open: String,
     pub modified: String,
+    /// Drawn beside the filename by `frame::status_text` when the file changed
+    /// on disk under a modified buffer. Empty turns the marker off.
+    pub conflict: String,
     /// SPEC §6, drawn by `frame::render_scroll_hint` at the pane's right
     /// edge, and only while the document overflows the screen.
     pub scroll_hint: String,
@@ -266,6 +276,9 @@ impl Default for GlyphConfig {
             folder: "\u{f07b}".into(),
             folder_open: "\u{f07c}".into(),
             modified: "●".into(),
+            // Portable warning sign, not a Nerd Font glyph: this is the one
+            // marker a reader must not miss for want of a font.
+            conflict: "⚠".into(),
             scroll_hint: "▐".into(),
             rule: "─".into(),
         }
@@ -288,6 +301,7 @@ impl GlyphConfig {
             folder: "".into(),
             folder_open: "".into(),
             modified: "*".into(),
+            conflict: "!".into(),
             scroll_hint: "|".into(),
             rule: "-".into(),
         }
@@ -319,6 +333,7 @@ impl GlyphConfig {
         fall_back("folder", &mut self.folder, ascii.folder);
         fall_back("folder_open", &mut self.folder_open, ascii.folder_open);
         fall_back("modified", &mut self.modified, ascii.modified);
+        fall_back("conflict", &mut self.conflict, ascii.conflict);
         fall_back("scroll_hint", &mut self.scroll_hint, ascii.scroll_hint);
         fall_back("rule", &mut self.rule, ascii.rule);
     }

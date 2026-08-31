@@ -1336,7 +1336,19 @@ fn status_text(app: &App) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for item in &app.config.status.show {
         match item.as_str() {
-            "file" => parts.push(app.buffer.display_name()),
+            // The conflict marker rides on the FILENAME rather than being its
+            // own `[status] show` item: it is a fact about this file, and it
+            // must not be switchable off by a preference about the modified
+            // dot. `elide` in `render` still bounds the whole line.
+            "file" => {
+                let mut name = app.buffer.display_name();
+                let marker = &app.config.glyphs.conflict;
+                if app.buffer.conflict && !marker.is_empty() {
+                    name.push(' ');
+                    name.push_str(marker);
+                }
+                parts.push(name);
+            }
             "modified" if app.buffer.modified => parts.push(app.config.glyphs.modified.clone()),
             "position" => parts.push(format!(
                 "{}:{}",
@@ -1626,6 +1638,46 @@ mod tests {
         // any other wiki link — off means "not expanded", not "not styled".
         assert!(all.contains("frag"));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The conflict marker reaches the status line, riding on the FILENAME so a
+    /// reader who trimmed `[status] show` down cannot switch it off by accident.
+    ///
+    /// It is only ever drawn where it means something: a conflict exists solely
+    /// on a modified buffer, since a clean one is reloaded instead of flagged.
+    #[test]
+    fn a_conflicted_file_is_marked_on_the_status_line() {
+        let mut app = app_with("hi\n");
+        app.buffer.path = Some(std::path::PathBuf::from("notes.md"));
+        // A flash whose text is `None` is what asks for the DEFAULT status
+        // content (file, position, words) — `status_text` shows nothing at all
+        // without one, which is how `touch_status` works.
+        let default_content = || crate::app::Flash {
+            text: None,
+            kind: crate::app::FlashKind::Info,
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        app.flash = Some(default_content());
+
+        let clean = status_text(&app).unwrap_or_default();
+        assert!(clean.contains("notes.md"), "got: {clean:?}");
+        assert!(
+            !clean.contains(&app.config.glyphs.conflict),
+            "nothing to warn about yet: {clean:?}"
+        );
+
+        app.buffer.conflict = true;
+        let marked = status_text(&app).unwrap_or_default();
+        assert!(
+            marked.contains(&format!("notes.md {}", app.config.glyphs.conflict)),
+            "the marker sits with the name: {marked:?}"
+        );
+
+        // Empty turns it off, the way every other glyph does.
+        app.config.glyphs.conflict = String::new();
+        let off = status_text(&app).unwrap_or_default();
+        assert!(off.contains("notes.md"), "{off:?}");
+        assert_eq!(off.trim_end(), off, "and leaves no dangling space");
     }
 
     /// A status message too long for the measure is ELIDED, not silently cut.
