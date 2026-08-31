@@ -299,6 +299,14 @@ pub struct App {
     /// `step` raises this for whatever it handled and the loop lowers it after
     /// painting — an idle editor does no work between ticks.
     needs_redraw: bool,
+
+    /// When the next autosave is due, or `None` when `[editor] autosave` is off.
+    ///
+    /// A DEADLINE rather than an elapsed count, so the loop's question is one
+    /// `Instant` comparison it can afford every tick. Re-armed after every
+    /// write, the manual ones included: a timer that fires two seconds after
+    /// `:w` writes a file nobody changed since.
+    autosave_at: Option<Instant>,
 }
 
 /// `App` derefs to the document you are editing. That is what lets every verb
@@ -486,6 +494,10 @@ impl App {
             None => Buffer::empty(),
         };
         let config_focus = config.layout.focus.clone();
+        // Read before `config` moves into the struct below.
+        let autosave = crate::fs::save::Autosave::from_config(&config.editor)
+            .interval()
+            .map(|every| Instant::now() + every);
         // Bad individual bindings are skipped (not fatal); surface the first as a
         // startup flash so a typo'd action name is visible, not silent.
         let (keymap, key_warnings) = Keymap::from_config(&config.keys, &config.input.leader);
@@ -565,6 +577,7 @@ impl App {
             last_insert: None,
             zen: None,
             needs_redraw: true,
+            autosave_at: autosave,
         })
     }
 
@@ -573,6 +586,10 @@ impl App {
             self.term_size = (size.width, size.height);
         }
         while !self.quit {
+            // Before the draw, so its status line reaches the same frame.
+            if self.autosave_tick() {
+                self.needs_redraw = true;
+            }
             self.refresh_blocks();
             self.refresh_focus();
             self.sync_cursor_shape();
@@ -798,6 +815,9 @@ impl App {
                 }
                 // Re-emit the caret for a possibly-changed [cursor].
                 self.cursor_shape = None;
+                // [editor] autosave may have just been turned on, off, or
+                // re-timed; the deadline in hand was computed from the old one.
+                self.arm_autosave();
                 // A reload is also how someone iterates on their own art, so
                 // re-resolve it here rather than only at startup.
                 let dir = self.watcher.as_ref().and_then(|w| w.config_dir());
@@ -945,6 +965,77 @@ impl App {
             MouseEventKind::ScrollUp => self.move_by(Motion::Up, 3),
             _ => {}
         }
+    }
+
+    /// Arm — or disarm — the autosave deadline from the config as it stands.
+    ///
+    /// Called at every point the answer can have changed: a write, a `:set`, a
+    /// hot reload. `Autosave::interval` returning `None` for "off" is what lets
+    /// this be one line rather than a branch.
+    fn arm_autosave(&mut self) {
+        self.autosave_at = crate::fs::save::Autosave::from_config(&self.config.editor)
+            .interval()
+            .map(|every| Instant::now() + every);
+    }
+
+    /// Write if the deadline has passed. Reports whether anything needs drawing.
+    ///
+    /// The deadline is re-armed BEFORE the write and whatever the write does, so
+    /// a file that cannot be saved — one something else has touched — is
+    /// reported once every interval and not once every tick.
+    fn autosave_tick(&mut self) -> bool {
+        match self.autosave_at {
+            Some(due) if Instant::now() >= due => {}
+            _ => return false,
+        }
+        self.arm_autosave();
+        self.autosave_now()
+    }
+
+    /// Save every modified buffer that has a filename, and say so.
+    ///
+    /// Three deliberate limits, because an unattended write has none of the
+    /// escape hatches `:w` does:
+    ///
+    /// - **Never `force`.** The external-modification guard is the whole reason
+    ///   `:w` can refuse, and a background write is exactly when nobody is
+    ///   watching for the refusal. A file someone else has written since we read
+    ///   it is LEFT ALONE and named on the status line; `:w!` remains the only
+    ///   way past that, because overruling it is a decision.
+    /// - **A buffer with no path is skipped**, silently. `save` would fail with
+    ///   "no filename", and a timer that flashes an error every three minutes at
+    ///   a scratch buffer is worse than one that says nothing.
+    /// - **Every document, not just the visible one.** A modified buffer behind
+    ///   a split or in another pane is precisely what an autosave is for; `:w`
+    ///   only ever means the one in front of you.
+    ///
+    /// Like `:w`, this seals the undo step (`Buffer::write_to` calls
+    /// `history.split()`), so an undo after an autosave stops at the point it
+    /// fired. That is the same boundary a manual save leaves and the same one
+    /// `undo_coalesce_ms` draws anyway.
+    fn autosave_now(&mut self) -> bool {
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        let mut written: Vec<String> = Vec::new();
+        let mut refused: Option<String> = None;
+        for doc in &mut self.docs {
+            if !doc.buffer.modified || doc.buffer.path.is_none() {
+                continue;
+            }
+            match doc.buffer.save(policy, false) {
+                Ok(()) => written.push(doc.buffer.display_name()),
+                // The FIRST refusal: one line of status, and the rest of the
+                // documents still get their turn.
+                Err(e) if refused.is_none() => refused = Some(e.to_string()),
+                Err(_) => {}
+            }
+        }
+        match (refused, written.len()) {
+            (Some(why), _) => self.notify(format!("autosave: {why}"), FlashKind::Error),
+            (None, 0) => return false,
+            (None, 1) => self.notify(format!("autosaved {}", written[0]), FlashKind::Info),
+            (None, n) => self.notify(format!("autosaved {n} files"), FlashKind::Info),
+        }
+        true
     }
 
     /// Drop a flash whose time is up, reporting whether it actually cleared —
@@ -3850,6 +3941,48 @@ impl App {
                 let set = self.config.layout.line_spacing;
                 return self.notify(format!("line_spacing={set}"), FlashKind::Info);
             }
+            // Reports on/off rather than falling through to the generic
+            // "set autosave", which for a toggle says everything except which
+            // way it went — and this is a toggle that writes files.
+            "autosave" => {
+                let on = resolve(val, self.config.editor.autosave);
+                self.config.editor.autosave = on;
+                self.arm_autosave();
+                let every = crate::fs::save::Autosave::from_config(&self.config.editor)
+                    .every
+                    .minutes();
+                return match on {
+                    true => self.notify(format!("autosave on · every {every} min"), FlashKind::Info),
+                    false => self.notify("autosave off", FlashKind::Info),
+                };
+            }
+            // Minutes, so it reports rather than toggles — like `measure`.
+            // Setting it does NOT turn autosave on: the interval is a
+            // preference, switching it on is a decision.
+            "autosave_interval" | "autosave_min" => {
+                use crate::fs::save::AutosaveInterval;
+                let cur = self.config.editor.autosave_interval;
+                if val.is_empty() {
+                    return self.notify(format!("autosave_interval={cur}"), FlashKind::Info);
+                }
+                let n = val.parse::<u8>().ok().and_then(AutosaveInterval::parse);
+                let Some(n) = n else {
+                    return self.notify(
+                        format!(
+                            "autosave_interval: {} to {} minutes, not {val:?}",
+                            AutosaveInterval::MIN,
+                            AutosaveInterval::MAX
+                        ),
+                        FlashKind::Error,
+                    );
+                };
+                self.config.editor.autosave_interval = n.minutes();
+                self.arm_autosave();
+                return self.notify(
+                    format!("autosave_interval={}", n.minutes()),
+                    FlashKind::Info,
+                );
+            }
             "code_syntax" | "syntax" => {
                 self.config.markdown.code_syntax = resolve(val, self.config.markdown.code_syntax);
             }
@@ -3898,6 +4031,8 @@ impl App {
                 let name = self.buffer.display_name();
                 let words = self.buffer.word_count();
                 self.notify(format!("{name} written · {words} words"), FlashKind::Info);
+                // The clock starts from the last write, not from startup.
+                self.arm_autosave();
             }
             Err(e) => self.notify(format!("{e}"), FlashKind::Error),
         }
@@ -4498,6 +4633,211 @@ mod tests {
         // The write recorded a fresh mtime, so the next plain :w is fine again.
         app.buffer.save(SavePolicy::default(), false).expect("guard rearms against the new mtime");
         let _ = std::fs::remove_file(path);
+    }
+
+    // ------------------------------------------------------------- autosave
+
+    /// A named scratch file with `text` in it, already saved so the buffer is
+    /// clean and `disk_mtime` is recorded — the state autosave has to start in.
+    fn saved_file(app: &mut App, tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("shoin-autosave-{tag}-{t}-{n}.md"));
+        app.buffer
+            .save_as(path.clone(), SavePolicy::default(), false)
+            .unwrap();
+        path
+    }
+
+    /// Turn autosave on and put the deadline in the PAST, so one `autosave_tick`
+    /// stands in for however many minutes. Nothing in the feature reads a clock
+    /// except `autosave_tick` itself, which is what makes that legitimate.
+    fn autosave_due(app: &mut App) {
+        app.config.editor.autosave = true;
+        app.autosave_at = Some(Instant::now() - Duration::from_secs(1));
+    }
+
+    /// Off is off: a dirty named buffer and a fired clock still write nothing,
+    /// because there is no deadline to fire. This is the default, and the one
+    /// assertion that has to hold whatever else changes.
+    #[test]
+    fn autosave_does_nothing_until_it_is_turned_on() {
+        let mut app = app_with("draft\n");
+        let path = saved_file(&mut app, "off");
+        feed(&mut app, "x");
+        assert!(app.buffer.modified);
+
+        app.arm_autosave();
+        assert!(app.autosave_at.is_none(), "no deadline while autosave is off");
+        assert!(!app.autosave_tick(), "and so nothing to fire");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "draft\n",
+            "the file on disk is untouched"
+        );
+        assert!(app.buffer.modified, "and the buffer is still dirty");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// On, and due: the edit reaches disk, the buffer goes clean, and the
+    /// deadline moves into the future by the configured interval.
+    #[test]
+    fn autosave_writes_a_modified_buffer_and_rearms() {
+        let mut app = app_with("draft\n");
+        let path = saved_file(&mut app, "write");
+        feed(&mut app, "A more");
+        esc(&mut app);
+
+        autosave_due(&mut app);
+        assert!(app.autosave_tick(), "the timer fired and wrote");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "draft more\n");
+        assert!(!app.buffer.modified, "a save is a save — the buffer is clean");
+        assert!(flash_text(&app).contains("autosaved"), "got: {}", flash_text(&app));
+
+        // Re-armed for the next interval, not left in the past.
+        let due = app.autosave_at.expect("still armed");
+        assert!(due > Instant::now(), "the deadline moved forward");
+        assert!(
+            due <= Instant::now() + Duration::from_secs(180),
+            "and by no more than the three-minute default"
+        );
+
+        // Nothing modified now, so the next firing is silent rather than a
+        // pointless write of the same bytes.
+        app.autosave_at = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!app.autosave_tick(), "nothing dirty, nothing to say");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// THE one that matters: autosave never forces. A file something else has
+    /// written since we read it is left exactly as that writer left it, and the
+    /// refusal is reported instead of being swallowed by a background timer.
+    #[test]
+    fn autosave_never_clobbers_a_file_someone_else_wrote() {
+        let mut app = app_with("mine\n");
+        let path = saved_file(&mut app, "guard");
+
+        // Someone else writes it. `set_modified` rather than a sleep, so the
+        // mtime differs by construction and the test cannot flake.
+        std::fs::write(&path, "theirs\n").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(10);
+        f.set_modified(later).unwrap();
+        drop(f);
+
+        feed(&mut app, "x");
+        autosave_due(&mut app);
+        assert!(app.autosave_tick(), "it reported, which needs a redraw");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theirs\n",
+            "an unattended write must never take the file"
+        );
+        assert!(app.buffer.modified, "and the text is still unsaved");
+        let msg = flash_text(&app);
+        assert!(msg.contains("autosave"), "got: {msg}");
+        assert!(msg.contains("changed on disk"), "got: {msg}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A buffer with no filename is skipped in silence. `save` would fail with
+    /// "no filename", and a timer that flashes that every few minutes at a
+    /// scratch buffer is worse than one that says nothing.
+    #[test]
+    fn autosave_skips_a_buffer_with_no_filename() {
+        let mut app = app_with("scratch\n");
+        assert!(app.buffer.path.is_none());
+        assert!(app.buffer.modified);
+
+        autosave_due(&mut app);
+        assert!(!app.autosave_tick(), "nothing written and nothing said");
+        assert_eq!(flash_text(&app), "", "no error at a buffer that has no file");
+    }
+
+    /// Every modified document, not just the visible one — a dirty buffer
+    /// behind a split is exactly what an autosave is for, and `:w` only ever
+    /// means the one in front of you.
+    #[test]
+    fn autosave_writes_every_modified_document() {
+        let dir = two_files();
+        let mut app = app_with("scratch\n");
+        app.open_file(dir.join("one.md"));
+        feed(&mut app, "A 1");
+        esc(&mut app);
+        app.open_file(dir.join("two.md"));
+        feed(&mut app, "A 2");
+        esc(&mut app);
+
+        // The scratch buffer stays dirty and unnamed: it is skipped, and its
+        // presence must not stop the two named ones from being written.
+        assert_eq!(
+            app.docs.iter().filter(|d| d.buffer.modified).count(),
+            3,
+            "two files plus the scratch buffer"
+        );
+
+        autosave_due(&mut app);
+        assert!(app.autosave_tick());
+        assert_eq!(std::fs::read_to_string(dir.join("one.md")).unwrap(), "file one 1\n");
+        assert_eq!(std::fs::read_to_string(dir.join("two.md")).unwrap(), "file two 2\n");
+        assert_eq!(
+            app.docs.iter().filter(|d| d.buffer.modified).count(),
+            1,
+            "only the unnamed scratch buffer is left dirty"
+        );
+        assert_eq!(flash_text(&app), "autosaved 2 files");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A manual `:w` restarts the clock. Otherwise a timer armed at startup
+    /// fires seconds after a save and writes bytes nobody changed.
+    #[test]
+    fn a_manual_write_restarts_the_clock() {
+        let mut app = app_with("draft\n");
+        let path = saved_file(&mut app, "rearm");
+        app.config.editor.autosave = true;
+        app.autosave_at = Some(Instant::now() + Duration::from_secs(1));
+
+        feed(&mut app, "x");
+        app.write(None, false);
+        let due = app.autosave_at.expect("armed");
+        assert!(
+            due > Instant::now() + Duration::from_secs(120),
+            "the deadline restarted from the write, not from startup"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `:set autosave` arms and disarms it live, and `:set autosave_interval`
+    /// refuses a number outside 1–5 rather than rounding it into range.
+    #[test]
+    fn set_autosave_arms_it_and_bounds_the_interval() {
+        let mut app = app_with("x\n");
+
+        app.set_option("autosave");
+        assert!(app.config.editor.autosave, "bare :set toggles it on");
+        assert!(app.autosave_at.is_some(), "and arms the timer");
+        assert!(flash_text(&app).contains("every 3 min"), "got: {}", flash_text(&app));
+
+        app.set_option("autosave_interval=5");
+        assert_eq!(app.config.editor.autosave_interval, 5);
+
+        app.set_option("autosave_interval=9");
+        assert_eq!(app.config.editor.autosave_interval, 5, "9 is refused, not clamped");
+        assert!(flash_text(&app).contains("1 to 5"), "got: {}", flash_text(&app));
+
+        app.set_option("autosave off");
+        assert!(!app.config.editor.autosave);
+        assert!(app.autosave_at.is_none(), "off disarms the timer");
+        assert_eq!(
+            app.config.editor.autosave_interval, 5,
+            "the interval survives being switched off"
+        );
     }
 
     /// `:w <other-path>` must not be blocked by the mtime of the file we READ —

@@ -118,6 +118,12 @@ pub struct EditorConfig {
     pub auto_pair: bool,
     pub trim_on_save: bool,
     pub final_newline: String,
+    /// Write every modified named buffer on a timer. OFF by default — see
+    /// `fs::save`'s module doc for why that is not a shrug.
+    pub autosave: bool,
+    /// Minutes between autosaves, 1–5. Read only when `autosave` is on, and
+    /// kept when it goes off so turning it back on remembers the number.
+    pub autosave_interval: u8,
     pub undo_coalesce_ms: u64,
     pub scroll_off: u16,
 }
@@ -132,6 +138,9 @@ impl Default for EditorConfig {
             auto_pair: false,
             trim_on_save: false,
             final_newline: "preserve".into(),
+            // Off, and 3 minutes when it goes on.
+            autosave: false,
+            autosave_interval: crate::fs::save::AutosaveInterval::DEFAULT,
             undo_coalesce_ms: 400,
             scroll_off: 3,
         }
