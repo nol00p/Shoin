@@ -1,7 +1,9 @@
 # Shoin
 
-A no-clutter terminal Markdown editor. This file shows off the **step-4**
-block styling — headings, lists, quotes, and code.
+A no-clutter terminal Markdown editor. This file exercises the block styling —
+headings, lists, quotes, tables and fenced code. Open it to see concealment at
+work: the line your cursor is on shows its raw Markdown, every other line shows
+the finished text.
 
 ## Headings cascade through six colors
 
@@ -21,7 +23,7 @@ block styling — headings, lists, quotes, and code.
 - [ ] an open task
 - [x] a finished task
 
-## Inline styling (step 5)
+## Inline styling
 
 This paragraph has **bold**, *italic*, ***both***, ~~struck~~, ==highlit==,
 and `inline code`. A [labelled link](https://example.com), a [[Wiki Page]],

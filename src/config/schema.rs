@@ -339,8 +339,9 @@ impl GlyphConfig {
     }
 }
 
-/// SPEC.md §14.6. Accepted and validated in v1; ignored until the feature
-/// lands, so an early adopter's config never breaks.
+/// SPEC.md §14.6. Every field here is live — this comment used to say the
+/// section was "accepted and validated but ignored until the feature lands",
+/// which stopped being true the day transclusion shipped.
 ///
 /// `Clone + PartialEq` because `render::cache::StyleKey` holds a copy: these
 /// settings reach an embed's EXPANSION, so changing one has to re-parse the
