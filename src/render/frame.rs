@@ -753,7 +753,7 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
         ))
         .title_bottom(
             Line::from(Span::styled(
-                " m keep mine · t keep theirs · ]c [c difference · q close ",
+                " l keep live · f keep file · n p difference · q close ",
                 Style::default().fg(dim),
             ))
             .right_aligned(),
@@ -784,9 +784,9 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(pad(" yours (buffer)".into(), side), Style::default().fg(dim)),
+            Span::styled(pad(" live — in the editor".into(), side), Style::default().fg(dim)),
             Span::styled("│", Style::default().fg(dim)),
-            Span::styled(pad(" on disk".into(), right_w), Style::default().fg(dim)),
+            Span::styled(pad(" file — on disk".into(), right_w), Style::default().fg(dim)),
         ])),
         head,
     );
@@ -809,8 +809,8 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
             Row::Added { .. } => (theme.diff_add.to_ratatui(), (' ', '+')),
             Row::Removed { .. } => (theme.diff_remove.to_ratatui(), ('-', ' ')),
         };
-        // The difference `]c` last landed on is marked in the border column, so
-        // stepping is visible even when a hunk is taller than the screen.
+        // The difference `n` / `p` last landed on is marked in the border column,
+        // so stepping is visible even when a hunk is taller than the screen.
         let here = current.as_ref().is_some_and(|h| h.contains(&row_index));
         let bar = match here {
             true => Span::styled("┃", Style::default().fg(accent)),
@@ -1772,7 +1772,7 @@ mod tests {
         let screen = rows.join("\n");
 
         assert!(screen.contains("diff: notes.md"), "titled:\n{screen}");
-        assert!(screen.contains("yours (buffer)") && screen.contains("on disk"), "{screen}");
+        assert!(screen.contains("live") && screen.contains("file — on disk"), "{screen}");
 
         // The edited line: both versions on ONE row, in that order.
         let changed = rows
