@@ -4,12 +4,14 @@
 //! one filesystem), fsync, then rename over the target. A crash mid-save leaves
 //! the original intact. Original mode bits are preserved.
 //!
-//! No swap files, no autosave in v1. Explicit `:w` only — a writing tool should
-//! not surprise the user with writes they did not ask for.
+//! No swap files, and autosave is OFF unless `[editor] autosave` asks for it —
+//! a writing tool should not surprise the user with writes they did not ask
+//! for. When it IS on it writes through this same `write_atomic`, guard
+//! included, so a timer can never clobber what `:w` would have refused to.
 
 use std::io::Write;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use ropey::Rope;
@@ -75,6 +77,75 @@ impl SavePolicy {
             // has already flagged it through `config::validate`.
             final_newline: FinalNewline::parse(&cfg.final_newline).unwrap_or_default(),
         }
+    }
+}
+
+/// How often `[editor] autosave` writes, in whole minutes.
+///
+/// A ladder of five rather than a free number of seconds. The point of a bound
+/// is that both ends are wrong for the feature: a 10-second autosave is a swap
+/// file with the document's own name on it, and an hourly one has not saved
+/// anything you would miss. Minutes also keep the setting readable — `3` is a
+/// number a reader can hold in their head, `180000` is one they copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutosaveInterval(u8);
+
+impl AutosaveInterval {
+    pub const MIN: u8 = 1;
+    pub const MAX: u8 = 5;
+    pub const DEFAULT: u8 = 3;
+
+    /// `None` outside 1–5, so the caller reports the number instead of quietly
+    /// rounding it — the same rule `FinalNewline::parse` follows, and for the
+    /// same reason: a setting that silently ignores what you wrote reads as a
+    /// setting that does not work.
+    pub fn parse(minutes: u8) -> Option<AutosaveInterval> {
+        (Self::MIN..=Self::MAX)
+            .contains(&minutes)
+            .then_some(AutosaveInterval(minutes))
+    }
+
+    pub fn minutes(self) -> u8 {
+        self.0
+    }
+
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(self.0 as u64 * 60)
+    }
+}
+
+impl Default for AutosaveInterval {
+    fn default() -> Self {
+        AutosaveInterval(AutosaveInterval::DEFAULT)
+    }
+}
+
+/// `[editor] autosave` and `autosave_interval` reduced to the one question the
+/// event loop asks: how long until the next write, or nothing at all.
+///
+/// Two fields rather than one `Option<u8>` because they answer to two different
+/// people. Turning autosave on and off is the decision; the interval is a
+/// preference that should still be there, unchanged, the next time it goes on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Autosave {
+    pub enabled: bool,
+    pub every: AutosaveInterval,
+}
+
+impl Autosave {
+    pub fn from_config(cfg: &crate::config::schema::EditorConfig) -> Autosave {
+        Autosave {
+            enabled: cfg.autosave,
+            // Out of range falls back here; `config::validate` is what makes
+            // the number visible rather than this silently taking 3.
+            every: AutosaveInterval::parse(cfg.autosave_interval).unwrap_or_default(),
+        }
+    }
+
+    /// The gap between writes, or `None` when autosave is off — which is also
+    /// the disarmed timer, so the loop has one thing to ask and not two.
+    pub fn interval(self) -> Option<Duration> {
+        self.enabled.then(|| self.every.duration())
     }
 }
 
@@ -205,6 +276,62 @@ mod tests {
         assert!(!FinalNewline::Preserve.resolve(false));
         assert!(FinalNewline::Always.resolve(false), "always overrules");
         assert!(!FinalNewline::Never.resolve(true), "never overrules");
+    }
+
+    /// The bound is the feature: five values, and a number outside it is
+    /// reported rather than rounded into range.
+    #[test]
+    fn the_autosave_interval_is_one_to_five_minutes() {
+        for m in 1..=5u8 {
+            let i = AutosaveInterval::parse(m).expect("in range");
+            assert_eq!(i.minutes(), m);
+            assert_eq!(i.duration(), Duration::from_secs(m as u64 * 60));
+        }
+        assert_eq!(AutosaveInterval::parse(0), None, "0 is not an interval");
+        assert_eq!(AutosaveInterval::parse(6), None);
+        assert_eq!(AutosaveInterval::parse(255), None);
+        assert_eq!(AutosaveInterval::default().minutes(), 3);
+    }
+
+    /// The `[editor]` section reaches the timer, and the default is OFF — the
+    /// one assertion that has to hold whatever else changes here.
+    #[test]
+    fn the_editor_section_reaches_the_autosave_timer() {
+        use crate::config::schema::EditorConfig;
+        let mut cfg = EditorConfig::default();
+        assert!(!cfg.autosave, "autosave is off unless asked for");
+        assert_eq!(
+            Autosave::from_config(&cfg).interval(),
+            None,
+            "off means no deadline at all, not a deadline nobody acts on"
+        );
+
+        cfg.autosave = true;
+        assert_eq!(
+            Autosave::from_config(&cfg).interval(),
+            Some(Duration::from_secs(180)),
+            "the default interval is three minutes"
+        );
+
+        cfg.autosave_interval = 5;
+        assert_eq!(
+            Autosave::from_config(&cfg).interval(),
+            Some(Duration::from_secs(300))
+        );
+
+        // Out of range falls back rather than refusing the config;
+        // `config::validate` is what makes the number visible.
+        cfg.autosave_interval = 9;
+        assert_eq!(
+            Autosave::from_config(&cfg).every.minutes(),
+            AutosaveInterval::DEFAULT
+        );
+
+        // Turning it off keeps the interval, so turning it back on remembers.
+        cfg.autosave = false;
+        cfg.autosave_interval = 2;
+        assert_eq!(Autosave::from_config(&cfg).interval(), None);
+        assert_eq!(Autosave::from_config(&cfg).every.minutes(), 2);
     }
 
     /// The `[editor]` section actually reaches a save. This is the assertion

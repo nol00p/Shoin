@@ -140,6 +140,18 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         crate::fs::save::FinalNewline::parse(&cfg.editor.final_newline).is_some(),
         "preserve · always · never",
     );
+    {
+        // A number, so the value shown is the number that was written — the
+        // point of the message is that 9 is not one of five, not that "9" is
+        // an unknown word.
+        let n = cfg.editor.autosave_interval;
+        check(
+            "editor.autosave_interval",
+            &n.to_string(),
+            crate::fs::save::AutosaveInterval::parse(n).is_some(),
+            "1 to 5 minutes",
+        );
+    }
     check(
         "layout.focus",
         &cfg.layout.focus,
@@ -440,6 +452,31 @@ mod tests {
     fn the_defaults_are_all_legal() {
         let warnings = validate(&Config::default());
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// An out-of-range `autosave_interval` is a NUMBER, so it gets the same
+    /// treatment as a misspelt word: the config still loads, the timer still
+    /// runs at the default, and the number is named on startup. Refusing the
+    /// whole file over one setting is what the leniency rule above forbids.
+    #[test]
+    fn an_impossible_autosave_interval_is_named_not_fatal() {
+        let cfg = parse("[editor]\nautosave = true\nautosave_interval = 9\n")
+            .expect("out of range must not refuse the config");
+        assert_eq!(cfg.editor.autosave_interval, 9, "kept as written");
+        let w = validate(&cfg);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].starts_with("editor.autosave_interval"), "{w:?}");
+        assert!(w[0].contains("1 to 5"), "the message names the range: {w:?}");
+
+        // And the timer runs at the default rather than at 9 minutes.
+        assert_eq!(
+            crate::fs::save::Autosave::from_config(&cfg.editor).interval(),
+            Some(std::time::Duration::from_secs(180))
+        );
+
+        // 0 is the other end of the same mistake.
+        let cfg = parse("[editor]\nautosave_interval = 0\n").unwrap();
+        assert_eq!(validate(&cfg).len(), 1);
     }
 
     /// A misspelt setting is REPORTED. It still falls back, but silently

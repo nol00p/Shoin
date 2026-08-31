@@ -232,6 +232,33 @@ Everything below opens and closes with the same key. `<leader>` is Space.
   <img src="docs/screenshots/focus-mode.png" alt="Focus mode dims all but the current paragraph" width="800">
 </p>
 
+### Saving
+
+`:w` writes, atomically: the text goes to a temp file beside the target, gets
+fsynced, and is renamed over it, so a crash mid-save leaves the original intact.
+If the file changed on disk since Shoin read it the write is refused — `:w!` is
+how you say you meant it.
+
+Autosave is off by default, because a writing tool shouldn't make writes you
+didn't ask for. Turn it on and it writes every modified named buffer on a timer:
+
+```
+  :set autosave                     on, every 3 minutes
+  :set autosave_interval=1          1 to 5 minutes
+  :set autosave off                 back to explicit :w only
+```
+
+```toml
+[editor]
+autosave          = true
+autosave_interval = 3     # minutes, 1–5
+```
+
+It keeps the guard: a file something else has written is left alone and named on
+the status line, never overwritten while you weren't looking. A buffer with no
+filename yet is skipped rather than nagged about, and the clock restarts from
+every write, so `:w` and the timer never save the same seconds apart.
+
 ---
 
 ## Compose notes into a text
@@ -347,6 +374,10 @@ text       = "#c0caf5"
 
 [input]
 leader = " "
+
+[editor]
+autosave          = false # write modified named buffers on a timer
+autosave_interval = 3     # minutes between them, 1–5
 
 [tree]
 show_hidden = false       # dotfiles in the file tree (H toggles it live)
