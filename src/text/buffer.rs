@@ -232,17 +232,7 @@ impl Buffer {
             return Ok(false);
         }
 
-        let text = loaded.rope.to_string();
-        // One group, so the whole replacement is a single `u`.
-        self.history.begin_group(Some(self.cursor));
-        let len = self.rope.len_chars();
-        if len > 0 {
-            self.delete_chars(0, len);
-        }
-        if !text.is_empty() {
-            self.insert_str(Cursor::new(0, 0), &text);
-        }
-        self.history.end_group();
+        self.replace_all(&loaded.rope.to_string());
 
         self.line_ending = loaded.line_ending;
         self.final_newline = loaded.final_newline;
@@ -252,6 +242,28 @@ impl Buffer {
         self.modified = false;
         self.conflict = false;
         Ok(true)
+    }
+
+    /// Replace the whole document, as ONE undo step.
+    ///
+    /// Shared by `reload` and the `:diff` merge because both replace everything
+    /// and both must be a single `u` — two copies of this would be two chances
+    /// for one of them to stop grouping, and the group is the whole reason an
+    /// automatic reload is safe to do behind the reader's back.
+    ///
+    /// The cursor is left where it was; callers clamp (`App::sync_after_input`
+    /// does it for every input path anyway), and the group records the
+    /// pre-replacement cursor so undo lands where the reader was.
+    pub fn replace_all(&mut self, text: &str) {
+        self.history.begin_group(Some(self.cursor));
+        let len = self.rope.len_chars();
+        if len > 0 {
+            self.delete_chars(0, len);
+        }
+        if !text.is_empty() {
+            self.insert_str(Cursor::new(0, 0), text);
+        }
+        self.history.end_group();
     }
 
     /// Recompute `modified` from the revision the disk holds. Undoing back to

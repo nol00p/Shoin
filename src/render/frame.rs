@@ -753,7 +753,7 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
         ))
         .title_bottom(
             Line::from(Span::styled(
-                " l keep live · f keep file · n p difference · q close ",
+                " Tab cycle · n p difference · l f b all · w commit · q abort ",
                 Style::default().fg(dim),
             ))
             .right_aligned(),
@@ -809,27 +809,53 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
             Row::Added { .. } => (theme.diff_add.to_ratatui(), (' ', '+')),
             Row::Removed { .. } => (theme.diff_remove.to_ratatui(), ('-', ' ')),
         };
-        // The difference `n` / `p` last landed on is marked in the border column,
-        // so stepping is visible even when a hunk is taller than the screen.
+        // The divider carries BOTH facts at once: its glyph points at the side
+        // this difference keeps, and its colour says whether this is the
+        // difference `n` / `p` last landed on. Two columns of chrome for that
+        // would cost more width than the text can spare.
         let here = current.as_ref().is_some_and(|h| h.contains(&row_index));
-        let bar = match here {
-            true => Span::styled("┃", Style::default().fg(accent)),
-            false => Span::styled("│", Style::default().fg(dim)),
+        let chosen = view.side_at(row_index);
+        let bar = match chosen {
+            Some(s) => Span::styled(
+                s.glyph().to_string(),
+                match here {
+                    true => Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    false => Style::default().fg(dim),
+                },
+            ),
+            None => Span::styled("│".to_string(), Style::default().fg(dim)),
         };
 
-        let text = |line: Option<usize>, from: &[String], mark: char, w: usize| -> Span<'static> {
+        // A side that loses the merge is DIMMED, so the surviving document can
+        // be read straight down the screen. `Both` dims neither, which is why
+        // "both kept" needs no visual vocabulary of its own.
+        let keeps = |mine: bool| match chosen {
+            None => true,
+            Some(crate::diff::Side::Both) => true,
+            Some(crate::diff::Side::Live) => mine,
+            Some(crate::diff::Side::File) => !mine,
+        };
+        let text = |line: Option<usize>,
+                    from: &[String],
+                    mark: char,
+                    w: usize,
+                    live: bool|
+         -> Span<'static> {
             match line {
                 Some(n) => Span::styled(
                     pad(format!("{mark}{}", from.get(n).cloned().unwrap_or_default()), w),
-                    Style::default().fg(colour),
+                    match keeps(live) {
+                        true => Style::default().fg(colour),
+                        false => Style::default().fg(dim).add_modifier(Modifier::CROSSED_OUT),
+                    },
                 ),
                 None => Span::styled(filler(w), Style::default().fg(dim)),
             }
         };
         lines.push(Line::from(vec![
-            text(row.left(), &view.mine, marks.0, side),
+            text(row.left(), &view.mine, marks.0, side, true),
             bar,
-            text(row.right(), &view.theirs, marks.1, right_w),
+            text(row.right(), &view.theirs, marks.1, right_w, false),
         ]));
     }
     frame.render_widget(Paragraph::new(lines), body);
@@ -1765,6 +1791,7 @@ mod tests {
             "notes.md".into(),
             vec!["keep".into(), "mine".into(), "tail".into()],
             vec!["keep".into(), "theirs".into(), "extra".into(), "tail".into()],
+            None,
         ));
 
         let buf = render_to(&app, 80, 24);
@@ -1797,6 +1824,62 @@ mod tests {
 
         // Nothing of the document underneath leaks through the takeover.
         assert!(!screen.contains("words"), "no status line behind it:\n{screen}");
+    }
+
+    /// The merge selection has to be VISIBLE, or the reader is committing a
+    /// document they cannot read. Two things carry it: the losing side is struck
+    /// out, and the divider glyph points at the side that wins.
+    #[test]
+    fn the_diff_view_shows_which_side_wins() {
+        use crate::diff::Side;
+        use ratatui::style::Modifier;
+
+        let mut app = app_with("x\n");
+        app.diff = Some(crate::diff::DiffView::new(
+            0,
+            "notes.md".into(),
+            vec!["keep".into(), "mine".into(), "tail".into()],
+            vec!["keep".into(), "theirs".into(), "tail".into()],
+            None,
+        ));
+
+        // Find the row carrying both versions, and a cell inside each column.
+        let probe = |app: &App| -> (String, bool, bool) {
+            let buf = render_to(app, 60, 12);
+            let y = (0..12)
+                .find(|y| row_text(&buf, *y).contains("mine"))
+                .expect("the changed row is on screen");
+            let row = row_text(&buf, y);
+            let struck = |needle: &str| -> bool {
+                let at = row.find(needle).expect("column text present") as u16;
+                buf[(at, y)].modifier.contains(Modifier::CROSSED_OUT)
+            };
+            // The divider is the one cell that is neither column's text.
+            let bar = row
+                .chars()
+                .find(|c| matches!(c, '\u{25c0}' | '\u{25b6}' | '\u{25c6}'))
+                .map(String::from)
+                .unwrap_or_default();
+            (bar, struck("mine"), struck("theirs"))
+        };
+
+        app.diff.as_mut().unwrap().set_all(Side::Live);
+        let (bar, mine_out, theirs_out) = probe(&app);
+        assert_eq!(bar, "\u{25c0}", "the glyph points left, at live");
+        assert!(!mine_out, "the surviving side reads normally");
+        assert!(theirs_out, "and the losing side is struck out");
+
+        app.diff.as_mut().unwrap().set_all(Side::File);
+        let (bar, mine_out, theirs_out) = probe(&app);
+        assert_eq!(bar, "\u{25b6}", "and right, at file");
+        assert!(mine_out);
+        assert!(!theirs_out);
+
+        // Both kept needs no visual vocabulary of its own: nothing is struck.
+        app.diff.as_mut().unwrap().set_all(Side::Both);
+        let (bar, mine_out, theirs_out) = probe(&app);
+        assert_eq!(bar, "\u{25c6}");
+        assert!(!mine_out && !theirs_out, "both survive, so neither is struck");
     }
 
     /// The conflict marker reaches the status line, riding on the FILENAME so a

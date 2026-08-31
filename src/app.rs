@@ -1138,7 +1138,9 @@ impl App {
         let name = self.buffer.display_name();
         let mine = crate::diff::lines_of(&self.buffer.rope.to_string());
         let theirs = crate::diff::lines_of(&loaded.rope.to_string());
-        let mut view = crate::diff::DiffView::new(self.current(), name.clone(), mine, theirs);
+        let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let mut view =
+            crate::diff::DiffView::new(self.current(), name.clone(), mine, theirs, mtime);
         if view.align.is_identical() {
             return self.notify(format!("{name} matches the file on disk"), FlashKind::Info);
         }
@@ -1152,6 +1154,49 @@ impl App {
         }
         self.diff = Some(view);
         self.needs_redraw = true;
+    }
+
+    /// `w` in the diff view — write the merge the selections add up to.
+    ///
+    /// Commits the WHOLE document, not the difference under the cursor: every
+    /// hunk always has a chosen side, so the view is a complete text at all
+    /// times and this is the one place it becomes real. That is what makes `q`
+    /// a true abort and the result a single undo step.
+    ///
+    /// It re-checks the file first. `check_disk` freezes a document while its
+    /// diff is open, so nothing WE do can move it — but nothing stops a third
+    /// party writing the file while the reader deliberates, and forcing past
+    /// that would clobber an edit this view never showed them.
+    fn commit_diff(&mut self) {
+        let Some(view) = self.diff.as_ref() else { return };
+        let doc = view.doc;
+        let name = view.name.clone();
+        let merged = view.merged();
+        let snapshot = view.snapshot_mtime;
+
+        let Some(path) = self.docs.get(doc).and_then(|d| d.buffer.path.clone()) else {
+            self.diff = None;
+            return self.notify("the file is gone — nothing to write", FlashKind::Error);
+        };
+        if crate::fs::save::changed_externally(&path, snapshot) {
+            self.diff = None;
+            return self.notify(
+                format!("{name} changed again — :diff to see it"),
+                FlashKind::Error,
+            );
+        }
+
+        self.diff = None;
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        let doc = &mut self.docs[doc];
+        doc.buffer.replace_all(&merged);
+        // Forced, and safe to force: the guard exists to catch a change nobody
+        // has looked at, and the check above just proved there is none.
+        match doc.buffer.save(policy, true) {
+            Ok(()) => self.notify(format!("{name} merged and written"), FlashKind::Info),
+            Err(e) => self.notify(format!("{e}"), FlashKind::Error),
+        }
+        self.sync_after_input();
     }
 
     /// Keys inside the diff view. It has drawn over everything, so this is the
@@ -1180,18 +1225,38 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.diff = None;
             }
-            // The two whole-file answers, named after the version each keeps:
-            // `l`ive is what is in the editor, `f`ile is what is on disk. Both
-            // are things the editor could already do — this view is what lets
-            // you SEE which one you want before committing to it.
+            // `<Tab>` rather than `<Space>`: space is the LEADER key everywhere
+            // else in the editor, and a key that starts a command sequence in
+            // every other context should not silently decide which version of
+            // your work survives in this one. Tab is a two-way switch by nature
+            // and has no Normal-mode meaning to unlearn.
+            KeyCode::Tab | KeyCode::BackTab => {
+                if let Some(side) = view.cycle_current() {
+                    let n = view.hunk + 1;
+                    let total = view.align.hunks.len();
+                    self.notify(
+                        format!("difference {n}/{total}: keep {}", side.label()),
+                        FlashKind::Info,
+                    );
+                }
+            }
+            // The bulk answers. They SET every difference rather than resolving
+            // outright: with per-difference choices in play, a key that both
+            // selects and commits would silently discard whatever the reader
+            // had already toggled.
             KeyCode::Char('l') => {
-                self.diff = None;
-                self.write(None, true);
+                view.set_all(crate::diff::Side::Live);
+                self.notify("every difference: keep live · w to commit", FlashKind::Info);
             }
             KeyCode::Char('f') => {
-                self.diff = None;
-                self.revert(true);
+                view.set_all(crate::diff::Side::File);
+                self.notify("every difference: keep file · w to commit", FlashKind::Info);
             }
+            KeyCode::Char('b') => {
+                view.set_all(crate::diff::Side::Both);
+                self.notify("every difference: keep both · w to commit", FlashKind::Info);
+            }
+            KeyCode::Char('w') => return self.commit_diff(),
             _ => {}
         }
         self.needs_redraw = true;
@@ -4986,45 +5051,127 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `l` keeps the LIVE version — what is in the editor: the buffer goes over
-    /// the file, and the conflict is settled.
+    /// `l` / `f` / `b` SELECT for every difference; they do not commit. A key
+    /// that both selected and wrote would silently discard whatever the reader
+    /// had already toggled.
     #[test]
-    fn diff_l_keeps_the_live_version() {
-        let (mut app, path) = app_on_disk("mine", "shared\n");
+    fn the_bulk_keys_select_without_committing() {
+        use crate::diff::Side;
+        let (mut app, path) = app_on_disk("bulk", "shared\n");
         feed(&mut app, "A mine");
         esc(&mut app);
         write_settled(&path, "theirs\n");
-        assert!(app.check_disk(), "flagged first");
-        assert!(app.buffer.conflict);
-
         app.open_diff();
-        diff_key(&mut app, 'l');
-        assert!(app.diff.is_none(), "the view closes behind the choice");
-        assert!(std::fs::read_to_string(&path).unwrap().contains("mine"));
-        assert!(!app.buffer.modified, "written, so clean");
-        assert!(!app.buffer.conflict, "and settled");
+
+        for (key, want) in [('f', Side::File), ('b', Side::Both), ('l', Side::Live)] {
+            diff_key(&mut app, key);
+            let view = app.diff.as_ref().expect("still open — nothing was committed");
+            assert!(view.sides.iter().all(|s| *s == want), "{key} set every difference");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "theirs\n",
+            "and the file is untouched until w"
+        );
         let _ = std::fs::remove_file(path);
     }
 
-    /// `f` keeps the FILE version, discarding the unsaved buffer — and because a
-    /// reload is one undo step, `u` is still the way back.
+    /// `<Tab>` cycles the CURRENT difference only, through live → file → both.
+    /// Not `<Space>`: space is the leader key everywhere else in the editor.
     #[test]
-    fn diff_f_keeps_the_file_version_reversibly() {
-        let (mut app, path) = app_on_disk("theirs", "shared\n");
-        feed(&mut app, "A mine");
+    fn tab_cycles_only_the_current_difference() {
+        use crate::diff::Side;
+        let (mut app, path) = app_on_disk("tab", "a\nb\nc\nd\ne\n");
+        write_settled(&path, "a\nB\nc\nD\ne\n");
+        app.term_size = (80, 24);
+        app.open_diff();
+        assert_eq!(app.diff.as_ref().unwrap().sides, vec![Side::Live, Side::Live]);
+
+        let tab = |app: &mut App| app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        tab(&mut app);
+        assert_eq!(app.diff.as_ref().unwrap().sides, vec![Side::File, Side::Live]);
+        tab(&mut app);
+        assert_eq!(app.diff.as_ref().unwrap().sides, vec![Side::Both, Side::Live]);
+        tab(&mut app);
+        assert_eq!(app.diff.as_ref().unwrap().sides, vec![Side::Live, Side::Live], "wraps");
+
+        // Move on, and the next Tab leaves the first difference alone.
+        diff_key(&mut app, 'n');
+        tab(&mut app);
+        assert_eq!(app.diff.as_ref().unwrap().sides, vec![Side::Live, Side::File]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `w` commits the WHOLE merged document — as one undo step, written once,
+    /// with the conflict settled.
+    #[test]
+    fn w_commits_the_merge_as_one_undo_step() {
+        use crate::diff::Side;
+        let (mut app, path) = app_on_disk("commit", "a\nmine\nc\nx\ne\n");
+        feed(&mut app, "A ");
         esc(&mut app);
-        write_settled(&path, "theirs\n");
+        app.buffer.replace_all("a\nmine\nc\nx\ne\n");
+        write_settled(&path, "a\ntheirs\nc\ny\ne\n");
         assert!(app.check_disk());
+        assert!(app.buffer.conflict);
+        let before = text(&app);
 
         app.open_diff();
-        diff_key(&mut app, 'f');
-        assert!(app.diff.is_none());
-        assert_eq!(text(&app), "theirs\n", "the file's version won");
-        assert!(!app.buffer.modified);
-        assert!(!app.buffer.conflict);
+        let view = app.diff.as_mut().unwrap();
+        assert_eq!(view.align.hunks.len(), 2);
+        view.sides[0] = Side::File;
+        view.sides[1] = Side::Both;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert!(app.diff.is_none(), "the view closes behind the commit");
+        assert_eq!(text(&app), "a\ntheirs\nc\nx\ny\ne\n", "one hunk each way");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\ntheirs\nc\nx\ny\ne\n",
+            "and it reached the file"
+        );
+        assert!(!app.buffer.modified, "written, so clean");
+        assert!(!app.buffer.conflict, "and settled");
 
         feed(&mut app, "u");
-        assert!(text(&app).contains("mine"), "and the discarded work is one u away");
+        assert_eq!(text(&app), before, "one u puts the whole merge back");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A THIRD write during the decision must not be clobbered. `check_disk`
+    /// freezes the document, but nothing stops another process touching the
+    /// file while the reader deliberates, and `w` forces.
+    #[test]
+    fn w_refuses_when_the_file_moved_under_the_view() {
+        let (mut app, path) = app_on_disk("third", "mine\n");
+        write_settled(&path, "theirs\n");
+        app.open_diff();
+
+        write_settled(&path, "somebody else\n");
+        app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert!(app.diff.is_none(), "the stale view is closed");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "somebody else\n",
+            "the third write survives"
+        );
+        assert!(flash_text(&app).contains("changed again"), "got: {}", flash_text(&app));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `q` after toggling is still a true abort: selections were never applied.
+    #[test]
+    fn q_abandons_selections_without_writing() {
+        use crate::diff::Side;
+        let (mut app, path) = app_on_disk("abort", "mine\n");
+        write_settled(&path, "theirs\n");
+        app.open_diff();
+        app.diff.as_mut().unwrap().set_all(Side::Both);
+
+        diff_key(&mut app, 'q');
+        assert!(app.diff.is_none());
+        assert_eq!(text(&app), "mine\n", "the buffer never changed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "nor the file");
         let _ = std::fs::remove_file(path);
     }
 

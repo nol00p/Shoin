@@ -251,6 +251,52 @@ pub fn lines_of(text: &str) -> Vec<String> {
     body.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect()
 }
 
+/// Which version of one difference survives the merge.
+///
+/// A three-rung ladder cycled by one key, in the shape `transclude::Mode` set:
+/// the two simple answers first, and `Both` as the deliberate extra rather than
+/// something you pass through on the way back to `Live`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Side {
+    /// What is in the editor. The DEFAULT, so a merge with nothing toggled
+    /// keeps the reader's unsaved work rather than quietly dropping it.
+    #[default]
+    Live,
+    /// What is on disk.
+    File,
+    /// Both, the editor's first — matching the left-to-right column order, so
+    /// the output order is the one the screen already showed.
+    Both,
+}
+
+impl Side {
+    pub fn cycle(self) -> Side {
+        match self {
+            Side::Live => Side::File,
+            Side::File => Side::Both,
+            Side::Both => Side::Live,
+        }
+    }
+
+    /// The divider-column glyph. It points at the side that wins, which is one
+    /// less thing to remember than a letter would be.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Side::Live => "\u{25c0}",
+            Side::File => "\u{25b6}",
+            Side::Both => "\u{25c6}",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Side::Live => "live",
+            Side::File => "file",
+            Side::Both => "both",
+        }
+    }
+}
+
 /// The `:diff` conflict view: the buffer beside the file, aligned.
 ///
 /// A SELF-DRAWN overlay in the shape of `Help` and `Finder`, not a pane showing
@@ -278,11 +324,27 @@ pub struct DiffView {
     pub scroll: usize,
     /// Which hunk `n` / `p` last landed on, so the view can mark it.
     pub hunk: usize,
+    /// The chosen side for each hunk, parallel to `align.hunks`.
+    ///
+    /// Every hunk always HAS a side, which is what makes the view a complete
+    /// document at all times: there is no undecided state for `w` to trip over,
+    /// and no partial application to unwind if the reader aborts.
+    pub sides: Vec<Side>,
+    /// The file's mtime when the snapshot was taken. Checked again before
+    /// committing, so a merge cannot write over a THIRD edit it never showed.
+    pub snapshot_mtime: Option<std::time::SystemTime>,
 }
 
 impl DiffView {
-    pub fn new(doc: usize, name: String, mine: Vec<String>, theirs: Vec<String>) -> DiffView {
+    pub fn new(
+        doc: usize,
+        name: String,
+        mine: Vec<String>,
+        theirs: Vec<String>,
+        snapshot_mtime: Option<std::time::SystemTime>,
+    ) -> DiffView {
         let align = align(&mine, &theirs);
+        let sides = vec![Side::default(); align.hunks.len()];
         DiffView {
             doc,
             name,
@@ -291,6 +353,69 @@ impl DiffView {
             align,
             scroll: 0,
             hunk: 0,
+            sides,
+            snapshot_mtime,
+        }
+    }
+
+    /// The side chosen for the hunk containing `row`, or `None` for a row that
+    /// is the same on both sides.
+    pub fn side_at(&self, row: usize) -> Option<Side> {
+        let h = self.align.hunks.iter().position(|h| h.contains(&row))?;
+        self.sides.get(h).copied()
+    }
+
+    /// Advance the current hunk's choice one rung.
+    pub fn cycle_current(&mut self) -> Option<Side> {
+        let side = self.sides.get_mut(self.hunk)?;
+        *side = side.cycle();
+        Some(*side)
+    }
+
+    pub fn set_all(&mut self, side: Side) {
+        self.sides.iter_mut().for_each(|s| *s = side);
+    }
+
+    /// Assemble the merged document from the per-hunk choices.
+    ///
+    /// Walks the alignment ONE HUNK AT A TIME rather than row by row: a hunk is
+    /// the unit of choice, so `Both` has to emit all of its left lines and then
+    /// all of its right lines, which a per-row walk could not order correctly.
+    /// That also makes the one-sided rows free — a difference that exists only
+    /// on disk has no live counterpart, so `Both` and `File` agree there
+    /// without a special case.
+    pub fn merged(&self) -> String {
+        let mut out: Vec<&str> = Vec::with_capacity(self.align.rows.len());
+        let mut i = 0usize;
+        let mut h = 0usize;
+        while i < self.align.rows.len() {
+            let row = self.align.rows[i];
+            if row.is_same() {
+                if let Some(l) = row.left() {
+                    out.push(self.mine[l].as_str());
+                }
+                i += 1;
+                continue;
+            }
+            // `group` guarantees the hunks are in order and cover exactly the
+            // runs of differing rows, so the hunk starting here is this one.
+            let range = self.align.hunks[h].clone();
+            let side = self.sides.get(h).copied().unwrap_or_default();
+            let rows = &self.align.rows[range.clone()];
+            if matches!(side, Side::Live | Side::Both) {
+                out.extend(rows.iter().filter_map(Row::left).map(|l| self.mine[l].as_str()));
+            }
+            if matches!(side, Side::File | Side::Both) {
+                out.extend(rows.iter().filter_map(Row::right).map(|r| self.theirs[r].as_str()));
+            }
+            i = range.end;
+            h += 1;
+        }
+        match out.is_empty() {
+            true => String::new(),
+            // A trailing newline, as every text path here produces; the save
+            // policy (`final_newline`) is what decides whether the FILE keeps it.
+            false => format!("{}\n", out.join("\n")),
         }
     }
 
@@ -461,6 +586,89 @@ mod tests {
         // CRLF on disk against an LF rope must not read as every line changed.
         assert_eq!(lines_of("a\r\nb\r\n"), v(&["a", "b"]));
         assert!(align(&lines_of("a\nb\n"), &lines_of("a\nb")).is_identical());
+    }
+
+    fn view(mine: &[&str], theirs: &[&str]) -> DiffView {
+        DiffView::new(0, "t.md".into(), v(mine), v(theirs), None)
+    }
+
+    /// The ladder, and that it comes back round. `Both` is the deliberate extra
+    /// at the end rather than something you pass through returning to `Live`.
+    #[test]
+    fn the_side_ladder_cycles_live_file_both() {
+        assert_eq!(Side::default(), Side::Live, "the default keeps your work");
+        assert_eq!(Side::Live.cycle(), Side::File);
+        assert_eq!(Side::File.cycle(), Side::Both);
+        assert_eq!(Side::Both.cycle(), Side::Live);
+    }
+
+    /// Every hunk starts with a side, so the view is a complete document from
+    /// the moment it opens — there is no undecided state for `w` to trip on.
+    #[test]
+    fn every_hunk_starts_chosen_and_defaults_to_live() {
+        let v = view(&["a", "mine", "c", "x", "e"], &["a", "theirs", "c", "y", "e"]);
+        assert_eq!(v.sides.len(), v.align.hunks.len());
+        assert_eq!(v.sides, vec![Side::Live, Side::Live]);
+        assert_eq!(v.side_at(1), Some(Side::Live), "a differing row has a side");
+        assert_eq!(v.side_at(0), None, "an identical row has none");
+        assert_eq!(v.merged(), "a\nmine\nc\nx\ne\n", "so w with no toggles keeps live");
+    }
+
+    /// The three whole-document answers.
+    #[test]
+    fn merged_follows_the_chosen_side() {
+        let mut v = view(&["keep", "mine", "tail"], &["keep", "theirs", "extra", "tail"]);
+        assert_eq!(v.merged(), "keep\nmine\ntail\n");
+
+        v.set_all(Side::File);
+        assert_eq!(v.merged(), "keep\ntheirs\nextra\ntail\n");
+
+        // Both: every left line of the hunk, THEN every right line — the
+        // left-to-right order the screen showed.
+        v.set_all(Side::Both);
+        assert_eq!(v.merged(), "keep\nmine\ntheirs\nextra\ntail\n");
+    }
+
+    /// The point of the feature: different answers for different differences.
+    #[test]
+    fn each_hunk_merges_on_its_own_choice() {
+        let mut v = view(&["a", "mine", "c", "x", "e"], &["a", "theirs", "c", "y", "e"]);
+        assert_eq!(v.align.hunks.len(), 2);
+        v.sides[0] = Side::File;
+        v.sides[1] = Side::Both;
+        assert_eq!(v.merged(), "a\ntheirs\nc\nx\ny\ne\n");
+
+        // Cycling acts on the CURRENT hunk only.
+        v.set_all(Side::Live);
+        v.hunk = 1;
+        assert_eq!(v.cycle_current(), Some(Side::File));
+        assert_eq!(v.sides, vec![Side::Live, Side::File], "hunk 0 untouched");
+    }
+
+    /// A one-sided difference has no counterpart to append, so `Both` and the
+    /// side that HAS the lines agree — without a special case anywhere.
+    #[test]
+    fn both_on_a_one_sided_hunk_is_not_a_duplicate() {
+        let mut v = view(&["a", "b"], &["a", "new", "b"]);
+        v.set_all(Side::Both);
+        assert_eq!(v.merged(), "a\nnew\nb\n");
+        v.set_all(Side::File);
+        assert_eq!(v.merged(), "a\nnew\nb\n", "same answer, nothing doubled");
+        v.set_all(Side::Live);
+        assert_eq!(v.merged(), "a\nb\n", "and live drops the insertion");
+    }
+
+    /// Identical texts merge to themselves whatever is selected — there are no
+    /// hunks, so there is nothing for a choice to change.
+    #[test]
+    fn merging_an_identical_pair_changes_nothing() {
+        let mut v = view(&["one", "two"], &["one", "two"]);
+        assert!(v.sides.is_empty());
+        for s in [Side::Live, Side::File, Side::Both] {
+            v.set_all(s);
+            assert_eq!(v.merged(), "one\ntwo\n");
+        }
+        assert_eq!(v.cycle_current(), None, "nothing to cycle");
     }
 
     /// A middle too large to align exactly still covers every line, and says
