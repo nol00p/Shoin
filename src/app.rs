@@ -1161,26 +1161,15 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let Some(view) = self.diff.as_mut() else { return };
 
-        // `]c` / `[c`, vim's spelling, so it needs one character of memory.
-        if let Some(pending) = view.pending.take() {
-            if matches!(key.code, KeyCode::Char('c')) {
-                let row = view.step_hunk(pending == ']');
-                if let Some(row) = row {
-                    view.reveal(row, height);
-                }
-                return;
-            }
-            // Anything else abandons the half-typed sequence and is handled
-            // below on its own terms, exactly as `Pending::feed` does.
-        }
-
         let max = view.rows().saturating_sub(height);
         match key.code {
-            KeyCode::Char(']') | KeyCode::Char('[') => {
-                view.pending = match key.code {
-                    KeyCode::Char(c) => Some(c),
-                    _ => None,
-                };
+            // Single keys, not vim's `]c` / `[c`: this view has its own grammar
+            // and nothing to be compatible with, so nothing needs holding.
+            KeyCode::Char('n') | KeyCode::Char('p') => {
+                let forward = matches!(key.code, KeyCode::Char('n'));
+                if let Some(row) = view.step_hunk(forward) {
+                    view.reveal(row, height);
+                }
             }
             KeyCode::Char('j') | KeyCode::Down => view.scroll = (view.scroll + 1).min(max),
             KeyCode::Char('k') | KeyCode::Up => view.scroll = view.scroll.saturating_sub(1),
@@ -1191,14 +1180,15 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.diff = None;
             }
-            // The two whole-file answers. Both are things the editor could
-            // already do — this view is what lets you SEE which one you want
-            // before committing to it.
-            KeyCode::Char('m') => {
+            // The two whole-file answers, named after the version each keeps:
+            // `l`ive is what is in the editor, `f`ile is what is on disk. Both
+            // are things the editor could already do — this view is what lets
+            // you SEE which one you want before committing to it.
+            KeyCode::Char('l') => {
                 self.diff = None;
                 self.write(None, true);
             }
-            KeyCode::Char('t') => {
+            KeyCode::Char('f') => {
                 self.diff = None;
                 self.revert(true);
             }
@@ -4996,10 +4986,10 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `m` keeps the Shoin version: the buffer goes over the file, and the
-    /// conflict is settled.
+    /// `l` keeps the LIVE version — what is in the editor: the buffer goes over
+    /// the file, and the conflict is settled.
     #[test]
-    fn diff_m_keeps_the_shoin_version() {
+    fn diff_l_keeps_the_live_version() {
         let (mut app, path) = app_on_disk("mine", "shared\n");
         feed(&mut app, "A mine");
         esc(&mut app);
@@ -5008,7 +4998,7 @@ mod tests {
         assert!(app.buffer.conflict);
 
         app.open_diff();
-        diff_key(&mut app, 'm');
+        diff_key(&mut app, 'l');
         assert!(app.diff.is_none(), "the view closes behind the choice");
         assert!(std::fs::read_to_string(&path).unwrap().contains("mine"));
         assert!(!app.buffer.modified, "written, so clean");
@@ -5016,10 +5006,10 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `t` keeps the external version, discarding the unsaved buffer — and
-    /// because a reload is one undo step, `u` is still the way back.
+    /// `f` keeps the FILE version, discarding the unsaved buffer — and because a
+    /// reload is one undo step, `u` is still the way back.
     #[test]
-    fn diff_t_keeps_the_external_version_reversibly() {
+    fn diff_f_keeps_the_file_version_reversibly() {
         let (mut app, path) = app_on_disk("theirs", "shared\n");
         feed(&mut app, "A mine");
         esc(&mut app);
@@ -5027,7 +5017,7 @@ mod tests {
         assert!(app.check_disk());
 
         app.open_diff();
-        diff_key(&mut app, 't');
+        diff_key(&mut app, 'f');
         assert!(app.diff.is_none());
         assert_eq!(text(&app), "theirs\n", "the file's version won");
         assert!(!app.buffer.modified);
@@ -5038,7 +5028,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `]c` and `[c` step between differences and wrap. Wrapping matters: past
+    /// `n` and `p` step between differences and wrap. Wrapping matters: past
     /// the last difference a reader means "show me again", not "do nothing".
     #[test]
     fn diff_steps_between_differences_and_wraps() {
@@ -5049,16 +5039,15 @@ mod tests {
         assert_eq!(app.diff.as_ref().unwrap().align.hunks.len(), 2);
         assert_eq!(app.diff.as_ref().unwrap().hunk, 0, "opens on the first");
 
-        feed(&mut app, "]c");
+        diff_key(&mut app, 'n');
         assert_eq!(app.diff.as_ref().unwrap().hunk, 1);
-        feed(&mut app, "]c");
+        diff_key(&mut app, 'n');
         assert_eq!(app.diff.as_ref().unwrap().hunk, 0, "wraps forward");
-        feed(&mut app, "[c");
+        diff_key(&mut app, 'p');
         assert_eq!(app.diff.as_ref().unwrap().hunk, 1, "and backward");
 
-        // A `]` followed by anything else is abandoned, not held on a timer.
-        feed(&mut app, "]j");
-        assert!(app.diff.as_ref().unwrap().pending.is_none());
+        // The view is still open: neither key resolves anything on its own.
+        assert!(app.diff.is_some());
         let _ = std::fs::remove_file(path);
     }
 

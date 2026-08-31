@@ -64,7 +64,7 @@ impl Row {
 pub struct Alignment {
     pub rows: Vec<Row>,
     /// One range of `rows` per run of consecutive differing rows — a "hunk".
-    /// This is what `]c` / `[c` step through and what a per-difference choice
+    /// This is what `n` / `p` step through and what a per-difference choice
     /// is made against, so it is computed here rather than rediscovered by
     /// every consumer.
     pub hunks: Vec<Range<usize>>,
@@ -276,11 +276,8 @@ pub struct DiffView {
     pub theirs: Vec<String>,
     pub align: Alignment,
     pub scroll: usize,
-    /// Which hunk `]c` / `[c` last landed on, so the view can mark it.
+    /// Which hunk `n` / `p` last landed on, so the view can mark it.
     pub hunk: usize,
-    /// The `]` or `[` of a half-typed `]c` / `[c`. One character of memory is
-    /// all this grammar needs, so it does not borrow `input::Pending`.
-    pub pending: Option<char>,
 }
 
 impl DiffView {
@@ -294,7 +291,6 @@ impl DiffView {
             align,
             scroll: 0,
             hunk: 0,
-            pending: None,
         }
     }
 

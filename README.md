@@ -281,7 +281,7 @@ unsaved changes?**
 wherever one side has no line — so you can see what changed before deciding:
 
 ```
-  yours (buffer)                   │ on disk
+  live — in the editor             │ file — on disk
   # On attention                   │ # On attention
                                    │
   A draft paragraph                │ A draft paragraph
@@ -289,7 +289,7 @@ wherever one side has no line — so you can see what changed before deciding:
  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┃+their edited line
   tail                             │ tail
 
-  m  keep mine    t  keep theirs    ]c [c  next / previous    q  close
+  l  keep live    f  keep file    n / p  next / previous    q  close
 ```
 
 An editor must never quietly pick between two versions of your work, which is
