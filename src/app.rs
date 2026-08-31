@@ -302,6 +302,10 @@ pub struct App {
     /// The file-tree pane, when open (left side). SPEC.md IDEAS — Neo-tree style.
     pub tree: Option<FileTree>,
 
+    /// The `:diff` conflict view, when open. An overlay in the shape of `help`
+    /// and `finder`: it draws the whole surface itself and owns all input.
+    pub diff: Option<crate::diff::DiffView>,
+
     /// The fuzzy file finder, when open. An overlay, not a pane: it takes all
     /// input while it is up and owns no part of the editor's coordinate space.
     pub finder: Option<Finder>,
@@ -598,6 +602,7 @@ impl App {
             term_size: (0, 0),
             help: None,
             tree: None,
+            diff: None,
             finder: None,
             last_insert: None,
             zen: None,
@@ -1046,7 +1051,14 @@ impl App {
         let mut conflicted: Vec<String> = Vec::new();
         let mut failed: Option<String> = None;
 
-        for doc in &mut self.docs {
+        // A document being compared is frozen: the view holds SNAPSHOTS, and
+        // the comparison a reader is deciding about must not move under them
+        // because a poll noticed a third write.
+        let under_review = self.diff.as_ref().map(|d| d.doc);
+        for (i, doc) in self.docs.iter_mut().enumerate() {
+            if Some(i) == under_review {
+                continue;
+            }
             let Some(path) = doc.buffer.path.clone() else {
                 continue;
             };
@@ -1102,6 +1114,97 @@ impl App {
             (None, _, n) => self.notify(format!("reloaded {n} files"), FlashKind::Info),
         }
         true
+    }
+
+    /// `:diff` — open the conflict view: this buffer beside the file.
+    ///
+    /// Useful without a conflict too (it reports when the two match), because a
+    /// command that only works in the one state you are already alarmed about
+    /// is a command nobody has practised.
+    fn open_diff(&mut self) {
+        let Some(path) = self.buffer.path.clone() else {
+            return self.notify("no file to compare against", FlashKind::Error);
+        };
+        if !path.exists() {
+            let name = self.buffer.display_name();
+            return self.notify(format!("{name} is not on disk yet"), FlashKind::Error);
+        }
+        let exts = self.config.markdown.plain_text_extensions.clone();
+        let loaded = match crate::fs::open::load(&path, &exts) {
+            Ok(l) => l,
+            Err(e) => return self.notify(format!("{e}"), FlashKind::Error),
+        };
+
+        let name = self.buffer.display_name();
+        let mine = crate::diff::lines_of(&self.buffer.rope.to_string());
+        let theirs = crate::diff::lines_of(&loaded.rope.to_string());
+        let mut view = crate::diff::DiffView::new(self.current(), name.clone(), mine, theirs);
+        if view.align.is_identical() {
+            return self.notify(format!("{name} matches the file on disk"), FlashKind::Info);
+        }
+        // Open ON the first difference rather than at the top: the reader asked
+        // to see what changed, and in a long note that is rarely line 1.
+        if let Some(first) = view.align.hunks.first().map(|h| h.start) {
+            view.reveal(first, self.term_size.1.saturating_sub(4).max(4) as usize);
+        }
+        if view.align.coarse {
+            self.notify("the two versions share little — showing one block", FlashKind::Info);
+        }
+        self.diff = Some(view);
+        self.needs_redraw = true;
+    }
+
+    /// Keys inside the diff view. It has drawn over everything, so this is the
+    /// whole grammar while it is up — deliberately small, and none of it edits.
+    fn on_key_diff(&mut self, key: KeyEvent) {
+        let height = self.term_size.1.saturating_sub(4).max(4) as usize;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(view) = self.diff.as_mut() else { return };
+
+        // `]c` / `[c`, vim's spelling, so it needs one character of memory.
+        if let Some(pending) = view.pending.take() {
+            if matches!(key.code, KeyCode::Char('c')) {
+                let row = view.step_hunk(pending == ']');
+                if let Some(row) = row {
+                    view.reveal(row, height);
+                }
+                return;
+            }
+            // Anything else abandons the half-typed sequence and is handled
+            // below on its own terms, exactly as `Pending::feed` does.
+        }
+
+        let max = view.rows().saturating_sub(height);
+        match key.code {
+            KeyCode::Char(']') | KeyCode::Char('[') => {
+                view.pending = match key.code {
+                    KeyCode::Char(c) => Some(c),
+                    _ => None,
+                };
+            }
+            KeyCode::Char('j') | KeyCode::Down => view.scroll = (view.scroll + 1).min(max),
+            KeyCode::Char('k') | KeyCode::Up => view.scroll = view.scroll.saturating_sub(1),
+            KeyCode::Char('d') if ctrl => view.scroll = (view.scroll + height / 2).min(max),
+            KeyCode::Char('u') if ctrl => view.scroll = view.scroll.saturating_sub(height / 2),
+            KeyCode::Char('g') | KeyCode::Home => view.scroll = 0,
+            KeyCode::Char('G') | KeyCode::End => view.scroll = max,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.diff = None;
+            }
+            // The two whole-file answers. Both are things the editor could
+            // already do — this view is what lets you SEE which one you want
+            // before committing to it.
+            KeyCode::Char('m') => {
+                self.diff = None;
+                self.write(None, true);
+            }
+            KeyCode::Char('t') => {
+                self.diff = None;
+                self.revert(true);
+            }
+            _ => {}
+        }
+        self.needs_redraw = true;
     }
 
     /// `:revert` — take what is on disk, discarding whatever is unsaved.
@@ -1520,6 +1623,12 @@ impl App {
         // The help overlay owns all input while it is open.
         if self.help.is_some() {
             self.on_key_help(key);
+            return;
+        }
+        // The diff view owns all input while it is open, for the same reason
+        // help does: it has drawn over everything and its keys are its own.
+        if self.diff.is_some() {
+            self.on_key_diff(key);
             return;
         }
         // The finder overlay owns all input while it is open — it sits above
@@ -4000,6 +4109,7 @@ impl App {
             // NOT `:e!`, which this editor already spends on the config. A
             // command that re-reads the file needs its own name rather than a
             // second meaning for one that is taken.
+            "diff" | "diffsplit" => self.open_diff(),
             "revert" => self.revert(false),
             "revert!" => self.revert(true),
             "help" | "h" => self.open_help(arg),
@@ -4820,6 +4930,172 @@ mod tests {
         // The write recorded a fresh mtime, so the next plain :w is fine again.
         app.buffer.save(SavePolicy::default(), false).expect("guard rearms against the new mtime");
         let _ = std::fs::remove_file(path);
+    }
+
+    // ------------------------------------------------------------ diff view
+
+    fn diff_key(app: &mut App, c: char) {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    /// `:diff` on a file that matches says so and opens nothing. A view of no
+    /// differences is a window a reader has to close for no reason.
+    #[test]
+    fn diff_on_a_matching_file_opens_nothing() {
+        let (mut app, path) = app_on_disk("same", "one\ntwo\n");
+        app.open_diff();
+        assert!(app.diff.is_none());
+        assert!(flash_text(&app).contains("matches the file"), "got: {}", flash_text(&app));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The view aligns the two versions: an edited line is one row carrying
+    /// both, and an insertion is a row with a filler on the buffer's side.
+    #[test]
+    fn diff_opens_aligned_on_the_first_difference() {
+        let (mut app, path) = app_on_disk("open", "keep\nmine\ntail\n");
+        write_settled(&path, "keep\ntheirs\nextra\ntail\n");
+
+        app.open_diff();
+        let view = app.diff.as_ref().expect("the view opened");
+        assert_eq!(view.mine, vec!["keep", "mine", "tail"]);
+        assert_eq!(view.theirs, vec!["keep", "theirs", "extra", "tail"]);
+        assert_eq!(
+            view.align.rows,
+            vec![
+                crate::diff::Row::Same { left: 0, right: 0 },
+                crate::diff::Row::Changed { left: 1, right: 1 },
+                crate::diff::Row::Added { right: 2 },
+                crate::diff::Row::Same { left: 2, right: 3 },
+            ]
+        );
+        assert_eq!(view.align.hunks, vec![1..3], "one difference, two rows");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `q` and `<Esc>` close it and change nothing at all — the escape a reader
+    /// needs before they will risk pressing anything else.
+    #[test]
+    fn diff_closes_without_touching_either_side() {
+        let (mut app, path) = app_on_disk("close", "mine\n");
+        feed(&mut app, "A edited");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        let before = text(&app);
+
+        app.open_diff();
+        assert!(app.diff.is_some());
+        diff_key(&mut app, 'q');
+        assert!(app.diff.is_none(), "q closes it");
+        assert_eq!(text(&app), before, "the buffer is untouched");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "so is the file");
+
+        app.open_diff();
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.diff.is_none(), "and so does Esc");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `m` keeps the Shoin version: the buffer goes over the file, and the
+    /// conflict is settled.
+    #[test]
+    fn diff_m_keeps_the_shoin_version() {
+        let (mut app, path) = app_on_disk("mine", "shared\n");
+        feed(&mut app, "A mine");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        assert!(app.check_disk(), "flagged first");
+        assert!(app.buffer.conflict);
+
+        app.open_diff();
+        diff_key(&mut app, 'm');
+        assert!(app.diff.is_none(), "the view closes behind the choice");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("mine"));
+        assert!(!app.buffer.modified, "written, so clean");
+        assert!(!app.buffer.conflict, "and settled");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `t` keeps the external version, discarding the unsaved buffer — and
+    /// because a reload is one undo step, `u` is still the way back.
+    #[test]
+    fn diff_t_keeps_the_external_version_reversibly() {
+        let (mut app, path) = app_on_disk("theirs", "shared\n");
+        feed(&mut app, "A mine");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        assert!(app.check_disk());
+
+        app.open_diff();
+        diff_key(&mut app, 't');
+        assert!(app.diff.is_none());
+        assert_eq!(text(&app), "theirs\n", "the file's version won");
+        assert!(!app.buffer.modified);
+        assert!(!app.buffer.conflict);
+
+        feed(&mut app, "u");
+        assert!(text(&app).contains("mine"), "and the discarded work is one u away");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `]c` and `[c` step between differences and wrap. Wrapping matters: past
+    /// the last difference a reader means "show me again", not "do nothing".
+    #[test]
+    fn diff_steps_between_differences_and_wraps() {
+        let (mut app, path) = app_on_disk("steps", "a\nb\nc\nd\ne\n");
+        write_settled(&path, "a\nB\nc\nD\ne\n");
+        app.term_size = (80, 24);
+        app.open_diff();
+        assert_eq!(app.diff.as_ref().unwrap().align.hunks.len(), 2);
+        assert_eq!(app.diff.as_ref().unwrap().hunk, 0, "opens on the first");
+
+        feed(&mut app, "]c");
+        assert_eq!(app.diff.as_ref().unwrap().hunk, 1);
+        feed(&mut app, "]c");
+        assert_eq!(app.diff.as_ref().unwrap().hunk, 0, "wraps forward");
+        feed(&mut app, "[c");
+        assert_eq!(app.diff.as_ref().unwrap().hunk, 1, "and backward");
+
+        // A `]` followed by anything else is abandoned, not held on a timer.
+        feed(&mut app, "]j");
+        assert!(app.diff.as_ref().unwrap().pending.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A document under review is FROZEN: the comparison must not move because
+    /// a background poll noticed a third write mid-decision.
+    #[test]
+    fn a_document_under_review_is_left_alone_by_the_poll() {
+        let (mut app, path) = app_on_disk("frozen", "mine\n");
+        write_settled(&path, "theirs\n");
+        app.open_diff();
+        let snapshot = app.diff.as_ref().unwrap().theirs.clone();
+
+        // Something writes it a third time while the reader is deciding.
+        write_settled(&path, "third\n");
+        assert!(!app.check_disk(), "the poll steps over it");
+        assert_eq!(text(&app), "mine\n", "the buffer did not move");
+        assert_eq!(
+            app.diff.as_ref().unwrap().theirs,
+            snapshot,
+            "and neither did the comparison"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A buffer with no file has nothing to compare against, and one whose file
+    /// is not written yet says which of the two problems it has.
+    #[test]
+    fn diff_needs_a_file_to_compare_against() {
+        let mut app = app_with("scratch\n");
+        app.open_diff();
+        assert!(app.diff.is_none());
+        assert!(flash_text(&app).contains("no file"), "got: {}", flash_text(&app));
+
+        app.buffer.path = Some(std::env::temp_dir().join("shoin-diff-absent-xyz.md"));
+        app.open_diff();
+        assert!(app.diff.is_none());
+        assert!(flash_text(&app).contains("not on disk"), "got: {}", flash_text(&app));
     }
 
     // ----------------------------------------------------------- autoreload

@@ -42,6 +42,13 @@ pub fn render(frame: &mut Frame, app: &App) {
     let bg = app.theme.background.to_ratatui();
     frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
 
+    // The diff view takes over the whole surface, like help. Checked first
+    // because a reader who opened it is deciding about a file, and nothing
+    // underneath is worth a partial repaint behind that.
+    if let Some(view) = &app.diff {
+        render_diff(frame, app, view, area);
+        return;
+    }
     // The help overlay takes over the whole surface when open.
     if let Some(help) = &app.help {
         render_help(frame, app, help, area);
@@ -719,6 +726,113 @@ fn tree_row<'a>(app: &App, tree: &FileTree, e: &Entry, selected: bool, width: us
         Span::styled(name, sel_bg(name_style)),
         Span::styled(" ".repeat(pad), sel_bg(Style::default())),
     ])
+}
+
+/// Draw the `:diff` conflict view: the buffer on the left, the file on the
+/// right, aligned row for row.
+///
+/// The alignment is already computed (`diff::align`), so this only has to place
+/// it: one screen row per `diff::Row`, a filler bar where a side has no line,
+/// and the whole line coloured the way `git diff` colours it. Both columns read
+/// the SAME scroll offset, which is what makes them stay in step without any
+/// notion of bound scrolling.
+fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area: Rect) {
+    use crate::diff::Row;
+
+    let theme = &app.theme;
+    let accent = theme.link.to_ratatui();
+    let dim = theme.text_dim.to_ratatui();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(theme.background.to_ratatui()))
+        .title(Span::styled(
+            format!(" diff: {} ", view.name),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(Span::styled(
+                " m keep mine · t keep theirs · ]c [c difference · q close ",
+                Style::default().fg(dim),
+            ))
+            .right_aligned(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    if inner.width < 8 || inner.height < 2 {
+        return;
+    }
+
+    // A header row naming the sides, then the rows themselves. The divider
+    // takes one cell, so the two halves split what is left.
+    let side = (inner.width as usize - 1) / 2;
+    let right_w = inner.width as usize - 1 - side;
+    let head = Rect { height: 1, ..inner };
+    let body = Rect {
+        y: inner.y + 1,
+        height: inner.height - 1,
+        ..inner
+    };
+
+    let pad = |s: String, w: usize| -> String {
+        let mut out = elide(&s, w);
+        let used = display_width(&out) as usize;
+        out.push_str(&" ".repeat(w.saturating_sub(used)));
+        out
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(pad(" yours (buffer)".into(), side), Style::default().fg(dim)),
+            Span::styled("│", Style::default().fg(dim)),
+            Span::styled(pad(" on disk".into(), right_w), Style::default().fg(dim)),
+        ])),
+        head,
+    );
+
+    // The filler bar: a row where this side has no line at all. Drawn rather
+    // than left blank, so a reader can tell "nothing here" from "an empty line
+    // here" — which in Markdown is a meaningful difference.
+    let filler = |w: usize| "\u{2504}".repeat(w);
+    let current = view.align.hunks.get(view.hunk).cloned();
+
+    let mut lines: Vec<Line> = Vec::with_capacity(body.height as usize);
+    for i in 0..body.height as usize {
+        let row_index = view.scroll + i;
+        let Some(row) = view.align.rows.get(row_index) else {
+            break;
+        };
+        let (colour, marks) = match row {
+            Row::Same { .. } => (theme.text.to_ratatui(), (' ', ' ')),
+            Row::Changed { .. } => (theme.diff_change.to_ratatui(), ('~', '~')),
+            Row::Added { .. } => (theme.diff_add.to_ratatui(), (' ', '+')),
+            Row::Removed { .. } => (theme.diff_remove.to_ratatui(), ('-', ' ')),
+        };
+        // The difference `]c` last landed on is marked in the border column, so
+        // stepping is visible even when a hunk is taller than the screen.
+        let here = current.as_ref().is_some_and(|h| h.contains(&row_index));
+        let bar = match here {
+            true => Span::styled("┃", Style::default().fg(accent)),
+            false => Span::styled("│", Style::default().fg(dim)),
+        };
+
+        let text = |line: Option<usize>, from: &[String], mark: char, w: usize| -> Span<'static> {
+            match line {
+                Some(n) => Span::styled(
+                    pad(format!("{mark}{}", from.get(n).cloned().unwrap_or_default()), w),
+                    Style::default().fg(colour),
+                ),
+                None => Span::styled(filler(w), Style::default().fg(dim)),
+            }
+        };
+        lines.push(Line::from(vec![
+            text(row.left(), &view.mine, marks.0, side),
+            bar,
+            text(row.right(), &view.theirs, marks.1, right_w),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), body);
 }
 
 /// Draw the `:help` overlay: a near-full-screen bordered panel with the scrolled
@@ -1638,6 +1752,51 @@ mod tests {
         // any other wiki link — off means "not expanded", not "not styled".
         assert!(all.contains("frag"));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The diff view draws both versions on one row, and a FILLER where a side
+    /// has no line at all. The filler is the load-bearing part: without it the
+    /// two columns drift apart and the alignment is decoration.
+    #[test]
+    fn the_diff_view_draws_both_sides_with_fillers() {
+        let mut app = app_with("keep\nmine\ntail\n");
+        app.diff = Some(crate::diff::DiffView::new(
+            0,
+            "notes.md".into(),
+            vec!["keep".into(), "mine".into(), "tail".into()],
+            vec!["keep".into(), "theirs".into(), "extra".into(), "tail".into()],
+        ));
+
+        let buf = render_to(&app, 80, 24);
+        let rows: Vec<String> = (0..24).map(|y| row_text(&buf, y)).collect();
+        let screen = rows.join("\n");
+
+        assert!(screen.contains("diff: notes.md"), "titled:\n{screen}");
+        assert!(screen.contains("yours (buffer)") && screen.contains("on disk"), "{screen}");
+
+        // The edited line: both versions on ONE row, in that order.
+        let changed = rows
+            .iter()
+            .find(|r| r.contains("mine") && r.contains("theirs"))
+            .expect("the changed line shows both sides:\n{screen}");
+        assert!(
+            changed.find("mine") < changed.find("theirs"),
+            "buffer on the left: {changed:?}"
+        );
+
+        // The inserted line exists only on the right, so its row carries a
+        // filler bar on the left and the text on the right.
+        let added = rows
+            .iter()
+            .find(|r| r.contains("extra"))
+            .expect("the added line is on screen");
+        assert!(
+            added.contains('\u{2504}'),
+            "the buffer side is filled, not blank: {added:?}"
+        );
+
+        // Nothing of the document underneath leaks through the takeover.
+        assert!(!screen.contains("words"), "no status line behind it:\n{screen}");
     }
 
     /// The conflict marker reaches the status line, riding on the FILENAME so a
