@@ -1,6 +1,6 @@
 [package]
 name = "shoin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # 1.88 because `ratatui` 0.30 requires it. This was 1.82 — a number from before
 # the dependency bumped — and nothing checked it; the CI `msrv` job reads this
