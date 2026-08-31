@@ -1,5 +1,7 @@
 //! The window layout: a tree of splits whose leaves are editor panes.
-//! docs/history/IDEAS.md #5.
+//!
+//! The file tree is NOT a leaf here — it is chrome, and takes its width from
+//! the frame before these panes divide what is left.
 //!
 //! `frame::render` used to assume ONE text area. It now asks this tree for a
 //! rect per leaf and draws each pane into its own, which is the whole of split

@@ -75,7 +75,9 @@ pub enum Action {
     /// `<C-w>` window commands, by their second key.
     Window(char),
     /// `<leader>sv`/`<leader>ss` — split the focused pane, or close it if the
-    /// window is already split (toggle symmetry, docs/history/IDEAS.md).
+    /// window is already split. Toggle symmetry: every panel is bound to a key
+    /// that both opens and closes it, which is how this editor reconciles
+    /// having chrome at all with the no-interface ethos.
     ToggleSplit { vertical: bool },
     ClosePane,
     OnlyPane,

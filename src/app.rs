@@ -180,7 +180,11 @@ pub struct App {
 
     /// The window layout: a tree of splits whose leaves are panes, each a view
     /// onto a document. One leaf until you split.
-    /// See `docs/history/IDEAS.md` #5 for why the tree is a sidebar and not a leaf.
+    ///
+    /// The FILE TREE is deliberately not a leaf of this tree: it is chrome, not
+    /// a view onto a document, so it takes its width from the frame before the
+    /// panes divide what is left. Making it a leaf would mean every split
+    /// computation had to special-case a node that holds no buffer.
     pub layout: Node,
     /// Which pane has the cursor.
     pub focus_pane: PaneId,
@@ -1501,8 +1505,8 @@ impl App {
                 self.window_command(c);
                 self.window_count = 1;
             }
-            // Toggle symmetry (docs/history/IDEAS.md): the binding that opens a split closes
-            // it again. `<C-w>v` is the unconditional form, as in vim.
+            // Toggle symmetry: the binding that opens a split closes it again.
+            // `<C-w>v` is the unconditional form, as in vim.
             Action::ToggleSplit { vertical } => {
                 if self.layout.count() > 1 {
                     self.close_pane();
@@ -2539,10 +2543,9 @@ impl App {
     /// `<leader>ff`/`fF`: open the finder. Each open rewalks, so the list is
     /// never stale against files created since.
     ///
-    /// Not a toggle, unlike the tree (docs/history/IDEAS.md, "toggle
-    /// symmetry"): an open
-    /// finder is a text field that swallows every key, so its own binding would
-    /// arrive as query text. Esc closes it — the same deal as the `:` box.
+    /// Not a toggle, unlike the tree: an open finder is a text field that
+    /// swallows every key, so its own binding would arrive as query text. Esc
+    /// closes it — the same deal as the `:` box.
     fn open_finder(&mut self, root: PathBuf) {
         self.finder = Some(Finder::open(root));
     }
