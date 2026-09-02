@@ -210,11 +210,14 @@ fn hints(app: &App) -> Vec<(String, &'static str)> {
     ];
     // The editor never seeds a config on its own — `config::init` records why.
     // What it can do is say the command exists, and only to the reader who has
-    // no config yet, on the one screen that has room to say it.
+    // no config yet, on the one screen that has room to say it. Named as
+    // required rather than merely offered: with no config, `[keys.*]` stays
+    // empty (`KeysConfig`'s `Default`), so the leader hint above does nothing
+    // until this is run.
     if !app.configured {
         out.push((
             "shoin --init-config".into(),
-            "write a config you can edit",
+            "required — leader bindings do nothing without it",
         ));
     }
     out
@@ -576,8 +579,9 @@ mod tests {
         assert!(!all.contains("browse files"), "the descriptions do not");
     }
 
-    /// A reader with no config is told how to get one — and a reader who has
-    /// one is not nagged about it.
+    /// A reader with no config is told how to get one, told plainly that it is
+    /// required rather than optional — and a reader who has one is not nagged
+    /// about it.
     #[test]
     fn the_init_hint_appears_only_when_there_is_no_config() {
         let mut app = bare();
@@ -585,7 +589,10 @@ mod tests {
         app.configured = false;
         let text = screen(&app, 90, 28).join("\n");
         assert!(text.contains("--init-config"), "offered when there is none:\n{text}");
-        assert!(text.contains("write a config you can edit"));
+        assert!(
+            text.contains("required") && text.contains("leader bindings"),
+            "must say it is required, not merely offered:\n{text}"
+        );
         // The extra line must not have pushed anything off the screen.
         assert!(text.contains(":q"), "the last hint still fits:\n{text}");
 
