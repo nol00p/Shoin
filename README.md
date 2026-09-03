@@ -483,6 +483,40 @@ shoin [FILE]
 
 ---
 
+## Changelog
+
+### 0.1.3
+
+- Table rows no longer word-wrap — a row wider than the pane stays on one
+  line, clipped at the edge, instead of breaking its `|` columns across
+  several ragged lines.
+- A new `:help shortcuts` page, bound to `<leader>hl`, lists every keyboard
+  interaction — leader keys, `:` commands, navigation, and other
+  keybindings — grouped by kind, on one page.
+
+### 0.1.2
+
+- The start-screen hint for a config-less first run now says `--init-config`
+  is required, not merely offered: without a config, leader bindings like
+  `<leader>fe` do nothing.
+
+### 0.1.1
+
+- Initial release. Obsidian-style live concealment with Vim modal editing —
+  operators, motions, text objects, counts, registers, dot-repeat, writer
+  verbs on the `g` prefix.
+- Centered measure with focus and typewriter modes, fenced code highlighting,
+  inline images where the terminal supports them, atomic saves with an
+  external-modification guard.
+- Panels, toggled rather than permanent: file tree, fuzzy finder,
+  multi-buffer, pane splits, start screen.
+- Transclusion of other notes, link following, and export to Markdown, plain
+  text, HTML and PDF.
+- Autosave on a timer, auto-reload when something else edits the file, and a
+  side-by-side diff view to merge the two versions difference by difference.
+
+---
+
 ## License
 
 Licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE), or
