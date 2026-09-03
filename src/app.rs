@@ -1641,6 +1641,10 @@ impl App {
                 let root = self.root_dir(root);
                 self.toggle_tree(root);
             }
+            // Not toggle symmetry: once open, the overlay owns all input
+            // (`on_key_help`), so a repeat of this binding never reaches here
+            // to close it — q / Esc does that, same as `:help` opened it.
+            Action::Help => self.open_help("shortcuts"),
             Action::FollowLink => self.follow_link(),
             Action::OpenExternal => self.open_external(),
             Action::AlternateBuffer => self.alternate_buffer(),
@@ -6538,6 +6542,18 @@ mod tests {
         let mut app = app_with_keys("word\n", &[("<leader>b", "toggle_bold")]);
         feed(&mut app, " b"); // <leader>b
         assert_eq!(text(&app), "**word**\n");
+    }
+
+    /// `<leader>hl` opens the shortcuts reference. Once open it owns all
+    /// input (like `:help`), so `q` is what closes it, not a second press.
+    #[test]
+    fn leader_hl_opens_the_shortcuts_help() {
+        let mut app = app_with_keys("word\n", &[("<leader>hl", "help")]);
+        feed(&mut app, " hl");
+        assert_eq!(app.help.as_ref().map(|h| h.title.as_str()), Some("shortcuts"));
+
+        feed(&mut app, "q");
+        assert!(app.help.is_none(), "q closes it");
     }
 
     fn cmd(app: &mut App, line: &str) {

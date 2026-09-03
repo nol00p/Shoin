@@ -122,6 +122,11 @@ pub enum Action {
     /// alternate file, and the way back out of a followed link.
     AlternateBuffer,
 
+    /// Open the shortcuts/keybindings reference overlay (`:help shortcuts`,
+    /// one key away). `:help [topic]` reaches the same overlay for any topic;
+    /// q / Esc closes it, same as it closes `:help`.
+    Help,
+
     /// `gf` — open what the cursor is on: a `[[note]]`, an unexpanded
     /// `![[embed]]`, or the path in a `[text](path)`. A note that does not
     /// exist yet is CREATED — in a vault, the link is written before the note.
@@ -186,6 +191,7 @@ impl Action {
             "toggle_typewriter" | "typewriter" => Action::ToggleTypewriter,
             "toggle_conceal" | "conceal" => Action::ToggleConceal,
             "toggle_zen" | "zen" => Action::ToggleZen,
+            "help" | "shortcuts" => Action::Help,
             "file_tree" | "file_explorer" | "tree" => Action::FileTree { root: Root::File },
             "file_tree_home" | "file_explorer_home" => Action::FileTree { root: Root::Home },
             "find_file" | "fuzzy_find" | "files" => Action::FindFile { root: Root::File },

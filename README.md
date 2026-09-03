@@ -121,7 +121,9 @@ frame.
 
 Then, in order: `i` to type, `Esc` to stop, `:w` to save, `:q` to quit. And
 **`:help`** inside the editor explains everything else — `:help bindings`,
-`:help commands`, `:help writer`, `:help config`.
+`:help commands`, `:help writer`, `:help config`. `<leader>hl` (or
+`:help shortcuts`) opens a single page listing every keyboard interaction —
+leader keys, `:` commands, navigation and other keybindings — grouped by kind.
 
 ---
 

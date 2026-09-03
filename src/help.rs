@@ -14,6 +14,7 @@ impl Help {
         let key = topic.trim().to_ascii_lowercase();
         let (title, lines): (&str, Vec<&str>) = match key.as_str() {
             "" | "overview" | "help" => ("help", OVERVIEW.to_vec()),
+            "shortcuts" | "reference" | "cheatsheet" | "cheat" => ("shortcuts", SHORTCUTS.to_vec()),
             "bindings" | "keys" | "keymap" | "keymaps" | "motions" => ("bindings", BINDINGS.to_vec()),
             "commands" | "command" | "ex" => ("commands", COMMANDS.to_vec()),
             "writer" | "verbs" | "markdown" | "format" => ("writer verbs", WRITER.to_vec()),
@@ -35,6 +36,7 @@ fn unknown(topic: &str) -> Vec<&'static str> {
     v.extend_from_slice(&[
         "Available topics:",
         "  :help              this overview",
+        "  :help shortcuts    every keyboard interaction, by category",
         "  :help bindings     keys, motions, operators",
         "  :help commands     the : (ex) commands",
         "  :help writer       bold / italic / headings / tasks",
@@ -93,10 +95,67 @@ const OVERVIEW: &[&str] = &[
     "  Enter  Esc         open the selected file · close the finder",
     "",
     "MORE HELP",
+    "  <leader>hl         every keyboard interaction, by category",
     "  :help bindings     the full key list",
     "  :help commands     every : command",
     "  :help writer       Markdown formatting verbs (g...)",
     "  :help config       config file location and settings",
+    "",
+    "Scroll with j/k or the arrows. Press q or Esc to close.",
+];
+
+/// Every keyboard interaction shoin answers to, grouped by KIND rather than by
+/// what it is used for — one page to scan top to bottom, opened with
+/// `<leader>hl` or `:help shortcuts`. `:help bindings` covers the Vim grammar
+/// (motions, operators, text objects) in more depth; this page is the map of
+/// where everything lives.
+const SHORTCUTS: &[&str] = &[
+    "SHORTCUTS — every keyboard interaction, by kind",
+    "",
+    "<leader> KEYS  (leader is Space by default — [input].leader)",
+    "  <leader>hl     this page",
+    "  <leader>w      save                    <leader>q      quit",
+    "  <leader>F      cycle focus mode        <leader>t      typewriter scroll",
+    "  <leader>z      toggle zen (all chrome) <leader>c      toggle conceal",
+    "  <leader>fe     file tree, this folder  <leader>fE     file tree, $HOME",
+    "  <leader>ff     find file, this folder  <leader>fF     find file, $HOME",
+    "  <leader>fb     switch buffer (finder)",
+    "  <leader>sv     split beside / close    <leader>ss     split below / close",
+    "  <leader>so     keep only this pane",
+    "  <leader>b      toggle **bold**  (Visual mode only)",
+    "  <leader>i      toggle *italic*  (Visual mode only)",
+    "  These are the shipped defaults (shoin/keys.conf) — remap any of them, or",
+    "  add more, under [keys.normal] / [keys.visual]. See :help config.",
+    "",
+    ": COMMANDS  (type : then the command, Enter to run — :help commands for all)",
+    "  :w  :q  :wq          save / close / both        :Q  :qa      quit all",
+    "  :e <path>            open a file                :help [topic] this help",
+    "  :sp  :vs  :close  :only                          split / close panes",
+    "  :ls  :b <name>  :bn  :bp  :bd                     buffers",
+    "  :diff  :revert  :export [fmt]                     merge / reload / export",
+    "  :set <key> [value]   settings, e.g. measure, autosave, line_spacing",
+    "  :embed [mode]        how much of ![[...]] to expand in place",
+    "",
+    "NAVIGATION  (motions — take a count, e.g. 3w; also see :help bindings)",
+    "  h j k l        left / down / up / right (arrows work too)",
+    "  w b e  W B E   word forward / back / end (W/B/E = whitespace-delimited)",
+    "  0 ^ $          line start / first non-blank / end",
+    "  { }            previous / next paragraph        gg G   top / bottom",
+    "  f{c} t{c}      find / till char (F/T backward);  ; ,   repeat / reverse",
+    "  H M L          top / middle / bottom of the visible screen",
+    "  Ctrl-d/u/f/b   half page / full page down / up",
+    "  gf  gx         follow a link · open it externally",
+    "",
+    "KEYBINDINGS  (single/doubled keys — the Vim grammar, :help bindings for all)",
+    "  i a I A o O    insert / append / line start / line end / open below/above",
+    "  d c y  dd cc yy  operators — delete / change / yank, doubled = whole line",
+    "  x X D C Y      delete char / before / to-eol / change-to-eol / yank-line",
+    "  p P            paste after / before             u  Ctrl-r  undo / redo",
+    "  v V            Visual charwise / linewise        .   repeat last change",
+    "  / ?  n N       search forward / back / repeat    :   command line",
+    "  g1..g6 g0      set / clear heading level         gb gi gh gk  bold/italic/",
+    "                                                    highlight/code (writer)",
+    "  Ctrl-w h j k l v s q o  window: move / split / close / cycle pane",
     "",
     "Scroll with j/k or the arrows. Press q or Esc to close.",
 ];
@@ -266,8 +325,8 @@ const COMMANDS: &[&str] = &[
     "  :set line_spacing=1   blank rows between lines, 0-4",
     "",
     "HELP",
-    "  :help [topic]         this help — topics: bindings, commands,",
-    "                        writer, config",
+    "  :help [topic]         this help — topics: shortcuts, bindings,",
+    "                        commands, writer, config",
 ];
 
 const WRITER: &[&str] = &[
@@ -346,12 +405,27 @@ mod tests {
     #[test]
     fn resolves_topics_and_aliases() {
         assert_eq!(Help::open("").title, "help");
+        assert_eq!(Help::open("shortcuts").title, "shortcuts");
+        assert_eq!(Help::open("cheatsheet").title, "shortcuts"); // alias
         assert_eq!(Help::open("bindings").title, "bindings");
         assert_eq!(Help::open("keys").title, "bindings"); // alias
         assert_eq!(Help::open("commands").title, "commands");
         assert_eq!(Help::open("writer").title, "writer verbs");
         assert_eq!(Help::open("config").title, "config");
         assert!(!Help::open("bindings").lines.is_empty());
+        assert!(!Help::open("shortcuts").lines.is_empty());
+    }
+
+    /// The shortcuts page is the one place all four kinds of interaction are
+    /// listed together — the thing `<leader>hl` exists to open.
+    #[test]
+    fn shortcuts_page_covers_every_kind() {
+        let h = Help::open("shortcuts");
+        assert!(h.lines.iter().any(|l| l.contains("<leader> KEYS")));
+        assert!(h.lines.iter().any(|l| l.contains(": COMMANDS")));
+        assert!(h.lines.iter().any(|l| l.contains("NAVIGATION")));
+        assert!(h.lines.iter().any(|l| l.contains("KEYBINDINGS")));
+        assert!(h.lines.iter().any(|l| l.contains("<leader>hl")));
     }
 
     #[test]
