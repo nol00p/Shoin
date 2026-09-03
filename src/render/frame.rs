@@ -2513,5 +2513,24 @@ mod tests {
         assert!(joined.contains("# One"));
         assert!(joined.contains("## Two"), "conceal off: line 1 keeps its ##");
     }
+
+    /// A table row's `|` columns are laid out by its author, not by wrapping —
+    /// a row wider than the measure stays one row, clipped at the edge, rather
+    /// than breaking onto ragged continuation lines that no longer align.
+    #[test]
+    fn a_wide_table_row_does_not_wrap() {
+        let md = "| Name | Description | Owner |\n|---|---|---|\n| alpha | a long description that will not fit in a narrow measure | bob |\n";
+        let app = app_with(md);
+        let buf = render_to(&app, 40, 12);
+        let text = rows(&buf);
+        assert!(
+            text.iter().any(|r| r.contains("| alpha | a long description")),
+            "the row's start is on screen, unbroken: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|r| r.trim() == "bob |"),
+            "the row's tail must not have wrapped onto its own line: {text:?}"
+        );
+    }
 }
 

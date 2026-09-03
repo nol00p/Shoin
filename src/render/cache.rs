@@ -25,7 +25,7 @@ use crate::app::{App, BufferState};
 use crate::config::schema::{GlyphConfig, MarkdownConfig};
 use crate::render::conceal::{ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
-use crate::render::layout::{content_column, wrap_hanging, RowSource, VisualRow};
+use crate::render::layout::{content_column, no_wrap, wrap_hanging, RowSource, VisualRow};
 use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
 use crate::transclude::preview::Expansion;
@@ -521,9 +521,22 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         None
     };
 
+    // A table row's `|` columns are laid out by its author, in the source; word
+    // wrap would break that layout onto several ragged rows instead of leaving
+    // it aligned. Overflow past the measure is clipped at the pane edge, same
+    // as any other unwrapped line.
+    let (wrap_raw, wrap_concealed) = if block == BlockKind::Table {
+        (no_wrap(&source), no_wrap(&concealed))
+    } else {
+        (
+            wrap_hanging(&source, measure, hang_raw),
+            wrap_hanging(&concealed, measure, hang_concealed),
+        )
+    };
+
     LineEntry {
-        wrap_raw: wrap_hanging(&source, measure, hang_raw),
-        wrap_concealed: wrap_hanging(&concealed, measure, hang_concealed),
+        wrap_raw,
+        wrap_concealed,
         source,
         block,
         styled,

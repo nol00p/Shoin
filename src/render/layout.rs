@@ -251,6 +251,16 @@ pub fn wrap_line(text: &str, measure: u16) -> Vec<(usize, usize)> {
     out
 }
 
+/// A line that never wraps: one range, covering the whole line.
+///
+/// A table row's columns are aligned by `|`s the author placed in the source;
+/// word-wrapping it the way a paragraph wraps would break that alignment onto
+/// several ragged rows, which is worse than the row running past the measure
+/// and getting clipped at the pane edge like any other unwrapped overflow.
+pub fn no_wrap(text: &str) -> Vec<(usize, usize)> {
+    vec![(0, text.chars().count())]
+}
+
 /// The single funnel for measuring a line in display cells.
 pub fn display_width(text: &str) -> u16 {
     text.chars()
