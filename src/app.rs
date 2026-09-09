@@ -4228,6 +4228,12 @@ impl App {
                 self.write(if arg.is_empty() { None } else { Some(arg) }, true);
                 self.try_quit(true);
             }
+            // Vim's abbreviations, so muscle memory lands: `:u`, `:un`, `:und`,
+            // `:undo`, and `:red`/`:redo`. Not `:r` or `:re` — `:r` is `:read`
+            // in vim, and taking it for undo here would train the wrong reflex
+            // against every other editor.
+            "u" | "un" | "und" | "undo" => self.undo_or_warn(),
+            "red" | "redo" => self.redo_or_warn(),
             "reload" | "e!" => self.reload_config(),
             // NOT `:e!`, which this editor already spends on the config. A
             // command that re-reads the file needs its own name rather than a
@@ -7476,6 +7482,81 @@ mod tests {
         feed(&mut app, "u");
         assert_eq!(text(&app), "start\n");
         assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
+    }
+
+    // --- :undo / :redo ---
+
+    /// Type a `:` command and run it, the way a user does — through Command
+    /// mode and Enter, not by calling the dispatcher.
+    fn ex(app: &mut App, cmd: &str) {
+        feed(app, ":");
+        feed(app, cmd);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+    }
+
+    /// `:u` takes back the last change, exactly as `u` does.
+    #[test]
+    fn ex_undo_takes_back_the_last_change() {
+        let mut app = app_with("start\n");
+        feed(&mut app, "x");
+        assert_eq!(text(&app), "tart\n");
+        ex(&mut app, "u");
+        assert_eq!(text(&app), "start\n");
+        assert_eq!(app.mode, Mode::Normal, "the : line is done with");
+    }
+
+    /// Vim's abbreviations all land on it, so muscle memory works.
+    #[test]
+    fn every_undo_abbreviation_runs_it() {
+        for spelling in ["u", "un", "und", "undo"] {
+            let mut app = app_with("start\n");
+            feed(&mut app, "x");
+            ex(&mut app, spelling);
+            assert_eq!(text(&app), "start\n", ":{spelling} should undo");
+        }
+    }
+
+    /// `:redo` is the way back, and `:red` abbreviates it.
+    #[test]
+    fn ex_redo_puts_the_change_back() {
+        for spelling in ["red", "redo"] {
+            let mut app = app_with("start\n");
+            feed(&mut app, "x");
+            ex(&mut app, "u");
+            assert_eq!(text(&app), "start\n");
+            ex(&mut app, spelling);
+            assert_eq!(text(&app), "tart\n", ":{spelling} should redo");
+        }
+    }
+
+    /// Nothing left to take back flashes the same hint `u` does, rather than
+    /// the dispatcher's "not a command".
+    #[test]
+    fn ex_undo_at_the_oldest_change_says_so() {
+        let mut app = app_with("start\n");
+        // `app_with` seeds its text through the buffer, so that seed is itself
+        // a change: undo past it to reach the bottom of the history.
+        for _ in 0..8 {
+            ex(&mut app, "u");
+        }
+        let flash = app.flash.as_ref().and_then(|f| f.text.clone());
+        assert_eq!(flash.as_deref(), Some("already at oldest change"));
+    }
+
+    /// `:r` is `:read` in vim, not undo. Claiming it here would train a reflex
+    /// that misfires in every other editor, so it stays unclaimed — as does
+    /// the ambiguous `:re`.
+    #[test]
+    fn r_is_not_an_undo_abbreviation() {
+        for spelling in ["r", "re"] {
+            let mut app = app_with("start\n");
+            feed(&mut app, "x");
+            ex(&mut app, spelling);
+            assert_eq!(text(&app), "tart\n", ":{spelling} must not undo");
+            let flash = app.flash.as_ref().and_then(|f| f.text.clone());
+            assert_eq!(flash, Some(format!("not a command: {spelling}")));
+        }
     }
 
     // --- mouse selection ---

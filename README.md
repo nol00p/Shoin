@@ -485,6 +485,14 @@ shoin [FILE]
 
 ## Changelog
 
+### Unreleased
+
+- `:u` and `:redo` now work. Undo and redo were reachable only as `u` and
+  `Ctrl-r`; typing Vim's `:u` fell through to `not a command: u`, which is easy
+  to miss in a status line that clears after 1.5s. All of Vim's abbreviations
+  land — `:u`, `:un`, `:und`, `:undo`, `:red`, `:redo`. `:r` and `:re` stay
+  unclaimed, since `:r` is `:read` in Vim.
+
 ### 0.1.4
 
 - Dragging with the mouse now selects text, the way `mouse=a` does in Vim: the
