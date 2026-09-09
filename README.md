@@ -487,6 +487,13 @@ shoin [FILE]
 
 ### Unreleased
 
+- Dragging the mouse **while inserting** now selects, following Vim's
+  `-- (insert) VISUAL --`: the selection remembers the insert session it came
+  out of, and an operator (`y`, `d`, a writer verb) or `Esc` hands typing back
+  rather than dropping you in Normal. A second `Esc` leaves Insert as usual.
+  The mode names itself once in the status line on the way in, and the caret
+  takes the accent colour for as long as the selection is live — no chrome, so
+  zen mode is unaffected.
 - `:u` and `:redo` now work. Undo and redo were reachable only as `u` and
   `Ctrl-r`; typing Vim's `:u` fell through to `not a command: u`, which is easy
   to miss in a status line that clears after 1.5s. All of Vim's abbreviations

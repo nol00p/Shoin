@@ -251,6 +251,12 @@ pub struct App {
     /// and started in a text pane. `None` the rest of the time — including for
     /// a press in the file tree, which is how tree drags stay inert.
     drag_from: Option<Cursor>,
+    /// Whether leaving Visual should resume the insert session it came out of
+    /// rather than land in Normal — vim's `-- (insert) VISUAL --`, reached by
+    /// dragging the mouse while inserting. Only ever true WHILE in Visual:
+    /// `enter_visual` clears it and `end_visual` consumes it, so it cannot go
+    /// stale and drop a later `v` into Insert.
+    visual_resumes_insert: bool,
 
     /// Live config-file watcher; `None` when running on built-in defaults.
     watcher: Option<ConfigWatcher>,
@@ -593,6 +599,7 @@ impl App {
             pending_register: None,
             anchor: None,
             drag_from: None,
+            visual_resumes_insert: false,
             watcher,
             focus: FocusMode::parse(&config_focus).unwrap_or(FocusMode::Off),
             focus_region: None,
@@ -766,9 +773,14 @@ impl App {
             let _ = execute!(std::io::stdout(), shape.to_terminal(c.blink));
         }
 
-        if command != self.cursor_colored {
-            self.cursor_colored = command;
-            set_cursor_color(command.then(|| cursor_blue(&self.theme)));
+        // The accent caret marks "typing goes somewhere other than the text
+        // under it" — the `:` line, the finder, and now a selection that will
+        // hand you back to Insert. It is the whole cue for the last of those,
+        // so nothing is drawn and zen mode keeps working.
+        let tinted = command || self.visual_resumes_insert;
+        if tinted != self.cursor_colored {
+            self.cursor_colored = tinted;
+            set_cursor_color(tinted.then(|| cursor_blue(&self.theme)));
         }
     }
 
@@ -1030,15 +1042,12 @@ impl App {
                     if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
                         self.leave_visual();
                     }
-                    // Only Normal arms a drag, and only with the document in
-                    // front. From Insert a selection would have to close the
-                    // insert undo group on the way out, and a mouse that
-                    // wandered a cell is a poor reason to end someone's
-                    // typing; under an overlay the text being dragged over is
-                    // not the text on screen.
+                    // Normal and Insert both arm a drag, with the document in
+                    // front. Under an overlay the text being dragged over is
+                    // not the text on screen, so nothing is armed there.
                     let overlaid =
                         self.help.is_some() || self.diff.is_some() || self.finder.is_some();
-                    if self.mode == Mode::Normal && !overlaid {
+                    if matches!(self.mode, Mode::Normal | Mode::Insert) && !overlaid {
                         self.drag_from = Some(cursor);
                     }
                 }
@@ -1049,9 +1058,10 @@ impl App {
                 let Some(from) = self.drag_from else {
                     return;
                 };
-                // The press armed this in Normal, but a key since may have
-                // moved on — into `:`, or a tree prompt. Those own the input.
-                if !matches!(self.mode, Mode::Normal | Mode::Visual) {
+                // The press armed this in Normal or Insert, but a key since
+                // may have moved on — into `:`, or a tree prompt. Those own
+                // the input.
+                if !matches!(self.mode, Mode::Normal | Mode::Insert | Mode::Visual) {
                     return;
                 }
                 let area = self.mouse_area();
@@ -1065,7 +1075,19 @@ impl App {
                     return;
                 }
                 if self.mode != Mode::Visual {
+                    // Dragged out of an insert session, the selection remembers
+                    // to go back into it — vim's `-- (insert) VISUAL --`. The
+                    // insert group is left open deliberately: the operator and
+                    // the typing that resumes after it undo as one step, the
+                    // same shape `cw` already has.
+                    let resumes_insert = self.mode == Mode::Insert;
                     self.enter_visual(Mode::Visual);
+                    self.visual_resumes_insert = resumes_insert;
+                    // Naming the mode once, on the way in. The caret carries it
+                    // from there; nothing stays on screen.
+                    if resumes_insert {
+                        self.notify("-- (insert) visual --", FlashKind::Info);
+                    }
                 }
                 self.anchor = Some(from);
                 self.buffer.cursor = cursor;
@@ -2454,6 +2476,7 @@ impl App {
         }
         self.mode = Mode::Normal;
         self.anchor = None;
+        self.visual_resumes_insert = false;
         self.pending.reset();
         // The block cache of a document edited while it was in the background
         // (there is no such path today, but reload could add one) resyncs on
@@ -2897,8 +2920,7 @@ impl App {
             } else {
                 (cur, anchor)
             };
-            self.mode = Mode::Normal;
-            self.anchor = None;
+            self.end_visual();
             let s = self.buffer.char_index(lo);
             let e = (self.buffer.char_index(hi) + 1).min(self.buffer.rope.len_chars());
             (s, e)
@@ -3174,8 +3196,7 @@ impl App {
             } else {
                 (cur, anchor)
             };
-            self.mode = Mode::Normal;
-            self.anchor = None;
+            self.end_visual();
             let s = self.buffer.char_index(lo);
             let e = (self.buffer.char_index(hi) + 1).min(self.buffer.rope.len_chars());
             (s, e)
@@ -3485,12 +3506,30 @@ impl App {
     fn enter_visual(&mut self, mode: Mode) {
         self.anchor = Some(self.buffer.cursor);
         self.mode = mode;
+        // A keyboard `v` always returns to Normal. Only the mouse sets this,
+        // and it sets it straight after this call.
+        self.visual_resumes_insert = false;
         self.touch_status();
     }
 
-    fn leave_visual(&mut self) {
-        self.mode = Mode::Normal;
+    /// Leave Visual for whatever comes next: back into the insert session when
+    /// the selection was dragged out of one, Normal otherwise.
+    ///
+    /// Every Visual exit funnels through here — `Esc`, the operators, and the
+    /// writer verbs alike — so the resume is honoured once rather than
+    /// remembered at each of them.
+    fn end_visual(&mut self) {
+        self.mode = if self.visual_resumes_insert {
+            Mode::Insert
+        } else {
+            Mode::Normal
+        };
+        self.visual_resumes_insert = false;
         self.anchor = None;
+    }
+
+    fn leave_visual(&mut self) {
+        self.end_visual();
         self.pending.reset();
     }
 
@@ -3498,8 +3537,7 @@ impl App {
         let anchor = self.anchor.unwrap_or(self.buffer.cursor);
         let cursor = self.buffer.cursor;
         let linewise = matches!(self.mode, Mode::VisualLine);
-        self.mode = Mode::Normal;
-        self.anchor = None;
+        self.end_visual();
         if linewise {
             self.operate_linewise(op, anchor.line, cursor.line);
         } else {
@@ -7662,17 +7700,126 @@ mod tests {
         assert!(app.anchor.is_none());
     }
 
-    /// Insert mode is left alone. A selection would have to close the insert
-    /// undo group on its way out, and a mouse that wandered a cell is a poor
-    /// reason to end someone's typing.
+    /// Dragging out of an insert session selects, and remembers to hand the
+    /// session back afterwards — vim's `-- (insert) VISUAL --`.
     #[test]
-    fn a_drag_while_inserting_does_not_start_a_selection() {
+    fn a_drag_while_inserting_enters_insert_visual() {
         let mut app = mouse_app();
         feed(&mut app, "i");
         press(&mut app, 8, 2);
         drag(&mut app, 8, 4);
-        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.mode, Mode::Visual);
+        assert!(app.visual_resumes_insert, "it will go back to Insert");
+        assert_eq!(app.anchor.expect("an anchor").line, 0);
+    }
+
+    /// The mode is named once, on the way in. After that the caret carries it.
+    #[test]
+    fn entering_insert_visual_names_itself_once() {
+        let mut app = mouse_app();
+        feed(&mut app, "i");
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        let flash = app.flash.as_ref().and_then(|f| f.text.clone());
+        assert_eq!(flash.as_deref(), Some("-- (insert) visual --"));
+    }
+
+    /// An operator takes the selection and hands the insert session back, so
+    /// typing carries on where it left off.
+    #[test]
+    fn an_operator_returns_to_the_insert_session() {
+        let mut app = mouse_app();
+        feed(&mut app, "i");
+        press(&mut app, 8, 4);
+        drag(&mut app, 12, 4);
+        feed(&mut app, "y");
+        assert_eq!(app.mode, Mode::Insert, "back to inserting");
+        assert!(!app.visual_resumes_insert, "and the flag is spent");
         assert!(app.anchor.is_none());
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, " para");
+    }
+
+    /// Esc does the same — it ends the selection, not the typing. A second Esc
+    /// is what leaves Insert, exactly as it would have without the detour.
+    #[test]
+    fn esc_returns_to_the_insert_session_then_leaves_it() {
+        let mut app = mouse_app();
+        feed(&mut app, "i");
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        esc(&mut app);
+        assert_eq!(app.mode, Mode::Insert);
+        esc(&mut app);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    /// A drag begun in Normal is unaffected: it still ends in Normal.
+    #[test]
+    fn a_drag_from_normal_still_ends_in_normal() {
+        let mut app = mouse_app();
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        assert!(!app.visual_resumes_insert);
+        feed(&mut app, "y");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    /// The resume must not outlive the selection that earned it. A keyboard
+    /// `v` after an insert-visual drag is an ordinary selection.
+    #[test]
+    fn a_later_keyboard_visual_does_not_inherit_the_resume() {
+        let mut app = mouse_app();
+        feed(&mut app, "i");
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        feed(&mut app, "y");
+        esc(&mut app);
+        assert_eq!(app.mode, Mode::Normal);
+
+        feed(&mut app, "v");
+        assert!(!app.visual_resumes_insert, "a keyboard v never resumes");
+        feed(&mut app, "y");
+        assert_eq!(app.mode, Mode::Normal, "and lands in Normal");
+    }
+
+    /// The undo shape through the detour, which is the subtle part. The
+    /// operator and the typing that resumes after it collapse into ONE step —
+    /// the same shape `cw` already has — and the insert before the drag stays
+    /// its own. Nothing is left half-sealed.
+    #[test]
+    fn insert_visual_undoes_in_cw_shaped_steps() {
+        let mut app = mouse_app();
+        feed(&mut app, "i");
+        feed(&mut app, "XY");
+        press(&mut app, 8, 4);
+        drag(&mut app, 12, 4);
+        feed(&mut app, "d");
+        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(text(&app), "XY# One\n\nsecondgraph here\n", "the selection is gone");
+        feed(&mut app, "ZZ");
+        esc(&mut app);
+        assert_eq!(text(&app), "XY# One\n\nsecondZZgraph here\n");
+
+        // One step takes back the delete AND the typing that resumed after it.
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "XY# One\n\nsecond paragraph here\n");
+        // The insert that ran BEFORE the drag is its own step.
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "# One\n\nsecond paragraph here\n");
+    }
+
+    /// The writer verbs exit Visual through the same door, so they hand the
+    /// session back too.
+    #[test]
+    fn a_writer_verb_returns_to_the_insert_session() {
+        let mut app = mouse_app();
+        feed(&mut app, "i");
+        press(&mut app, 8, 4);
+        drag(&mut app, 12, 4);
+        feed(&mut app, "gb");
+        assert_eq!(app.mode, Mode::Insert, "bold, and still inserting");
+        assert!(text(&app).contains("**"), "it wrapped the selection: {:?}", text(&app));
     }
 
     /// A key that changes mode between the press and the drag wins: `:` owns
