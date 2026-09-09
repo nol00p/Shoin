@@ -961,12 +961,27 @@ pub fn pane_at(app: &App, area: Rect, col: u16, row: u16) -> Option<crate::rende
 /// The caller is expected to have focused the clicked pane first (`pane_at`),
 /// so this reads the focused pane's geometry and document.
 pub fn locate_click(app: &App, area: Rect, col: u16, row: u16) -> Option<Cursor> {
+    locate(app, area, col, row, false)
+}
+
+/// `locate_click` for a position reached mid-drag: outside the text area it
+/// clamps to the nearest edge rather than refusing. A selection dragged past
+/// the top or bottom of the pane should go on extending to the row the pointer
+/// is level with — freezing at the last cell that happened to be inside reads
+/// as the drag having broken.
+pub fn locate_drag(app: &App, area: Rect, col: u16, row: u16) -> Option<Cursor> {
+    locate(app, area, col, row, true)
+}
+
+fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Cursor> {
     let cfg = &app.config;
     let rect = focused_rect(app, area)?;
     // A click outside the pane — in the tree sidebar, say — is not a position.
-    if col < rect.x || col >= rect.right() || row < rect.y || row >= rect.bottom() {
+    if !clamp && (col < rect.x || col >= rect.right() || row < rect.y || row >= rect.bottom()) {
         return None;
     }
+    let col = col.clamp(rect.x, rect.right().saturating_sub(1));
+    let row = row.clamp(rect.y, rect.bottom().saturating_sub(1));
     let ex = rect.x;
     let lay = Layout::compute(&cfg.layout, rect.width, rect.height, 0);
 
@@ -983,14 +998,29 @@ pub fn locate_click(app: &App, area: Rect, col: u16, row: u16) -> Option<Cursor>
         app.scroll_hint(),
     );
 
-    if row < rect.y + lay.top {
+    if lay.height == 0 {
         return None;
     }
-    let screen_row = (row - rect.y - lay.top) as usize;
-    if screen_row >= lay.height as usize {
+    let screen_row = if row < rect.y + lay.top {
+        if !clamp {
+            return None;
+        }
+        0
+    } else {
+        (row - rect.y - lay.top) as usize
+    };
+    let last = lay.height as usize - 1;
+    if screen_row > last && !clamp {
         return None;
     }
-    let vr = cache.row(top + screen_row)?;
+    let screen_row = screen_row.min(last);
+    // Dragging below the end of a short document lands past the last row; that
+    // is the end of the text, not a miss.
+    let vr = match cache.row(top + screen_row) {
+        Some(vr) => vr,
+        None if clamp => cache.row(cache.total_rows().checked_sub(1)?)?,
+        None => return None,
+    };
     let line = vr.line();
 
     // A click on transcluded content has no column to land on — that text is
@@ -2426,6 +2456,23 @@ mod tests {
         assert_eq!(locate_click(&app, area, 8, 4).map(|c| c.line), Some(2));
         // Above the text area → no position.
         assert!(locate_click(&app, area, 8, 0).is_none());
+    }
+
+    /// A drag that wanders out of the text area clamps to the nearest edge
+    /// instead of refusing, so a selection dragged off the top or the bottom
+    /// goes on extending to the row the pointer is level with.
+    #[test]
+    fn a_drag_clamps_to_the_text_area() {
+        let app = app_with("# One\n\nsecond paragraph here\n");
+        let area = Rect { x: 0, y: 0, width: 60, height: 12 };
+        // The row a click refuses is the first line to a drag.
+        assert_eq!(locate_drag(&app, area, 8, 0).map(|c| c.line), Some(0));
+        // Past the last row, and off the right edge of it: the end of the text.
+        let end = locate_drag(&app, area, 59, 11).expect("a position");
+        let last = app.buffer.rope.len_lines() - 1;
+        assert_eq!(end.line, last, "the last line");
+        // Left of the pane clamps back to its first column.
+        assert_eq!(locate_drag(&app, area, 0, 2).map(|c| c.col), Some(0));
     }
 
     /// The theme background fills the whole surface, so a theme renders on its

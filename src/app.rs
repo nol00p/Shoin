@@ -247,6 +247,10 @@ pub struct App {
     pending_register: Option<char>,
     /// Visual-mode selection anchor; `None` outside Visual/VisualLine.
     pub anchor: Option<Cursor>,
+    /// Where the left button went down, while a drag out of it is still live
+    /// and started in a text pane. `None` the rest of the time — including for
+    /// a press in the file tree, which is how tree drags stay inert.
+    drag_from: Option<Cursor>,
 
     /// Live config-file watcher; `None` when running on built-in defaults.
     watcher: Option<ConfigWatcher>,
@@ -588,6 +592,7 @@ impl App {
             registers: HashMap::new(),
             pending_register: None,
             anchor: None,
+            drag_from: None,
             watcher,
             focus: FocusMode::parse(&config_focus).unwrap_or(FocusMode::Off),
             focus_region: None,
@@ -976,13 +981,27 @@ impl App {
         };
     }
 
-    /// Left-click positions the cursor; the wheel scrolls by moving it.
+    /// The whole terminal, for mapping a mouse position through the layout.
+    fn mouse_area(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: self.term_size.0,
+            height: self.term_size.1,
+        }
+    }
+
+    /// Left-click positions the cursor and drag-selects from it; the wheel
+    /// scrolls by moving it.
     fn on_mouse(&mut self, m: MouseEvent) {
         if !self.config.input.mouse {
             return;
         }
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // A press ends whatever the previous one started, wherever it
+                // lands — including in the tree, which arms no drag.
+                self.drag_from = None;
                 let tw = if self.tree.is_some() {
                     crate::tree::WIDTH.min(self.term_size.0 / 2)
                 } else {
@@ -992,12 +1011,7 @@ impl App {
                     self.tree_click(m.row);
                     return;
                 }
-                let area = Rect {
-                    x: 0,
-                    y: 0,
-                    width: self.term_size.0,
-                    height: self.term_size.1,
-                };
+                let area = self.mouse_area();
                 // A click focuses the pane it landed in first — otherwise it
                 // would be mapped through the geometry of a different one.
                 if let Some(id) = frame::pane_at(self, area, m.column, m.row) {
@@ -1010,8 +1024,55 @@ impl App {
                     self.buffer.cursor = cursor;
                     // A click abandons any half-typed command.
                     self.pending.reset();
+                    // ...and drops any selection, rather than extending it to
+                    // where you clicked. Vim does the same: the click puts the
+                    // cursor down, and the drag that may follow starts there.
+                    if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+                        self.leave_visual();
+                    }
+                    // Only Normal arms a drag, and only with the document in
+                    // front. From Insert a selection would have to close the
+                    // insert undo group on the way out, and a mouse that
+                    // wandered a cell is a poor reason to end someone's
+                    // typing; under an overlay the text being dragged over is
+                    // not the text on screen.
+                    let overlaid =
+                        self.help.is_some() || self.diff.is_some() || self.finder.is_some();
+                    if self.mode == Mode::Normal && !overlaid {
+                        self.drag_from = Some(cursor);
+                    }
                 }
             }
+            // Dragging out of that press is Visual mode, charwise, anchored
+            // where the button went down.
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(from) = self.drag_from else {
+                    return;
+                };
+                // The press armed this in Normal, but a key since may have
+                // moved on — into `:`, or a tree prompt. Those own the input.
+                if !matches!(self.mode, Mode::Normal | Mode::Visual) {
+                    return;
+                }
+                let area = self.mouse_area();
+                let Some(cursor) = frame::locate_drag(self, area, m.column, m.row) else {
+                    return;
+                };
+                // Entering only once the drag has actually reached another
+                // cell keeps a shaky hand — a Drag event on the pressed cell —
+                // from turning every click into a one-character selection.
+                if cursor == from && self.mode != Mode::Visual {
+                    return;
+                }
+                if self.mode != Mode::Visual {
+                    self.enter_visual(Mode::Visual);
+                }
+                self.anchor = Some(from);
+                self.buffer.cursor = cursor;
+            }
+            // The selection outlives the button: releasing leaves Visual mode
+            // up, so `y`, `d` and `<leader>b` all have something to act on.
+            MouseEventKind::Up(MouseButton::Left) => self.drag_from = None,
             MouseEventKind::ScrollDown => self.move_by(Motion::Down, 3),
             MouseEventKind::ScrollUp => self.move_by(Motion::Up, 3),
             _ => {}
@@ -7415,5 +7476,157 @@ mod tests {
         feed(&mut app, "u");
         assert_eq!(text(&app), "start\n");
         assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
+    }
+
+    // --- mouse selection ---
+    //
+    // The geometry these coordinates rely on is the one
+    // `frame::tests::click_maps_to_the_clicked_line` pins down: in a 60x12
+    // terminal showing "# One\n\nsecond paragraph here\n", screen row 2 is
+    // line 0 and row 4 is line 2.
+
+    fn mouse_app() -> App {
+        let mut app = app_with("# One\n\nsecond paragraph here\n");
+        app.term_size = (60, 12);
+        app
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
+        app.on_mouse(MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE });
+        app.sync_after_input();
+    }
+
+    fn press(app: &mut App, col: u16, row: u16) {
+        mouse(app, MouseEventKind::Down(MouseButton::Left), col, row);
+    }
+
+    fn drag(app: &mut App, col: u16, row: u16) {
+        mouse(app, MouseEventKind::Drag(MouseButton::Left), col, row);
+    }
+
+    fn release(app: &mut App, col: u16, row: u16) {
+        mouse(app, MouseEventKind::Up(MouseButton::Left), col, row);
+    }
+
+    /// Dragging out of a press is a charwise Visual selection anchored where
+    /// the button went down — and it outlives the release, so an operator
+    /// still has something to act on.
+    #[test]
+    fn a_drag_selects_from_the_press_to_the_pointer() {
+        let mut app = mouse_app();
+        press(&mut app, 8, 2);
+        assert_eq!(app.mode, Mode::Normal, "a press alone selects nothing");
+        assert_eq!(app.buffer.cursor.line, 0);
+
+        drag(&mut app, 8, 4);
+        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(app.anchor.expect("an anchor").line, 0, "anchored at the press");
+        assert_eq!(app.buffer.cursor.line, 2, "the cursor follows the pointer");
+
+        release(&mut app, 8, 4);
+        assert_eq!(app.mode, Mode::Visual, "the selection survives the release");
+        assert_eq!(app.anchor.expect("an anchor").line, 0);
+    }
+
+    /// The selection a drag leaves behind is a real one: `y` takes it.
+    #[test]
+    fn a_dragged_selection_can_be_yanked() {
+        let mut app = mouse_app();
+        press(&mut app, 8, 4);
+        drag(&mut app, 12, 4);
+        release(&mut app, 12, 4);
+        feed(&mut app, "y");
+        assert_eq!(app.mode, Mode::Normal);
+        // Inclusive of the cell under the pointer, as a Visual selection is.
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, " para", "the five cells the drag crossed");
+    }
+
+    /// A press drops the selection instead of extending it to where you
+    /// clicked — the click puts the cursor down, and the next drag starts
+    /// from there.
+    #[test]
+    fn a_press_drops_the_previous_selection() {
+        let mut app = mouse_app();
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        release(&mut app, 8, 4);
+        assert_eq!(app.mode, Mode::Visual);
+
+        press(&mut app, 8, 2);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.anchor.is_none());
+    }
+
+    /// A Drag event on the cell that was pressed is a shaky hand, not a
+    /// selection: every click would otherwise leave Visual mode up.
+    #[test]
+    fn a_drag_that_never_leaves_the_cell_is_not_a_selection() {
+        let mut app = mouse_app();
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 2);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.anchor.is_none());
+    }
+
+    /// Text panes only: a press in the file tree arms no drag, so dragging out
+    /// of the sidebar and across the document selects nothing.
+    #[test]
+    fn a_drag_out_of_the_file_tree_selects_nothing() {
+        let mut app = mouse_app();
+        app.tree = Some(FileTree::open(std::env::current_dir().unwrap()));
+        press(&mut app, 2, 3);
+        drag(&mut app, 40, 4);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.anchor.is_none());
+    }
+
+    /// Insert mode is left alone. A selection would have to close the insert
+    /// undo group on its way out, and a mouse that wandered a cell is a poor
+    /// reason to end someone's typing.
+    #[test]
+    fn a_drag_while_inserting_does_not_start_a_selection() {
+        let mut app = mouse_app();
+        feed(&mut app, "i");
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        assert_eq!(app.mode, Mode::Insert);
+        assert!(app.anchor.is_none());
+    }
+
+    /// A key that changes mode between the press and the drag wins: `:` owns
+    /// the input, and a drag must not yank the user back out of it.
+    #[test]
+    fn a_mode_change_since_the_press_calls_the_drag_off() {
+        let mut app = mouse_app();
+        press(&mut app, 8, 2);
+        feed(&mut app, ":");
+        drag(&mut app, 8, 4);
+        assert!(matches!(app.mode, Mode::Command(_)), "still on the : line");
+        assert!(app.anchor.is_none());
+    }
+
+    /// An overlay owns the screen, so the text a drag would cross is not the
+    /// text being shown.
+    #[test]
+    fn a_drag_under_the_help_overlay_selects_nothing() {
+        let mut app = mouse_app();
+        app.open_help("");
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.anchor.is_none());
+    }
+
+    /// Capture off is the terminal's own selection, so shoin must not be
+    /// reading drags at all.
+    #[test]
+    fn mouse_off_ignores_a_drag() {
+        let mut app = mouse_app();
+        app.config.input.mouse = false;
+        press(&mut app, 8, 2);
+        drag(&mut app, 8, 4);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 0), "the cursor never moved");
     }
 }

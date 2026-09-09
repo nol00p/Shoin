@@ -169,8 +169,8 @@ pub struct InputConfig {
     pub sequence_timeout_ms: u64,
     pub leader: String,
     pub escape_alias: String,
-    /// Capture the mouse for click-to-position and wheel scroll. Off leaves the
-    /// terminal's native text selection/copy alone.
+    /// Capture the mouse for click-to-position, drag-to-select and wheel
+    /// scroll. Off leaves the terminal's native text selection/copy alone.
     pub mouse: bool,
 }
 

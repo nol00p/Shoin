@@ -485,6 +485,15 @@ shoin [FILE]
 
 ## Changelog
 
+### Unreleased
+
+- Dragging with the mouse now selects text, the way `mouse=a` does in Vim: the
+  press puts the cursor down, dragging out of it opens a charwise Visual
+  selection anchored there, and the selection outlives the release so `y`, `d`
+  and the writer verbs act on it. Text panes only — a drag begun in the file
+  tree still does nothing. Set `mouse = false` (or `:set mouse off`) to hand
+  selection back to the terminal.
+
 ### 0.1.3
 
 - Table rows no longer word-wrap — a row wider than the pane stays on one
