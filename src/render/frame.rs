@@ -19,6 +19,7 @@ use crate::render::markdown::block::BlockKind;
 use crate::render::splash;
 use crate::render::focus::FocusRegion;
 use crate::render::layout::{display_width, scroll_offset, Layout, VisualRow};
+use crate::render::numbers::NumberMode;
 use crate::render::theme::Color as ThemeColor;
 use crate::render::theme::Style as ThemeStyle;
 use crate::render::StyledSpan;
@@ -229,6 +230,12 @@ fn render_pane(
         height: lay.height,
     };
 
+    // Zero when numbers are off, or when the margin has no room for them —
+    // `align = "left"`'s fixed 2-column margin, say — in which case the pane
+    // simply goes without rather than drawing into the text.
+    let numbers = app.numbers;
+    let number_digits = number_gutter_digits(numbers, doc.buffer.line_count(), lay.margin_left);
+
     // Rows of one line are contiguous, so one materialized DisplayLine serves
     // every row it wrapped into. Each row is drawn on its own so the active
     // line can hang its revealed markers into the reserved gutter.
@@ -262,7 +269,8 @@ fn render_pane(
             current = None;
             continue;
         }
-        if current.as_ref().is_none_or(|(l, _)| *l != row.line()) {
+        let is_first_row = current.as_ref().is_none_or(|(l, _)| *l != row.line());
+        if is_first_row {
             current = Some((row.line(), display_line_of(app, doc, &cache, row.line(), focused)));
         }
         let d = &current.as_ref().unwrap().1;
@@ -285,6 +293,18 @@ fn render_pane(
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(row_bg)), r);
         if fenced {
             render_fence_bar(frame, app, r);
+        }
+        // Drawn AFTER the row's own text, like the fence bar above: a wide
+        // reveal shift on the active line can push its raw markers left into
+        // the margin, and the number needs to win that column, not lose to it.
+        if number_digits > 0 && is_first_row {
+            let gutter = Rect {
+                x: text_area.x - number_digits - 1,
+                y: text_area.y + i as u16,
+                width: number_digits,
+                height: 1,
+            };
+            render_line_number(frame, app, gutter, numbers, row.line(), cursor.line);
         }
     }
 
@@ -514,6 +534,40 @@ fn in_fence(cache: &RenderCache, line: usize) -> bool {
             BlockKind::FenceOpen(_) | BlockKind::FenceBody { .. } | BlockKind::FenceClose
         )
     })
+}
+
+/// Columns the line-number gutter needs for the largest number it could show
+/// — zero when numbers are off, or when the margin has no room for them, so
+/// a narrow pane (or `align = "left"`'s fixed 2-column margin) simply goes
+/// without rather than drawing into the text.
+fn number_gutter_digits(mode: NumberMode, line_count: usize, margin_left: u16) -> u16 {
+    if !mode.is_on() {
+        return 0;
+    }
+    let digits = line_count.max(1).to_string().len() as u16;
+    if digits < margin_left { digits } else { 0 }
+}
+
+/// The line-number gutter, right-aligned against the text column with one
+/// blank column of air before it. Only the row that STARTS a buffer line
+/// gets one — a wrapped continuation carries no number, the way a reader
+/// wrapping their eyes down a paragraph in Vim finds it blank too.
+///
+/// Drawn AFTER the row's own text (see the call site): a wide reveal shift on
+/// the active line can push its raw markers left into this same margin band,
+/// and the number needs to win that column, not lose to it.
+fn render_line_number(frame: &mut Frame, app: &App, gutter: Rect, mode: NumberMode, line: usize, cursor_line: usize) {
+    let n = if mode == NumberMode::Relative {
+        line.abs_diff(cursor_line)
+    } else {
+        line + 1
+    };
+    let color = if line == cursor_line { app.theme.text } else { app.theme.text_dim };
+    let style = Style::default()
+        .fg(color.to_ratatui())
+        .bg(app.theme.background.to_ratatui());
+    let digits = gutter.width as usize;
+    frame.render_widget(Paragraph::new(Span::styled(format!("{n:>digits$}"), style)), gutter);
 }
 
 /// The colored left gutter bar beside a fenced row (SPEC.md §5.3).
@@ -2251,6 +2305,93 @@ mod tests {
         app.config.layout.scroll_hint = false;
         let buf = render_to(&app, 80, 24);
         assert!(hint_rows(&buf).is_empty(), "disabled hint should not paint");
+    }
+
+    /// `layout.numbers` off (the default) draws no gutter at all — the text
+    /// sits exactly where the margin alone puts it.
+    #[test]
+    fn numbers_off_draws_no_gutter() {
+        let app = app_with("hello\n");
+        assert_eq!(app.numbers, NumberMode::Off);
+        let lay = Layout::compute(&app.config.layout, 80, 24 - STATUS_ROWS, 0);
+        let buf = render_to(&app, 80, 24);
+        let rows = rows(&buf);
+        assert_eq!(
+            rows[lay.top as usize].find("hello"),
+            Some(lay.margin_left as usize)
+        );
+    }
+
+    /// Absolute numbers the source line, 1-indexed, only on the row where
+    /// each line begins.
+    #[test]
+    fn absolute_numbers_the_source_line_one_indexed() {
+        let mut app = app_with("one\ntwo\nthree\n");
+        app.numbers = NumberMode::Absolute;
+        let lay = Layout::compute(&app.config.layout, 80, 24 - STATUS_ROWS, 0);
+        let buf = render_to(&app, 80, 24);
+        let rows = rows(&buf);
+        let top = lay.top as usize;
+        assert!(rows[top].contains("1 one"), "{:?}", rows[top]);
+        assert!(rows[top + 1].contains("2 two"), "{:?}", rows[top + 1]);
+        assert!(rows[top + 2].contains("3 three"), "{:?}", rows[top + 2]);
+    }
+
+    /// Relative numbers read `0` at the cursor's own line and count outward
+    /// both ways, the way `relativenumber` does.
+    #[test]
+    fn relative_numbers_read_zero_at_the_cursor_and_count_outward() {
+        let mut app = app_with("a\nb\nc\nd\ne\n");
+        app.numbers = NumberMode::Relative;
+        app.buffer.cursor = Cursor::new(2, 0); // "c"
+        let lay = Layout::compute(&app.config.layout, 80, 24 - STATUS_ROWS, 0);
+        let buf = render_to(&app, 80, 24);
+        let rows = rows(&buf);
+        let top = lay.top as usize;
+        assert!(rows[top].contains("2 a"), "{:?}", rows[top]);
+        assert!(rows[top + 1].contains("1 b"), "{:?}", rows[top + 1]);
+        assert!(rows[top + 2].contains("0 c"), "{:?}", rows[top + 2]);
+        assert!(rows[top + 3].contains("1 d"), "{:?}", rows[top + 3]);
+        assert!(rows[top + 4].contains("2 e"), "{:?}", rows[top + 4]);
+    }
+
+    /// Only the row a line STARTS on gets a number; a wrapped continuation
+    /// stays blank, the way Vim leaves the rest of a wrapped line's gutter.
+    #[test]
+    fn a_wrapped_continuation_row_shows_no_number() {
+        let mut app = app_with(&format!("{}\n", "a".repeat(30)));
+        app.config.layout.measure = 10;
+        app.numbers = NumberMode::Absolute;
+        let lay = Layout::compute(&app.config.layout, 80, 24 - STATUS_ROWS, 0);
+        let buf = render_to(&app, 80, 24);
+        let rows = rows(&buf);
+        let top = lay.top as usize;
+        assert!(rows[top].trim_start().starts_with('1'), "{:?}", rows[top]);
+        assert!(
+            !rows[top + 1].trim_start().starts_with(|c: char| c.is_ascii_digit()),
+            "continuation row should carry no number: {:?}",
+            rows[top + 1]
+        );
+    }
+
+    /// A margin with no room for the gutter — `align = "left"`'s fixed
+    /// 2 columns, with a document that needs 2 digits — goes without rather
+    /// than drawing into the text, the same "no room, no draw" `fence_bar`
+    /// already uses.
+    #[test]
+    fn numbers_with_no_room_in_the_margin_draw_nothing() {
+        let text: String = (0..15).map(|i| format!("line {i}\n")).collect();
+        let mut app = app_with(&text);
+        app.config.layout.align = "left".into();
+        app.numbers = NumberMode::Absolute;
+        let lay = Layout::compute(&app.config.layout, 80, 24 - STATUS_ROWS, 0);
+        let buf = render_to(&app, 80, 24);
+        let rows = rows(&buf);
+        assert_eq!(
+            rows[lay.top as usize].find("line 0"),
+            Some(lay.margin_left as usize),
+            "text sits exactly at the margin, nothing squeezed in ahead of it"
+        );
     }
 
     /// The cursor's line renders raw; the line below has its `#` concealed.

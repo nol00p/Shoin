@@ -32,6 +32,7 @@ use crate::input::pending::{Key, Pending, Resolution, Table};
 use crate::render::cache::RenderCache;
 use crate::render::conceal::ActiveSet;
 use crate::render::focus::{FocusMode, FocusRegion};
+use crate::render::numbers::NumberMode;
 use crate::render::pane::{Dir, Node, Pane, PaneId};
 use crate::render::frame;
 use crate::render::markdown::block::{BlockCache, BlockKind, Marker};
@@ -264,6 +265,14 @@ pub struct App {
     /// Focus mode and its cached bright region. SPEC.md §6.
     pub focus: FocusMode,
     pub focus_region: Option<FocusRegion>,
+
+    /// The line-number gutter. Starts at `layout.numbers`; `:number [mode]`
+    /// changes it.
+    pub numbers: NumberMode,
+    /// The mode a bare `:number` turns back on, so toggling off and on again
+    /// returns to whichever mode was last chosen rather than defaulting to
+    /// absolute.
+    last_numbers: NumberMode,
 
     /// The last executed search; drives `n`/`N` and match highlighting.
     pub search: Option<Search>,
@@ -537,6 +546,7 @@ impl App {
             None => Buffer::empty(),
         };
         let config_focus = config.layout.focus.clone();
+        let config_numbers = config.layout.numbers.clone();
         // Read before `config` moves into the struct below.
         let autosave = crate::fs::save::Autosave::from_config(&config.editor)
             .interval()
@@ -603,6 +613,8 @@ impl App {
             watcher,
             focus: FocusMode::parse(&config_focus).unwrap_or(FocusMode::Off),
             focus_region: None,
+            numbers: NumberMode::parse(&config_numbers).unwrap_or_default(),
+            last_numbers: NumberMode::Absolute,
             search: None,
             dot: Vec::new(),
             recording: Vec::new(),
@@ -1720,6 +1732,7 @@ impl App {
             Action::ToggleConceal => {
                 self.config.layout.conceal = !self.config.layout.conceal;
             }
+            Action::ToggleNumbers => self.set_numbers(""),
             Action::FileTree { root } => {
                 let root = self.root_dir(root);
                 self.toggle_tree(root);
@@ -4299,6 +4312,7 @@ impl App {
                 let on = if self.config.layout.typewriter { "on" } else { "off" };
                 self.notify(format!("typewriter {on}"), FlashKind::Info);
             }
+            "number" | "nu" => self.set_numbers(arg),
             "export" => self.open_export(arg),
             // §14.3. Also re-reads every target, so it doubles as the way to
             // refresh an expansion after editing the file it came from.
@@ -4340,6 +4354,37 @@ impl App {
         }
         self.embed_mode = next;
         self.notify(format!("embed {}", next.name()), FlashKind::Info);
+    }
+
+    /// `:number [relative|absolute]` — the line-number gutter.
+    ///
+    /// With no argument it TOGGLES, and turning it back on returns to whichever
+    /// mode was last chosen: someone who switched to `relative` for a `5dj`
+    /// expects `:number` twice to put them back in `relative`, not to default
+    /// to `absolute`.
+    fn set_numbers(&mut self, arg: &str) {
+        let next = if arg.trim().is_empty() {
+            if self.numbers.is_on() {
+                NumberMode::Off
+            } else {
+                self.last_numbers
+            }
+        } else {
+            match NumberMode::parse(arg) {
+                Some(m) => m,
+                None => {
+                    return self.notify(
+                        format!("number: off · relative · absolute, not {arg:?}"),
+                        FlashKind::Error,
+                    )
+                }
+            }
+        };
+        if next.is_on() {
+            self.last_numbers = next;
+        }
+        self.numbers = next;
+        self.notify(format!("number: {}", next.label()), FlashKind::Info);
     }
 
     /// `:set <key> [on|off]` or `:set <key>=<value>` — toggle when no value.
@@ -4457,6 +4502,7 @@ impl App {
                 self.config.layout.conceal = resolve(val, self.config.layout.conceal);
             }
             "embed" => return self.set_embed_mode(val),
+            "numbers" | "number" | "nu" => return self.set_numbers(val),
             "mouse" => {
                 self.config.input.mouse = resolve(val, self.config.input.mouse);
                 self.set_mouse_capture(self.config.input.mouse);
@@ -6123,6 +6169,50 @@ mod tests {
         assert_eq!(app.config.layout.measure, 88, "a bad value changes nothing");
         cmd(&mut app, ":set measure=2");
         assert_eq!(app.config.layout.measure, 88, "…and so does an absurd one");
+    }
+
+    /// `:number [relative|absolute]` — an explicit mode sets it directly, and
+    /// with no argument it TOGGLES, returning to whichever mode was last
+    /// chosen rather than defaulting to absolute (mirrors `:embed`).
+    #[test]
+    fn number_command_toggles_and_remembers_the_last_mode() {
+        let mut app = app_with("hi\n");
+        assert_eq!(app.numbers, NumberMode::Off, "the default");
+
+        cmd(&mut app, ":number relative");
+        assert_eq!(app.numbers, NumberMode::Relative);
+
+        cmd(&mut app, ":number"); // bare: off
+        assert_eq!(app.numbers, NumberMode::Off);
+        cmd(&mut app, ":number"); // bare again: back to relative, not absolute
+        assert_eq!(app.numbers, NumberMode::Relative);
+
+        cmd(&mut app, ":number absolute");
+        assert_eq!(app.numbers, NumberMode::Absolute);
+        cmd(&mut app, ":number");
+        assert_eq!(app.numbers, NumberMode::Off);
+        cmd(&mut app, ":number");
+        assert_eq!(app.numbers, NumberMode::Absolute, "now the last mode was absolute");
+
+        // A bad argument changes nothing, same as an unset `:set` value would.
+        cmd(&mut app, ":number sideways");
+        assert_eq!(app.numbers, NumberMode::Absolute);
+
+        // `:set numbers=...` reaches the same place.
+        cmd(&mut app, ":set numbers=relative");
+        assert_eq!(app.numbers, NumberMode::Relative);
+    }
+
+    /// The bare no-argument toggle is also reachable as a leader binding, the
+    /// way `toggle_conceal`/`toggle_zen` are.
+    #[test]
+    fn toggle_numbers_action_flips_it_on_and_off() {
+        let mut app = app_with_keys("hi\n", &[("<leader>n", "toggle_numbers")]);
+        assert_eq!(app.numbers, NumberMode::Off);
+        feed(&mut app, " n");
+        assert_eq!(app.numbers, NumberMode::Absolute, "turns on to the default last mode");
+        feed(&mut app, " n");
+        assert_eq!(app.numbers, NumberMode::Off);
     }
 
     /// Changing the measure re-wraps: the render cache keys its entries on it.

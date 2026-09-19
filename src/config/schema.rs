@@ -40,6 +40,8 @@ pub struct LayoutConfig {
     pub typewriter: bool,
     pub typewriter_anchor: f32,
     pub focus: String,
+    /// The line-number gutter. `:number [relative|absolute]` changes it live.
+    pub numbers: String,
     /// Live preview. `false` renders every line raw with dimmed markers.
     pub conceal: bool,
     /// Reserve reveal width for the active line, trading horizontal slack for
@@ -60,6 +62,7 @@ impl Default for LayoutConfig {
             typewriter: false,
             typewriter_anchor: 0.5,
             focus: "off".into(),
+            numbers: "off".into(),
             conceal: true,
             stable_gutter: true,
         }

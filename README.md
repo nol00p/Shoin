@@ -223,6 +223,8 @@ Everything below opens and closes with the same key. `<leader>` is Space.
 
 ```
   :focus [off|paragraph|sentence]   dim everything but what you're writing
+  :number [relative|absolute]       line numbers — bare :number toggles off
+                                     and back to whichever mode you last used
   :typewriter                       keep the cursor line centered
   :zen                              hide every chrome affordance at once
   :set measure=72                   the text width, in columns
@@ -425,6 +427,7 @@ resolved config with `shoin --print-config`.
 measure    = 72           # text width in columns  (:set measure=N to change live)
 typewriter = false        # keep the cursor line centered
 focus      = "off"        # "paragraph" or "sentence" dims everything else
+numbers    = "off"        # "relative" or "absolute" line-number gutter
 
 [theme]
 # The default is Tokyo Night (dark). Override individual colors, or point
@@ -484,6 +487,18 @@ shoin [FILE]
 ---
 
 ## Changelog
+
+### Unreleased
+
+- Fixed the viewport jumping around during ordinary navigation. The scroll
+  position was recomputed fresh every frame but never persisted, so it kept
+  re-deriving itself from a stale baseline instead of staying put while the
+  cursor moved within view.
+- Added a line-number gutter: `:number relative` or `:number absolute`, or
+  `<leader>n` / a bare `:number` to toggle it off and back to whichever mode
+  you last used. Relative numbers read `0` at the cursor's own line; a
+  margin too narrow to hold them (`align = "left"`, or a narrow terminal)
+  goes without rather than crowding the text.
 
 ### 0.1.4
 

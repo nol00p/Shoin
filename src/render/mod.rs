@@ -8,6 +8,7 @@ pub mod focus;
 pub mod frame;
 pub mod indent;
 pub mod layout;
+pub mod numbers;
 pub mod pane;
 pub mod splash;
 pub mod markdown;

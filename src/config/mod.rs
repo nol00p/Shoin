@@ -159,6 +159,12 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         "off · paragraph · sentence",
     );
     check(
+        "layout.numbers",
+        &cfg.layout.numbers,
+        crate::render::numbers::NumberMode::parse(&cfg.layout.numbers).is_some(),
+        "off · relative · absolute",
+    );
+    check(
         "layout.align",
         &cfg.layout.align,
         matches!(cfg.layout.align.trim(), "left" | "center" | "centre"),

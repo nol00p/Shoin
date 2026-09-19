@@ -108,6 +108,9 @@ pub enum Action {
     CycleFocus,
     ToggleTypewriter,
     ToggleZen,
+    /// The line-number gutter, off ↔ whichever mode (`relative`/`absolute`)
+    /// was last chosen. `:number [mode]` reaches the modes directly.
+    ToggleNumbers,
     /// Flip `layout.conceal` — live preview vs. every line raw.
     ToggleConceal,
     /// Toggle the file-tree pane, rooted at the edited file's own folder or at
@@ -191,6 +194,7 @@ impl Action {
             "toggle_typewriter" | "typewriter" => Action::ToggleTypewriter,
             "toggle_conceal" | "conceal" => Action::ToggleConceal,
             "toggle_zen" | "zen" => Action::ToggleZen,
+            "toggle_numbers" | "numbers" | "number" => Action::ToggleNumbers,
             "help" | "shortcuts" => Action::Help,
             "file_tree" | "file_explorer" | "tree" => Action::FileTree { root: Root::File },
             "file_tree_home" | "file_explorer_home" => Action::FileTree { root: Root::Home },
