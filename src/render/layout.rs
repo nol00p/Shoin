@@ -23,6 +23,11 @@ pub struct Layout {
     pub top: u16,
     /// Number of screen rows available to text.
     pub height: u16,
+    /// Columns the line-number gutter reserves — digits plus one column of
+    /// air before the text, 0 when numbers are off. `compute` does not know
+    /// the buffer's line count, so it starts at 0; the caller sets it once
+    /// that is known, before drawing the gutter (`render::frame`).
+    pub number_gutter: u16,
 }
 
 /// Where a visual row's content comes from.
@@ -117,6 +122,7 @@ impl Layout {
             margin_left,
             top: pad_top,
             height,
+            number_gutter: 0,
         }
     }
 }

@@ -193,7 +193,12 @@ fn render_pane(
     }
 
     // The status line already has its row reserved out of `pane_area`.
-    let lay = Layout::compute(&cfg.layout, rect.width, rect.height, 0);
+    let mut lay = Layout::compute(&cfg.layout, rect.width, rect.height, 0);
+    // Zero when numbers are off, or when the margin has no room for them —
+    // `align = "left"`'s fixed 2-column margin, say — in which case the pane
+    // simply goes without rather than drawing into the text.
+    let numbers = app.numbers;
+    lay.number_gutter = number_gutter_width(numbers, doc.buffer.line_count(), lay.margin_left);
 
     let mut cache = doc.cache.borrow_mut();
     cache.sync_doc(app, doc, lay.measure);
@@ -229,12 +234,6 @@ fn render_pane(
         width: lay.measure,
         height: lay.height,
     };
-
-    // Zero when numbers are off, or when the margin has no room for them —
-    // `align = "left"`'s fixed 2-column margin, say — in which case the pane
-    // simply goes without rather than drawing into the text.
-    let numbers = app.numbers;
-    let number_digits = number_gutter_digits(numbers, doc.buffer.line_count(), lay.margin_left);
 
     // Rows of one line are contiguous, so one materialized DisplayLine serves
     // every row it wrapped into. Each row is drawn on its own so the active
@@ -294,14 +293,18 @@ fn render_pane(
         if fenced {
             render_fence_bar(frame, app, r);
         }
-        // Drawn AFTER the row's own text, like the fence bar above: a wide
-        // reveal shift on the active line can push its raw markers left into
-        // the margin, and the number needs to win that column, not lose to it.
-        if number_digits > 0 && is_first_row {
+        // Shifted left by the SAME `shift` as the row's own text: on the
+        // active line, revealed markers hang into the columns immediately
+        // left of where the row now starts, so the number has to give up
+        // that band and sit one further band left of it — never the same
+        // columns, whatever `shift` turns out to be. When even that does not
+        // fit the margin, the number is skipped for this one row rather than
+        // drawn off the pane or over the markers.
+        if lay.number_gutter > 0 && is_first_row && shift + lay.number_gutter <= lay.margin_left {
             let gutter = Rect {
-                x: text_area.x - number_digits - 1,
+                x: text_area.x - shift - lay.number_gutter,
                 y: text_area.y + i as u16,
-                width: number_digits,
+                width: lay.number_gutter - 1,
                 height: 1,
             };
             render_line_number(frame, app, gutter, numbers, row.line(), cursor.line);
@@ -536,26 +539,23 @@ fn in_fence(cache: &RenderCache, line: usize) -> bool {
     })
 }
 
-/// Columns the line-number gutter needs for the largest number it could show
-/// — zero when numbers are off, or when the margin has no room for them, so
-/// a narrow pane (or `align = "left"`'s fixed 2-column margin) simply goes
-/// without rather than drawing into the text.
-fn number_gutter_digits(mode: NumberMode, line_count: usize, margin_left: u16) -> u16 {
+/// Columns the line-number gutter reserves — digits for the largest number it
+/// could show, plus one column of air before the text — zero when numbers are
+/// off, or when the margin has no room for them, so a narrow pane (or
+/// `align = "left"`'s fixed 2-column margin) simply goes without rather than
+/// drawing into the text.
+fn number_gutter_width(mode: NumberMode, line_count: usize, margin_left: u16) -> u16 {
     if !mode.is_on() {
         return 0;
     }
     let digits = line_count.max(1).to_string().len() as u16;
-    if digits < margin_left { digits } else { 0 }
+    if digits < margin_left { digits + 1 } else { 0 }
 }
 
 /// The line-number gutter, right-aligned against the text column with one
 /// blank column of air before it. Only the row that STARTS a buffer line
 /// gets one — a wrapped continuation carries no number, the way a reader
 /// wrapping their eyes down a paragraph in Vim finds it blank too.
-///
-/// Drawn AFTER the row's own text (see the call site): a wide reveal shift on
-/// the active line can push its raw markers left into this same margin band,
-/// and the number needs to win that column, not lose to it.
 fn render_line_number(frame: &mut Frame, app: &App, gutter: Rect, mode: NumberMode, line: usize, cursor_line: usize) {
     let n = if mode == NumberMode::Relative {
         line.abs_diff(cursor_line)
@@ -2392,6 +2392,51 @@ mod tests {
             Some(lay.margin_left as usize),
             "text sits exactly at the margin, nothing squeezed in ahead of it"
         );
+    }
+
+    /// The active line renders its heading markers raw, which normally hangs
+    /// them left into the margin (`gutter_shift`). With numbers on, the
+    /// number has to give up that same band — it shifts one band further
+    /// left, in lockstep with the row, so the two sit side by side rather
+    /// than fighting for the same columns (regression: they used to overlap,
+    /// since only the row shifted and the number stayed put).
+    #[test]
+    fn a_revealed_heading_and_its_number_shift_together_without_overlapping() {
+        let mut app = app_with("### Title\nmore\n");
+        app.numbers = NumberMode::Absolute;
+        app.buffer.cursor = Cursor::new(0, 0); // on the heading: it renders raw
+        // A wide terminal, so the margin has room for both the reveal shift
+        // and the gutter — the case the narrower one below does NOT have.
+        let lay = Layout::compute(&app.config.layout, 120, 24 - STATUS_ROWS, 0);
+        let gutter = number_gutter_width(NumberMode::Absolute, app.buffer.line_count(), lay.margin_left);
+        assert!(gutter > 0, "test needs the number gutter to actually be reserved");
+        let buf = render_to(&app, 120, 24);
+        let row = &rows(&buf)[lay.top as usize];
+        let heading_at = row.find("### Title").expect("the heading is drawn whole, not clipped");
+        let digit_at = row
+            .find(|c: char| c.is_ascii_digit())
+            .expect("there was room for the number too, not just the heading");
+        assert!(digit_at < heading_at, "number and markers overlapped: {row:?}");
+    }
+
+    /// When shifting the number clear of the markers would push it out of the
+    /// margin entirely, the number is left off that ONE row rather than drawn
+    /// over the heading or off the pane — the heading itself stays whole, and
+    /// every other row keeps its own number.
+    #[test]
+    fn a_crowded_margin_drops_the_number_rather_than_overlap_the_heading() {
+        let mut app = app_with("### Title\nmore\n");
+        app.numbers = NumberMode::Absolute;
+        app.buffer.cursor = Cursor::new(0, 0);
+        // The default measure against an 80-column terminal leaves a 4-column
+        // margin — room for the `### ` shift alone, or the gutter alone, but
+        // not both together.
+        let lay = Layout::compute(&app.config.layout, 80, 24 - STATUS_ROWS, 0);
+        let buf = render_to(&app, 80, 24);
+        let rows = rows(&buf);
+        let top = lay.top as usize;
+        assert!(rows[top].contains("### Title"), "the heading is whole: {:?}", rows[top]);
+        assert!(rows[top + 1].trim_start().starts_with('2'), "the next row keeps its own number: {:?}", rows[top + 1]);
     }
 
     /// The cursor's line renders raw; the line below has its `#` concealed.
