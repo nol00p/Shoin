@@ -22,6 +22,8 @@
 //! chrome rather than a view onto a document, and folding it in would mean
 //! every leaf carrying a "which kind am I" tag for one special case.
 
+use std::cell::Cell;
+
 use ratatui::layout::Rect;
 
 use crate::text::cursor::Cursor;
@@ -36,9 +38,13 @@ pub struct Pane {
     pub id: PaneId,
     /// Index into `App::docs`.
     pub doc: usize,
-    /// Top visual row. A HINT — the renderer recomputes it from the cursor
-    /// every frame — but per pane, so two views of one file scroll apart.
-    pub scroll: usize,
+    /// Top visual row. The renderer recomputes it from the cursor every
+    /// frame and writes the result back here, per pane, so two views of one
+    /// file scroll apart. A `Cell` because `render()` only holds `&App`: the
+    /// write-back is what makes `scroll_offset`'s "stay put unless the
+    /// cursor leaves the padded zone" logic see the actual last-drawn top
+    /// instead of a stale one.
+    pub scroll: Cell<usize>,
     /// This pane's share of its parent split. See `EVEN`.
     pub weight: u16,
     /// Where this pane is looking. The FOCUSED pane's copy is written back
@@ -80,7 +86,7 @@ pub struct Geometry {
 
 impl Node {
     pub fn leaf(id: PaneId, doc: usize) -> Node {
-        Node::Leaf(Pane { id, doc, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) })
+        Node::Leaf(Pane { id, doc, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) })
     }
 
     /// Divide `area` among the leaves. Children share their parent's space
@@ -433,7 +439,7 @@ mod tests {
     #[test]
     fn a_vertical_split_puts_panes_side_by_side_with_a_divider() {
         let mut t = tree();
-        assert!(t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) }));
+        assert!(t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) }));
         let geo = t.geometry(area());
         assert_eq!(geo.panes.len(), 2);
         let (_, left) = geo.panes[0];
@@ -448,7 +454,7 @@ mod tests {
     #[test]
     fn a_horizontal_split_stacks_them() {
         let mut t = tree();
-        t.split(1, false, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(1, false, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
         let geo = t.geometry(area());
         let (_, top) = geo.panes[0];
         let (_, bottom) = geo.panes[1];
@@ -462,8 +468,8 @@ mod tests {
     #[test]
     fn repeated_splits_stay_flat_and_even() {
         let mut t = tree();
-        t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
-        t.split(2, true, Pane { id: 3, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(2, true, Pane { id: 3, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
         assert_eq!(t.ids(), vec![1, 2, 3]);
         let geo = t.geometry(area());
         let widths: Vec<u16> = geo.panes.iter().map(|(_, r)| r.width).collect();
@@ -477,8 +483,8 @@ mod tests {
     #[test]
     fn closing_collapses_a_split_with_one_child_left() {
         let mut t = tree();
-        t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
-        t.split(2, false, Pane { id: 3, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(2, false, Pane { id: 3, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
         assert_eq!(t.count(), 3);
 
         assert!(t.close(3));
@@ -498,7 +504,7 @@ mod tests {
     #[test]
     fn resizing_moves_the_boundary_by_the_cells_asked_for() {
         let mut t = tree();
-        t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
         let a = area();
         let before = widths(&t, a);
 
@@ -516,7 +522,7 @@ mod tests {
     #[test]
     fn a_resize_stops_at_the_minimum_rather_than_squeezing_a_pane_out() {
         let mut t = tree();
-        t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
         let a = area();
         assert!(t.resize(a, 2, true, 500), "clamped, not refused");
         let w = widths(&t, a);
@@ -529,7 +535,7 @@ mod tests {
     #[test]
     fn resizing_needs_a_split_that_divides_that_way() {
         let mut t = tree();
-        t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
         // Side by side, so there is no height to redistribute.
         assert!(!t.resize(area(), 2, false, 4));
         assert!(!tree().resize(area(), 1, true, 4), "a lone pane has no neighbour");
@@ -538,7 +544,7 @@ mod tests {
     #[test]
     fn weights_are_relative_so_the_layout_scales_and_equalize_resets() {
         let mut t = tree();
-        t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) });
+        t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) });
         let a = area();
         t.resize(a, 2, true, 20);
         let wide = widths(&t, a);
@@ -561,8 +567,8 @@ mod tests {
     #[test]
     fn neighbors_are_found_by_geometry() {
         let mut t = tree();
-        t.split(1, true, Pane { id: 2, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) }); // 1 | 2
-        t.split(2, false, Pane { id: 3, doc: 0, scroll: 0, weight: EVEN, cursor: Cursor::new(0, 0) }); // right column: 2 over 3
+        t.split(1, true, Pane { id: 2, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) }); // 1 | 2
+        t.split(2, false, Pane { id: 3, doc: 0, scroll: Cell::new(0), weight: EVEN, cursor: Cursor::new(0, 0) }); // right column: 2 over 3
         let a = area();
 
         assert_eq!(t.neighbor(a, 1, Dir::Right), Some(2), "the top of the right column");

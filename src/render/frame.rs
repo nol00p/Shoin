@@ -213,8 +213,14 @@ fn render_pane(
         &lay,
         &cfg.layout,
         cfg.editor.scroll_off,
-        pane.scroll,
+        pane.scroll.get(),
     );
+    // Persist the computed top, not just the value this frame drew: without
+    // this, `scroll_offset`'s "stay put unless the cursor leaves the padded
+    // zone" check always sees a stale baseline and re-derives from scratch
+    // every frame, which reads as the viewport jumping around on navigation
+    // instead of scrolling smoothly (SPEC.md §6, "Reveal shift").
+    pane.scroll.set(top);
 
     let text_area = Rect {
         x: rect.x + lay.margin_left,
@@ -2200,6 +2206,41 @@ mod tests {
         );
         assert!(bottom_rows[0] > top_rows[0], "thumb moved down");
         assert_eq!(bottom_rows.len(), top_rows.len(), "thumb keeps its length");
+    }
+
+    /// `Pane::scroll` is a `Cell` written back on every render specifically so
+    /// `scroll_offset` sees the ACTUAL last-drawn top rather than a stale one.
+    /// Without that write-back, a step that stays inside the padded view would
+    /// still re-derive `top` from scratch each frame and the screen would
+    /// scroll on every keystroke instead of staying put — the viewport
+    /// "jumping around" on ordinary navigation.
+    #[test]
+    fn scroll_does_not_move_on_a_step_that_stays_inside_the_padded_view() {
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let mut app = app_with(&text);
+
+        let lay = Layout::compute(&app.config.layout, 80, 24 - STATUS_ROWS, 0);
+        let height = lay.height as usize;
+        let pad = (app.config.editor.scroll_off as usize).min(height.saturating_sub(1) / 2);
+
+        // Step the cursor down one row per render, the way real keystrokes
+        // drive it, past the point scrolling kicks in, with a little slack.
+        let settle_row = height + pad + 3;
+        for line in 0..=settle_row {
+            app.buffer.cursor = Cursor::new(line, 0);
+            render_to(&app, 80, 24);
+        }
+        let top_before = app.scroll_hint();
+        assert!(top_before > 0, "should have scrolled by now");
+
+        // One step up, still well inside the padded view: the top must not move.
+        app.buffer.cursor = Cursor::new(settle_row - 1, 0);
+        render_to(&app, 80, 24);
+        assert_eq!(
+            app.scroll_hint(),
+            top_before,
+            "scroll jumped on a move that stayed on screen"
+        );
     }
 
     /// Turning it off leaves the margin clean.

@@ -2359,7 +2359,7 @@ impl App {
 
     /// The focused pane's scroll position — a hint the renderer refines.
     pub fn scroll_hint(&self) -> usize {
-        self.focused_pane().map(|p| p.scroll).unwrap_or(0)
+        self.focused_pane().map(|p| p.scroll.get()).unwrap_or(0)
     }
 
     /// The whole area panes are laid out in — the frame minus the tree sidebar
@@ -2383,11 +2383,11 @@ impl App {
     /// document, side by side (or stacked, for a horizontal split).
     fn split_pane(&mut self, vertical: bool) {
         let doc = self.current();
-        let scroll = self.focused_pane().map(|p| p.scroll).unwrap_or(0);
+        let scroll = self.focused_pane().map(|p| p.scroll.get()).unwrap_or(0);
         let cursor = self.buffer.cursor;
         let id = self.next_pane_id;
         self.next_pane_id += 1;
-        if self.layout.split(self.focus_pane, vertical, Pane { id, doc, scroll, weight: crate::render::pane::EVEN, cursor }) {
+        if self.layout.split(self.focus_pane, vertical, Pane { id, doc, scroll: std::cell::Cell::new(scroll), weight: crate::render::pane::EVEN, cursor }) {
             self.focus_pane = id;
             self.touch_status();
         }
@@ -2469,7 +2469,7 @@ impl App {
         let cursor = self.docs[i].buffer.cursor;
         if let Some(pane) = self.layout.pane_mut(self.focus_pane) {
             pane.doc = i;
-            pane.scroll = 0;
+            pane.scroll.set(0);
             // A pane arriving at a document picks up where that document was
             // left, not where this pane was in the last one.
             pane.cursor = cursor;
