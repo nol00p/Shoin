@@ -4,7 +4,7 @@
 //! (block classification) and step 5 (inline), concealment in step 6 — all of
 //! which slot in where the row `Span` is currently built raw.
 
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -14,6 +14,7 @@ use crate::app::{App, FlashKind};
 use crate::finder::{Finder, VISIBLE_ROWS};
 use crate::help::Help;
 use crate::input::mode::{Mode, Prompt, PromptKind};
+use crate::render::align::{self, TextAlign};
 use crate::render::cache::RenderCache;
 use crate::render::markdown::block::BlockKind;
 use crate::render::splash;
@@ -273,7 +274,7 @@ fn render_pane(
             current = Some((row.line(), display_line_of(app, doc, &cache, row.line(), focused)));
         }
         let d = &current.as_ref().unwrap().1;
-        let line = Line::from(window_spans(&d.text, &d.spans, row.start_col, row.end_col));
+        let mut spans = window_spans(&d.text, &d.spans, row.start_col, row.end_col);
         let shift = gutter_shift(app, &cache, &lay, row.line(), row.start_col);
         // A wrapped list continuation is pushed right to sit under the item's
         // content; the cache already wrapped it at the narrower width (SPEC §6).
@@ -289,6 +290,33 @@ fn render_pane(
         // background across the measure (SPEC §5.3).
         let fenced = in_fence(&cache, row.line());
         let row_bg = if fenced { app.theme.code_bg.to_ratatui() } else { bg };
+
+        // `text_align` shapes how each row sits WITHIN the column — a
+        // different axis from the column's own placement (`layout.align`,
+        // handled by `lay.margin_left` already). It never touches a fenced
+        // code row (columns are code) or a table row (its `|`s are the
+        // author's own layout, already left as `no_wrap`).
+        let table = matches!(doc.blocks.kinds.get(row.line()), Some(BlockKind::Table));
+        let is_last_row = row.end_col >= d.text.chars().count();
+        let align = row_align(app.text_align, fenced || table, is_last_row);
+        let mut alignment = None;
+        match align {
+            TextAlign::Left => {}
+            TextAlign::Center => alignment = Some(Alignment::Center),
+            TextAlign::Right => alignment = Some(Alignment::Right),
+            TextAlign::Justified => {
+                let row_text: String =
+                    d.text.chars().skip(row.start_col).take(row.end_col - row.start_col).collect();
+                let gaps = align::justify_gaps(&row_text, r.width);
+                if !gaps.is_empty() {
+                    spans = stretch_spans(spans, &gaps);
+                }
+            }
+        }
+        let mut line = Line::from(spans);
+        if let Some(a) = alignment {
+            line = line.alignment(a);
+        }
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(row_bg)), r);
         if fenced {
             render_fence_bar(frame, app, r);
@@ -320,19 +348,36 @@ fn render_pane(
     if screen_row >= lay.height as usize {
         return None;
     }
-    let (row_start, hang) = cache
-        .row(cursor_row)
-        .map(|r| (r.start_col, hang_x(app, &cache, &lay, &r)))
-        .unwrap_or((0, 0));
-    let prefix: String = doc
-        .buffer
-        .line_text(cursor.line)
-        .chars()
-        .skip(row_start)
-        .take(cursor_offset)
-        .collect();
+    let vr = cache.row(cursor_row);
+    let row_start = vr.map(|r| r.start_col).unwrap_or(0);
+    let row_end = vr.map(|r| r.end_col).unwrap_or(0);
+    let hang = vr.map(|r| hang_x(app, &cache, &lay, &r)).unwrap_or(0);
+    let line_text = doc.buffer.line_text(cursor.line);
+    let prefix: String = line_text.chars().skip(row_start).take(cursor_offset).collect();
     let shift = gutter_shift(app, &cache, &lay, cursor.line, row_start);
-    let x = (text_area.x + display_width(&prefix) + hang)
+
+    // The same alignment the render loop drew this row with, so the caret
+    // lands where the text actually is under `Center`/`Right`/`Justified`.
+    // The active line is always shown raw (never concealed), so `line_text`
+    // above is exactly what that loop windowed for this row.
+    let table = matches!(doc.blocks.kinds.get(cursor.line), Some(BlockKind::Table));
+    let fenced = in_fence(&cache, cursor.line);
+    let is_last_row = row_end >= line_text.chars().count();
+    let align = row_align(app.text_align, fenced || table, is_last_row);
+    let row_width = lay.measure + shift - hang;
+    let extra = match align {
+        TextAlign::Left => 0,
+        TextAlign::Center | TextAlign::Right => {
+            let row_text: String = line_text.chars().skip(row_start).take(row_end - row_start).collect();
+            align::align_offset(align, display_width(&row_text), row_width)
+        }
+        TextAlign::Justified => {
+            let row_text: String = line_text.chars().skip(row_start).take(row_end - row_start).collect();
+            let gaps = align::justify_gaps(&row_text, row_width);
+            align::justify_offset(&gaps, cursor_offset)
+        }
+    };
+    let x = (text_area.x + display_width(&prefix) + hang + extra)
         .saturating_sub(shift)
         .min(rect.right().saturating_sub(1));
     Some(Position::new(x, text_area.y + screen_row as u16))
@@ -1092,13 +1137,39 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
 
     // The active line may hang its markers into the gutter, so it starts that
     // many columns to the left of the text column.
+    let entry = cache.entry(line)?;
+    let concealed = cache.is_concealed(line);
     let shift = gutter_shift(app, &cache, &lay, line, vr.start_col);
-    let click_x = (col + shift).saturating_sub(ex + lay.margin_left + hang_x(app, &cache, &lay, &vr));
+    let hang = hang_x(app, &cache, &lay, &vr);
+    let raw_click_x = (col + shift).saturating_sub(ex + lay.margin_left + hang);
+
+    // Undo whatever offset `text_align` drew this row with, so the click
+    // still lands on the character under the pointer rather than wherever
+    // `Left` would have put it.
+    let table = matches!(app.blocks.kinds.get(line), Some(BlockKind::Table));
+    let fenced = in_fence(&cache, line);
+    let display_text = if concealed { entry.cmap.display_text(&entry.source) } else { entry.source.clone() };
+    let is_last_row = vr.end_col >= display_text.chars().count();
+    let align = row_align(app.text_align, fenced || table, is_last_row);
+    let row_width = lay.measure + shift - hang;
+    let click_x = match align {
+        TextAlign::Left => raw_click_x,
+        TextAlign::Center | TextAlign::Right => {
+            let row_text: String =
+                display_text.chars().skip(vr.start_col).take(vr.end_col - vr.start_col).collect();
+            raw_click_x.saturating_sub(align::align_offset(align, display_width(&row_text), row_width))
+        }
+        TextAlign::Justified => {
+            let row_text: String =
+                display_text.chars().skip(vr.start_col).take(vr.end_col - vr.start_col).collect();
+            let gaps = align::justify_gaps(&row_text, row_width);
+            align::unstretch_col(&gaps, raw_click_x)
+        }
+    };
     let display_col = vr.start_col as u16 + click_x;
 
-    let entry = cache.entry(line)?;
     let len = entry.source.chars().count();
-    let src_col = if cache.is_concealed(line) {
+    let src_col = if concealed {
         entry.cmap.source_col(&entry.source, display_col).min(len)
     } else {
         (display_col as usize).min(len)
@@ -1534,6 +1605,44 @@ fn apply_focus_dim(spans: &mut Vec<StyledSpan>, len: usize, region: &FocusRegion
 /// Clip a line's styled spans to one visual row's char window and lower them to
 /// ratatui spans, pulling display text from the source. Spans arrive ordered,
 /// gap-free, and non-overlapping, so the clip preserves those properties.
+/// The alignment a row actually draws with: `Left` when it is not eligible —
+/// a fenced code line (its columns are code) or a table row (its `|`s are the
+/// author's own layout, already left as `no_wrap`) — or when `Justified`
+/// would apply to a paragraph's own LAST row, which stays ragged by
+/// definition. That last exception is the one thing that turns "stretch
+/// every line" into "justified".
+fn row_align(align: TextAlign, ineligible: bool, is_last_row: bool) -> TextAlign {
+    if ineligible || (align == TextAlign::Justified && is_last_row) {
+        return TextAlign::Left;
+    }
+    align
+}
+
+/// Insert the extra spaces `align::justify_gaps` computed, splitting a span at
+/// each gap so the inserted padding carries no style of its own — the words
+/// on either side keep exactly the style they already had.
+fn stretch_spans(spans: Vec<Span<'static>>, gaps: &[(usize, u16)]) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(spans.len() + gaps.len());
+    let mut idx = 0usize;
+    let mut next_gap = 0usize;
+    for span in spans {
+        let mut buf = String::new();
+        for ch in span.content.chars() {
+            buf.push(ch);
+            idx += 1;
+            if next_gap < gaps.len() && idx == gaps[next_gap].0 + 1 {
+                out.push(Span::styled(std::mem::take(&mut buf), span.style));
+                out.push(Span::raw(" ".repeat(gaps[next_gap].1 as usize)));
+                next_gap += 1;
+            }
+        }
+        if !buf.is_empty() {
+            out.push(Span::styled(buf, span.style));
+        }
+    }
+    out
+}
+
 fn window_spans(source: &str, styled: &[StyledSpan], start: usize, end: usize) -> Vec<Span<'static>> {
     let chars: Vec<char> = source.chars().collect();
     let end = end.min(chars.len());
@@ -2805,6 +2914,95 @@ mod tests {
             !text.iter().any(|r| r.trim() == "bob |"),
             "the row's tail must not have wrapped onto its own line: {text:?}"
         );
+    }
+
+    /// `text_align` shapes how a row sits WITHIN the column — a different axis
+    /// from `layout.align`, which places the column itself (untouched here).
+    /// The default is `left`: a short row stays flush against the column's
+    /// own left edge, exactly where it always drew.
+    #[test]
+    fn left_is_the_default_and_leaves_a_short_row_flush() {
+        let app = app_with("hi\n");
+        assert_eq!(app.text_align, TextAlign::Left);
+        let drawn = rows(&render_to(&app, 80, 8));
+        let row = drawn.iter().find(|r| r.trim() == "hi").expect("hi is on screen");
+        let margin_left = (80u16 - app.config.layout.measure) / 2;
+        let leading = row.chars().take_while(|c| *c == ' ').count() as u16;
+        assert_eq!(leading, margin_left, "flush against the column's left edge");
+    }
+
+    /// `Center` centers a short (unwrapped) row inside the measure — the same
+    /// offset ratatui's own `Line::centered` would compute, since that is
+    /// exactly what draws it.
+    #[test]
+    fn center_align_centers_a_short_row_in_the_measure() {
+        let mut app = app_with("hi\n");
+        app.config.layout.measure = 20;
+        app.text_align = TextAlign::Center;
+        let drawn = rows(&render_to(&app, 80, 8));
+        let row = drawn.iter().find(|r| r.trim() == "hi").expect("hi is on screen");
+        let margin_left = (80u16 - 20) / 2;
+        let leading = row.chars().take_while(|c| *c == ' ').count() as u16;
+        assert_eq!(leading, margin_left + 9, "(20/2) - (2/2) columns in from the edge");
+    }
+
+    /// `Right` pushes a short row flush against the measure's own right edge.
+    #[test]
+    fn right_align_pushes_a_short_row_to_the_measures_right_edge() {
+        let mut app = app_with("hi\n");
+        app.config.layout.measure = 20;
+        app.text_align = TextAlign::Right;
+        let drawn = rows(&render_to(&app, 80, 8));
+        let row = drawn.iter().find(|r| r.trim() == "hi").expect("hi is on screen");
+        let margin_left = (80u16 - 20) / 2;
+        let leading = row.chars().take_while(|c| *c == ' ').count() as u16;
+        assert_eq!(leading, margin_left + 18, "20 - 2 columns in from the edge");
+    }
+
+    /// `Justified` stretches every wrapped row of a paragraph to fill the
+    /// measure exactly, EXCEPT the paragraph's own last row, which stays
+    /// ragged — the one thing that tells "justified" apart from "stretch
+    /// every line", and why a reader can still tell where the paragraph ends.
+    #[test]
+    fn justified_stretches_every_row_but_the_last() {
+        let mut app = app_with("aaa bbb ccc ddd\n");
+        app.config.layout.measure = 10;
+        app.text_align = TextAlign::Justified;
+        let drawn = rows(&render_to(&app, 80, 8));
+        let margin_left = (80u16 - 10) / 2;
+        let pad = " ".repeat(margin_left as usize);
+
+        let first = drawn.iter().find(|r| r.trim_start().starts_with("aaa")).expect("first row");
+        assert_eq!(first, &format!("{pad}aaa    bbb"), "stretched flush to the measure");
+
+        let last = drawn.iter().find(|r| r.trim_start().starts_with("ccc")).expect("last row");
+        assert_eq!(last, &format!("{pad}ccc ddd"), "the last row stays ragged");
+    }
+
+    /// A short paragraph that never wraps has no "last row" distinct from its
+    /// only row, so `Justified` leaves it exactly as `Left` would draw it —
+    /// there is nothing to stretch it against.
+    #[test]
+    fn justified_leaves_an_unwrapped_row_ragged() {
+        let mut app = app_with("aaa bbb\n");
+        app.config.layout.measure = 20;
+        app.text_align = TextAlign::Justified;
+        let drawn = rows(&render_to(&app, 80, 8));
+        let row = drawn.iter().find(|r| r.contains("aaa")).expect("on screen");
+        assert!(row.trim_end().ends_with("aaa bbb"), "single space, not stretched: {row:?}");
+    }
+
+    /// A fenced code row is code, not prose: `text_align` never touches it,
+    /// even set to `Justified`, which would otherwise mangle indentation and
+    /// inter-token spacing.
+    #[test]
+    fn fenced_code_ignores_text_align() {
+        let mut app = app_with("```\nfn  x()  {}\n```\n");
+        app.config.layout.measure = 40;
+        app.text_align = TextAlign::Justified;
+        let drawn = rows(&render_to(&app, 80, 8));
+        let row = drawn.iter().find(|r| r.contains("fn")).expect("code line on screen");
+        assert!(row.contains("fn  x()  {}"), "spacing untouched: {row:?}");
     }
 }
 

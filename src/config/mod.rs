@@ -171,6 +171,12 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         "left · center",
     );
     check(
+        "layout.text_align",
+        &cfg.layout.text_align,
+        crate::render::align::TextAlign::parse(&cfg.layout.text_align).is_some(),
+        "left · center · right · justified",
+    );
+    check(
         "transclude.embed",
         &cfg.transclude.embed,
         crate::transclude::Mode::parse(&cfg.transclude.embed).is_some(),
