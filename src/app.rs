@@ -31,6 +31,7 @@ use crate::input::mode::{Mode, Prompt, PromptKind};
 use crate::input::pending::{Key, Pending, Resolution, Table};
 use crate::render::cache::RenderCache;
 use crate::render::conceal::ActiveSet;
+use crate::render::align::TextAlign;
 use crate::render::focus::{FocusMode, FocusRegion};
 use crate::render::numbers::NumberMode;
 use crate::render::pane::{Dir, Node, Pane, PaneId};
@@ -273,6 +274,12 @@ pub struct App {
     /// returns to whichever mode was last chosen rather than defaulting to
     /// absolute.
     last_numbers: NumberMode,
+
+    /// How each row sits within the (always-centered, per `layout.align`)
+    /// writing column. Starts at `layout.text_align`; `:align [mode]` changes
+    /// it live, and cycles left → center → right → justified with no
+    /// argument.
+    pub text_align: TextAlign,
 
     /// The last executed search; drives `n`/`N` and match highlighting.
     pub search: Option<Search>,
@@ -547,6 +554,7 @@ impl App {
         };
         let config_focus = config.layout.focus.clone();
         let config_numbers = config.layout.numbers.clone();
+        let config_text_align = config.layout.text_align.clone();
         // Read before `config` moves into the struct below.
         let autosave = crate::fs::save::Autosave::from_config(&config.editor)
             .interval()
@@ -615,6 +623,7 @@ impl App {
             focus_region: None,
             numbers: NumberMode::parse(&config_numbers).unwrap_or_default(),
             last_numbers: NumberMode::Absolute,
+            text_align: TextAlign::parse(&config_text_align).unwrap_or_default(),
             search: None,
             dot: Vec::new(),
             recording: Vec::new(),
@@ -4313,6 +4322,7 @@ impl App {
                 self.notify(format!("typewriter {on}"), FlashKind::Info);
             }
             "number" | "nu" => self.set_numbers(arg),
+            "align" => self.set_align(arg),
             "export" => self.open_export(arg),
             // §14.3. Also re-reads every target, so it doubles as the way to
             // refresh an expansion after editing the file it came from.
@@ -4385,6 +4395,32 @@ impl App {
         }
         self.numbers = next;
         self.notify(format!("number: {}", next.label()), FlashKind::Info);
+    }
+
+    /// `:align [left|center|right|justified]` — how each row of text sits
+    /// within the writing column (SPEC.md §6). Column placement itself
+    /// (`layout.align`, `center | left`) is untouched by this.
+    ///
+    /// With no argument it CYCLES left → center → right → justified → left,
+    /// same shape as `:focus`: there is no single "off" state to toggle back
+    /// to, so cycling is the only motion that reaches every value from a key
+    /// press alone.
+    fn set_align(&mut self, arg: &str) {
+        let next = if arg.trim().is_empty() {
+            self.text_align.next()
+        } else {
+            match TextAlign::parse(arg) {
+                Some(a) => a,
+                None => {
+                    return self.notify(
+                        format!("align: left · center · right · justified, not {arg:?}"),
+                        FlashKind::Error,
+                    )
+                }
+            }
+        };
+        self.text_align = next;
+        self.notify(format!("align: {}", next.label()), FlashKind::Info);
     }
 
     /// `:set <key> [on|off]` or `:set <key>=<value>` — toggle when no value.
@@ -4503,6 +4539,7 @@ impl App {
             }
             "embed" => return self.set_embed_mode(val),
             "numbers" | "number" | "nu" => return self.set_numbers(val),
+            "align" => return self.set_align(val),
             "mouse" => {
                 self.config.input.mouse = resolve(val, self.config.input.mouse);
                 self.set_mouse_capture(self.config.input.mouse);
@@ -6201,6 +6238,42 @@ mod tests {
         // `:set numbers=...` reaches the same place.
         cmd(&mut app, ":set numbers=relative");
         assert_eq!(app.numbers, NumberMode::Relative);
+    }
+
+    /// `:align [left|center|right|justified]` — the default is `left`, an
+    /// explicit mode sets it directly, and with no argument it CYCLES through
+    /// every value (there is no single "off" to toggle back to, unlike
+    /// `:number`/`:embed`).
+    #[test]
+    fn align_command_sets_directly_and_cycles_with_no_argument() {
+        let mut app = app_with("hi\n");
+        assert_eq!(app.text_align, TextAlign::Left, "the default");
+
+        cmd(&mut app, ":align center");
+        assert_eq!(app.text_align, TextAlign::Center);
+        cmd(&mut app, ":align right");
+        assert_eq!(app.text_align, TextAlign::Right);
+        cmd(&mut app, ":align justified");
+        assert_eq!(app.text_align, TextAlign::Justified);
+        cmd(&mut app, ":align left");
+        assert_eq!(app.text_align, TextAlign::Left);
+
+        cmd(&mut app, ":align"); // bare: cycles forward
+        assert_eq!(app.text_align, TextAlign::Center);
+        cmd(&mut app, ":align");
+        assert_eq!(app.text_align, TextAlign::Right);
+        cmd(&mut app, ":align");
+        assert_eq!(app.text_align, TextAlign::Justified);
+        cmd(&mut app, ":align");
+        assert_eq!(app.text_align, TextAlign::Left, "wraps back around");
+
+        // A bad argument changes nothing, same as an unset `:set` value would.
+        cmd(&mut app, ":align sideways");
+        assert_eq!(app.text_align, TextAlign::Left);
+
+        // `:set align=...` reaches the same place.
+        cmd(&mut app, ":set align=center");
+        assert_eq!(app.text_align, TextAlign::Center);
     }
 
     /// The bare no-argument toggle is also reachable as a leader binding, the

@@ -2,6 +2,7 @@
 //! Holds no mutable state except caches keyed by `Buffer::revision`.
 //! SPEC.md §3, §9.
 
+pub mod align;
 pub mod cache;
 pub mod conceal;
 pub mod focus;

@@ -225,6 +225,8 @@ Everything below opens and closes with the same key. `<leader>` is Space.
   :focus [off|paragraph|sentence]   dim everything but what you're writing
   :number [relative|absolute]       line numbers — bare :number toggles off
                                      and back to whichever mode you last used
+  :align [left|center|right|        how each line sits within the column —
+         |justified]                bare :align cycles through all four
   :typewriter                       keep the cursor line centered
   :zen                              hide every chrome affordance at once
   :set measure=72                   the text width, in columns
