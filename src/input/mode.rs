@@ -49,8 +49,10 @@ pub enum PromptKind {
     Delete { entries: usize },
     /// `:export` — confirm where the finished document goes. `input` opens
     /// pre-filled with a suggestion, and `target` is the document being
-    /// exported, kept so the write can refuse to land on it.
-    Export { format: crate::export::Format },
+    /// exported, kept so the write can refuse to land on it. `justify`
+    /// stretches `html`/`txt` to fill the measure, checked before the prompt
+    /// even opens since `md`/`pdf` have no layout of their own to stretch.
+    Export { format: crate::export::Format, justify: bool },
 }
 
 impl PromptKind {

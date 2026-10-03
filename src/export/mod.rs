@@ -88,7 +88,8 @@ pub fn write(
     match format {
         Format::Markdown => std::fs::write(dest, flat).with_context(|| short(dest))?,
         Format::Text => {
-            std::fs::write(dest, plain::render(&flat)).with_context(|| short(dest))?
+            std::fs::write(dest, plain::render(&flat, page.measure, page.justify))
+                .with_context(|| short(dest))?
         }
         Format::Html => {
             let title = source
@@ -258,6 +259,29 @@ mod tests {
         assert!(!got.contains("**"));
         assert!(!got.contains("##"), "and headings underlined instead");
         assert!(got.contains("----"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `page.justify` reaches both formats that have a layout of their own to
+    /// stretch: `txt` wraps and pads with spaces (`export::plain`), `html`
+    /// gets a class the stylesheet justifies (`export::html`). `md` has no
+    /// visual layout of its own, so the flag has nothing to do there.
+    #[test]
+    fn justify_reaches_the_txt_and_html_exports() {
+        let d = vault("justify");
+        let src = d.join("note.md");
+        std::fs::write(&src, "aaa bbb ccc ddd\n").unwrap();
+        let page = html::Page { measure: 10, justify: true, ..html::Page::default() };
+
+        let txt = d.join("out.txt");
+        write(&src, &txt, Format::Text, &TranscludeConfig::default(), &page).unwrap();
+        let got = std::fs::read_to_string(&txt).unwrap();
+        assert!(got.contains("aaa    bbb"), "stretched to the measure: {got:?}");
+
+        let html_dest = d.join("out.html");
+        write(&src, &html_dest, Format::Html, &TranscludeConfig::default(), &page).unwrap();
+        let got = std::fs::read_to_string(&html_dest).unwrap();
+        assert!(got.contains("<main class=\"justify\">"));
         std::fs::remove_dir_all(&d).ok();
     }
 

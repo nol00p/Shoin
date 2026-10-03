@@ -68,6 +68,12 @@ struct Cli {
     #[arg(long, value_name = "FORMAT", default_value = "md")]
     format: String,
 
+    /// Stretch every wrapped line but a paragraph's last to fill the measure.
+    /// Only `--format html` and `--format txt` have a layout of their own to
+    /// stretch.
+    #[arg(long)]
+    justify: bool,
+
     /// Where `--export` writes.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
@@ -108,10 +114,14 @@ fn main() -> Result<()> {
     if let Some(src) = &cli.export {
         let format = export::Format::parse(&cli.format)
             .ok_or_else(|| anyhow::anyhow!("{:?} is not md, txt, html or pdf", cli.format))?;
+        if cli.justify && !matches!(format, export::Format::Html | export::Format::Text) {
+            anyhow::bail!("--justify only applies to --format html or --format txt");
+        }
         let page = export::html::Page {
             theme: render::theme::Theme::authored(&config.theme).unwrap_or_default(),
             measure: config.layout.measure,
             base: src.parent().unwrap_or(std::path::Path::new("")).to_path_buf(),
+            justify: cli.justify,
         };
         let title = src
             .file_stem()
@@ -123,7 +133,7 @@ fn main() -> Result<()> {
             }
             let flat = transclude::compile::compile(src, &config.transclude)?;
             match format {
-                export::Format::Text => print!("{}", export::plain::render(&flat)),
+                export::Format::Text => print!("{}", export::plain::render(&flat, page.measure, page.justify)),
                 export::Format::Html => print!("{}", export::html::render(&flat, &title, &page)),
                 _ => print!("{flat}"),
             }

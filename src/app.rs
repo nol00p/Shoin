@@ -31,6 +31,7 @@ use crate::input::mode::{Mode, Prompt, PromptKind};
 use crate::input::pending::{Key, Pending, Resolution, Table};
 use crate::render::cache::RenderCache;
 use crate::render::conceal::ActiveSet;
+use crate::render::align::TextAlign;
 use crate::render::focus::{FocusMode, FocusRegion};
 use crate::render::numbers::NumberMode;
 use crate::render::pane::{Dir, Node, Pane, PaneId};
@@ -273,6 +274,12 @@ pub struct App {
     /// returns to whichever mode was last chosen rather than defaulting to
     /// absolute.
     last_numbers: NumberMode,
+
+    /// How each row sits within the (always-centered, per `layout.align`)
+    /// writing column. Starts at `layout.text_align`; `:align [mode]` changes
+    /// it live, and cycles left → center → right → justified with no
+    /// argument.
+    pub text_align: TextAlign,
 
     /// The last executed search; drives `n`/`N` and match highlighting.
     pub search: Option<Search>,
@@ -547,6 +554,7 @@ impl App {
         };
         let config_focus = config.layout.focus.clone();
         let config_numbers = config.layout.numbers.clone();
+        let config_text_align = config.layout.text_align.clone();
         // Read before `config` moves into the struct below.
         let autosave = crate::fs::save::Autosave::from_config(&config.editor)
             .interval()
@@ -615,6 +623,7 @@ impl App {
             focus_region: None,
             numbers: NumberMode::parse(&config_numbers).unwrap_or_default(),
             last_numbers: NumberMode::Absolute,
+            text_align: TextAlign::parse(&config_text_align).unwrap_or_default(),
             search: None,
             dot: Vec::new(),
             recording: Vec::new(),
@@ -3954,8 +3963,8 @@ impl App {
     fn finish_prompt(&mut self, p: Prompt) {
         // Export is not a tree operation and must work with the tree closed,
         // so it is answered before the tree is required.
-        if let PromptKind::Export { format } = p.kind {
-            return self.finish_export(format, &p.target, p.input.trim());
+        if let PromptKind::Export { format, justify } = p.kind {
+            return self.finish_export(format, justify, &p.target, p.input.trim());
         }
         let Some(tree) = self.tree.as_ref() else { return };
         let root = tree.root.clone();
@@ -4041,24 +4050,39 @@ impl App {
         }
     }
 
-    /// `:export [md|txt|html|pdf]` — open the save dialog for the finished doc.
+    /// `:export [md|txt|html|pdf] [justify]` — open the save dialog for the
+    /// finished doc. `justify` stretches every wrapped line but a
+    /// paragraph's last to fill `layout.measure` — only `html` and `txt` have
+    /// a layout of their own to stretch, so it is refused on `md` (raw
+    /// markup, no visual layout) and `pdf` (pandoc's own template decides
+    /// that).
     ///
     /// The document is flattened from what is ON DISK, so an unsaved buffer is
     /// refused rather than exported from a stale file. Silently exporting
     /// yesterday's version is the one outcome nobody could detect.
     fn open_export(&mut self, arg: &str) {
-        let arg = arg.trim();
-        let format = if arg.is_empty() {
-            Format::Markdown
-        } else {
-            match Format::parse(arg) {
+        let mut format_tok = None;
+        let mut justify = false;
+        for tok in arg.split_whitespace() {
+            match tok.to_ascii_lowercase().as_str() {
+                "justify" | "justified" => justify = true,
+                _ if format_tok.is_none() => format_tok = Some(tok),
+                _ => return self.notify(format!("export: unexpected {tok:?}"), FlashKind::Error),
+            }
+        }
+        let format = match format_tok {
+            None => Format::Markdown,
+            Some(f) => match Format::parse(f) {
                 Some(f) => f,
                 None => {
                     return self
-                        .notify(format!("export: {arg:?} is not md, txt, html or pdf"), FlashKind::Error)
+                        .notify(format!("export: {f:?} is not md, txt, html or pdf"), FlashKind::Error)
                 }
-            }
+            },
         };
+        if justify && !matches!(format, Format::Html | Format::Text) {
+            return self.notify("export: justify only applies to html or txt", FlashKind::Error);
+        }
         let Some(src) = self.buffer.path.clone() else {
             return self.notify("export: save this file first", FlashKind::Error);
         };
@@ -4075,14 +4099,14 @@ impl App {
             .to_string_lossy()
             .into_owned();
         self.mode = Mode::Prompt(Prompt {
-            kind: PromptKind::Export { format },
+            kind: PromptKind::Export { format, justify },
             target: src,
             input: shown,
         });
     }
 
     /// Carry out an answered export prompt.
-    fn finish_export(&mut self, format: Format, source: &Path, dest: &str) {
+    fn finish_export(&mut self, format: Format, justify: bool, source: &Path, dest: &str) {
         if dest.is_empty() {
             return;
         }
@@ -4105,6 +4129,7 @@ impl App {
                 .parent()
                 .unwrap_or(std::path::Path::new(""))
                 .to_path_buf(),
+            justify,
         };
         match crate::export::write(source, &dest, format, &self.config.transclude, &page) {
             Err(e) => self.notify(format!("export: {e}"), FlashKind::Error),
@@ -4313,6 +4338,7 @@ impl App {
                 self.notify(format!("typewriter {on}"), FlashKind::Info);
             }
             "number" | "nu" => self.set_numbers(arg),
+            "align" => self.set_align(arg),
             "export" => self.open_export(arg),
             // §14.3. Also re-reads every target, so it doubles as the way to
             // refresh an expansion after editing the file it came from.
@@ -4385,6 +4411,32 @@ impl App {
         }
         self.numbers = next;
         self.notify(format!("number: {}", next.label()), FlashKind::Info);
+    }
+
+    /// `:align [left|center|right|justified]` — how each row of text sits
+    /// within the writing column (SPEC.md §6). Column placement itself
+    /// (`layout.align`, `center | left`) is untouched by this.
+    ///
+    /// With no argument it CYCLES left → center → right → justified → left,
+    /// same shape as `:focus`: there is no single "off" state to toggle back
+    /// to, so cycling is the only motion that reaches every value from a key
+    /// press alone.
+    fn set_align(&mut self, arg: &str) {
+        let next = if arg.trim().is_empty() {
+            self.text_align.next()
+        } else {
+            match TextAlign::parse(arg) {
+                Some(a) => a,
+                None => {
+                    return self.notify(
+                        format!("align: left · center · right · justified, not {arg:?}"),
+                        FlashKind::Error,
+                    )
+                }
+            }
+        };
+        self.text_align = next;
+        self.notify(format!("align: {}", next.label()), FlashKind::Info);
     }
 
     /// `:set <key> [on|off]` or `:set <key>=<value>` — toggle when no value.
@@ -4503,6 +4555,7 @@ impl App {
             }
             "embed" => return self.set_embed_mode(val),
             "numbers" | "number" | "nu" => return self.set_numbers(val),
+            "align" => return self.set_align(val),
             "mouse" => {
                 self.config.input.mouse = resolve(val, self.config.input.mouse);
                 self.set_mouse_capture(self.config.input.mouse);
@@ -6201,6 +6254,70 @@ mod tests {
         // `:set numbers=...` reaches the same place.
         cmd(&mut app, ":set numbers=relative");
         assert_eq!(app.numbers, NumberMode::Relative);
+    }
+
+    /// `:align [left|center|right|justified]` — the default is `left`, an
+    /// explicit mode sets it directly, and with no argument it CYCLES through
+    /// every value (there is no single "off" to toggle back to, unlike
+    /// `:number`/`:embed`).
+    #[test]
+    fn align_command_sets_directly_and_cycles_with_no_argument() {
+        let mut app = app_with("hi\n");
+        assert_eq!(app.text_align, TextAlign::Left, "the default");
+
+        cmd(&mut app, ":align center");
+        assert_eq!(app.text_align, TextAlign::Center);
+        cmd(&mut app, ":align right");
+        assert_eq!(app.text_align, TextAlign::Right);
+        cmd(&mut app, ":align justified");
+        assert_eq!(app.text_align, TextAlign::Justified);
+        cmd(&mut app, ":align left");
+        assert_eq!(app.text_align, TextAlign::Left);
+
+        cmd(&mut app, ":align"); // bare: cycles forward
+        assert_eq!(app.text_align, TextAlign::Center);
+        cmd(&mut app, ":align");
+        assert_eq!(app.text_align, TextAlign::Right);
+        cmd(&mut app, ":align");
+        assert_eq!(app.text_align, TextAlign::Justified);
+        cmd(&mut app, ":align");
+        assert_eq!(app.text_align, TextAlign::Left, "wraps back around");
+
+        // A bad argument changes nothing, same as an unset `:set` value would.
+        cmd(&mut app, ":align sideways");
+        assert_eq!(app.text_align, TextAlign::Left);
+
+        // `:set align=...` reaches the same place.
+        cmd(&mut app, ":set align=center");
+        assert_eq!(app.text_align, TextAlign::Center);
+    }
+
+    /// `:export [format] [justify]` takes the two tokens in either order, and
+    /// refuses `justify` on `md`/`pdf` — neither has a visual layout of its
+    /// own to stretch (raw markup; pandoc's own template, respectively) — by
+    /// never opening the save dialog at all.
+    #[test]
+    fn export_command_takes_format_and_justify_in_either_order() {
+        let d = two_files();
+        let mut app = app_with("scratch\n");
+        app.open_file(d.join("one.md"));
+
+        cmd(&mut app, ":export html justify");
+        let Mode::Prompt(p) = app.mode.clone() else { panic!("no prompt") };
+        assert_eq!(p.kind, PromptKind::Export { format: Format::Html, justify: true });
+        app.mode = Mode::Normal;
+
+        cmd(&mut app, ":export justify txt");
+        let Mode::Prompt(p) = app.mode.clone() else { panic!("no prompt") };
+        assert_eq!(p.kind, PromptKind::Export { format: Format::Text, justify: true });
+        app.mode = Mode::Normal;
+
+        cmd(&mut app, ":export justify");
+        assert!(matches!(app.mode, Mode::Normal), "md has nothing to stretch");
+        cmd(&mut app, ":export pdf justify");
+        assert!(matches!(app.mode, Mode::Normal), "pandoc's template decides, not us");
+
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// The bare no-argument toggle is also reachable as a leader binding, the

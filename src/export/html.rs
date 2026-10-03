@@ -32,11 +32,17 @@ pub struct Page {
     /// against the DOCUMENT, not against wherever the export was run from, so
     /// inlining it needs to know where the document lives.
     pub base: std::path::PathBuf,
+    /// Stretch every wrapped line but a paragraph's last to fill `measure` —
+    /// the browser's own `text-align:justify`, which already leaves the last
+    /// line of a block ragged, so it needs no extra math unlike the plain-text
+    /// path (`export::plain`). Never applied to a fenced block or a table,
+    /// whose columns are the author's own layout.
+    pub justify: bool,
 }
 
 impl Default for Page {
     fn default() -> Self {
-        Page { theme: Theme::default(), measure: 72, base: std::path::PathBuf::new() }
+        Page { theme: Theme::default(), measure: 72, base: std::path::PathBuf::new(), justify: false }
     }
 }
 
@@ -56,7 +62,8 @@ pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
     out.push_str(&format!("<title>{}</title>\n", escape(&title)));
     out.push_str("<style>\n");
     out.push_str(&stylesheet(page));
-    out.push_str("</style>\n</head>\n<body>\n<main>\n");
+    let main_class = if page.justify { " class=\"justify\"" } else { "" };
+    out.push_str(&format!("</style>\n</head>\n<body>\n<main{main_class}>\n"));
     out.push_str(&body);
     out.push_str("</main>\n</body>\n</html>\n");
     out
@@ -828,6 +835,8 @@ table{{border-collapse:collapse;margin:1.5em 0;width:100%;font-size:.95em}}
 th,td{{border:1px solid var(--border);padding:.4em .7em;text-align:left}}
 th{{color:var(--fg);font-weight:700}}
 img{{max-width:100%;height:auto}}
+main.justify p,main.justify li,main.justify blockquote{{text-align:justify}}
+main.justify pre,main.justify table{{text-align:left}}
 .k{{color:var(--syn-k)}}
 .t{{color:var(--syn-t)}}
 .s{{color:var(--syn-s)}}
@@ -1043,6 +1052,24 @@ mod tests {
         let html = render("# H\n", "x", &page);
         assert!(html.contains("--h1: #112233"), "the theme reaches the CSS");
         assert!(html.contains("max-width:100ch"), "and so does the measure");
+    }
+
+    /// `page.justify` is what `--justify`/`:export … justify` sets: it turns
+    /// into a class on `<main>`, which the stylesheet justifies prose under
+    /// and keeps a fenced block or table left regardless. The browser's own
+    /// `text-align:justify` already leaves the last line of a paragraph
+    /// ragged, so there is no stretch math to carry over from `export::plain`.
+    #[test]
+    fn justify_adds_the_class_and_css_but_leaves_code_and_tables_left() {
+        let page = Page::default();
+        let html = render("text\n", "x", &page);
+        assert!(html.contains("<main>\n"), "no class without the flag");
+
+        let page = Page { justify: true, ..Page::default() };
+        let html = render("text\n", "x", &page);
+        assert!(html.contains("<main class=\"justify\">\n"));
+        assert!(html.contains("main.justify p,main.justify li,main.justify blockquote{text-align:justify}"));
+        assert!(html.contains("main.justify pre,main.justify table{text-align:left}"));
     }
 
     /// An indexed color is what a theme downgraded for a 256-color terminal is

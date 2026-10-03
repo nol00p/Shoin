@@ -30,6 +30,9 @@ pub struct Config {
 pub struct LayoutConfig {
     pub measure: u16,
     pub align: String,
+    /// How each row of text sits within the column `measure`/`align` place on
+    /// screen — left | center | right | justified. `:align` changes it live.
+    pub text_align: String,
     pub padding_top: u16,
     pub padding_bottom: u16,
     pub hanging_indent: bool,
@@ -54,6 +57,7 @@ impl Default for LayoutConfig {
         Self {
             measure: 72,
             align: "center".into(),
+            text_align: "left".into(),
             padding_top: 2,
             padding_bottom: 2,
             hanging_indent: true,
