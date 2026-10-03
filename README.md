@@ -494,6 +494,19 @@ shoin [FILE]
 
 ## Changelog
 
+### 0.1.6
+
+- Added `:align [left|center|right|justified]` (bare form cycles) and a
+  matching `layout.text_align` config setting, controlling how each row sits
+  *within* the writing column — separate from `layout.align`, which places
+  the column itself on screen. Justified stretches every wrapped row to fill
+  the measure except a paragraph's last row, which stays ragged; fenced code
+  and table rows are always left regardless of the setting.
+- `:export [md|txt|html|pdf] [justify]`, and `--justify` on the CLI, carry
+  the same justification into `html`/`txt` export — the two formats shoin
+  renders itself. `md` and `pdf` refuse the flag, since raw markup and
+  pandoc's own template have no layout of their own to stretch.
+
 ### 0.1.5
 
 - Fixed the viewport jumping around during ordinary navigation. The scroll
