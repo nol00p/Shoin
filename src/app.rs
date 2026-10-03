@@ -3963,8 +3963,8 @@ impl App {
     fn finish_prompt(&mut self, p: Prompt) {
         // Export is not a tree operation and must work with the tree closed,
         // so it is answered before the tree is required.
-        if let PromptKind::Export { format } = p.kind {
-            return self.finish_export(format, &p.target, p.input.trim());
+        if let PromptKind::Export { format, justify } = p.kind {
+            return self.finish_export(format, justify, &p.target, p.input.trim());
         }
         let Some(tree) = self.tree.as_ref() else { return };
         let root = tree.root.clone();
@@ -4050,24 +4050,39 @@ impl App {
         }
     }
 
-    /// `:export [md|txt|html|pdf]` — open the save dialog for the finished doc.
+    /// `:export [md|txt|html|pdf] [justify]` — open the save dialog for the
+    /// finished doc. `justify` stretches every wrapped line but a
+    /// paragraph's last to fill `layout.measure` — only `html` and `txt` have
+    /// a layout of their own to stretch, so it is refused on `md` (raw
+    /// markup, no visual layout) and `pdf` (pandoc's own template decides
+    /// that).
     ///
     /// The document is flattened from what is ON DISK, so an unsaved buffer is
     /// refused rather than exported from a stale file. Silently exporting
     /// yesterday's version is the one outcome nobody could detect.
     fn open_export(&mut self, arg: &str) {
-        let arg = arg.trim();
-        let format = if arg.is_empty() {
-            Format::Markdown
-        } else {
-            match Format::parse(arg) {
+        let mut format_tok = None;
+        let mut justify = false;
+        for tok in arg.split_whitespace() {
+            match tok.to_ascii_lowercase().as_str() {
+                "justify" | "justified" => justify = true,
+                _ if format_tok.is_none() => format_tok = Some(tok),
+                _ => return self.notify(format!("export: unexpected {tok:?}"), FlashKind::Error),
+            }
+        }
+        let format = match format_tok {
+            None => Format::Markdown,
+            Some(f) => match Format::parse(f) {
                 Some(f) => f,
                 None => {
                     return self
-                        .notify(format!("export: {arg:?} is not md, txt, html or pdf"), FlashKind::Error)
+                        .notify(format!("export: {f:?} is not md, txt, html or pdf"), FlashKind::Error)
                 }
-            }
+            },
         };
+        if justify && !matches!(format, Format::Html | Format::Text) {
+            return self.notify("export: justify only applies to html or txt", FlashKind::Error);
+        }
         let Some(src) = self.buffer.path.clone() else {
             return self.notify("export: save this file first", FlashKind::Error);
         };
@@ -4084,14 +4099,14 @@ impl App {
             .to_string_lossy()
             .into_owned();
         self.mode = Mode::Prompt(Prompt {
-            kind: PromptKind::Export { format },
+            kind: PromptKind::Export { format, justify },
             target: src,
             input: shown,
         });
     }
 
     /// Carry out an answered export prompt.
-    fn finish_export(&mut self, format: Format, source: &Path, dest: &str) {
+    fn finish_export(&mut self, format: Format, justify: bool, source: &Path, dest: &str) {
         if dest.is_empty() {
             return;
         }
@@ -4114,6 +4129,7 @@ impl App {
                 .parent()
                 .unwrap_or(std::path::Path::new(""))
                 .to_path_buf(),
+            justify,
         };
         match crate::export::write(source, &dest, format, &self.config.transclude, &page) {
             Err(e) => self.notify(format!("export: {e}"), FlashKind::Error),
@@ -6274,6 +6290,34 @@ mod tests {
         // `:set align=...` reaches the same place.
         cmd(&mut app, ":set align=center");
         assert_eq!(app.text_align, TextAlign::Center);
+    }
+
+    /// `:export [format] [justify]` takes the two tokens in either order, and
+    /// refuses `justify` on `md`/`pdf` — neither has a visual layout of its
+    /// own to stretch (raw markup; pandoc's own template, respectively) — by
+    /// never opening the save dialog at all.
+    #[test]
+    fn export_command_takes_format_and_justify_in_either_order() {
+        let d = two_files();
+        let mut app = app_with("scratch\n");
+        app.open_file(d.join("one.md"));
+
+        cmd(&mut app, ":export html justify");
+        let Mode::Prompt(p) = app.mode.clone() else { panic!("no prompt") };
+        assert_eq!(p.kind, PromptKind::Export { format: Format::Html, justify: true });
+        app.mode = Mode::Normal;
+
+        cmd(&mut app, ":export justify txt");
+        let Mode::Prompt(p) = app.mode.clone() else { panic!("no prompt") };
+        assert_eq!(p.kind, PromptKind::Export { format: Format::Text, justify: true });
+        app.mode = Mode::Normal;
+
+        cmd(&mut app, ":export justify");
+        assert!(matches!(app.mode, Mode::Normal), "md has nothing to stretch");
+        cmd(&mut app, ":export pdf justify");
+        assert!(matches!(app.mode, Mode::Normal), "pandoc's template decides, not us");
+
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// The bare no-argument toggle is also reachable as a leader binding, the

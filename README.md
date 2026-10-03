@@ -342,8 +342,10 @@ Write atomic ideas as separate files; compose them by ordering links.
 Obsidian syntax, so vaults stay portable — and moving a section becomes `dd` `p`.
 
 `:embed [none|short|rec|full]` chooses how much to expand on screen; `full`
-shows the finished document with no seams. `:export [md|txt|html|pdf]` writes it
-out through a save dialog.
+shows the finished document with no seams. `:export [md|txt|html|pdf] [justify]`
+writes it out through a save dialog — `justify` stretches every wrapped line
+but a paragraph's last to fill the measure, in whichever of `html`/`txt` you
+chose (the only two with a layout of their own to stretch).
 
 #### Following a link
 
@@ -407,6 +409,7 @@ covering every link form including one that deliberately doesn't resolve.
 ```sh
 shoin --export notes.md --format html --out notes.html
 shoin --export notes.md --format txt --stdout | pandoc …
+shoin --export notes.md --format html --justify --out notes.html
 ```
 
 No terminal is acquired, so it composes into pipelines and build scripts.
@@ -482,6 +485,7 @@ shoin [FILE]
   --zen               start with every chrome affordance hidden
   --export <FILE>     export without starting the editor
   --format <FORMAT>   md | txt | html | pdf          (default: md)
+  --justify           stretch html/txt to fill the measure (md, pdf: refused)
   --out <PATH>        where --export writes
   --stdout            print the export instead of writing it (text formats only)
 ```

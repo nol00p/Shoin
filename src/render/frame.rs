@@ -1243,7 +1243,10 @@ fn prompt_label(app: &App, p: &Prompt) -> String {
         PromptKind::Create => format!("{}/", shown(&p.target)),
         PromptKind::Rename => "name: ".to_string(),
         PromptKind::Move => "to: ".to_string(),
-        PromptKind::Export { format } => format!("{} to: ", format.name()),
+        PromptKind::Export { format, justify } => {
+            let mode = if *justify { " (justified)" } else { "" };
+            format!("{}{mode} to: ", format.name())
+        }
         PromptKind::Delete { entries } => {
             let what = shown(&p.target);
             // The count is the point: `d` on a directory row takes everything
