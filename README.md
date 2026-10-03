@@ -494,6 +494,15 @@ shoin [FILE]
 
 ## Changelog
 
+### 0.1.7
+
+- Added a `cycle_align` keybinding action, reaching the same left → center →
+  right → justified cycle as a bare `:align` from a single key press. Bound
+  by default to `<leader>a`.
+- Clarified the `leader` comment in `input.conf`: a modifier or named key
+  needs the same `<...>` wrapping a `keys.conf` binding uses (`"<C-x>"`, not
+  `"C-x"`), which is easy to miss since a single character needs none.
+
 ### 0.1.6
 
 - Added `:align [left|center|right|justified]` (bare form cycles) and a
