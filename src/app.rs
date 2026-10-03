@@ -1742,6 +1742,7 @@ impl App {
                 self.config.layout.conceal = !self.config.layout.conceal;
             }
             Action::ToggleNumbers => self.set_numbers(""),
+            Action::CycleAlign => self.set_align(""),
             Action::FileTree { root } => {
                 let root = self.root_dir(root);
                 self.toggle_tree(root);
@@ -6330,6 +6331,23 @@ mod tests {
         assert_eq!(app.numbers, NumberMode::Absolute, "turns on to the default last mode");
         feed(&mut app, " n");
         assert_eq!(app.numbers, NumberMode::Off);
+    }
+
+    /// `cycle_align` reaches the same bare cycle as `:align` with no argument,
+    /// from a single key press — there is no "off" to toggle back to, so
+    /// unlike `toggle_numbers` every press moves forward one step.
+    #[test]
+    fn cycle_align_action_steps_through_every_value() {
+        let mut app = app_with_keys("hi\n", &[("<leader>a", "cycle_align")]);
+        assert_eq!(app.text_align, TextAlign::Left);
+        feed(&mut app, " a");
+        assert_eq!(app.text_align, TextAlign::Center);
+        feed(&mut app, " a");
+        assert_eq!(app.text_align, TextAlign::Right);
+        feed(&mut app, " a");
+        assert_eq!(app.text_align, TextAlign::Justified);
+        feed(&mut app, " a");
+        assert_eq!(app.text_align, TextAlign::Left);
     }
 
     /// Changing the measure re-wraps: the render cache keys its entries on it.

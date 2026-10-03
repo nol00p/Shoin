@@ -119,7 +119,7 @@ const SHORTCUTS: &[&str] = &[
     "  <leader>w      save                    <leader>q      quit",
     "  <leader>F      cycle focus mode        <leader>t      typewriter scroll",
     "  <leader>z      toggle zen (all chrome) <leader>c      toggle conceal",
-    "  <leader>n      toggle line numbers",
+    "  <leader>n      toggle line numbers      <leader>a      cycle text align",
     "  <leader>fe     file tree, this folder  <leader>fE     file tree, $HOME",
     "  <leader>ff     find file, this folder  <leader>fF     find file, $HOME",
     "  <leader>fb     switch buffer (finder)",

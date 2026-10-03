@@ -113,6 +113,10 @@ pub enum Action {
     ToggleNumbers,
     /// Flip `layout.conceal` — live preview vs. every line raw.
     ToggleConceal,
+    /// `:align` with no argument, reachable from a key: left → center → right
+    /// → justified → left. No single value is "off", so cycling is the only
+    /// way a leader binding reaches every value.
+    CycleAlign,
     /// Toggle the file-tree pane, rooted at the edited file's own folder or at
     /// `$HOME`. Inside the tree, `-` and `+` move the root from there.
     FileTree { root: Root },
@@ -195,6 +199,7 @@ impl Action {
             "toggle_conceal" | "conceal" => Action::ToggleConceal,
             "toggle_zen" | "zen" => Action::ToggleZen,
             "toggle_numbers" | "numbers" | "number" => Action::ToggleNumbers,
+            "cycle_align" | "align" => Action::CycleAlign,
             "help" | "shortcuts" => Action::Help,
             "file_tree" | "file_explorer" | "tree" => Action::FileTree { root: Root::File },
             "file_tree_home" | "file_explorer_home" => Action::FileTree { root: Root::Home },
