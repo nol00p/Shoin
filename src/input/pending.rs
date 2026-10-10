@@ -384,7 +384,7 @@ impl Pending {
             // alone: `"a2dd` is one command.
             Awaiting::Register => {
                 if let Some(name) = key.as_char() {
-                    if name.is_ascii_alphanumeric() || name == '"' {
+                    if name.is_ascii_alphanumeric() || matches!(name, '"' | '+' | '*') {
                         self.register = Some(name);
                     }
                 }

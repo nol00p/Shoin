@@ -20,6 +20,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 
+use crate::clipboard::Clipboard;
 use crate::config::{Config, ConfigWatcher};
 use crate::help::Help;
 use crate::finder::{self, Finder};
@@ -247,6 +248,9 @@ pub struct App {
     registers: HashMap<char, Register>,
     /// Register named by a `"x` prefix, consumed by the next store or paste.
     pending_register: Option<char>,
+    /// What `"+` and `"*` reach — and every unnamed yank and paste when
+    /// `[editor] clipboard` is on. Never the real one under `cargo test`.
+    clipboard: Box<dyn Clipboard>,
     /// Visual-mode selection anchor; `None` outside Visual/VisualLine.
     pub anchor: Option<Cursor>,
     /// Where the left button went down, while a drag out of it is still live
@@ -285,10 +289,10 @@ pub struct App {
     pub search: Option<Search>,
 
     // --- `.` repeat (SPEC.md §7.3) ---
-    /// Keys of the last change, replayed by `.`.
-    dot: Vec<KeyEvent>,
-    /// Keys of the command currently in flight.
-    recording: Vec<KeyEvent>,
+    /// Input of the last change, replayed by `.`.
+    dot: Vec<Replay>,
+    /// Input of the command currently in flight.
+    recording: Vec<Replay>,
     /// Buffer revision when the in-flight command began, to tell if it edited.
     dot_rev: u64,
     /// True while replaying `dot`, so the replay is not itself recorded.
@@ -399,6 +403,16 @@ struct ZenState {
 struct Register {
     text: String,
     linewise: bool,
+}
+
+/// One piece of recorded input for `.`. A bracketed paste is its own entry
+/// rather than the keys it would have taken to type: replayed as keys it would
+/// go back through auto-indent, list continuation and the escape alias, and
+/// come out different from what was pasted.
+#[derive(Clone)]
+enum Replay {
+    Key(KeyEvent),
+    Paste(String),
 }
 
 /// The last executed search, for `n`/`N` repeats and match highlighting.
@@ -615,6 +629,7 @@ impl App {
             last_find: None,
             registers: HashMap::new(),
             pending_register: None,
+            clipboard: crate::clipboard::session(),
             anchor: None,
             drag_from: None,
             visual_resumes_insert: false,
@@ -983,6 +998,11 @@ impl App {
             }
             CtEvent::Mouse(m) => {
                 self.on_mouse(m);
+                self.sync_after_input();
+                self.needs_redraw = true;
+            }
+            CtEvent::Paste(text) => {
+                self.on_paste(text);
                 self.sync_after_input();
                 self.needs_redraw = true;
             }
@@ -1834,7 +1854,7 @@ impl App {
                 self.recording.clear();
                 self.dot_rev = self.buffer.revision;
             }
-            self.recording.push(key);
+            self.recording.push(Replay::Key(key));
         }
 
         let mode = self.mode.clone();
@@ -1869,6 +1889,112 @@ impl App {
         if !self.replaying && self.is_clean() && self.buffer.revision != self.dot_rev {
             self.dot = std::mem::take(&mut self.recording);
         }
+    }
+
+    // ----------------------------------------------------------------- paste
+
+    /// A bracketed paste: the terminal's own paste (Cmd+V, Ctrl+Shift+V),
+    /// arriving as one piece of text instead of as keys.
+    ///
+    /// Into the buffer it goes in exactly as it was copied, in Normal mode as
+    /// much as Insert: no auto-indent, no list continuation, no auto-pair and
+    /// no escape alias, any one of which would change it on the way in. Normal
+    /// mode inserts at the cursor and stays in Normal, as Neovim does — the
+    /// keys-as-commands reading is the accident bracketed paste exists to
+    /// prevent. A one-line field takes the first line only, since a newline
+    /// there would be Enter.
+    fn on_paste(&mut self, text: String) {
+        let text = crate::clipboard::normalize(&text);
+        let first_line = || text.split('\n').next().unwrap_or("").to_string();
+        if self.help.is_some() || self.diff.is_some() {
+            return;
+        }
+        if let Some(finder) = self.finder.as_mut() {
+            first_line().chars().for_each(|c| finder.push_char(c));
+            return;
+        }
+        match self.mode.clone() {
+            Mode::Command(mut buf) => {
+                buf.push_str(&first_line());
+                self.mode = Mode::Command(buf);
+                return;
+            }
+            Mode::Search { mut query, reverse } => {
+                query.push_str(&first_line());
+                self.mode = Mode::Search { query, reverse };
+                return;
+            }
+            // A yes/no question is answered by one deliberate key, never by
+            // whatever happened to be on the clipboard.
+            Mode::Prompt(mut p) => {
+                if !p.kind.is_confirm() {
+                    p.input.push_str(&first_line());
+                    self.mode = Mode::Prompt(p);
+                }
+                return;
+            }
+            _ => {}
+        }
+        if self.tree.as_ref().is_some_and(|t| t.focused) || text.is_empty() {
+            return;
+        }
+        // Over a selection, the selection ends first; a drag made while
+        // inserting goes back to the insert session it came out of.
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+            self.leave_visual();
+        }
+        // A half-typed command is dropped, not finished by the next key: a `d`
+        // left waiting under a paste would take whatever is typed after it.
+        if matches!(self.mode, Mode::Normal) {
+            self.pending.reset();
+        }
+        // `.` repeats a paste the way it repeats anything else: from Normal
+        // it is a change of its own, inside an insert session it is part of
+        // the session's change.
+        if !self.replaying {
+            if self.is_clean() {
+                self.recording.clear();
+                self.dot_rev = self.buffer.revision;
+            }
+            self.recording.push(Replay::Paste(text.clone()));
+        }
+        let inserting = matches!(self.mode, Mode::Insert);
+        if inserting {
+            // A step of its own inside the session, so `u` takes back the
+            // paste and not the sentence typed before it.
+            self.coalesce_insert(true);
+            self.escape_run = 0;
+            self.escape_since = None;
+        } else {
+            let anchor = self.buffer.cursor;
+            self.buffer.history.begin_group(Some(anchor));
+        }
+        self.insert_pasted(&text, inserting);
+        if inserting {
+            self.buffer.history.split();
+        } else {
+            self.buffer.history.end_group();
+        }
+        if !self.replaying && self.is_clean() && self.buffer.revision != self.dot_rev {
+            self.dot = std::mem::take(&mut self.recording);
+        }
+    }
+
+    /// Put pasted text in at the cursor. The cursor ends after it while
+    /// inserting, and on its last character in Normal mode, as `P` leaves it.
+    fn insert_pasted(&mut self, text: &str, inserting: bool) {
+        let at = self.buffer.cursor;
+        if !self.buffer.insert_str(at, text) {
+            return;
+        }
+        let newlines = text.matches('\n').count();
+        let tail = text.rsplit('\n').next().unwrap_or("").chars().count();
+        let line = at.line + newlines;
+        let mut col = if newlines == 0 { at.col + tail } else { tail };
+        if !inserting {
+            col = col.saturating_sub(1);
+        }
+        self.buffer.cursor = Cursor::new(line, col);
     }
 
     // ------------------------------------------------------------------ help
@@ -2749,8 +2875,11 @@ impl App {
             return;
         }
         self.replaying = true;
-        for key in self.dot.clone() {
-            self.on_key(key);
+        for input in self.dot.clone() {
+            match input {
+                Replay::Key(key) => self.on_key(key),
+                Replay::Paste(text) => self.on_paste(text),
+            }
         }
         self.replaying = false;
     }
@@ -3435,9 +3564,19 @@ impl App {
     ///
     /// An UPPERCASE name appends to that register instead of replacing it, so
     /// `"Ayy` on several lines collects them.
+    ///
+    /// `"+` and `"*` are the system clipboard — one clipboard, not X11's two:
+    /// PRIMARY is the selection a terminal already owns. With
+    /// `[editor] clipboard` on, an unnamed store goes there as well, the way
+    /// vim's `clipboard=unnamedplus` does; a NAMED one still does not, so
+    /// `"ayy` remains a way to keep something out of it.
     fn store_register(&mut self, text: String, linewise: bool, deleted: bool) {
         let reg = Register { text, linewise };
         if let Some(name) = self.pending_register.take() {
+            if is_clipboard_register(name) {
+                self.copy_to_clipboard(reg);
+                return;
+            }
             let key = name.to_ascii_lowercase();
             let merged = if name.is_ascii_uppercase() {
                 match self.registers.get(&key) {
@@ -3473,18 +3612,57 @@ impl App {
         } else {
             self.registers.insert('0', reg.clone());
         }
+        if self.config.editor.clipboard {
+            self.copy_to_clipboard(reg);
+        } else {
+            self.registers.insert('"', reg);
+        }
+    }
+
+    /// Copy to the system clipboard, keeping a record of what went: `"+` for
+    /// `read_clipboard_register` to recognise, and `"` as every store fills.
+    fn copy_to_clipboard(&mut self, reg: Register) {
+        self.clipboard.copy(&reg.text);
+        self.registers.insert('+', reg.clone());
         self.registers.insert('"', reg);
     }
 
     /// The register a command should read: the one a `"x` prefix named (consumed
-    /// here), else the unnamed one.
+    /// here), else the unnamed one — or the system clipboard, for `"+`/`"*` or
+    /// an unnamed paste with `[editor] clipboard` on.
     fn take_register(&mut self) -> Option<Register> {
         let name = self
             .pending_register
             .take()
             .unwrap_or('"')
             .to_ascii_lowercase();
-        self.registers.get(&name).cloned()
+        let system =
+            is_clipboard_register(name) || (name == '"' && self.config.editor.clipboard);
+        if !system {
+            return self.registers.get(&name).cloned();
+        }
+        match self.clipboard.paste().filter(|t| !t.is_empty()) {
+            Some(text) => Some(self.read_clipboard_register(text)),
+            // Nothing readable — no program, or over SSH, where copying went
+            // out as OSC 52 and cannot come back. Shoin's own record of its
+            // last copy is the best answer left.
+            None => {
+                let key = if name == '"' { '"' } else { '+' };
+                self.registers.get(&key).cloned()
+            }
+        }
+    }
+
+    /// A register for text read off the system clipboard, which says nothing
+    /// about lines. If it still holds what Shoin last put there, that copy's
+    /// record knows whether it was `yy` or `yw`; otherwise text ending in a
+    /// newline is taken for whole lines, which is vim's rule too.
+    fn read_clipboard_register(&self, text: String) -> Register {
+        if let Some(ours) = self.registers.get(&'+').filter(|r| r.text == text) {
+            return ours.clone();
+        }
+        let linewise = text.ends_with('\n');
+        Register { text, linewise }
     }
 
     /// `p` / `P`: paste the register after / before the cursor.
@@ -4518,6 +4696,14 @@ impl App {
                     false => self.notify("autoreload off", FlashKind::Info),
                 };
             }
+            "clipboard" | "cb" => {
+                let on = resolve(val, self.config.editor.clipboard);
+                self.config.editor.clipboard = on;
+                return match on {
+                    true => self.notify("clipboard on · y d p use the system clipboard", FlashKind::Info),
+                    false => self.notify("clipboard off · \"+y \"+p still reach it", FlashKind::Info),
+                };
+            }
             // Minutes, so it reports rather than toggles — like `measure`.
             // Setting it does NOT turn autosave on: the interval is a
             // preference, switching it on is a decision.
@@ -4664,6 +4850,11 @@ fn closer_of(c: char) -> Option<char> {
         '"' | '\'' | '`' => c,
         _ => return None,
     })
+}
+
+/// `"+` and `"*`: the system clipboard.
+fn is_clipboard_register(name: char) -> bool {
+    matches!(name, '+' | '*')
 }
 
 #[cfg(test)]
@@ -8081,5 +8272,168 @@ mod tests {
         drag(&mut app, 8, 4);
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.buffer.cursor, Cursor::new(0, 0), "the cursor never moved");
+    }
+
+    // ------------------------------------------------------------- clipboard
+
+    /// An app whose system clipboard is `mem`, kept by the caller to inspect.
+    fn clip_app(text: &str, mem: &crate::clipboard::Memory) -> App {
+        let mut app = app_with(text);
+        app.clipboard = Box::new(mem.clone());
+        app
+    }
+
+    #[test]
+    fn plus_register_yanks_to_the_clipboard() {
+        let mem = crate::clipboard::Memory::default();
+        let mut app = clip_app("alpha\nbravo\n", &mem);
+        feed(&mut app, "j\"+yy");
+        assert_eq!(mem.text().as_deref(), Some("bravo\n"));
+        feed(&mut app, "\"*yiw");
+        assert_eq!(mem.text().as_deref(), Some("bravo"), "\"* is the same clipboard");
+    }
+
+    #[test]
+    fn plus_register_pastes_what_another_program_copied() {
+        let mem = crate::clipboard::Memory::holding("XY");
+        let mut app = clip_app("ab\n", &mem);
+        feed(&mut app, "\"+p");
+        assert_eq!(text(&app), "aXYb\n", "charwise, after the cursor");
+    }
+
+    #[test]
+    fn clipboard_text_ending_in_a_newline_pastes_as_lines() {
+        let mem = crate::clipboard::Memory::holding("new\n");
+        let mut app = clip_app("one\ntwo\n", &mem);
+        feed(&mut app, "\"+p");
+        assert_eq!(text(&app), "one\nnew\ntwo\n");
+    }
+
+    /// Shoin's own copy keeps its shape: a charwise copy that happens to end
+    /// in a newline is still charwise when it comes back off the clipboard.
+    #[test]
+    fn our_own_copy_remembers_it_was_charwise() {
+        let mem = crate::clipboard::Memory::default();
+        let mut app = clip_app("ab\n", &mem);
+        app.pending_register = Some('+');
+        app.store_register("x\n".into(), false, false);
+        assert_eq!(mem.text().as_deref(), Some("x\n"));
+        feed(&mut app, "\"+p");
+        assert_eq!(text(&app), "ax\nb\n", "inside the line, not a line below");
+        // The same text from another program is taken for a line.
+        let mut other = clip_app("ab\n", &crate::clipboard::Memory::holding("x\n"));
+        feed(&mut other, "\"+p");
+        assert_eq!(text(&other), "ab\nx\n");
+    }
+
+    /// No program to read from (or over SSH): `"+p` uses what was copied.
+    #[test]
+    fn an_unreadable_clipboard_falls_back_to_our_copy() {
+        struct WriteOnly;
+        impl Clipboard for WriteOnly {
+            fn copy(&mut self, _: &str) {}
+            fn paste(&mut self) -> Option<String> {
+                None
+            }
+        }
+        let mut app = app_with("ab\n");
+        app.clipboard = Box::new(WriteOnly);
+        feed(&mut app, "\"+yl\"+p");
+        assert_eq!(text(&app), "aab\n");
+    }
+
+    #[test]
+    fn plain_yank_leaves_the_clipboard_alone_by_default() {
+        let mem = crate::clipboard::Memory::holding("theirs");
+        let mut app = clip_app("ours\n", &mem);
+        feed(&mut app, "yyp");
+        assert_eq!(mem.text().as_deref(), Some("theirs"));
+        assert_eq!(text(&app), "ours\nours\n");
+    }
+
+    #[test]
+    fn clipboard_option_routes_unnamed_yank_and_paste() {
+        let mem = crate::clipboard::Memory::default();
+        let mut app = clip_app("ours\n", &mem);
+        app.set_option("clipboard");
+        assert!(app.config.editor.clipboard);
+        feed(&mut app, "yy");
+        assert_eq!(mem.text().as_deref(), Some("ours\n"));
+        mem.clone().copy("theirs");
+        feed(&mut app, "P");
+        assert_eq!(text(&app), "theirsours\n", "plain P read the clipboard");
+    }
+
+    /// `"ayy` is how to keep something out of the clipboard with it on.
+    #[test]
+    fn a_named_register_never_reaches_the_clipboard() {
+        let mem = crate::clipboard::Memory::holding("theirs");
+        let mut app = clip_app("ours\n", &mem);
+        app.config.editor.clipboard = true;
+        feed(&mut app, "\"ayy");
+        assert_eq!(mem.text().as_deref(), Some("theirs"));
+    }
+
+    // ----------------------------------------------------------------- paste
+
+    #[test]
+    fn a_paste_while_inserting_goes_in_verbatim() {
+        let mut app = app_with("- one\n");
+        feed(&mut app, "A");
+        // Typed, the newline would continue the list and indent, and `jk`
+        // would leave Insert.
+        app.on_paste("\r\n  - two jk\n- three".into());
+        assert_eq!(text(&app), "- one\n  - two jk\n- three\n");
+        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.buffer.cursor, Cursor::new(2, 7), "after the paste");
+    }
+
+    #[test]
+    fn a_paste_in_normal_mode_is_text_not_commands() {
+        let mut app = app_with("ab\n");
+        app.on_paste("dd".into());
+        assert_eq!(text(&app), "ddab\n");
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 1), "on its last character");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "ab\n", "one undo step");
+    }
+
+    #[test]
+    fn a_paste_drops_a_half_typed_command() {
+        let mut app = app_with("ab\ncd\n");
+        feed(&mut app, "d");
+        app.on_paste("X".into());
+        feed(&mut app, "j");
+        assert_eq!(text(&app), "Xab\ncd\n", "j moved; it did not complete dj");
+        assert_eq!(app.buffer.cursor.line, 1);
+    }
+
+    #[test]
+    fn dot_repeats_a_paste() {
+        let mut app = app_with("ab\n");
+        app.on_paste("X".into());
+        feed(&mut app, "ll.");
+        assert_eq!(text(&app), "XaXb\n");
+    }
+
+    #[test]
+    fn dot_repeats_an_insert_session_with_a_paste_in_it() {
+        let mut app = app_with("\n\n");
+        feed(&mut app, "i(");
+        app.on_paste("jk".into());
+        feed(&mut app, ")");
+        esc(&mut app);
+        feed(&mut app, "j.");
+        assert_eq!(text(&app), "(jk)\n(jk)\n");
+    }
+
+    #[test]
+    fn a_paste_on_the_command_line_takes_its_first_line() {
+        let mut app = app_with("ab\n");
+        feed(&mut app, ":");
+        app.on_paste("set mouse\nq!".into());
+        assert_eq!(app.mode, Mode::Command("set mouse".into()));
+        assert_eq!(text(&app), "ab\n");
     }
 }
