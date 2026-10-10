@@ -494,6 +494,13 @@ shoin [FILE]
 
 ## Changelog
 
+### Unreleased
+
+- `dw` on a line's last word no longer takes the line break with it and joins
+  the next line on, and `yw` there no longer yanks the newline — vim's `w`
+  rule. A `d{count}w` that crosses lines from the start of a line deletes
+  whole lines, as in vim.
+
 ### 0.1.7
 
 - Added a `cycle_align` keybinding action, reaching the same left → center →
