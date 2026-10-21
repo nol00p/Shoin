@@ -51,6 +51,8 @@ desk built into a bay by the window, and nothing else in the room.
 
 ---
 
+[![Shoin on The Terminal Index](https://cli.masoko.net/badge/shoin.svg)](https://cli.masoko.net/tools/shoin/)
+
 ## Install
 
 ### From the repository
