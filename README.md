@@ -51,6 +51,8 @@ desk built into a bay by the window, and nothing else in the room.
 
 ---
 
+[![Shoin on The Terminal Index](https://cli.masoko.net/badge/shoin.svg)](https://cli.masoko.net/tools/shoin/)
+
 ## Install
 
 ### From the repository
@@ -520,6 +522,10 @@ shoin [FILE]
 - A terminal paste now arrives as one piece of text (bracketed paste) and goes
   in verbatim: it no longer runs as commands in Normal mode, picks up
   auto-indent or list markers, or leaves Insert on a `jk`.
+- `dw` on a line's last word no longer takes the line break with it and joins
+  the next line on, and `yw` there no longer yanks the newline — vim's `w`
+  rule. A `d{count}w` that crosses lines from the start of a line deletes
+  whole lines, as in vim.
 
 ### 0.1.7
 

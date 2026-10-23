@@ -3044,15 +3044,57 @@ impl App {
         };
         let from = self.buffer.cursor;
         let page = self.viewport_height();
-        let res = match motion::resolve(&self.buffer, m, count, page) {
-            Some(r) => r,
-            None => return,
+        // `w` under an operator stops at the end of the line its last word
+        // ends (`:help w`), so `dw` there keeps the line break.
+        let res = match m {
+            Motion::WordForward { big } => motion::word_forward_operator(&self.buffer, count, big)
+                .map(|target| motion::MotionResult {
+                    target,
+                    kind: motion::MotionKind::Exclusive,
+                }),
+            _ => motion::resolve(&self.buffer, m, count, page),
         };
+        let Some(mut res) = res else {
+            return;
+        };
+        if res.kind == motion::MotionKind::Exclusive {
+            // vim's rule for every exclusive motion (`:help exclusive`): one
+            // ending in column 0 of a later line ends at the end of the line
+            // before instead — and goes linewise if it started in the indent.
+            if res.target.col == 0 && res.target.line > from.line {
+                let line = res.target.line - 1;
+                if from.col <= self.first_non_blank(from.line) {
+                    return self.operate_linewise(op, from.line, line);
+                }
+                res.target = Cursor::new(line, self.buffer.line_len(line));
+            }
+            if op == Operator::Delete && self.delete_goes_linewise(from, res.target) {
+                return self.operate_linewise(op, from.line, res.target.line);
+            }
+        }
         match res.kind {
             motion::MotionKind::Linewise => self.operate_linewise(op, from.line, res.target.line),
             motion::MotionKind::Inclusive => self.operate_charwise(op, from, res.target, true),
             motion::MotionKind::Exclusive => self.operate_charwise(op, from, res.target, false),
         }
+    }
+
+    /// vim's `op_delete` rule: a charwise delete over more than one line that
+    /// starts in the first line's indent and ends with nothing but blanks
+    /// after it removes whole lines instead, so `d3w` from the start of
+    /// `a / b c / d` leaves `d` rather than an empty line above it.
+    fn delete_goes_linewise(&self, from: Cursor, end: Cursor) -> bool {
+        if end.line <= from.line {
+            return false;
+        }
+        let in_indent = from.col <= self.first_non_blank(from.line);
+        let rest_blank = self
+            .buffer
+            .line_text(end.line)
+            .chars()
+            .skip(end.col)
+            .all(char::is_whitespace);
+        in_indent && rest_blank
     }
 
     // -------------------------------------------------------- writer verbs (g)
@@ -6752,6 +6794,116 @@ mod tests {
         let mut app = app_with("the quick fox\n");
         feed(&mut app, "dw");
         assert_eq!(text(&app), "quick fox\n");
+    }
+
+    /// `dw` on a line's last word keeps the line break: the next line is not
+    /// joined on.
+    #[test]
+    fn dw_on_the_last_word_of_a_line_keeps_the_newline() {
+        let mut app = app_with("alpha\nbravo\ncharlie\n");
+        feed(&mut app, "jdw");
+        assert_eq!(text(&app), "alpha\n\ncharlie\n");
+        let mut app = app_with("one two\nthree\n");
+        feed(&mut app, "wdw");
+        assert_eq!(text(&app), "one \nthree\n");
+    }
+
+    #[test]
+    fn yw_on_the_last_word_of_a_line_yanks_no_newline() {
+        let mut app = app_with("alpha\nbravo\n");
+        feed(&mut app, "jyw");
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, "bravo");
+    }
+
+    /// Trailing whitespace after the last word still goes, as in vim.
+    #[test]
+    fn dw_at_a_line_end_takes_trailing_whitespace() {
+        let mut app = app_with("foo bar   \nbaz\n");
+        feed(&mut app, "wdw");
+        assert_eq!(text(&app), "foo \nbaz\n");
+    }
+
+    /// With a count the rule applies to the LAST word moved over: `d3w`
+    /// across a line break stops at the end of the line the third word ends.
+    #[test]
+    fn counted_dw_across_lines_stops_at_the_last_words_line_end() {
+        // Started mid-line, the delete stays charwise.
+        let mut app = app_with("x a\nb c\nd\n");
+        feed(&mut app, "wd3w");
+        assert_eq!(text(&app), "x \nd\n");
+    }
+
+    /// Started in the indent, a multi-line `dw` takes whole lines (vim's
+    /// `op_delete` rule).
+    #[test]
+    fn counted_dw_from_the_indent_deletes_whole_lines() {
+        let mut app = app_with("a\nb c\nd\n");
+        feed(&mut app, "d3w");
+        assert_eq!(text(&app), "d\n");
+        let mut app = app_with("  a\nb\nc\n");
+        feed(&mut app, "^d2w");
+        assert_eq!(text(&app), "c\n", "on the first non-blank is still in the indent");
+        let mut app = app_with("  a\nb\nc\n");
+        feed(&mut app, "^d3w");
+        assert_eq!(text(&app), "", "to the end of the buffer");
+    }
+
+    /// An empty line is a word to `w`, so it is where the rule looks, and a
+    /// `dw` that starts on one is left as it was. Each case checked in vim.
+    #[test]
+    fn dw_around_empty_lines_matches_vim() {
+        let cases = [
+            ("a\n\nb\n", "dw", "\n\nb\n"),
+            ("a\n\nb\n", "d2w", "b\n"),
+            ("\nb\n", "dw", "b\n"),
+        ];
+        for (before, keys, after) in cases {
+            let mut app = app_with(before);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), after, "{keys} on {before:?}");
+        }
+    }
+
+    /// `y` never goes linewise: the rule is `d`'s alone.
+    #[test]
+    fn counted_yw_across_lines_stays_charwise() {
+        let mut app = app_with("a\nb c\nd\n");
+        feed(&mut app, "y3w");
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, "a\nb c");
+    }
+
+    /// `cw` on the blank before a line end changes the blanks, not the line
+    /// break.
+    #[test]
+    fn cw_on_trailing_blanks_keeps_the_newline() {
+        let mut app = app_with("ab  \ncd\n");
+        feed(&mut app, "llcw");
+        esc(&mut app);
+        assert_eq!(text(&app), "ab\ncd\n");
+    }
+
+    /// A counted `w` whose last word is mid-line is not cut back to an
+    /// earlier line end, and the buffer's end counts as a line end.
+    #[test]
+    fn counted_dw_ending_mid_line_or_at_buffer_end_matches_vim() {
+        let cases = [
+            ("a\nb c\n", "d2w", "c\n"),
+            ("x a\nb c d\n", "wd2w", "x c d\n"),
+            ("a\nb\nc d\n", "d3w", "d\n"),
+            ("a\nb", "d2w", ""),
+            ("foo\nbar", "jdw", "foo\n"),
+        ];
+        for (before, keys, after) in cases {
+            let mut app = app_with(before);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), after, "{keys} on {before:?}");
+        }
+        let mut app = app_with("a\nb c");
+        feed(&mut app, "y2w");
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, "a\nb ");
     }
 
     #[test]

@@ -140,7 +140,7 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
             let mut line = cur.line;
             let mut col = cur.col;
             for _ in 0..count {
-                let (l, c) = word_forward(buffer, line, col, big, last_line);
+                let (l, c) = word_forward(buffer, line, col, big, last_line, false);
                 line = l;
                 col = c;
             }
@@ -261,12 +261,32 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
     Some(MotionResult { target, kind })
 }
 
+/// `w` as an operator's motion (`dw`, `yw`, `cw` on a blank): the same steps
+/// as `w`, except that the LAST step stops on the line end when the word it
+/// moves over ends the line, or when it runs out of buffer — vim's `fwd_word`
+/// with `eol` set. `None` if it cannot move.
+pub fn word_forward_operator(buffer: &Buffer, count: usize, big: bool) -> Option<Cursor> {
+    let cur = buffer.cursor;
+    let last_line = buffer.line_count().saturating_sub(1);
+    let count = count.max(1);
+    let (mut line, mut col) = (cur.line, cur.col);
+    for i in 0..count {
+        (line, col) = word_forward(buffer, line, col, big, last_line, i + 1 == count);
+    }
+    let target = Cursor::new(line, col);
+    (target != cur).then_some(target)
+}
+
+/// One `w` step. With `stop_at_eol` it lands on the line end (`col == len`)
+/// rather than crossing the line break when the word stepped off ends the
+/// line, and rather than stalling on the last character at the buffer end.
 fn word_forward(
     buffer: &Buffer,
     mut line: usize,
     mut col: usize,
     big: bool,
     last_line: usize,
+    stop_at_eol: bool,
 ) -> (usize, usize) {
     let chars: Vec<char> = buffer.line_text(line).chars().collect();
     if col >= chars.len() {
@@ -301,12 +321,18 @@ fn word_forward(
         }
         col += 1;
     }
+    if stop_at_eol && start_class != 0 && col >= chars.len() {
+        return (line, chars.len());
+    }
     // Then skip whitespace.
     while col < chars.len() && chars[col].is_whitespace() {
         col += 1;
     }
 
     if col >= chars.len() {
+        if stop_at_eol && line == last_line {
+            return (line, chars.len());
+        }
         if line < last_line {
             line += 1;
             let next: Vec<char> = buffer.line_text(line).chars().collect();
