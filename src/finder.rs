@@ -164,6 +164,12 @@ impl Finder {
         self.refilter();
     }
 
+    /// Add a whole pasted string, filtering once rather than per character.
+    pub fn push_str(&mut self, s: &str) {
+        self.query.push_str(s);
+        self.refilter();
+    }
+
     pub fn pop_char(&mut self) {
         self.query.pop();
         self.refilter();

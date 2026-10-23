@@ -16,21 +16,24 @@
 //! finds no program answers `None`, and the caller falls back to the text it
 //! copied itself.
 //!
-//! Each program gets `TOOL_TIMEOUT` to answer and is killed after it, so a
-//! clipboard daemon that hangs costs the editor a second, not the session.
+//! One copy or paste gets `TOOL_TIMEOUT` in all, however many programs it
+//! tries, and a program still running at the end is killed, so a clipboard
+//! daemon that hangs costs the editor a second, not the session.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// How long a clipboard program may take before it is given up on.
+/// How long one copy or paste may take before it is given up on.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Somewhere text can be copied to and pasted from. `System` in the editor;
 /// `Memory` in the tests, which must never touch the developer's clipboard.
 pub trait Clipboard {
     fn copy(&mut self, text: &str);
-    /// The clipboard's text, or `None` when it cannot be read.
+    /// The clipboard's text — empty when it holds none, or none as text — or
+    /// `None` when there is no clipboard here to read.
     fn paste(&mut self) -> Option<String>;
 }
 
@@ -61,7 +64,8 @@ impl System {
 
 impl Clipboard for System {
     fn copy(&mut self, text: &str) {
-        if !self.remote && tools().iter().any(|t| run_copy(t.copy, text)) {
+        let deadline = Instant::now() + TOOL_TIMEOUT;
+        if !self.remote && tools().iter().any(|t| run_copy(t.copy, text, deadline)) {
             return;
         }
         osc52(text);
@@ -71,7 +75,8 @@ impl Clipboard for System {
         if self.remote {
             return None;
         }
-        tools().iter().find_map(|t| run_paste(t.paste))
+        let deadline = Instant::now() + TOOL_TIMEOUT;
+        tools().iter().find_map(|t| run_paste(t.paste, deadline))
     }
 }
 
@@ -124,8 +129,7 @@ fn spawn(argv: &[&str], stdin: Stdio, stdout: Stdio) -> Option<Child> {
 }
 
 /// Wait for `child` to exit, killing it at the deadline. True on success.
-fn finish(mut child: Child) -> bool {
-    let deadline = Instant::now() + TOOL_TIMEOUT;
+fn finish(mut child: Child, deadline: Instant) -> bool {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -139,34 +143,60 @@ fn finish(mut child: Child) -> bool {
     }
 }
 
-fn run_copy(argv: &[&str], text: &str) -> bool {
+fn run_copy(argv: &[&str], text: &str, deadline: Instant) -> bool {
+    if Instant::now() >= deadline {
+        return false;
+    }
     let Some(mut child) = spawn(argv, Stdio::piped(), Stdio::null()) else {
         return false;
     };
-    // Dropping stdin closes it, which is what tells the program the text has
-    // ended. `xclip` and `wl-copy` then fork to keep serving the selection,
-    // so the process we wait on still exits promptly.
-    let wrote = child
-        .stdin
-        .take()
-        .is_some_and(|mut pipe| pipe.write_all(text.as_bytes()).is_ok());
-    finish(child) && wrote
+    let Some(mut pipe) = child.stdin.take() else {
+        return false;
+    };
+    // Write on a thread: a program that hangs without reading would block a
+    // write bigger than the pipe here forever, and `finish` could never reach
+    // its deadline. Killing the program breaks the pipe and ends the thread.
+    // The thread drops stdin when done, which is what tells the program the
+    // text has ended; `xclip` and `wl-copy` then fork to keep serving the
+    // selection, so the process we wait on still exits promptly.
+    let (tx, rx) = mpsc::channel();
+    let bytes = text.as_bytes().to_vec();
+    std::thread::spawn(move || {
+        let _ = tx.send(pipe.write_all(&bytes).is_ok());
+    });
+    if !finish(child, deadline) {
+        return false;
+    }
+    let left = deadline.saturating_duration_since(Instant::now());
+    rx.recv_timeout(left).unwrap_or(false)
 }
 
-fn run_paste(argv: &[&str]) -> Option<String> {
+/// What a paste program printed: `None` when it is not here to ask, and empty
+/// when it ran but gave no text — an empty clipboard, an image, a timeout.
+fn run_paste(argv: &[&str], deadline: Instant) -> Option<String> {
+    if Instant::now() >= deadline {
+        return None;
+    }
     let mut child = spawn(argv, Stdio::null(), Stdio::piped())?;
     // Read on a thread: a program that hangs with its pipe open would block a
     // read here forever, and `finish` could never reach its deadline.
-    let mut pipe = child.stdout.take()?;
+    let Some(mut pipe) = child.stdout.take() else {
+        return Some(String::new());
+    };
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         pipe.read_to_end(&mut bytes).map(|_| bytes)
     });
-    if !finish(child) {
-        return None;
+    if !finish(child, deadline) {
+        return Some(String::new());
     }
-    let bytes = reader.join().ok()?.ok()?;
-    String::from_utf8(bytes).ok().map(|s| normalize(&s))
+    let text = reader
+        .join()
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|s| normalize(&s));
+    Some(text.unwrap_or_default())
 }
 
 /// Hand `text` to the terminal's own clipboard with an OSC 52 escape.
@@ -266,7 +296,31 @@ mod tests {
 
     #[test]
     fn a_missing_program_is_a_failed_copy_not_a_panic() {
-        assert!(!run_copy(&["shoin-no-such-clipboard-tool"], "x"));
-        assert_eq!(run_paste(&["shoin-no-such-clipboard-tool"]), None);
+        let deadline = Instant::now() + TOOL_TIMEOUT;
+        assert!(!run_copy(&["shoin-no-such-clipboard-tool"], "x", deadline));
+        assert_eq!(run_paste(&["shoin-no-such-clipboard-tool"], deadline), None);
+    }
+
+    /// A program that never reads its input is killed at the deadline, not
+    /// waited on forever, however much text there is to write.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_program_that_never_reads_times_out() {
+        let big = "x".repeat(1 << 20);
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(200);
+        assert!(!run_copy(&["sleep", "5"], &big, deadline));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A program that ran but printed no text answers empty, not `None`, so
+    /// the caller does not fall back to a copy the clipboard no longer holds.
+    #[cfg(unix)]
+    #[test]
+    fn a_paste_program_with_nothing_to_give_answers_empty() {
+        let deadline = Instant::now() + TOOL_TIMEOUT;
+        assert_eq!(run_paste(&["false"], deadline).as_deref(), Some(""));
+        assert_eq!(run_paste(&["printf", "\\377"], deadline).as_deref(), Some(""));
+        assert_eq!(run_paste(&["printf", "hi"], deadline).as_deref(), Some("hi"));
     }
 }

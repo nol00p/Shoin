@@ -1910,7 +1910,7 @@ impl App {
             return;
         }
         if let Some(finder) = self.finder.as_mut() {
-            first_line().chars().for_each(|c| finder.push_char(c));
+            finder.push_str(&first_line());
             return;
         }
         match self.mode.clone() {
@@ -1987,14 +1987,16 @@ impl App {
         if !self.buffer.insert_str(at, text) {
             return;
         }
-        let newlines = text.matches('\n').count();
-        let tail = text.rsplit('\n').next().unwrap_or("").chars().count();
-        let line = at.line + newlines;
-        let mut col = if newlines == 0 { at.col + tail } else { tail };
-        if !inserting {
-            col = col.saturating_sub(1);
-        }
-        self.buffer.cursor = Cursor::new(line, col);
+        let end = self.buffer.char_index(at) + text.chars().count();
+        self.buffer.cursor = if inserting {
+            self.idx_to_cursor(end)
+        } else {
+            // On the last character — and Normal mode cannot rest on a line
+            // break, so a paste ending in one leaves the cursor before it.
+            let c = self.idx_to_cursor(end - 1);
+            let col = c.col.min(self.buffer.line_len(c.line).saturating_sub(1));
+            Cursor::new(c.line, col)
+        };
     }
 
     // ------------------------------------------------------------------ help
@@ -3641,11 +3643,14 @@ impl App {
         if !system {
             return self.registers.get(&name).cloned();
         }
-        match self.clipboard.paste().filter(|t| !t.is_empty()) {
+        match self.clipboard.paste() {
+            // A clipboard that holds no text — emptied, or an image copied
+            // since — pastes nothing, not a copy it has since replaced.
+            Some(text) if text.is_empty() => None,
             Some(text) => Some(self.read_clipboard_register(text)),
-            // Nothing readable — no program, or over SSH, where copying went
-            // out as OSC 52 and cannot come back. Shoin's own record of its
-            // last copy is the best answer left.
+            // No clipboard to read — no program, or over SSH, where copying
+            // went out as OSC 52 and cannot come back. Shoin's own record of
+            // its last copy is the best answer left.
             None => {
                 let key = if name == '"' { '"' } else { '+' };
                 self.registers.get(&key).cloned()
@@ -3696,8 +3701,14 @@ impl App {
             };
             let at = Cursor::new(cur.line, col);
             if self.buffer.insert_str(at, &reg.text) {
-                let n = reg.text.chars().count();
-                self.buffer.cursor = Cursor::new(cur.line, col + n.saturating_sub(1));
+                // On the last character of one line of text; at the start of
+                // several, as vim leaves it.
+                self.buffer.cursor = if reg.text.contains('\n') {
+                    at
+                } else {
+                    let n = reg.text.chars().count();
+                    Cursor::new(cur.line, col + n.saturating_sub(1))
+                };
             }
         }
     }
@@ -8342,6 +8353,28 @@ mod tests {
         assert_eq!(text(&app), "aab\n");
     }
 
+    /// A clipboard emptied (or holding an image) since our copy pastes
+    /// nothing — not the text it no longer holds.
+    #[test]
+    fn an_empty_clipboard_pastes_nothing() {
+        let mem = crate::clipboard::Memory::default();
+        let mut app = clip_app("ab\n", &mem);
+        feed(&mut app, "\"+yl");
+        mem.clone().copy("");
+        feed(&mut app, "\"+p");
+        assert_eq!(text(&app), "ab\n");
+    }
+
+    /// Charwise text of several lines leaves the cursor at its start, as vim.
+    #[test]
+    fn a_multi_line_charwise_paste_leaves_the_cursor_at_its_start() {
+        let mem = crate::clipboard::Memory::holding("foo\nbar");
+        let mut app = clip_app("ab\n", &mem);
+        feed(&mut app, "\"+p");
+        assert_eq!(text(&app), "afoo\nbarb\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 1));
+    }
+
     #[test]
     fn plain_yank_leaves_the_clipboard_alone_by_default() {
         let mem = crate::clipboard::Memory::holding("theirs");
@@ -8397,6 +8430,19 @@ mod tests {
         assert_eq!(app.buffer.cursor, Cursor::new(0, 1), "on its last character");
         feed(&mut app, "u");
         assert_eq!(text(&app), "ab\n", "one undo step");
+    }
+
+    /// A Normal-mode paste ending in a line break leaves the cursor on the
+    /// pasted text, not on the line it pushed down.
+    #[test]
+    fn a_normal_mode_paste_ending_in_a_newline_stays_on_the_paste() {
+        let mut app = app_with("ab\n");
+        app.on_paste("foo\n".into());
+        assert_eq!(text(&app), "foo\nab\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 2));
+        let mut app = app_with("ab\n");
+        app.on_paste("x\nyz".into());
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 1));
     }
 
     #[test]
