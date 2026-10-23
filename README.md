@@ -520,7 +520,7 @@ shoin [FILE]
 
 ## Changelog
 
-### Unreleased
+### 0.1.8
 
 - Clipboard support. `"+y` / `"+p` (and `"*`) copy to and paste from the
   system clipboard, through `pbcopy`, `wl-copy`, `xclip` or `xsel`, or an
