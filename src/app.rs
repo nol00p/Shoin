@@ -2913,12 +2913,30 @@ impl App {
         };
         let from = self.buffer.cursor;
         let page = self.viewport_height();
-        let mut res = match motion::resolve(&self.buffer, m, count, page) {
-            Some(r) => r,
-            None => return,
+        // `w` under an operator stops at the end of the line its last word
+        // ends (`:help w`), so `dw` there keeps the line break.
+        let res = match m {
+            Motion::WordForward { big } => motion::word_forward_operator(&self.buffer, count, big)
+                .map(|target| motion::MotionResult {
+                    target,
+                    kind: motion::MotionKind::Exclusive,
+                }),
+            _ => motion::resolve(&self.buffer, m, count, page),
         };
-        if matches!(m, Motion::WordForward { .. }) {
-            res.target = self.word_motion_end(from, res.target);
+        let Some(mut res) = res else {
+            return;
+        };
+        if res.kind == motion::MotionKind::Exclusive {
+            // vim's rule for every exclusive motion (`:help exclusive`): one
+            // ending in column 0 of a later line ends at the end of the line
+            // before instead — and goes linewise if it started in the indent.
+            if res.target.col == 0 && res.target.line > from.line {
+                let line = res.target.line - 1;
+                if from.col <= self.first_non_blank(from.line) {
+                    return self.operate_linewise(op, from.line, line);
+                }
+                res.target = Cursor::new(line, self.buffer.line_len(line));
+            }
             if op == Operator::Delete && self.delete_goes_linewise(from, res.target) {
                 return self.operate_linewise(op, from.line, res.target.line);
             }
@@ -2927,29 +2945,6 @@ impl App {
             motion::MotionKind::Linewise => self.operate_linewise(op, from.line, res.target.line),
             motion::MotionKind::Inclusive => self.operate_charwise(op, from, res.target, true),
             motion::MotionKind::Exclusive => self.operate_charwise(op, from, res.target, false),
-        }
-    }
-
-    /// vim's other `w` exception (`:help w`): under an operator, when the last
-    /// word moved over ends a line, the operated text ends there too — not at
-    /// the first word of the next line. Without it `dw` on a line's last word
-    /// takes the line break with it and joins the next line on, and `yw`
-    /// yanks the newline.
-    ///
-    /// The end becomes the END of the line the last word sat on, so trailing
-    /// whitespace after it still goes, as in vim. A start on an empty line is
-    /// left alone: there is no word on it to stop after.
-    fn word_motion_end(&self, from: Cursor, target: Cursor) -> Cursor {
-        if target.line <= from.line {
-            return target;
-        }
-        let line = target.line - 1;
-        let len = self.buffer.line_len(line);
-        let first = if line == from.line { from.col } else { 0 };
-        if len > first {
-            Cursor::new(line, len)
-        } else {
-            target
         }
     }
 
@@ -6685,6 +6680,28 @@ mod tests {
         feed(&mut app, "llcw");
         esc(&mut app);
         assert_eq!(text(&app), "ab\ncd\n");
+    }
+
+    /// A counted `w` whose last word is mid-line is not cut back to an
+    /// earlier line end, and the buffer's end counts as a line end.
+    #[test]
+    fn counted_dw_ending_mid_line_or_at_buffer_end_matches_vim() {
+        let cases = [
+            ("a\nb c\n", "d2w", "c\n"),
+            ("x a\nb c d\n", "wd2w", "x c d\n"),
+            ("a\nb\nc d\n", "d3w", "d\n"),
+            ("a\nb", "d2w", ""),
+            ("foo\nbar", "jdw", "foo\n"),
+        ];
+        for (before, keys, after) in cases {
+            let mut app = app_with(before);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), after, "{keys} on {before:?}");
+        }
+        let mut app = app_with("a\nb c");
+        feed(&mut app, "y2w");
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, "a\nb ");
     }
 
     #[test]
