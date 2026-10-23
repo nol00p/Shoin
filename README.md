@@ -176,6 +176,23 @@ Operators take motions, text objects and counts, the way you'd expect:
 `"0` for the last yank. `jk` leaves Insert mode; Enter continues a list marker
 and ends the list when the item is empty.
 
+### Copy and paste
+
+`"+y` copies to the system clipboard and `"+p` pastes from it (`"*` is the
+same clipboard). To make plain `y`, `d` and `p` use it too, set
+`clipboard = true` in `editor.conf`, or `:set clipboard` for the session. A
+named register — `"ayy` — never touches it.
+
+Shoin uses `pbcopy`/`pbpaste` on macOS and `wl-copy` or `xclip`/`xsel` on
+Linux. Over SSH, or with none of those installed, a copy is sent to the
+terminal as an OSC 52 escape, so it reaches the clipboard of the machine you
+are sitting at; pasting there falls back to Shoin's own last copy.
+
+Your terminal's own paste (Cmd+V, Ctrl+Shift+V) goes in exactly as it was
+copied, in Normal mode as much as Insert: no auto-indent, no list
+continuation, and a `jk` in the text stays text. It is one undo step, and `.`
+repeats it.
+
 ### Writer verbs
 
 The `g` prefix formats the word under the cursor, or the selection — each as a
@@ -498,6 +515,13 @@ shoin [FILE]
 
 ### Unreleased
 
+- Clipboard support. `"+y` / `"+p` (and `"*`) copy to and paste from the
+  system clipboard, through `pbcopy`, `wl-copy`, `xclip` or `xsel`, or an
+  OSC 52 escape over SSH. `[editor] clipboard = true` (or `:set clipboard`)
+  sends plain `y`, `d` and `p` there too.
+- A terminal paste now arrives as one piece of text (bracketed paste) and goes
+  in verbatim: it no longer runs as commands in Normal mode, picks up
+  auto-indent or list markers, or leaves Insert on a `jk`.
 - `dw` on a line's last word no longer takes the line break with it and joins
   the next line on, and `yw` there no longer yanks the newline — vim's `w`
   rule. A `d{count}w` that crosses lines from the start of a line deletes

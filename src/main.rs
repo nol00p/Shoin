@@ -14,6 +14,7 @@
 // §14.5 transclusion seam) carries its own targeted allow.
 
 mod app;
+mod clipboard;
 mod config;
 mod diff;
 mod export;
@@ -158,7 +159,8 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
     use ratatui::crossterm::event::{
-        DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture,
     };
     if mouse {
         let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
@@ -170,7 +172,14 @@ fn main() -> Result<()> {
     // does not implement it simply never sends the event (the 1-second poll
     // covers that case).
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableFocusChange);
+    // Bracketed paste makes a paste arrive as ONE event holding the text,
+    // rather than as the keys it would take to type it. Typed, a paste goes
+    // through auto-indent, list continuation and the `jk` escape alias, and a
+    // paste into Normal mode runs as commands. Unconditional for the same
+    // reason focus reporting is: a terminal without it just sends keys.
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
     let result = app.run_loop(&mut terminal);
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableFocusChange);
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();

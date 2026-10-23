@@ -137,6 +137,11 @@ pub struct EditorConfig {
     /// buffer that HAS unsaved work is never reloaded — it is flagged as a
     /// conflict for the reader to resolve.
     pub autoreload: bool,
+    /// Every unnamed yank, delete and paste goes through the system clipboard,
+    /// as vim's `clipboard=unnamedplus`. OFF: `x` filling the clipboard would
+    /// surprise anyone who copied something elsewhere and came back to tidy
+    /// up before pasting it. `"+` reaches the clipboard either way.
+    pub clipboard: bool,
     pub undo_coalesce_ms: u64,
     pub scroll_off: u16,
 }
@@ -155,6 +160,7 @@ impl Default for EditorConfig {
             autosave: false,
             autosave_interval: crate::fs::save::AutosaveInterval::DEFAULT,
             autoreload: true,
+            clipboard: false,
             undo_coalesce_ms: 400,
             scroll_off: 3,
         }

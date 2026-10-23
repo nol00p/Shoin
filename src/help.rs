@@ -208,6 +208,8 @@ const BINDINGS: &[&str] = &[
     "  \"A{cmd}        uppercase name APPENDS to that register",
     "  \"0             the last yank — a delete never overwrites it",
     "  \"1 - \"9        the delete ring, newest first",
+    "  \"+ \"*         the system clipboard:  \"+yy  \"+p",
+    "                 (:set clipboard sends plain y d p there too)",
     "",
     "VISUAL",
     "  v  V           start charwise / linewise select",
