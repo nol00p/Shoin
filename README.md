@@ -186,7 +186,14 @@ named register — `"ayy` — never touches it.
 Shoin uses `pbcopy`/`pbpaste` on macOS and `wl-copy` or `xclip`/`xsel` on
 Linux. Over SSH, or with none of those installed, a copy is sent to the
 terminal as an OSC 52 escape, so it reaches the clipboard of the machine you
-are sitting at; pasting there falls back to Shoin's own last copy.
+are sitting at; pasting there falls back to Shoin's own last copy. To paste
+text copied elsewhere over SSH, use your terminal's own paste (below): a
+terminal never lets programs read your clipboard.
+
+OSC 52 needs a terminal that supports it — kitty, WezTerm, Alacritty, foot,
+Ghostty, iTerm2 and Windows Terminal do; GNOME Terminal and Konsole do not.
+Inside tmux, add `set -g set-clipboard on` to `.tmux.conf`, or tmux swallows
+the escape.
 
 Your terminal's own paste (Cmd+V, Ctrl+Shift+V) goes in exactly as it was
 copied, in Normal mode as much as Insert: no auto-indent, no list
@@ -526,6 +533,29 @@ shoin [FILE]
   the next line on, and `yw` there no longer yanks the newline — vim's `w`
   rule. A `d{count}w` that crosses lines from the start of a line deletes
   whole lines, as in vim.
+- More operators and motions now match vim, each checked against it: `cw` on
+  a word's last character changes only that character; `db` from a line start
+  keeps the line break; `d}` keeps the blank line it stops at; `dl` takes a
+  line's last character; `dgg`/`dG` work on the first/last line; `5dG` and
+  `3dgg` honour the count typed before the operator; `3p` pastes three times;
+  `;` after `t` moves on to the next match; `w` skips leading blanks and
+  blank-only lines; `dc` cancels instead of running `c`; `"Ayw` appended to a
+  linewise register keeps its lines intact; `d2$` and `d2e` from a line start
+  delete whole lines. A linewise paste lands on the first non-blank.
+- `:w other.md` no longer overwrites an existing file without `!`, and
+  `:wq!` no longer quits when the write fails.
+- Saving through a symlink writes the file it points to instead of replacing
+  the link, and a reload that only changed line endings is no longer undone
+  by the next save.
+- `gt` only toggles the checkbox right after the list marker, never a `[x]`
+  in link text.
+- A clipboard program that hangs is not tried again for the rest of the
+  session, and a failed paste after an OSC 52 copy falls back to Shoin's own
+  copy.
+- `[editor] clipboard_background = true` runs clipboard copies on a
+  background thread, for when yanks and deletes feel slow with `clipboard`
+  on. A burst of copies runs the clipboard program once, for the newest text.
+- `:help` now lists `:set clipboard` and the `[editor]` clipboard settings.
 
 ### 0.1.7
 

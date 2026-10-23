@@ -150,7 +150,15 @@ impl Autosave {
 }
 
 /// Returns the new mtime, for external-modification tracking.
+///
+/// A symlink is written through to the file it names: renaming over the link
+/// itself would swap it for a regular file and leave the real one unedited.
 pub fn write_atomic(path: &Path, rope: &Rope, opts: &SaveOptions) -> Result<SystemTime> {
+    let resolved = path
+        .is_symlink()
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten();
+    let path = resolved.as_deref().unwrap_or(path);
     let mut text: String = rope.chunks().collect();
 
     if opts.trim_trailing_whitespace {
@@ -452,6 +460,23 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(&p, "theirs\n").unwrap();
         assert!(changed_externally(&p, Some(t)));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A symlink is written through: the file it names gets the text, and the
+    /// link itself survives as a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_written_through_not_replaced() {
+        let d = dir("link");
+        let real = d.join("real.md");
+        let link = d.join("link.md");
+        std::fs::write(&real, "old\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
+        assert!(link.is_symlink(), "the link is still a link");
         std::fs::remove_dir_all(&d).ok();
     }
 }

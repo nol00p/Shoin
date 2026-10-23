@@ -599,8 +599,16 @@ impl App {
             kind: FlashKind::Error,
             expires_at: Instant::now() + Duration::from_millis(config.status.flash_ms.max(3000)),
         });
+        let clipboard = crate::clipboard::session(config.editor.clipboard_background);
         // A failed watch is not fatal — the editor just runs without hot reload.
-        let watcher = ConfigWatcher::new(config_explicit).ok().flatten();
+        // Never under `cargo test`: every test app would watch the developer's
+        // real config directory, and hundreds of them at once run out of
+        // inotify instances (EMFILE) and fail the watcher's own tests.
+        let watcher = if cfg!(test) {
+            None
+        } else {
+            ConfigWatcher::new(config_explicit).ok().flatten()
+        };
         Ok(App {
             active: ActiveSet {
                 start: buffer.cursor.line,
@@ -629,7 +637,7 @@ impl App {
             last_find: None,
             registers: HashMap::new(),
             pending_register: None,
-            clipboard: crate::clipboard::session(),
+            clipboard,
             anchor: None,
             drag_from: None,
             visual_resumes_insert: false,
@@ -679,6 +687,9 @@ impl App {
             if self.autosave_tick() {
                 self.needs_redraw = true;
             }
+            // Between frames: a background copy that fell back to OSC 52
+            // writes its escape here, never in the middle of a draw.
+            self.clipboard.poll();
             self.refresh_blocks();
             self.refresh_focus();
             self.sync_cursor_shape();
@@ -901,6 +912,7 @@ impl App {
                 self.keymap = keymap;
                 let was_mouse = self.config.input.mouse;
                 self.config = new;
+                self.clipboard.set_background(self.config.editor.clipboard_background);
                 // A reload re-reads the file, which knows nothing about `--zen`
                 // or a `:zen` toggle — put those back on top of it.
                 self.reapply_zen();
@@ -1545,7 +1557,7 @@ impl App {
 
     fn move_by(&mut self, m: Motion, count: usize) {
         let page = self.viewport_height();
-        if let Some(res) = motion::resolve(&self.buffer, m, count, page) {
+        if let Some(res) = motion::resolve(&self.buffer, m, count, page, false) {
             self.buffer.cursor = res.target;
         }
     }
@@ -1619,6 +1631,8 @@ impl App {
                 self.search_move(backward);
             }
             Action::RepeatFind { reverse } => self.repeat_find(reverse, count),
+            Action::PasteAfter => self.paste(true, count),
+            Action::PasteBefore => self.paste(false, count),
             Action::SearchWordUnderCursor => self.search_word_under_cursor(),
             Action::AppendParagraph => {
                 self.move_by(Motion::ParagraphForward, 1);
@@ -1701,7 +1715,9 @@ impl App {
 
     fn apply_action(&mut self, action: Action) {
         match action {
-            Action::Save | Action::SaveStayInsert => self.write(None, false),
+            Action::Save | Action::SaveStayInsert => {
+                self.write(None, false);
+            }
             Action::WriteQuit => {
                 self.write(None, false);
                 self.try_quit(false);
@@ -1740,8 +1756,8 @@ impl App {
             Action::Undo => self.undo_or_warn(),
             Action::Redo => self.redo_or_warn(),
             Action::Repeat => self.repeat_dot(),
-            Action::PasteAfter => self.paste(true),
-            Action::PasteBefore => self.paste(false),
+            Action::PasteAfter => self.paste(true, 1),
+            Action::PasteBefore => self.paste(false, 1),
             Action::DeleteChar => self.delete_chars_under(1),
             Action::ToggleBold => self.writer_toggle("**"),
             Action::ToggleItalic => self.writer_toggle("*"),
@@ -3033,66 +3049,65 @@ impl App {
     }
 
     fn apply_operator(&mut self, op: Operator, m: Motion, count: usize) {
-        // vim's one irregular verb: on a non-blank, `cw` changes to the END of
-        // the word rather than up to the next one, so it does not swallow the
-        // space it is about to type over.
-        let m = match (op, m) {
-            (Operator::Change, Motion::WordForward { big }) if !self.cursor_on_blank() => {
-                Motion::WordEnd { big }
-            }
-            _ => m,
-        };
+        use motion::MotionKind::{Exclusive, Inclusive, Linewise};
         let from = self.buffer.cursor;
         let page = self.viewport_height();
-        // `w` under an operator stops at the end of the line its last word
-        // ends (`:help w`), so `dw` there keeps the line break.
-        let res = match m {
-            Motion::WordForward { big } => motion::word_forward_operator(&self.buffer, count, big)
-                .map(|target| motion::MotionResult {
-                    target,
-                    kind: motion::MotionKind::Exclusive,
-                }),
-            _ => motion::resolve(&self.buffer, m, count, page),
+        let res = match (op, m) {
+            // vim's one irregular verb: on a non-blank, `cw` changes to the
+            // END of the word rather than up to the next one, so it does not
+            // swallow the space it is about to type over.
+            (Operator::Change, Motion::WordForward { big }) if !self.cursor_on_blank() => {
+                Some(motion::MotionResult {
+                    target: motion::change_word_end(&self.buffer, count, big),
+                    kind: Inclusive,
+                })
+            }
+            _ => motion::resolve(&self.buffer, m, count, page, true),
         };
-        let Some(mut res) = res else {
+        let Some(res) = res else {
             return;
         };
-        if res.kind == motion::MotionKind::Exclusive {
-            // vim's rule for every exclusive motion (`:help exclusive`): one
-            // ending in column 0 of a later line ends at the end of the line
-            // before instead — and goes linewise if it started in the indent.
-            if res.target.col == 0 && res.target.line > from.line {
-                let line = res.target.line - 1;
-                if from.col <= self.first_non_blank(from.line) {
-                    return self.operate_linewise(op, from.line, line);
-                }
-                res.target = Cursor::new(line, self.buffer.line_len(line));
-            }
-            if op == Operator::Delete && self.delete_goes_linewise(from, res.target) {
-                return self.operate_linewise(op, from.line, res.target.line);
-            }
+        if res.kind == Linewise {
+            return self.operate_linewise(op, from.line, res.target.line);
         }
-        match res.kind {
-            motion::MotionKind::Linewise => self.operate_linewise(op, from.line, res.target.line),
-            motion::MotionKind::Inclusive => self.operate_charwise(op, from, res.target, true),
-            motion::MotionKind::Exclusive => self.operate_charwise(op, from, res.target, false),
+        let inclusive = res.kind == Inclusive;
+        let (start, mut end) = if (res.target.line, res.target.col) < (from.line, from.col) {
+            (res.target, from)
+        } else {
+            (from, res.target)
+        };
+        // vim's rule for every exclusive motion, either way it moves
+        // (`:help exclusive`): a range ending in column 0 of a later line ends
+        // at the end of the line before instead — and is whole lines if it
+        // started in the indent. So `dw` on a line's last word and `db` from
+        // a line start both leave the line break alone.
+        if res.kind == Exclusive && end.col == 0 && end.line > start.line {
+            let line = end.line - 1;
+            if start.col <= self.first_non_blank(start.line) {
+                return self.operate_linewise(op, start.line, line);
+            }
+            end = Cursor::new(line, self.buffer.line_len(line));
         }
+        if op == Operator::Delete && self.delete_goes_linewise(start, end, inclusive) {
+            return self.operate_linewise(op, start.line, end.line);
+        }
+        self.operate_charwise(op, start, end, inclusive)
     }
 
     /// vim's `op_delete` rule: a charwise delete over more than one line that
     /// starts in the first line's indent and ends with nothing but blanks
     /// after it removes whole lines instead, so `d3w` from the start of
     /// `a / b c / d` leaves `d` rather than an empty line above it.
-    fn delete_goes_linewise(&self, from: Cursor, end: Cursor) -> bool {
-        if end.line <= from.line {
+    fn delete_goes_linewise(&self, start: Cursor, end: Cursor, inclusive: bool) -> bool {
+        if end.line <= start.line {
             return false;
         }
-        let in_indent = from.col <= self.first_non_blank(from.line);
+        let in_indent = start.col <= self.first_non_blank(start.line);
         let rest_blank = self
             .buffer
             .line_text(end.line)
             .chars()
-            .skip(end.col)
+            .skip(end.col + usize::from(inclusive))
             .all(char::is_whitespace);
         in_indent && rest_blank
     }
@@ -3200,23 +3215,16 @@ impl App {
         let chars: Vec<char> = self.buffer.line_text(line).chars().collect();
         let base = self.buffer.rope.line_to_char(line);
 
-        // Flip an existing `[ ]` / `[x]`.
-        for i in 0..chars.len().saturating_sub(2) {
-            if chars[i] == '[' && chars[i + 2] == ']' {
-                let inner = chars[i + 1];
-                if matches!(inner, ' ' | 'x' | 'X') {
-                    let new = if inner == ' ' { "x" } else { " " };
-                    self.buffer.delete_chars(base + i + 1, base + i + 2);
-                    self.buffer.insert_str(Cursor::new(line, i + 1), new);
-                    return;
-                }
-            }
-        }
-
-        // Otherwise, if it is a list item, insert a checkbox after the marker.
-        if let Some(BlockKind::ListItem { marker, .. }) = self.blocks.kinds.get(line) {
-            let indent = chars.iter().take_while(|c| **c == ' ' || **c == '\t').count();
-            let mut p = indent;
+        // A task's box sits right after the list marker — or the indent, on a
+        // line that is not an item — and only there: a `[x]` further on is
+        // link text or prose (`See [x](notes.md)`), never a box to tick.
+        let indent = chars.iter().take_while(|c| **c == ' ' || **c == '\t').count();
+        let item = match self.blocks.kinds.get(line) {
+            Some(BlockKind::ListItem { marker, .. }) => Some(*marker),
+            _ => None,
+        };
+        let mut p = indent;
+        if let Some(marker) = item {
             match marker {
                 Marker::Ordered => {
                     while p < chars.len() && chars[p].is_ascii_digit() {
@@ -3229,7 +3237,20 @@ impl App {
             if p < chars.len() && (chars[p] == ' ' || chars[p] == '\t') {
                 p += 1;
             }
-            self.buffer.insert_str(Cursor::new(line, p.min(chars.len())), "[ ] ");
+        }
+        let p = p.min(chars.len());
+
+        // Flip an existing `[ ]` / `[x]`.
+        if let ['[', inner @ (' ' | 'x' | 'X'), ']', ..] = chars[p..] {
+            let new = if inner == ' ' { "x" } else { " " };
+            self.buffer.delete_chars(base + p + 1, base + p + 2);
+            self.buffer.insert_str(Cursor::new(line, p + 1), new);
+            return;
+        }
+
+        // Otherwise, if it is a list item, insert a checkbox after the marker.
+        if item.is_some() {
+            self.buffer.insert_str(Cursor::new(line, p), "[ ] ");
         }
     }
 
@@ -3364,10 +3385,19 @@ impl App {
     }
 
     /// `;` / `,`: repeat the last `f`/`t` (`,` reverses direction).
+    ///
+    /// A repeated till that would stay put goes on to the match after, as
+    /// vim's does: `t` stops just short of its match, so searching again from
+    /// there finds the same match and would never move.
     fn repeat_find(&mut self, reverse: bool, count: usize) {
-        if let Some((target, forward, till)) = self.last_find {
-            let forward = forward ^ reverse;
-            self.move_by(Motion::FindChar { target, forward, till }, count);
+        let Some((target, forward, till)) = self.last_find else {
+            return;
+        };
+        let m = Motion::FindChar { target, forward: forward ^ reverse, till };
+        let before = self.buffer.cursor;
+        self.move_by(m, count);
+        if till && self.buffer.cursor == before {
+            self.move_by(m, count + 1);
         }
     }
 
@@ -3625,15 +3655,19 @@ impl App {
             let merged = if name.is_ascii_uppercase() {
                 match self.registers.get(&key) {
                     Some(prev) => {
+                        // Lines on either side make the result lines, each
+                        // ending in a newline: `"ayy"Ayl` holds `ab\na\n`, and
+                        // `"ayl"Ayy` holds `a\nab\n`, as in vim.
+                        let linewise = prev.linewise || reg.linewise;
                         let mut text = prev.text.clone();
-                        if prev.linewise && !text.ends_with('\n') {
+                        if linewise && !text.ends_with('\n') {
                             text.push('\n');
                         }
                         text.push_str(&reg.text);
-                        Register {
-                            text,
-                            linewise: prev.linewise || reg.linewise,
+                        if linewise && !text.ends_with('\n') {
+                            text.push('\n');
                         }
+                        Register { text, linewise }
                     }
                     None => reg.clone(),
                 }
@@ -3712,12 +3746,17 @@ impl App {
         Register { text, linewise }
     }
 
-    /// `p` / `P`: paste the register after / before the cursor.
-    fn paste(&mut self, after: bool) {
-        let reg = match self.take_register() {
+    /// `p` / `P`: paste the register after / before the cursor, `count` times
+    /// over as one piece of text (`3p`).
+    fn paste(&mut self, after: bool, count: usize) {
+        let mut reg = match self.take_register() {
             Some(r) => r,
             None => return,
         };
+        if reg.linewise && !reg.text.ends_with('\n') {
+            reg.text.push('\n');
+        }
+        reg.text = reg.text.repeat(count.max(1));
         if reg.linewise {
             let cur = self.buffer.cursor;
             let line = if after { cur.line + 1 } else { cur.line };
@@ -3728,10 +3767,10 @@ impl App {
                 self.buffer.insert_str(Cursor::new(end_line, tail), "\n");
                 self.buffer
                     .insert_str(Cursor::new(end_line + 1, 0), reg.text.trim_end_matches('\n'));
-                self.buffer.cursor = Cursor::new(end_line + 1, 0);
+                self.buffer.cursor = Cursor::new(end_line + 1, self.first_non_blank(end_line + 1));
             } else {
                 self.buffer.insert_str(Cursor::new(line, 0), &reg.text);
-                self.buffer.cursor = Cursor::new(line, 0);
+                self.buffer.cursor = Cursor::new(line, self.first_non_blank(line));
             }
         } else {
             let cur = self.buffer.cursor;
@@ -4020,7 +4059,7 @@ impl App {
                 self.touch_status();
             }
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.write(None, false)
+                self.write(None, false);
             }
             // A control chord arrives as its plain letter plus CONTROL, so
             // without this `<C-a>` would type an `a`. Unbound chords do nothing.
@@ -4490,10 +4529,14 @@ impl App {
         };
 
         match name {
-            "w" | "write" => self.write(if arg.is_empty() { None } else { Some(arg) }, false),
+            "w" | "write" => {
+                self.write(if arg.is_empty() { None } else { Some(arg) }, false);
+            }
             // `!` is "I know it changed, write anyway" — the only way past the
             // external-modification guard.
-            "w!" | "write!" => self.write(if arg.is_empty() { None } else { Some(arg) }, true),
+            "w!" | "write!" => {
+                self.write(if arg.is_empty() { None } else { Some(arg) }, true);
+            }
             "q" => self.try_quit(false),
             // Capital Q leaves outright — the whole session, every buffer.
             // `qa`/`qall` are vim's spelling of the same thing.
@@ -4532,9 +4575,12 @@ impl App {
                 self.write(if arg.is_empty() { None } else { Some(arg) }, false);
                 self.try_quit(false);
             }
+            // The `!` forces the WRITE, not the quit: a write that fails
+            // still keeps the editor open, or the unsaved text would be lost.
             "wq!" | "x!" => {
-                self.write(if arg.is_empty() { None } else { Some(arg) }, true);
-                self.try_quit(true);
+                if self.write(if arg.is_empty() { None } else { Some(arg) }, true) {
+                    self.try_quit(true);
+                }
             }
             // Vim's abbreviations, so muscle memory lands: `:u`, `:un`, `:und`,
             // `:undo`, and `:red`/`:redo`. Not `:r` or `:re` — `:r` is `:read`
@@ -4823,7 +4869,8 @@ impl App {
         self.notify(format!("set {key}"), FlashKind::Info);
     }
 
-    fn write(&mut self, path: Option<&str>, force: bool) {
+    /// `:w`. True when the file was written.
+    fn write(&mut self, path: Option<&str>, force: bool) -> bool {
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let result = match path {
             Some(p) => self.buffer.save_as(PathBuf::from(p), policy, force),
@@ -4836,8 +4883,12 @@ impl App {
                 self.notify(format!("{name} written · {words} words"), FlashKind::Info);
                 // The clock starts from the last write, not from startup.
                 self.arm_autosave();
+                true
             }
-            Err(e) => self.notify(format!("{e}"), FlashKind::Error),
+            Err(e) => {
+                self.notify(format!("{e}"), FlashKind::Error);
+                false
+            }
         }
     }
 }
@@ -5747,6 +5798,18 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// A reload that finds the same text with new line endings adopts them,
+    /// so the next save keeps what the file now uses.
+    #[test]
+    fn a_reload_adopts_a_changed_line_ending() {
+        let (mut app, path) = app_on_disk("crlf", "one\ntwo\n");
+        write_settled(&path, "one\r\ntwo\r\n");
+        app.check_disk();
+        assert_eq!(text(&app), "one\ntwo\n");
+        assert_eq!(app.buffer.line_ending, crate::text::buffer::LineEnding::Crlf);
+        let _ = std::fs::remove_file(path);
+    }
+
     /// Case 2's precondition: both changed, so NOTHING is touched. This is the
     /// assertion the whole feature rests on — an editor may never silently
     /// choose between two versions of your work.
@@ -6165,14 +6228,52 @@ mod tests {
         let first = std::env::temp_dir().join(format!("shoin-sa-{tag}-a.md"));
         let second = std::env::temp_dir().join(format!("shoin-sa-{tag}-b.md"));
         app.buffer.save_as(first.clone(), SavePolicy::default(), false).unwrap();
+        // Age the recorded mtime, so a guard that wrongly consulted it for
+        // another path would fire.
+        app.buffer.disk_mtime = Some(std::time::UNIX_EPOCH);
 
-        std::fs::write(&second, "occupied\n").unwrap();
         app.buffer
             .save_as(second.clone(), SavePolicy::default(), false)
             .expect("a different target is not what disk_mtime describes");
         assert_eq!(std::fs::read_to_string(&second).unwrap(), "body\n");
         let _ = std::fs::remove_file(first);
         let _ = std::fs::remove_file(second);
+    }
+
+    /// `:w other.md` over a file that is not this buffer's refuses, as vim's
+    /// E13 does; `:w!` writes it.
+    #[test]
+    fn writing_over_another_existing_file_needs_a_bang() {
+        let mut app = app_with("body\n");
+        let tag = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let other = std::env::temp_dir().join(format!("shoin-e13-{tag}.md"));
+        std::fs::write(&other, "theirs\n").unwrap();
+        let refused = app.buffer.save_as(other.clone(), SavePolicy::default(), false);
+        assert!(refused.is_err());
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "theirs\n");
+        assert_eq!(app.buffer.path, None, "a refused :w names nothing");
+        app.buffer
+            .save_as(other.clone(), SavePolicy::default(), true)
+            .expect(":w! overwrites");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "body\n");
+        // Now it IS this buffer's file: a plain :w to it needs no bang.
+        app.buffer.insert_str(Cursor::new(0, 0), "x");
+        app.buffer.save(SavePolicy::default(), false).expect("our own file");
+        let _ = std::fs::remove_file(other);
+    }
+
+    /// `:wq!` whose write fails keeps the editor open: quitting would throw
+    /// the unsaved text away.
+    #[test]
+    fn wq_bang_with_a_failed_write_does_not_quit() {
+        let mut app = app_with("body\n");
+        app.buffer.insert_str(Cursor::new(0, 0), "x");
+        app.buffer.modified = true;
+        app.run_command("wq!");
+        assert!(!app.quit, "no file name: the write failed");
     }
 
     /// SPEC §7.2: `jk` in Insert removes both characters and leaves the mode.
@@ -6884,6 +6985,65 @@ mod tests {
         assert_eq!(text(&app), "ab\ncd\n");
     }
 
+    /// Operators, motions, counts and registers against vim. Every expected
+    /// buffer here was produced by running the same keys in `nvim --clean`.
+    #[test]
+    fn editing_commands_match_vim() {
+        let cases = [
+            ("foo bar   \n  baz\n", "wdw", "foo \n  baz\n"),
+            ("ab  \n  cd\n", "lldw", "ab\n  cd\n"),
+            ("1\n2\n3\n4\n5\n6\n7\n", "5dG", "6\n7\n"),
+            ("1\n2\n3\n4\n5\n6\n7\n", "3j3dgg", "1\n2\n5\n6\n7\n"),
+            ("foo bar\nbaz\n", "jdb", "foo \nbaz\n"),
+            ("  a\nb\n", "jdb", "b\n"),
+            ("a\nb\n\nc\n", "d}", "\nc\n"),
+            ("\na\nb\n", "jjd{", "b\n"),
+            ("a b\nc\n", "wd}", "a \n"),
+            ("ab\n", "ldl", "a\n"),
+            ("abc\n", "ld5l", "a\n"),
+            ("ab\ncd\n", "\"ayy\"Ayl\"ap", "ab\nab\na\ncd\n"),
+            ("ab\ncd\n", "\"ayl\"Ayy\"ap", "ab\na\nab\ncd\n"),
+            ("ab\ncd\nef\n", "d2$", "ef\n"),
+            ("ab\ncd\nef\n", "d2e", "ef\n"),
+            ("a\nb\n", "dgg", "b\n"),
+            ("a\nb\n", "jdG", "a\n"),
+            ("one\n", "yy3p", "one\none\none\none\n"),
+            ("  ab\n", "yypx", "  ab\n  b\n"),
+            ("ab\n", "yl3p", "aaaab\n"),
+            ("axbxcxd\n", "tx;;x", "axbxxd\n"),
+            ("\n  foo\n", "wx", "\n  oo\n"),
+            ("a\n   \nb\n", "wx", "a\n   \n\n"),
+            ("foo bar\n", "dcw", "foo bar\n"),
+            ("\n  foo\n", "dw", "  foo\n"),
+            ("a  \nb c\n", "d2w", "c\n"),
+            ("a\nb c\n", "d2w", "c\n"),
+            ("a\nb\nc d\n", "d3w", "d\n"),
+            ("foo\nbar\n", "jdw", "foo\n\n"),
+            ("alpha\nbravo\ncharlie\n", "jdw", "alpha\n\ncharlie\n"),
+        ];
+        let mut failures = Vec::new();
+        for (before, keys, after) in cases {
+            let mut app = app_with(before);
+            feed(&mut app, keys);
+            if text(&app) != after {
+                failures.push(format!("{keys} on {before:?}: got {:?}, vim {after:?}", text(&app)));
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// `cw` on a word's last character changes that character alone (vim's
+    /// `end_word` with `stop`), not the next word as well.
+    #[test]
+    fn cw_on_a_words_last_character_changes_only_it() {
+        for (before, keys, after) in [("a b\n", "cwX", "X b\n"), ("foo bar\n", "llcwX", "foX bar\n")] {
+            let mut app = app_with(before);
+            feed(&mut app, keys);
+            esc(&mut app);
+            assert_eq!(text(&app), after, "{keys} on {before:?}");
+        }
+    }
+
     /// A counted `w` whose last word is mid-line is not cut back to an
     /// earlier line end, and the buffer's end counts as a line end.
     #[test]
@@ -7102,6 +7262,23 @@ mod tests {
         let mut app = app_with("- item\n");
         feed(&mut app, "gt");
         assert_eq!(text(&app), "- [ ] item\n");
+    }
+
+    /// Only the box after the marker is a task's: a `[x]` later on the line is
+    /// link text or prose and is left alone.
+    #[test]
+    fn gt_never_touches_brackets_past_the_marker() {
+        let cases = [
+            ("See [x](notes.md) here\n", "See [x](notes.md) here\n"),
+            ("- see [x](notes.md)\n", "- [ ] see [x](notes.md)\n"),
+            ("- [x] see [ ](a.md)\n", "- [ ] see [ ](a.md)\n"),
+            ("  12. [ ] numbered\n", "  12. [x] numbered\n"),
+        ];
+        for (before, after) in cases {
+            let mut app = app_with(before);
+            feed(&mut app, "gt");
+            assert_eq!(text(&app), after, "gt on {before:?}");
+        }
     }
 
     #[test]

@@ -170,9 +170,14 @@ impl Buffer {
         // Only meaningful when this IS the file we read: `:w other.md` records
         // an mtime for a different path, and comparing the two would refuse a
         // perfectly ordinary write. SPEC.md §10.
-        let same_file = self.path.as_deref() == Some(path);
+        let same_file = self.path.as_deref().is_some_and(|ours| same_path(ours, path));
         if !force && same_file && save::changed_externally(path, self.disk_mtime) {
             anyhow::bail!("{} changed on disk — :w! to overwrite", name_of(path));
+        }
+        // Nor one that is not ours at all: `:w notes.md` over an existing
+        // notes.md would destroy it. vim's E13, and `:w!` the same way past.
+        if !force && !same_file && path.exists() {
+            anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
         let opts = SaveOptions {
             line_ending: self.line_ending,
@@ -227,6 +232,11 @@ impl Buffer {
         let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
 
         if loaded.rope == self.rope {
+            // Same text, but perhaps not the same bytes: a tool that turned
+            // LF into CRLF leaves the rope identical, and keeping the old
+            // ending would turn it back on the next save.
+            self.line_ending = loaded.line_ending;
+            self.final_newline = loaded.final_newline;
             self.disk_mtime = mtime;
             self.conflict = false;
             return Ok(false);
@@ -350,6 +360,16 @@ fn name_of(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// Whether two spellings name one file: `notes.md` and `./notes.md` do, and
+/// so does a symlink and what it points at.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 

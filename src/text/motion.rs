@@ -75,7 +75,18 @@ pub fn char_class(c: char) -> u8 {
 /// Returns `None` if the motion cannot move (e.g. `k` on line 0), which
 /// operators treat as a no-op rather than an error. `page` is the viewport
 /// height, needed by the scrolling motions.
-pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Option<MotionResult> {
+///
+/// `operator` is set when the motion is an operator's range (`dw`, `d}`)
+/// rather than a cursor move. A few motions then reach where the cursor can
+/// never rest: `l` and `}` the line end past the last character, and `w`'s
+/// last step stops at the end of its line instead of crossing it.
+pub fn resolve(
+    buffer: &Buffer,
+    motion: Motion,
+    count: usize,
+    page: usize,
+    operator: bool,
+) -> Option<MotionResult> {
     let count = count.max(1);
     let cur = buffer.cursor;
     let last_line = buffer.line_count().saturating_sub(1);
@@ -91,11 +102,14 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
             (Cursor::new(cur.line, cur.col.saturating_sub(count)), Exclusive)
         }
         Right => {
+            // `dl` on the last character takes it: the range runs to the line
+            // end, a column the cursor itself never rests on.
             let len = buffer.line_len(cur.line);
-            if len == 0 || cur.col + 1 >= len {
+            let max = if operator { len } else { len.saturating_sub(1) };
+            if len == 0 || cur.col >= max {
                 return None;
             }
-            (Cursor::new(cur.line, (cur.col + count).min(len - 1)), Exclusive)
+            (Cursor::new(cur.line, (cur.col + count).min(max)), Exclusive)
         }
         Up => {
             if cur.line == 0 {
@@ -139,10 +153,9 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
         WordForward { big } => {
             let mut line = cur.line;
             let mut col = cur.col;
-            for _ in 0..count {
-                let (l, c) = word_forward(buffer, line, col, big, last_line, false);
-                line = l;
-                col = c;
+            for i in 0..count {
+                let last_step = operator && i + 1 == count;
+                (line, col) = word_forward(buffer, line, col, big, last_line, last_step);
             }
             (Cursor::new(line, col), Exclusive)
         }
@@ -169,6 +182,9 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
             (Cursor::new(line, col), Inclusive)
         }
 
+        // `}` and `{` are exclusive, as in vim: `d}` stops before the blank
+        // line it lands on. With no blank line left, `}` runs to the end of
+        // the last line.
         ParagraphForward => {
             let mut line = cur.line;
             for _ in 0..count {
@@ -177,7 +193,14 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
                     line += 1;
                 }
             }
-            (Cursor::new(line, 0), Linewise)
+            let col = if buffer.line_text(line).trim().is_empty() {
+                0
+            } else if operator {
+                buffer.line_len(line)
+            } else {
+                buffer.line_len(line).saturating_sub(1)
+            };
+            (Cursor::new(line, col), Exclusive)
         }
         ParagraphBack => {
             let mut line = cur.line;
@@ -187,7 +210,7 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
                     line -= 1;
                 }
             }
-            (Cursor::new(line, 0), Linewise)
+            (Cursor::new(line, 0), Exclusive)
         }
 
         HalfPageDown => {
@@ -255,94 +278,86 @@ pub fn resolve(buffer: &Buffer, motion: Motion, count: usize, page: usize) -> Op
         _ => target.goal_col = target.col,
     }
 
-    if target == cur {
+    // Position only: `Cursor`'s equality also compares the hidden goal column.
+    // A linewise operator range that stays put still covers its line, so
+    // `dgg` on the first line deletes it.
+    if (target.line, target.col) == (cur.line, cur.col) && !(operator && kind == Linewise) {
         return None;
     }
     Some(MotionResult { target, kind })
 }
 
-/// `w` as an operator's motion (`dw`, `yw`, `cw` on a blank): the same steps
-/// as `w`, except that the LAST step stops on the line end when the word it
-/// moves over ends the line, or when it runs out of buffer — vim's `fwd_word`
-/// with `eol` set. `None` if it cannot move.
-pub fn word_forward_operator(buffer: &Buffer, count: usize, big: bool) -> Option<Cursor> {
+/// `cw` on a word: `e`, except that a cursor already on a word's last
+/// character counts as there — vim's `end_word` with `stop` set — so `cw` on
+/// the `a` of `a b` changes only `a`. Inclusive, and never `None`: at worst
+/// the range is the character under the cursor.
+pub fn change_word_end(buffer: &Buffer, count: usize, big: bool) -> Cursor {
     let cur = buffer.cursor;
     let last_line = buffer.line_count().saturating_sub(1);
-    let count = count.max(1);
+    let chars: Vec<char> = buffer.line_text(cur.line).chars().collect();
+    let at_end = match (chars.get(cur.col), chars.get(cur.col + 1)) {
+        (Some(&c), Some(&next)) => class_of(next, big) != class_of(c, big),
+        _ => true,
+    };
     let (mut line, mut col) = (cur.line, cur.col);
-    for i in 0..count {
-        (line, col) = word_forward(buffer, line, col, big, last_line, i + 1 == count);
+    for _ in usize::from(at_end)..count.max(1) {
+        (line, col) = word_end(buffer, line, col, big, last_line);
     }
-    let target = Cursor::new(line, col);
-    (target != cur).then_some(target)
+    Cursor::new(line, col)
 }
 
-/// One `w` step. With `stop_at_eol` it lands on the line end (`col == len`)
-/// rather than crossing the line break when the word stepped off ends the
-/// line, and rather than stalling on the last character at the buffer end.
+/// One `w` step. With `stop_at_eol` — the last step of an operator's `w` —
+/// it never crosses a line break: it stops on the line end (`col == len`)
+/// instead, so `dw` on a line's last word keeps the newline. From an empty
+/// line it still steps to the start of the next, as vim's `fwd_word` does.
 fn word_forward(
     buffer: &Buffer,
-    mut line: usize,
+    line: usize,
     mut col: usize,
     big: bool,
     last_line: usize,
     stop_at_eol: bool,
 ) -> (usize, usize) {
     let chars: Vec<char> = buffer.line_text(line).chars().collect();
-    if col >= chars.len() {
-        if line < last_line {
-            return (line + 1, 0);
+    if col < chars.len() {
+        // Step off the current run, then over the blanks after it.
+        let start = class_of(chars[col], big);
+        while col < chars.len() && class_of(chars[col], big) == start {
+            col += 1;
         }
-        return (line, col);
-    }
-    let start_class = if big {
-        if chars[col].is_whitespace() {
-            0
-        } else {
-            1
+        while col < chars.len() && chars[col].is_whitespace() {
+            col += 1;
         }
-    } else {
-        char_class(chars[col])
-    };
-
-    // Step off the current run.
-    while col < chars.len() {
-        let cls = if big {
-            if chars[col].is_whitespace() {
-                0
-            } else {
-                1
-            }
-        } else {
-            char_class(chars[col])
-        };
-        if cls != start_class {
-            break;
+        if col < chars.len() {
+            return (line, col);
         }
-        col += 1;
-    }
-    if stop_at_eol && start_class != 0 && col >= chars.len() {
-        return (line, chars.len());
-    }
-    // Then skip whitespace.
-    while col < chars.len() && chars[col].is_whitespace() {
-        col += 1;
-    }
-
-    if col >= chars.len() {
-        if stop_at_eol && line == last_line {
+        if stop_at_eol {
             return (line, chars.len());
         }
-        if line < last_line {
-            line += 1;
-            let next: Vec<char> = buffer.line_text(line).chars().collect();
-            col = next.iter().take_while(|c| c.is_whitespace()).count();
-            col = col.min(next.len().saturating_sub(1));
-        } else {
-            col = chars.len().saturating_sub(1);
+        if line == last_line {
+            return (line, chars.len().saturating_sub(1));
+        }
+    } else if line == last_line {
+        return (line, col);
+    } else if stop_at_eol {
+        return (line + 1, 0);
+    }
+    // On to the first word below. An empty line counts as a word; a line of
+    // nothing but blanks does not.
+    let mut line = line;
+    loop {
+        line += 1;
+        let next: Vec<char> = buffer.line_text(line).chars().collect();
+        if next.is_empty() {
+            return (line, 0);
+        }
+        if let Some(first) = next.iter().position(|c| !c.is_whitespace()) {
+            return (line, first);
+        }
+        if line == last_line {
+            return (line, next.len() - 1);
         }
     }
-    (line, col)
 }
 
 fn class_of(c: char, big: bool) -> u8 {
@@ -462,11 +477,11 @@ mod tests {
 
     /// Resolve and report `(line, col)`, or `None` when the motion cannot move.
     fn go(b: &Buffer, m: Motion, count: usize) -> Option<(usize, usize)> {
-        resolve(b, m, count, 10).map(|r| (r.target.line, r.target.col))
+        resolve(b, m, count, 10, false).map(|r| (r.target.line, r.target.col))
     }
 
     fn kind(b: &Buffer, m: Motion) -> MotionKind {
-        resolve(b, m, 1, 10).expect("a motion").kind
+        resolve(b, m, 1, 10, false).expect("a motion").kind
     }
 
     #[test]
@@ -556,7 +571,7 @@ mod tests {
     fn vertical_motions_keep_the_goal_column() {
         let b = buf("a long first line\nshort\nanother long line\n", 0, 15);
         // Down onto a short line clamps, but the GOAL is remembered.
-        let r = resolve(&b, Motion::Down, 1, 10).unwrap();
+        let r = resolve(&b, Motion::Down, 1, 10, false).unwrap();
         assert_eq!((r.target.line, r.target.col), (1, 4));
         assert_eq!(r.target.goal_col, 15, "the goal survives the clamp");
         assert_eq!(r.kind, MotionKind::Linewise);
