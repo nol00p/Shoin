@@ -256,10 +256,15 @@ impl Pending {
             Verb::Motion(m) => self.with_target(Target::Motion(m), table),
             Verb::Goto(fallback) => {
                 // `5G` is line 5; a bare `G` is the buffer end. The count is
-                // the TARGET here, so it must not also repeat the motion.
-                let m = match self.count.take() {
-                    Some(n) => crate::text::motion::Motion::GotoLine(n.saturating_sub(1)),
-                    None => fallback,
+                // the TARGET here, so it must not also repeat the motion —
+                // and one typed before an operator counts too: `5dG` deletes
+                // to line 5, and `2d3G` to line 6, the counts multiplying.
+                let m = match (self.op_count.take(), self.count.take()) {
+                    (None, None) => fallback,
+                    (op, n) => {
+                        let line = op.unwrap_or(1).saturating_mul(n.unwrap_or(1));
+                        crate::text::motion::Motion::GotoLine(line.saturating_sub(1))
+                    }
                 };
                 self.with_target(Target::Motion(m), table)
             }
@@ -272,7 +277,12 @@ impl Pending {
                     // `dd` — the doubled form is linewise on the current lines.
                     return self.emit(Action::Operator { op, target: Target::Line });
                 }
-                // A different pending operator (`dc`) is invalid: start fresh.
+                // A different pending operator (`dc`) is invalid: the command
+                // is dropped, as vim cancels it.
+                if self.operator.is_some() {
+                    self.reset();
+                    return Resolution::Invalid;
+                }
                 self.operator = Some(op);
                 self.op_key = self.partial.last().copied().or(self.last_key);
                 // Set the count typed so far aside for the motion's own count.

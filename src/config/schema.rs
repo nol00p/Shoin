@@ -142,6 +142,11 @@ pub struct EditorConfig {
     /// surprise anyone who copied something elsewhere and came back to tidy
     /// up before pasting it. `"+` reaches the clipboard either way.
     pub clipboard: bool,
+    /// Run clipboard copies on a background thread instead of waiting for
+    /// the clipboard program on each one. OFF: a copy normally takes a few
+    /// milliseconds, and waiting keeps every yank in step with the clipboard.
+    /// Worth turning on if yanks and deletes feel sluggish with `clipboard`.
+    pub clipboard_background: bool,
     pub undo_coalesce_ms: u64,
     pub scroll_off: u16,
 }
@@ -161,6 +166,7 @@ impl Default for EditorConfig {
             autosave_interval: crate::fs::save::AutosaveInterval::DEFAULT,
             autoreload: true,
             clipboard: false,
+            clipboard_background: false,
             undo_coalesce_ms: 400,
             scroll_off: 3,
         }
