@@ -7,15 +7,14 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/nol00p/shoin/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/nol00p/shoin/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
   <img alt="Rust 1.88+" src="https://img.shields.io/badge/rust-1.88%2B-orange.svg">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-439%20passing-brightgreen.svg">
+  <a href="https://cli.masoko.net/tools/shoin/"><img alt="Shoin on The Terminal Index" src="https://cli.masoko.net/badge/shoin.svg"></a>
 </p>
 
-<!-- SCREENSHOT: the editor with a document open — centered measure, wide margins,
-     one line raw and the rest concealed. This is the hero shot. -->
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="Shoin editing a Markdown document" width="900">
+  <img src="docs/media/hero.gif" alt="Shoin starting on its bonsai splash screen, opening a project from the file tree, and moving through a note" width="900">
 </p>
 
 *Shoin* (書院) is the study alcove of a traditional Japanese house: a writing
@@ -25,634 +24,100 @@ desk built into a bay by the window, and nothing else in the room.
 
 ## Why Shoin
 
-- **No permanent interface.** No menu bar, no always-on file tree, no tab strip,
-  no standing status line. Text in a centered measure, wide margins, and that's
-  it. Every panel answers to a key that both opens and closes it — chrome
-  appears when you summon it and leaves when you're done.
-- **Live preview that never lies.** The line your cursor is on shows raw
-  Markdown. Every other line shows it finished: markers hidden, styling applied.
-  You always edit exactly what's in the file, and you always read what it will
-  become.
-- **Vim bindings, plus writer verbs.** Normal / Insert / Visual, operators and
-  motions, counts, registers, text objects, undo, `.` repeat — and `gb` for
-  bold, `gi` for italic, `gt` to tick a task, `g1`–`g6` for headings.
-- **Plain TOML config, hot-reloaded.** A `~/.config/shoin/` directory of `*.conf`
-  files. Save one and the running editor updates. A broken config never takes
-  down the editor.
-- **Notes that compose.** `[[note]]` links, `![[note]]` embeds — and
-  `![[photo.png]]` embeds a picture, drawn as real pixels in a terminal that
-  can. Write atomic ideas as separate files, order the links, and export the
-  result as Markdown, plain text, self-contained HTML, or PDF.
-- **Links you can walk.** `gf` opens the note under the cursor — and writes it
-  first if it doesn't exist yet, because in a vault the link comes before the
-  note. `<C-^>` is the way back. `gx` hands a URL or a picture to the desktop.
-- **`.md` and `.txt` only.** Not a code editor — though a fenced block whose info
-  string names a language is syntax-highlighted, in seventeen of them.
+- **No permanent interface.** Text in a centered column and nothing else. The
+  file tree, finder and splits open on a key and close on the same key.
+  → [Panels](docs/panels.md)
+- **Live preview that never lies.** The line under the cursor shows raw
+  Markdown; every other line shows the finished text.
+  → [Live preview](docs/live-preview.md)
+- **Vim grammar, plus writer verbs.** Operators, motions, text objects, counts,
+  registers and `.` — and `gb` for bold, `gt` to tick a task, `g1`–`g6` for
+  headings. → [Editing](docs/editing.md) · [Writing](docs/writing.md)
+- **Notes that compose.** `[[links]]` you walk with `gf`, `![[embeds]]` that
+  pull one note into another, and export to Markdown, text, HTML or PDF.
+  → [Notes](docs/notes.md) · [Export](docs/export.md)
+- **Careful with your files.** Atomic saves, no autosave unless you ask, and
+  a merge view when something else edits a file you're working on.
+  → [Files](docs/files.md)
+- **Plain config, hot-reloaded.** A folder of TOML files; save one and the
+  running editor updates. → [Configuration](docs/configuration.md)
+
+`.md` and `.txt` only. It is not a code editor, though fenced code blocks are
+highlighted in seventeen languages.
+
+## See it work
+
+**Editing prose with Vim's grammar** — `ciw` and `.`, moving a paragraph with
+`dap` and `p`, `ci(`, list items that continue themselves, undo and redo.
+
+<p align="center">
+  <img src="docs/media/editing.gif" alt="Editing a draft with ciw, dot-repeat, dap, ci( and list continuation" width="800">
+</p>
+
+**Composing a text from notes** — two notes embedded in an essay, `:embed full`
+to read it without seams, `gf` to follow a link, and a new note created from a
+link that didn't resolve yet.
+
+<p align="center">
+  <img src="docs/media/transclusion.gif" alt="An essay built from embedded notes, followed and edited with gf" width="800">
+</p>
+
+**A tour** — writer verbs, Insert mode, focus mode and the file tree.
+
+<p align="center">
+  <img src="docs/media/tour.gif" alt="Highlighting, ticking tasks, focus mode and the file tree in one note" width="800">
+</p>
 
 ---
-
-[![Shoin on The Terminal Index](https://cli.masoko.net/badge/shoin.svg)](https://cli.masoko.net/tools/shoin/)
 
 ## Install
 
-### From the repository
-
 ```sh
 cargo install --git https://github.com/nol00p/shoin
+shoin --init-config        # writes the default config to ~/.config/shoin/
 ```
 
-### From a local clone
+Run `--init-config` once: the leader keys, such as `Space fe` for the file
+tree, are defined in that config and do nothing without it. You need Rust 1.88
+or newer, a truecolor terminal and a [Nerd Font](https://www.nerdfonts.com/)
+(or `glyphs.nerd_fonts = false`). [Getting started](docs/getting-started.md)
+covers installing from a clone and the optional PDF tools.
+
+## First five minutes
 
 ```sh
-git clone https://github.com/nol00p/shoin
-cd shoin
-cargo install --path .
+shoin notes.md     # open a file; it's created on the first :w
+shoin              # a blank page with a few ways in drawn on it
 ```
 
-Both put a `shoin` binary in `~/.cargo/bin` — make sure that's on your `PATH`.
-To try it without installing anything, `cargo run -- notes.md` works from a
-clone.
-
-Then, optionally, write yourself a config to edit:
-
-```sh
-shoin --init-config          # → ~/.config/shoin/*.conf
-```
-
-Installing does not do this for you, and neither does first launch. `cargo
-install` has no post-install hook, and a build script may only write to
-`OUT_DIR` — it also runs in CI, in sandboxes and on cross-compiles, often as
-another user. Seeding at startup instead would mean the editor writing to your
-home directory without being asked, which is the same rule that keeps it from
-autosaving your documents. So it is one command, it refuses to overwrite a
-config you already have (`--force` if you mean it), and shoin runs perfectly
-well with no config at all.
-
-<!-- Once published to crates.io, `cargo install shoin` becomes the one-liner. -->
-
-### Requirements
-
-| | |
+| Do this | Press |
 |---|---|
-| **Rust** | 1.88 or newer |
-| **Terminal** | truecolor (24-bit) support |
-| **Font** | a Nerd Font patched font — or set `glyphs.nerd_fonts = false` |
-| **PDF export only** | `pandoc` and a layout engine (`brew install pandoc typst`) |
-
-Markdown, text and HTML export need nothing beyond the binary.
-
----
-
-## Quick start
-
-```sh
-shoin notes.md      # open a file (created on first :w if it doesn't exist)
-shoin               # a blank page, with a few ways in drawn on it
-```
-
-Started with no file, Shoin shows a bonsai and five ways in: the file tree, how
-to begin writing, how to name the file, `:help`, and how to leave. It's drawn,
-not typed — the buffer underneath is genuinely empty, so the first character you
-press is the first character of the file, and the screen is gone that same
-frame.
-
-<!-- SCREENSHOT: the splash screen — bonsai plus the five hint lines. -->
-<p align="center">
-  <img src="docs/screenshots/splash.png" alt="The Shoin splash screen" width="800">
-</p>
-
-Then, in order: `i` to type, `Esc` to stop, `:w` to save, `:q` to quit. And
-**`:help`** inside the editor explains everything else — `:help bindings`,
-`:help commands`, `:help writer`, `:help config`. `<leader>hl` (or
-`:help shortcuts`) opens a single page listing every keyboard interaction —
-leader keys, `:` commands, navigation and other keybindings — grouped by kind.
-
----
-
-## The one idea
-
-```
-  ▍A finished paragraph with bold text and a link.        ← concealed
-  ▍
-  ▍This is the line I am **editing** right now.           ← raw, cursor here
-  ▍
-  ▍ Another finished line with inline code.              ← concealed
-```
-
-> The active line is always rendered 1:1 with its source.
-> Every other line may conceal its markup.
-
-That restriction is what keeps the editor honest. Live-preview editors normally
-need a two-way source↔screen coordinate map that every motion and every click
-must translate through — the thing that makes them fragile. Because the cursor
-only ever sits on a line that's 1:1, Shoin doesn't need one.
-
-In Visual mode the whole selection renders raw, so you never operate on markers
-you can't see. `layout.conceal = false` turns concealment off entirely.
-
-<!-- SCREENSHOT: a close-up of the active-line invariant — cursor line showing
-     **raw** markers while the lines above and below are rendered. -->
-<p align="center">
-  <img src="docs/screenshots/conceal.png" alt="The active line shows raw Markdown" width="800">
-</p>
-
----
-
-## Using it
-
-### Getting around
-
-```
-  h j k l / arrows   move             i / a        insert / append
-  w b e              by word          o / O        open a line below / above
-  0 ^ $              line start/end   x            delete a character
-  gg / G             top / bottom     dd yy p      delete / yank / paste
-  u / Ctrl-r         undo / redo      .            repeat the last change
-  / ? n N            search           :w  :q       save / quit
-```
-
-Operators take motions, text objects and counts, the way you'd expect:
-`d2w`, `ciw`, `ya(`, `>ip`, `gUiw`, `2d3w`. Registers work too — `"ayy`, `"ap`,
-`"0` for the last yank. `jk` leaves Insert mode; Enter continues a list marker
-and ends the list when the item is empty.
-
-### Copy and paste
-
-`"+y` copies to the system clipboard and `"+p` pastes from it (`"*` is the
-same clipboard). To make plain `y`, `d` and `p` use it too, set
-`clipboard = true` in `editor.conf`, or `:set clipboard` for the session. A
-named register — `"ayy` — never touches it.
-
-Shoin uses `pbcopy`/`pbpaste` on macOS and `wl-copy` or `xclip`/`xsel` on
-Linux. Over SSH, or with none of those installed, a copy is sent to the
-terminal as an OSC 52 escape, so it reaches the clipboard of the machine you
-are sitting at; pasting there falls back to Shoin's own last copy. To paste
-text copied elsewhere over SSH, use your terminal's own paste (below): a
-terminal never lets programs read your clipboard.
-
-OSC 52 needs a terminal that supports it — kitty, WezTerm, Alacritty, foot,
-Ghostty, iTerm2 and Windows Terminal do; GNOME Terminal and Konsole do not.
-Inside tmux, add `set -g set-clipboard on` to `.tmux.conf`, or tmux swallows
-the escape.
-
-Your terminal's own paste (Cmd+V, Ctrl+Shift+V) goes in exactly as it was
-copied, in Normal mode as much as Insert: no auto-indent, no list
-continuation, and a `jk` in the text stays text. It is one undo step, and `.`
-repeats it.
-
-### Writer verbs
-
-The `g` prefix formats the word under the cursor, or the selection — each as a
-single undo step.
-
-```
-  gb  **bold**        gt  toggle a task checkbox  - [ ] <-> - [x]
-  gi  *italic*        gl  wrap as a [link](url), cursor in the URL slot
-  gh  ==highlight==   g1..g6  set the heading level    g0  strip it
-  gk  `code`          gp  start the next paragraph
-
-  gf  follow the link under the cursor      gx  open it with the desktop
-```
-
-`gl` writes a link and `gf` walks it — see [Compose notes into a
-text](#compose-notes-into-a-text).
-
-<!-- SCREENSHOT: a before/after of gb / gt / g2 applied to a line. -->
-<p align="center">
-  <img src="docs/screenshots/writer-verbs.png" alt="Writer verbs formatting text" width="800">
-</p>
-
-### Panels, when you want them
-
-Everything below opens and closes with the same key. `<leader>` is Space.
-
-| | |
-|---|---|
-| `<leader>fe` / `fE` | file tree — this file's folder, or all of `$HOME` |
-| `-` / `=` (in the tree) | move the root up a level / into the selected directory |
-| `H` (in the tree) | show / hide dotfiles |
-| `a` `r` `m` `d` (in the tree) | new, rename, move, delete |
-| `<leader>ff` / `fF` | fuzzy finder — this file's directory, or all of `$HOME` |
-| `<leader>fb` | switch buffer (`:ls`, `:b`, `:bn`, `:bp`, `:bd`) |
-| `<C-^>` / `<C-6>` | back to the previous buffer — press twice to return |
-| `<leader>sv` / `<leader>ss` | split beside / below |
-| `Ctrl-w` + `hjkl` | move between panes (`Ctrl-w q` closes, `=` evens them) |
-| `:e <path>` | open another file |
-| `:q` / `:Q` | close this buffer (the last one quits) / quit every buffer at once |
-
-<!-- SCREENSHOT: file tree open on the left, a vertical split on the right. -->
-<p align="center">
-  <img src="docs/screenshots/panels.png" alt="File tree and a vertical split" width="900">
-</p>
-
-### Writing modes
-
-```
-  :focus [off|paragraph|sentence]   dim everything but what you're writing
-  :number [relative|absolute]       line numbers — bare :number toggles off
-                                     and back to whichever mode you last used
-  :align [left|center|right|        how each line sits within the column —
-         |justified]                bare :align cycles through all four
-  :typewriter                       keep the cursor line centered
-  :zen                              hide every chrome affordance at once
-  :set measure=72                   the text width, in columns
-  :set line_spacing=1               blank rows between lines, 0–4
-```
-
-<!-- SCREENSHOT: focus mode — surrounding paragraphs dimmed. -->
-<p align="center">
-  <img src="docs/screenshots/focus-mode.png" alt="Focus mode dims all but the current paragraph" width="800">
-</p>
-
-### Saving
-
-`:w` writes, atomically: the text goes to a temp file beside the target, gets
-fsynced, and is renamed over it, so a crash mid-save leaves the original intact.
-If the file changed on disk since Shoin read it the write is refused — `:w!` is
-how you say you meant it.
-
-Autosave is off by default, because a writing tool shouldn't make writes you
-didn't ask for. Turn it on and it writes every modified named buffer on a timer:
-
-```
-  :set autosave                     on, every 3 minutes
-  :set autosave_interval=1          1 to 5 minutes
-  :set autosave off                 back to explicit :w only
-```
-
-```toml
-[editor]
-autosave          = true
-autosave_interval = 3     # minutes, 1–5
-```
-
-It keeps the guard: a file something else has written is left alone and named on
-the status line, never overwritten while you weren't looking. A buffer with no
-filename yet is skipped rather than nagged about, and the clock restarts from
-every write, so `:w` and the timer never save the same seconds apart.
-
-### When something else edits the file
-
-Shoin watches the files you have open — on returning focus to the terminal, and
-once a second besides — and the answer turns on one question: **do you have
-unsaved changes?**
-
-- **You don't.** The file wins and the buffer takes its changes. There is
-  nothing of yours to lose, and it arrives as a single undo step, so `u` gives
-  you back what was on screen.
-- **You do.** Nothing is touched. The two versions diverged and only you can say
-  which wins, so the filename gets a ⚠ on the status line and waits for you:
-
-```
-  :diff      merge the two versions, difference by difference
-  :w!        keep mine — write over what changed on disk
-  :revert!   take theirs — re-read the file, discarding my changes
-```
-
-`:diff` aligns your buffer against the file, row for row, with a filler bar
-wherever one side has no line. Every difference is set to **live**, **file** or
-**both**, and the divider points at whichever wins:
-
-```
-  live — in the editor             │ file — on disk
-  # On attention                   │ # On attention
-                                   │
-  A draft paragraph                │ A draft paragraph
- ~my edited line                   ◀~their edited line     ← live wins here
- ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◆+their added line      ← both are kept
-  tail                             │ tail
-```
-
-```
-  n / p    move between differences
-  Tab      cycle this one:  live → file → both
-  l f b    set every difference to live / file / both
-  w        commit the merged text and write it
-  q  Esc   abort
-```
-
-The losing side is struck through, so the document you are about to get reads
-straight down the screen. **Nothing is written until `w`** — so `q` is a real
-abort — and the commit lands as a single undo step. `both` appends the editor's
-version and then the file's, which is what the left-to-right order on screen
-already showed you.
-
-An editor must never quietly pick between two versions of your work, which is
-the whole reason the second case does nothing at all.
-
-```
-  :set autoreload off       explicit :revert only
-```
-
-A `touch` that doesn't change a byte is absorbed in silence rather than throwing
-your cursor away, a file still being written is left for the next check instead
-of being read half-finished, and a file that was *deleted* leaves the buffer
-alone — `:w` recreates it.
-
----
-
-## Compose notes into a text
-
-Write atomic ideas as separate files; compose them by ordering links.
-
-```markdown
-# On attention
-
-![[fragments/attention-is-scarce]]
-![[fragments/the-cost-of-switching]]
-![[fragments/what-i-actually-do]]
-```
-
-`[[note]]` is a plain link; `![[note]]` embeds its content.
-`![[note#Heading]]` takes one section, `![[note#^blockid]]` one block. It's
-Obsidian syntax, so vaults stay portable — and moving a section becomes `dd` `p`.
-
-`:embed [none|short|rec|full]` chooses how much to expand on screen; `full`
-shows the finished document with no seams. `:export [md|txt|html|pdf] [justify]`
-writes it out through a save dialog — `justify` stretches every wrapped line
-but a paragraph's last to fill the measure, in whichever of `html`/`txt` you
-chose (the only two with a layout of their own to stretch).
-
-#### Following a link
-
-`gf` opens whatever the cursor is on — a `[[note]]`, an `![[embed]]` you
-haven't expanded, or the path in a `[text](note.md)`. A `#Heading` or
-`#^blockid` lands on that line rather than at the top of the file, and a name
-that several notes answer to opens the finder rather than an error.
-
-**A link to a note that doesn't exist yet creates it**, empty, on disk. In a
-vault you write the link first and the note second — `[[tomorrow]]` is how
-tomorrow's note gets started. Writing it to disk rather than to a scratch
-buffer means every other note pointing at that name resolves from then on.
-(Only for notes: a dead `[chart](out/chart.pdf)` is reported, not invented.)
-
-`<C-^>` goes back to the note you came from, and again to return — the way
-back out of a link, and how you read two notes against each other.
-
-`gx` hands the target to the desktop instead: a URL to the browser, an
-`![[photo.png]]` or a `[paper](x.pdf)` to whatever opens those. It never
-creates anything.
-
-<!-- SCREENSHOT: a composition file with :embed full, showing the assembled text. -->
-<p align="center">
-  <img src="docs/screenshots/transclusion.png" alt="Transcluded notes expanded in place" width="800">
-</p>
-
-### Pictures
-
-`![[photo.png]]` embeds an image the same way `![[note]]` embeds a note — png,
-jpg, gif, webp and bmp, resolved by the same rules, so a bare `![[diagram]]`
-finds `diagram.png` (and prefers `diagram.md` if both exist, since that's the
-one you can edit).
-
-An image embed reserves a box the shape of the picture, captioned with its name
-and pixel size. **In a terminal that can draw pixels — kitty, Ghostty, WezTerm,
-iTerm2 — the picture itself is drawn there.** Everywhere else the box and the
-caption are the picture, which is also what you get inside tmux, where a
-half-drawn image is worse than none. `SHOIN_IMAGE_PROTOCOL=kitty|iterm|none`
-overrides the detection.
-
-`:export html` carries the image *inside* the page as a `data:` URI, so a
-self-contained page really is one file.
-
-<!-- SCREENSHOT: a document with ![[photo.png]] drawn inline in kitty, and the
-     same document's placeholder box in a plain terminal, side by side. -->
-<p align="center">
-  <img src="docs/screenshots/images.png" alt="An image embedded in a document" width="800">
-</p>
-
-An embed on the cursor's line shows its raw source, exactly as `**bold**` does —
-which is also why embedded text can never be edited by accident: the cursor is
-never inside it. A cycle is a hard error naming the loop, and an unresolved link
-leaves a visible placeholder rather than a silent hole in your export.
-
-There are worked examples in [`examples/images/`](examples/images/) — one
-picture embedded four ways — and in [`examples/transclusion/`](examples/transclusion/),
-covering every link form including one that deliberately doesn't resolve.
-
-### Exporting from the shell
-
-```sh
-shoin --export notes.md --format html --out notes.html
-shoin --export notes.md --format txt --stdout | pandoc …
-shoin --export notes.md --format html --justify --out notes.html
-```
-
-No terminal is acquired, so it composes into pipelines and build scripts.
-
----
-
-## Configuration
-
-Config lives in **`~/.config/shoin/`** — a conf.d directory whose `*.conf` files
-are merged, so you can split settings by category. `shoin --init-config` writes
-the annotated defaults there; they also live in this repo's
-[`shoin/`](shoin/) directory.
-
-Every key is optional. Edits hot-reload live, and a parse error keeps the
-running config rather than dropping you into a broken one. See the whole
-resolved config with `shoin --print-config`.
-
-```toml
-[layout]
-measure    = 72           # text width in columns  (:set measure=N to change live)
-typewriter = false        # keep the cursor line centered
-focus      = "off"        # "paragraph" or "sentence" dims everything else
-numbers    = "off"        # "relative" or "absolute" line-number gutter
-
-[theme]
-# The default is Tokyo Night (dark). Override individual colors, or point
-# `name` at ~/.config/shoin/themes/<name>.toml.
-background = "#1a1b26"
-text       = "#c0caf5"
-
-[input]
-leader = " "
-
-[editor]
-autosave          = false # write modified named buffers on a timer
-autosave_interval = 3     # minutes between them, 1–5
-autoreload        = true  # take a file's changes back when it is edited
-                          # elsewhere — only if you have nothing unsaved
-
-[tree]
-show_hidden = false       # dotfiles in the file tree (H toggles it live)
-
-[keys.normal]
-"<leader>w" = "save"
-```
-
-A binding may name a whole **verb**, not just a discrete action, so the grammar
-itself moves with it: `"s" = "operator_delete"` keeps counts, text objects and
-the doubled form (`ss`) all working. Bindings resolve on exact match, so one
-that's also the prefix of a longer binding shadows it — and Shoin says so at
-load time rather than leaving the longer one silently dead.
-
-Lookup order, first that exists wins: `--config <path>`, `$SHOIN_CONFIG`,
-`./shoin.conf`, `./shoin/`, `$XDG_CONFIG_HOME/shoin/`, `~/.config/shoin/`.
-
-<!-- SCREENSHOT: a custom theme side by side with the default. -->
-<p align="center">
-  <img src="docs/screenshots/theme.png" alt="A custom theme" width="800">
-</p>
-
----
-
-## Command-line options
-
-```
-shoin [FILE]
-
-  --config <PATH>     use this config instead of the discovered one
-                      (with --init-config, seed THIS path instead)
-  --print-config      print the resolved config and exit
-  --init-config       write the shipped config to ~/.config/shoin and exit
-  --force             let --init-config replace a config already there
-  --zen               start with every chrome affordance hidden
-  --export <FILE>     export without starting the editor
-  --format <FORMAT>   md | txt | html | pdf          (default: md)
-  --justify           stretch html/txt to fill the measure (md, pdf: refused)
-  --out <PATH>        where --export writes
-  --stdout            print the export instead of writing it (text formats only)
-```
-
----
-
-## Changelog
-
-### Unreleased
-
-- On a file ending in a newline, `G` now goes to the last line of text instead
-  of an empty line past it, as in vim — so `GiX` no longer adds a line, and
-  `Go` no longer leaves a blank one. `j`, `{count}G`, `}`, `dd`, `J` and `dap`
-  at the end of a file stop at the same line.
-- An `![[embed]]` now shows its note as last written. It used to keep what it
-  first read until the line itself was edited, so an embed of a note that did
-  not exist yet kept saying "no note called …" after `gf` created the note and
-  it was saved.
-
-### 0.1.8
-
-- Clipboard support. `"+y` / `"+p` (and `"*`) copy to and paste from the
-  system clipboard, through `pbcopy`, `wl-copy`, `xclip` or `xsel`, or an
-  OSC 52 escape over SSH. `[editor] clipboard = true` (or `:set clipboard`)
-  sends plain `y`, `d` and `p` there too.
-- A terminal paste now arrives as one piece of text (bracketed paste) and goes
-  in verbatim: it no longer runs as commands in Normal mode, picks up
-  auto-indent or list markers, or leaves Insert on a `jk`.
-- `dw` on a line's last word no longer takes the line break with it and joins
-  the next line on, and `yw` there no longer yanks the newline — vim's `w`
-  rule. A `d{count}w` that crosses lines from the start of a line deletes
-  whole lines, as in vim.
-- More operators and motions now match vim, each checked against it: `cw` on
-  a word's last character changes only that character; `db` from a line start
-  keeps the line break; `d}` keeps the blank line it stops at; `dl` takes a
-  line's last character; `dgg`/`dG` work on the first/last line; `5dG` and
-  `3dgg` honour the count typed before the operator; `3p` pastes three times;
-  `;` after `t` moves on to the next match; `w` skips leading blanks and
-  blank-only lines; `dc` cancels instead of running `c`; `"Ayw` appended to a
-  linewise register keeps its lines intact; `d2$` and `d2e` from a line start
-  delete whole lines. A linewise paste lands on the first non-blank.
-- `:w other.md` no longer overwrites an existing file without `!`, and
-  `:wq!` no longer quits when the write fails.
-- Saving through a symlink writes the file it points to instead of replacing
-  the link, and a reload that only changed line endings is no longer undone
-  by the next save.
-- `gt` only toggles the checkbox right after the list marker, never a `[x]`
-  in link text.
-- A clipboard program that hangs is not tried again for the rest of the
-  session, and a failed paste after an OSC 52 copy falls back to Shoin's own
-  copy.
-- `[editor] clipboard_background = true` runs clipboard copies on a
-  background thread, for when yanks and deletes feel slow with `clipboard`
-  on. A burst of copies runs the clipboard program once, for the newest text.
-- `:help` now lists `:set clipboard` and the `[editor]` clipboard settings.
-
-### 0.1.7
-
-- Added a `cycle_align` keybinding action, reaching the same left → center →
-  right → justified cycle as a bare `:align` from a single key press. Bound
-  by default to `<leader>a`.
-- Clarified the `leader` comment in `input.conf`: a modifier or named key
-  needs the same `<...>` wrapping a `keys.conf` binding uses (`"<C-x>"`, not
-  `"C-x"`), which is easy to miss since a single character needs none.
-
-### 0.1.6
-
-- Added `:align [left|center|right|justified]` (bare form cycles) and a
-  matching `layout.text_align` config setting, controlling how each row sits
-  *within* the writing column — separate from `layout.align`, which places
-  the column itself on screen. Justified stretches every wrapped row to fill
-  the measure except a paragraph's last row, which stays ragged; fenced code
-  and table rows are always left regardless of the setting.
-- `:export [md|txt|html|pdf] [justify]`, and `--justify` on the CLI, carry
-  the same justification into `html`/`txt` export — the two formats shoin
-  renders itself. `md` and `pdf` refuse the flag, since raw markup and
-  pandoc's own template have no layout of their own to stretch.
-
-### 0.1.5
-
-- Fixed the viewport jumping around during ordinary navigation. The scroll
-  position was recomputed fresh every frame but never persisted, so it kept
-  re-deriving itself from a stale baseline instead of staying put while the
-  cursor moved within view.
-- Added a line-number gutter: `:number relative` or `:number absolute`, or
-  `<leader>n` / a bare `:number` to toggle it off and back to whichever mode
-  you last used. Relative numbers read `0` at the cursor's own line; a
-  margin too narrow to hold them (`align = "left"`, or a narrow terminal)
-  goes without rather than crowding the text.
-
-### 0.1.4
-
-- Dragging with the mouse now selects text, the way `mouse=a` does in Vim: the
-  press puts the cursor down, dragging out of it opens a charwise Visual
-  selection anchored there, and the selection outlives the release so `y`, `d`
-  and the writer verbs act on it. Text panes only — a drag begun in the file
-  tree still does nothing. Set `mouse = false` (or `:set mouse off`) to hand
-  selection back to the terminal.
-- Dragging **while inserting** follows Vim's `-- (insert) VISUAL --`: the
-  selection remembers the insert session it came out of, and an operator (`y`,
-  `d`, a writer verb) or `Esc` hands typing back rather than dropping you in
-  Normal. A second `Esc` leaves Insert as usual. The mode names itself once in
-  the status line on the way in, and the caret takes the accent colour for as
-  long as the selection is live — no chrome, so zen mode is unaffected.
-- `:u` and `:redo` now work. Undo and redo were reachable only as `u` and
-  `Ctrl-r`; typing Vim's `:u` fell through to `not a command: u`, which is easy
-  to miss in a status line that clears after 1.5s. All of Vim's abbreviations
-  land — `:u`, `:un`, `:und`, `:undo`, `:red`, `:redo`. `:r` and `:re` stay
-  unclaimed, since `:r` is `:read` in Vim.
-
-### 0.1.3
-
-- Table rows no longer word-wrap — a row wider than the pane stays on one
-  line, clipped at the edge, instead of breaking its `|` columns across
-  several ragged lines.
-- A new `:help shortcuts` page, bound to `<leader>hl`, lists every keyboard
-  interaction — leader keys, `:` commands, navigation, and other
-  keybindings — grouped by kind, on one page.
-
-### 0.1.2
-
-- The start-screen hint for a config-less first run now says `--init-config`
-  is required, not merely offered: without a config, leader bindings like
-  `<leader>fe` do nothing.
-
-### 0.1.1
-
-- Initial release. Obsidian-style live concealment with Vim modal editing —
-  operators, motions, text objects, counts, registers, dot-repeat, writer
-  verbs on the `g` prefix.
-- Centered measure with focus and typewriter modes, fenced code highlighting,
-  inline images where the terminal supports them, atomic saves with an
-  external-modification guard.
-- Panels, toggled rather than permanent: file tree, fuzzy finder,
-  multi-buffer, pane splits, start screen.
-- Transclusion of other notes, link following, and export to Markdown, plain
-  text, HTML and PDF.
-- Autosave on a timer, auto-reload when something else edits the file, and a
-  side-by-side diff view to merge the two versions difference by difference.
-
----
+| Type, then stop typing | `i` … `Esc` (or `jk`) |
+| Save, quit | `:w`, `:q` |
+| Bold the word under the cursor | `gb` |
+| Open the file tree | `Space fe` |
+| Follow a `[[link]]`, then come back | `gf`, then `Ctrl-^` |
+| Dim everything but this paragraph | `:focus paragraph` |
+| See every key on one page | `Space hl` |
+
+`:help` inside the editor explains the rest: `:help bindings`,
+`:help commands`, `:help writer` and `:help config`.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md) — install, requirements, first run
+- [Live preview](docs/live-preview.md) — how concealment works
+- [Editing](docs/editing.md) — motions, operators, text objects, registers
+- [Clipboard](docs/clipboard.md) — system clipboard, SSH, pasting
+- [Writing](docs/writing.md) — writer verbs, focus, typewriter and zen modes
+- [Panels](docs/panels.md) — file tree, finder, buffers, splits
+- [Notes](docs/notes.md) — links, embeds, `gf`, pictures
+- [Export](docs/export.md) — Markdown, text, HTML, PDF, from the editor or the shell
+- [Files](docs/files.md) — saving, autosave, outside edits and `:diff`
+- [Configuration](docs/configuration.md) — the config folder, themes, key bindings
+- [Design notes](docs/design.md) — why Shoin works the way it does
+- Reference: [keys](docs/reference/keys.md) · [commands](docs/reference/commands.md) · [command line](docs/reference/cli.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 

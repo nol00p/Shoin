@@ -1,0 +1,26 @@
+# Command line
+
+```
+shoin [FILE]
+
+  --config <PATH>     use this config instead of the discovered one
+                      (with --init-config, write to THIS path instead)
+  --print-config      print the resolved config and exit
+  --init-config       write the shipped config to ~/.config/shoin and exit
+  --force             let --init-config replace a config already there
+  --zen               start with every chrome affordance hidden
+  --export <FILE>     export without starting the editor
+  --format <FORMAT>   md | txt | html | pdf          (default: md)
+  --justify           stretch html/txt to fill the measure (md, pdf: refused)
+  --out <PATH>        where --export writes
+  --stdout            print the export instead of writing it (text formats only)
+  -h, --help          print help
+  -V, --version       print the version
+```
+
+Without `--out` or `--stdout`, `--export` writes `<name>.<format>` beside
+the file. With no `FILE`, Shoin opens a blank page with the splash screen.
+`SHOIN_CONFIG` names a config like `--config` does, and
+`SHOIN_IMAGE_PROTOCOL=kitty|iterm|none` overrides image detection. See
+[Configuration](../configuration.md#where-config-is-found) and
+[Export](../export.md).
