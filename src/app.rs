@@ -235,6 +235,12 @@ pub struct App {
     /// The mode a bare `:embed` turns back on, so toggling off and on again
     /// returns to `rec` rather than dropping to `short`.
     last_embed_mode: crate::transclude::Mode,
+    /// Bumped whenever a note on disk may have changed under an embed: a
+    /// write, a file created, moved or deleted, a reload, or arriving at a
+    /// document. An embed's expansion is read from DISK, not from the line, so
+    /// the render cache cannot see such a change in the text it keys on; it
+    /// compares this instead and re-reads its `![[…]]` lines when it moves.
+    pub disk_epoch: u64,
     /// How much of `input.escape_alias` has just been typed, and when the last
     /// of it arrived. Insert mode only; see `feed_escape_alias`.
     escape_run: usize,
@@ -625,6 +631,7 @@ impl App {
             embed_mode: crate::transclude::Mode::parse(&config.transclude.embed)
                 .unwrap_or_default(),
             last_embed_mode: crate::transclude::Mode::Short,
+            disk_epoch: 0,
             config,
             mode: Mode::Normal,
             flash: startup_flash,
@@ -1237,6 +1244,9 @@ impl App {
             }
         }
 
+        if !reloaded.is_empty() {
+            self.disk_changed();
+        }
         // A conflict outranks a reload in the report: one of them needs a
         // decision and the other is already finished.
         match (failed, conflicted.len(), reloaded.len()) {
@@ -1333,7 +1343,10 @@ impl App {
         // Forced, and safe to force: the guard exists to catch a change nobody
         // has looked at, and the check above just proved there is none.
         match doc.buffer.save(policy, true) {
-            Ok(()) => self.notify(format!("{name} merged and written"), FlashKind::Info),
+            Ok(()) => {
+                self.disk_changed();
+                self.notify(format!("{name} merged and written"), FlashKind::Info)
+            }
             Err(e) => self.notify(format!("{e}"), FlashKind::Error),
         }
         self.sync_after_input();
@@ -1424,7 +1437,10 @@ impl App {
         let result = doc.buffer.reload(&exts);
         let name = doc.buffer.display_name();
         match result {
-            Ok(true) => self.notify(format!("reverted {name}"), FlashKind::Info),
+            Ok(true) => {
+                self.disk_changed();
+                self.notify(format!("reverted {name}"), FlashKind::Info)
+            }
             Ok(false) => self.notify(format!("{name} already matches disk"), FlashKind::Info),
             Err(e) => self.notify(format!("{e}"), FlashKind::Error),
         }
@@ -1499,6 +1515,9 @@ impl App {
                 Err(_) => {}
             }
         }
+        if !written.is_empty() {
+            self.disk_changed();
+        }
         match (refused, written.len()) {
             (Some(why), _) => self.notify(format!("autosave: {why}"), FlashKind::Error),
             (None, 0) => return false,
@@ -1537,12 +1556,18 @@ impl App {
 
     /// Clamp the cursor and recompute the active set after any input.
     fn sync_after_input(&mut self) {
-        let last = self.buffer.line_count().saturating_sub(1);
+        // Insert mode may sit on the empty line after a trailing newline (an
+        // Enter at the end of the text lands there); nothing else may.
+        let past_end = self.mode.allows_past_end();
+        let last = if past_end {
+            self.buffer.line_count().saturating_sub(1)
+        } else {
+            self.buffer.last_line()
+        };
         if self.buffer.cursor.line > last {
             self.buffer.cursor.line = last;
         }
         let len = self.buffer.line_len(self.buffer.cursor.line);
-        let past_end = self.mode.allows_past_end();
         self.buffer.cursor.clamp(len, past_end);
         self.active = ActiveSet::compute(&self.mode, &self.buffer.cursor, self.anchor);
         // The focused pane remembers where it is, so leaving and coming back
@@ -1615,7 +1640,7 @@ impl App {
             Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change),
             Action::YankLine => {
                 let line = self.buffer.cursor.line;
-                let last = self.buffer.line_count().saturating_sub(1);
+                let last = self.buffer.last_line();
                 self.operate_linewise(Operator::Yank, line, (line + count - 1).min(last));
             }
             // `3rx` replaces three characters, so this needs the count and
@@ -1706,7 +1731,7 @@ impl App {
             Target::Object { key, around } => self.operate_object(op, key, around),
             Target::Line => {
                 let l1 = self.buffer.cursor.line;
-                let last = self.buffer.line_count().saturating_sub(1);
+                let last = self.buffer.last_line();
                 self.operate_linewise(op, l1, (l1 + count - 1).min(last));
             }
             Target::Selection => self.visual_operate(op),
@@ -2407,6 +2432,7 @@ impl App {
                 self.notify(format!("{e}"), FlashKind::Error);
                 return;
             }
+            self.disk_changed();
             if self.open_file(path.clone()) {
                 self.notify(format!("created {}", path.display()), FlashKind::Info);
             }
@@ -2619,6 +2645,11 @@ impl App {
 
     // -------------------------------------------------------------- buffers
 
+    /// Note that a file may have changed on disk; see `disk_epoch`.
+    fn disk_changed(&mut self) {
+        self.disk_epoch = self.disk_epoch.wrapping_add(1);
+    }
+
     /// Make document `i` current. The one being left keeps its cursor, scroll
     /// and parse cache, so coming back costs nothing.
     fn switch_to(&mut self, i: usize) {
@@ -2645,6 +2676,9 @@ impl App {
         self.anchor = None;
         self.visual_resumes_insert = false;
         self.pending.reset();
+        // Coming back to a document re-reads its embeds: the notes they name
+        // may have been written, or created, while it was out of sight.
+        self.disk_changed();
         // The block cache of a document edited while it was in the background
         // (there is no such path today, but reload could add one) resyncs on
         // the next frame through the usual revision check.
@@ -3338,7 +3372,7 @@ impl App {
     fn join_lines(&mut self, count: usize) {
         for _ in 0..count.saturating_sub(1).max(1) {
             let line = self.buffer.cursor.line;
-            if line + 1 >= self.buffer.line_count() {
+            if line >= self.buffer.last_line() {
                 break;
             }
             let cur_len = self.buffer.line_len(line);
@@ -3521,7 +3555,7 @@ impl App {
 
     /// Delete/change/yank whole lines `l1..=l2`.
     fn operate_linewise(&mut self, op: Operator, l1: usize, l2: usize) {
-        let last = self.buffer.line_count().saturating_sub(1);
+        let last = self.buffer.last_line();
         let (a, b) = (l1.min(l2), l1.max(l2).min(last));
         let start = self.buffer.rope.line_to_char(a);
         let end = if b < last {
@@ -3541,7 +3575,7 @@ impl App {
             Operator::Delete => {
                 self.buffer.delete_chars(start, end);
                 self.store_register(text, true, true);
-                let nl = self.buffer.line_count().saturating_sub(1);
+                let nl = self.buffer.last_line();
                 self.buffer.cursor = Cursor::new(a.min(nl), 0);
             }
             Operator::Change => {
@@ -4292,6 +4326,7 @@ impl App {
 
         match outcome {
             Ok(landed) => {
+                self.disk_changed();
                 let verb = match p.kind {
                     PromptKind::Create => "created",
                     PromptKind::Rename => "renamed",
@@ -4878,6 +4913,7 @@ impl App {
         };
         match result {
             Ok(()) => {
+                self.disk_changed();
                 let name = self.buffer.display_name();
                 let words = self.buffer.word_count();
                 self.notify(format!("{name} written · {words} words"), FlashKind::Info);
@@ -5250,6 +5286,93 @@ mod tests {
         assert_eq!(shown(&app), "note.md", "back to the note that linked here");
         ctrl(&mut app, '^');
         assert_eq!(shown(&app), "target.md", "and back again");
+    }
+
+    /// What line `line` of the current document draws as an embed, row by row,
+    /// after syncing its render cache the way a frame does.
+    fn embed_rows(app: &mut App, line: usize) -> Vec<String> {
+        app.refresh_blocks();
+        embed_rows_of(app, app.current(), line)
+    }
+
+    /// The same for document `doc`, which need not be the current one.
+    fn embed_rows_of(app: &App, doc: usize, line: usize) -> Vec<String> {
+        use crate::transclude::preview::Row;
+        let mut cache = app.docs[doc].cache.borrow_mut();
+        cache.sync_doc(app, &app.docs[doc], 60);
+        let Some(x) = cache.entry(line).and_then(|e| e.embed.as_ref()) else {
+            return Vec::new();
+        };
+        x.rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Body(s, _) => Some(s.clone()),
+                Row::Error(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Follow the embed on line 1 with `gf`, replace the note's text, and `:w`.
+    fn write_through_an_embed(app: &mut App, text: &str) {
+        cursor_on(app, 1, "fragments");
+        embed_rows(app, 1); // a frame on the link line, as the reader saw it
+        feed(app, "gf");
+        assert_eq!(shown(app), "next.md");
+        // A frame of the embedding note after the switch, as a split showing
+        // it would draw: from here only the write can tell it to re-read.
+        embed_rows_of(app, 0, 1);
+        feed(app, "ggdGi");
+        feed(app, text);
+        esc(app);
+        feed(app, ":w");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+        assert!(flash_text(app).contains("written"), "got {:?}", flash_text(app));
+    }
+
+    /// The bug as found: an embed of a note that did not exist yet kept saying
+    /// "no note called …" after `gf` had created the note and it was written.
+    /// The expansion is read from disk but cached with the LINE, and the line
+    /// had not changed.
+    #[test]
+    fn an_embed_of_a_missing_note_shows_it_once_it_is_created_and_written() {
+        let (_d, mut app) = vault("intro\n![[fragments/next]]\n", &[]);
+        app.embed_mode = crate::transclude::Mode::Full;
+        let before = embed_rows(&mut app, 1);
+        assert!(before[0].contains("no note called"), "got {before:?}");
+
+        write_through_an_embed(&mut app, "Next: protect two hours.");
+        ctrl(&mut app, '^');
+        feed(&mut app, "gg"); // off the link line, so it expands
+        assert_eq!(embed_rows(&mut app, 1), ["Next: protect two hours."]);
+    }
+
+    /// The same for a note that already existed: the embed shows what the note
+    /// was last written as.
+    #[test]
+    fn an_embed_shows_what_its_note_was_last_written_as() {
+        let (_d, mut app) = vault("intro\n![[fragments/next]]\n", &[("fragments/next.md", "old\n")]);
+        app.embed_mode = crate::transclude::Mode::Full;
+        assert_eq!(embed_rows(&mut app, 1), ["old"]);
+
+        write_through_an_embed(&mut app, "new");
+        ctrl(&mut app, '^');
+        feed(&mut app, "gg");
+        assert_eq!(embed_rows(&mut app, 1), ["new"]);
+    }
+
+    /// A document that stays on screen in another pane is never switched back
+    /// to, so the write itself has to reach its embeds.
+    #[test]
+    fn a_write_refreshes_embeds_in_a_document_left_on_screen() {
+        let (_d, mut app) = vault("intro\n![[fragments/next]]\n", &[("fragments/next.md", "old\n")]);
+        app.embed_mode = crate::transclude::Mode::Full;
+        assert_eq!(embed_rows_of(&app, 0, 1), ["old"]);
+
+        write_through_an_embed(&mut app, "new");
+        assert_eq!(shown(&app), "next.md", "still in the embedded note");
+        assert_eq!(embed_rows_of(&app, 0, 1), ["new"], "the embedding note re-read it");
     }
 
     /// Terminals disagree about which of the two chords they send.
@@ -6915,6 +7038,127 @@ mod tests {
         feed(&mut app, "jyw");
         let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
         assert_eq!(yanked, "bravo");
+    }
+
+    /// The bug as found: on a file ending in a newline, `G` went to the empty
+    /// string ropey counts after it, so `GiX` then `:w` wrote `one\ntwo\nX\n`.
+    /// vim's `G` is the last line of text, and the file keeps its newline.
+    #[test]
+    fn g_then_insert_on_a_file_with_a_trailing_newline_edits_the_last_line() {
+        for (on_disk, want) in [("one\ntwo\n", "one\nXtwo\n"), ("one\ntwo", "one\nXtwo")] {
+            let path = std::env::temp_dir().join(format!(
+                "shoin-G-{}-{}.md",
+                on_disk.len(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, on_disk).unwrap();
+            let mut app = App::new(Config::default(), None, None).unwrap();
+            app.buffer = Buffer::open(path.clone(), &[]).unwrap();
+            app.blocks = BlockCache::build(&app.buffer);
+
+            feed(&mut app, "G");
+            assert_eq!(app.buffer.cursor.line, 1, "{on_disk:?}: `G` is on `two`");
+            feed(&mut app, "iX");
+            esc(&mut app);
+            app.buffer.save(SavePolicy::default(), false).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{on_disk:?}");
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// `Go` opens one line below the last, with no blank line left between.
+    #[test]
+    fn g_then_o_opens_directly_below_the_last_line() {
+        let mut app = app_with("one\ntwo\n");
+        feed(&mut app, "GoX");
+        esc(&mut app);
+        assert_eq!(text(&app), "one\ntwo\nX\n");
+    }
+
+    /// `j` at the bottom and a counted `G` past the end both stop on the last
+    /// line of text.
+    #[test]
+    fn j_and_a_counted_g_stop_on_the_last_line_of_text() {
+        let mut app = app_with("one\ntwo\n");
+        feed(&mut app, "jj");
+        assert_eq!(app.buffer.cursor.line, 1, "`j` on the last line stays put");
+        feed(&mut app, "gg9G");
+        assert_eq!(app.buffer.cursor.line, 1, "`9G` clamps to the last line");
+        feed(&mut app, "ggVG");
+        assert_eq!(app.buffer.cursor.line, 1, "visual `G` too");
+        feed(&mut app, "d");
+        assert_eq!(text(&app), "", "and `VGd` takes every line");
+    }
+
+    /// `dd` on the last line leaves the cursor on the new last line, not on
+    /// the empty string after the newline.
+    #[test]
+    fn dd_on_the_last_line_lands_on_the_line_above() {
+        let mut app = app_with("one\ntwo\nthree\n");
+        feed(&mut app, "Gdd");
+        assert_eq!(text(&app), "one\ntwo\n");
+        assert_eq!(app.buffer.cursor.line, 1, "on `two`");
+        feed(&mut app, "dd");
+        assert_eq!(text(&app), "one\n", "a second `dd` takes `two`, not a phantom line");
+    }
+
+    /// `yy` and `p` on the last line put the copy directly below it.
+    #[test]
+    fn yy_then_p_on_the_last_line_duplicates_it() {
+        let mut app = app_with("one\ntwo\n");
+        feed(&mut app, "Gyyp");
+        assert_eq!(text(&app), "one\ntwo\ntwo\n");
+        assert_eq!(app.buffer.cursor.line, 2);
+        feed(&mut app, "P");
+        assert_eq!(text(&app), "one\ntwo\ntwo\ntwo\n");
+    }
+
+    /// `dG` and `yG` cover through the last line of text and no further.
+    #[test]
+    fn d_g_and_y_g_run_to_the_last_line() {
+        let mut app = app_with("one\ntwo\nthree\n");
+        feed(&mut app, "jyG");
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, "two\nthree\n");
+        feed(&mut app, "dG");
+        assert_eq!(text(&app), "one\n");
+        assert_eq!(app.buffer.cursor.line, 0);
+    }
+
+    /// `J` on the last line has nothing to join, as in vim — it used to join
+    /// the trailing newline away.
+    #[test]
+    fn j_join_on_the_last_line_does_nothing() {
+        let mut app = app_with("one\ntwo\n");
+        let before = app.buffer.revision;
+        feed(&mut app, "GJ");
+        assert_eq!(text(&app), "one\ntwo\n");
+        assert_eq!(app.buffer.revision, before, "nothing was changed");
+    }
+
+    /// `dap` on the last paragraph has no blank line after it to take, so it
+    /// takes the blank lines before it instead — vim's rule.
+    #[test]
+    fn dap_on_the_last_paragraph_takes_the_blank_lines_before_it() {
+        let mut app = app_with("x\n\na\nb\n");
+        feed(&mut app, "Gdap");
+        assert_eq!(text(&app), "x\n");
+    }
+
+    /// Insert mode may still sit on the line an Enter at the very end opens,
+    /// where there was no trailing newline to begin with.
+    #[test]
+    fn insert_mode_can_type_on_the_line_after_the_last_newline() {
+        let mut app = app_with("");
+        feed(&mut app, "ia");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+        assert_eq!(app.buffer.cursor.line, 1, "not clamped back while inserting");
+        feed(&mut app, "b");
+        assert_eq!(text(&app), "a\nb");
     }
 
     /// Trailing whitespace after the last word still goes, as in vim.

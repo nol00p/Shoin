@@ -166,6 +166,10 @@ pub struct RenderCache {
     /// line. `None` means the entries and the document may have diverged, which
     /// is the only state that has to pay for the verification walk.
     verified: Option<u64>,
+    /// `App::disk_epoch` when the embed lines were last expanded. Their
+    /// expansion reads the notes they name from disk, so it goes stale without
+    /// the line itself changing.
+    disk_epoch: u64,
     /// Lines parsed since startup. Instrumentation: the whole point of this
     /// type is that this number grows with EDITS, not with frames or lines.
     builds: u64,
@@ -205,6 +209,19 @@ impl RenderCache {
             self.entries.clear();
             self.verified = None;
             self.measure = measure;
+        }
+
+        if self.disk_epoch != app.disk_epoch {
+            // Only the `![[…]]` lines read the disk, so only they re-parse.
+            // That includes an embed showing "no note called …": the note may
+            // exist now.
+            for entry in &mut self.entries {
+                if entry.as_ref().is_some_and(|e| e.embed.is_some()) {
+                    *entry = None;
+                }
+            }
+            self.verified = None;
+            self.disk_epoch = app.disk_epoch;
         }
 
         if self.revision != doc.buffer.revision {

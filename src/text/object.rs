@@ -119,7 +119,7 @@ pub fn paragraph_bounds(buffer: &Buffer, line: usize) -> (usize, usize) {
     while s > 0 && !blank(s - 1) {
         s -= 1;
     }
-    let last = buffer.line_count().saturating_sub(1);
+    let last = buffer.last_line();
     let mut e = line;
     while e < last && !blank(e + 1) {
         e += 1;
@@ -132,7 +132,7 @@ pub fn paragraph_bounds(buffer: &Buffer, line: usize) -> (usize, usize) {
 /// file) — vim's "paragraph plus its trailing blank line".
 fn paragraph_object(buffer: &Buffer, line: usize, around: bool) -> Option<ObjectRange> {
     let blank = |l: usize| buffer.line_text(l).trim().is_empty();
-    let last = buffer.line_count().saturating_sub(1);
+    let last = buffer.last_line();
     let on_blank = blank(line);
 
     let mut s = line;

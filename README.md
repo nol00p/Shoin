@@ -520,6 +520,17 @@ shoin [FILE]
 
 ## Changelog
 
+### Unreleased
+
+- On a file ending in a newline, `G` now goes to the last line of text instead
+  of an empty line past it, as in vim — so `GiX` no longer adds a line, and
+  `Go` no longer leaves a blank one. `j`, `{count}G`, `}`, `dd`, `J` and `dap`
+  at the end of a file stop at the same line.
+- An `![[embed]]` now shows its note as last written. It used to keep what it
+  first read until the line itself was edited, so an embed of a note that did
+  not exist yet kept saying "no note called …" after `gf` created the note and
+  it was saved.
+
 ### 0.1.8
 
 - Clipboard support. `"+y` / `"+p` (and `"*`) copy to and paste from the
