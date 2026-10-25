@@ -286,6 +286,25 @@ impl Buffer {
         self.rope.len_lines()
     }
 
+    /// The last line the cursor can rest on outside Insert mode — vim's last
+    /// line.
+    ///
+    /// Ropey counts the empty string after a trailing newline as a line of its
+    /// own, so `line_count() - 1` is one past the end for any file ending in
+    /// `\n`. That line is not part of the document: saving writes the same
+    /// bytes whether or not it is there. Insert mode may still sit on it (an
+    /// Enter at the end of the text lands there), so `line_count` keeps
+    /// ropey's meaning and this is what motions and clamps use instead.
+    pub fn last_line(&self) -> usize {
+        let n = self.rope.len_lines();
+        let len = self.rope.len_chars();
+        if n > 1 && self.rope.char(len - 1) == '\n' {
+            n - 2
+        } else {
+            n - 1
+        }
+    }
+
     /// Line content WITHOUT its trailing newline.
     pub fn line_text(&self, line: usize) -> String {
         if line >= self.rope.len_lines() {
@@ -439,6 +458,26 @@ mod tests {
         // Past the end is empty rather than a panic: motions clamp against it.
         assert_eq!(b.line_text(99), "");
         assert_eq!(b.line_len(99), 0);
+    }
+
+    /// A trailing newline ends the last line rather than opening another, so
+    /// `last_line` is one short of ropey's count exactly when the text ends
+    /// in `\n` — and never below line 0.
+    #[test]
+    fn the_last_line_ignores_the_empty_string_after_a_trailing_newline() {
+        let mut b = Buffer::empty();
+        let cases = [
+            ("", 0),
+            ("\n", 0),
+            ("one", 0),
+            ("one\ntwo", 1),
+            ("one\ntwo\n", 1),
+            ("one\n\n", 1),
+        ];
+        for (text, last) in cases {
+            b.rope = Rope::from_str(text);
+            assert_eq!(b.last_line(), last, "{text:?}");
+        }
     }
 
     /// `char_index` clamps on both axes. Every edit primitive goes through it,

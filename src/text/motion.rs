@@ -89,7 +89,7 @@ pub fn resolve(
 ) -> Option<MotionResult> {
     let count = count.max(1);
     let cur = buffer.cursor;
-    let last_line = buffer.line_count().saturating_sub(1);
+    let last_line = buffer.last_line();
 
     use Motion::*;
     use MotionKind::*;
@@ -293,7 +293,7 @@ pub fn resolve(
 /// the range is the character under the cursor.
 pub fn change_word_end(buffer: &Buffer, count: usize, big: bool) -> Cursor {
     let cur = buffer.cursor;
-    let last_line = buffer.line_count().saturating_sub(1);
+    let last_line = buffer.last_line();
     let chars: Vec<char> = buffer.line_text(cur.line).chars().collect();
     let at_end = match (chars.get(cur.col), chars.get(cur.col + 1)) {
         (Some(&c), Some(&next)) => class_of(next, big) != class_of(c, big),
@@ -561,9 +561,9 @@ mod tests {
         let b = buf("one\ntwo two\nthree\n", 0, 0);
         assert_eq!(go(&b, Motion::LineEnd, 1), Some((0, 2)));
         assert_eq!(go(&b, Motion::LineEnd, 2), Some((1, 6)));
-        // Clamped to the last line — which, for a document ending in a
-        // newline, is the empty one after `three`.
-        assert_eq!(go(&b, Motion::LineEnd, 9), Some((3, 0)));
+        // Clamped to the last line — `three`, not the empty string ropey
+        // counts after the trailing newline.
+        assert_eq!(go(&b, Motion::LineEnd, 9), Some((2, 4)));
         assert_eq!(go(&b, Motion::LineEnd, 3), Some((2, 4)));
     }
 
@@ -589,14 +589,11 @@ mod tests {
         assert_eq!(go(&b, Motion::Left, 1), None);
         assert_eq!(go(&b, Motion::LineStart, 1), None, "already there");
 
-        // A document ending in a newline has an empty last line to sit on —
-        // ropey's model, and where an append would land — so there IS a line
-        // below `two`. Line 2 is that one, and nothing is below it.
+        // The trailing newline ends `two`; it does not open a line below it,
+        // so `two` is the last line, as in vim.
         let b = buf("one\ntwo\n", 1, 2);
-        assert_eq!(go(&b, Motion::Down, 1), Some((2, 0)));
-        assert_eq!(go(&b, Motion::Right, 1), None, "col 2 is the last char of `two`");
-        let b = buf("one\ntwo\n", 2, 0);
         assert_eq!(go(&b, Motion::Down, 1), None, "nothing below the last line");
+        assert_eq!(go(&b, Motion::Right, 1), None, "col 2 is the last char of `two`");
 
         // `H`/`M`/`L` need a viewport this module cannot see.
         assert_eq!(go(&b, Motion::ScreenTop, 1), None);
@@ -612,7 +609,30 @@ mod tests {
         let b = buf("one\n\ntwo\nthree\n\nfour\n", 5, 0);
         assert_eq!(go(&b, Motion::ParagraphBack, 1), Some((4, 0)));
         assert_eq!(go(&b, Motion::GotoLine(2), 1), Some((2, 0)));
-        assert_eq!(go(&b, Motion::GotoLine(999), 1), Some((6, 0)), "clamped");
+        assert_eq!(go(&b, Motion::GotoLine(999), 1), None, "clamped to `four`, already here");
+    }
+
+    /// `G` lands on the last line of text, not on the empty string ropey
+    /// counts after a trailing newline — and a file without one, or an empty
+    /// one, still has its last line where it was.
+    #[test]
+    fn buffer_end_is_the_last_line_of_text() {
+        let b = buf("one\ntwo\n", 0, 0);
+        assert_eq!(go(&b, Motion::BufferEnd, 1), Some((1, 0)));
+        assert_eq!(go(&b, Motion::GotoLine(99), 1), Some((1, 0)), "`99G` clamps there too");
+        assert_eq!(go(&b, Motion::Down, 5), Some((1, 0)), "`5j` stops on it");
+        assert_eq!(go(&b, Motion::PageDown, 1), Some((1, 0)));
+        assert_eq!(go(&b, Motion::ParagraphForward, 1), Some((1, 2)), "`}}` ends on `two`");
+
+        let b = buf("one\ntwo", 0, 0);
+        assert_eq!(go(&b, Motion::BufferEnd, 1), Some((1, 0)), "no trailing newline");
+        let b = buf("one\n\n", 0, 0);
+        assert_eq!(go(&b, Motion::BufferEnd, 1), Some((1, 0)), "a real empty last line");
+        // One line: already on the last line, so `G` stays put.
+        let b = buf("", 0, 0);
+        assert_eq!(go(&b, Motion::BufferEnd, 1), None, "an empty file");
+        let b = buf("\n", 0, 0);
+        assert_eq!(go(&b, Motion::BufferEnd, 1), None, "a lone newline is one line");
     }
 
     #[test]

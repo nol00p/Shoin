@@ -1537,12 +1537,18 @@ impl App {
 
     /// Clamp the cursor and recompute the active set after any input.
     fn sync_after_input(&mut self) {
-        let last = self.buffer.line_count().saturating_sub(1);
+        // Insert mode may sit on the empty line after a trailing newline (an
+        // Enter at the end of the text lands there); nothing else may.
+        let past_end = self.mode.allows_past_end();
+        let last = if past_end {
+            self.buffer.line_count().saturating_sub(1)
+        } else {
+            self.buffer.last_line()
+        };
         if self.buffer.cursor.line > last {
             self.buffer.cursor.line = last;
         }
         let len = self.buffer.line_len(self.buffer.cursor.line);
-        let past_end = self.mode.allows_past_end();
         self.buffer.cursor.clamp(len, past_end);
         self.active = ActiveSet::compute(&self.mode, &self.buffer.cursor, self.anchor);
         // The focused pane remembers where it is, so leaving and coming back
@@ -1615,7 +1621,7 @@ impl App {
             Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change),
             Action::YankLine => {
                 let line = self.buffer.cursor.line;
-                let last = self.buffer.line_count().saturating_sub(1);
+                let last = self.buffer.last_line();
                 self.operate_linewise(Operator::Yank, line, (line + count - 1).min(last));
             }
             // `3rx` replaces three characters, so this needs the count and
@@ -1706,7 +1712,7 @@ impl App {
             Target::Object { key, around } => self.operate_object(op, key, around),
             Target::Line => {
                 let l1 = self.buffer.cursor.line;
-                let last = self.buffer.line_count().saturating_sub(1);
+                let last = self.buffer.last_line();
                 self.operate_linewise(op, l1, (l1 + count - 1).min(last));
             }
             Target::Selection => self.visual_operate(op),
@@ -3338,7 +3344,7 @@ impl App {
     fn join_lines(&mut self, count: usize) {
         for _ in 0..count.saturating_sub(1).max(1) {
             let line = self.buffer.cursor.line;
-            if line + 1 >= self.buffer.line_count() {
+            if line >= self.buffer.last_line() {
                 break;
             }
             let cur_len = self.buffer.line_len(line);
@@ -3521,7 +3527,7 @@ impl App {
 
     /// Delete/change/yank whole lines `l1..=l2`.
     fn operate_linewise(&mut self, op: Operator, l1: usize, l2: usize) {
-        let last = self.buffer.line_count().saturating_sub(1);
+        let last = self.buffer.last_line();
         let (a, b) = (l1.min(l2), l1.max(l2).min(last));
         let start = self.buffer.rope.line_to_char(a);
         let end = if b < last {
@@ -3541,7 +3547,7 @@ impl App {
             Operator::Delete => {
                 self.buffer.delete_chars(start, end);
                 self.store_register(text, true, true);
-                let nl = self.buffer.line_count().saturating_sub(1);
+                let nl = self.buffer.last_line();
                 self.buffer.cursor = Cursor::new(a.min(nl), 0);
             }
             Operator::Change => {
@@ -6915,6 +6921,127 @@ mod tests {
         feed(&mut app, "jyw");
         let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
         assert_eq!(yanked, "bravo");
+    }
+
+    /// The bug as found: on a file ending in a newline, `G` went to the empty
+    /// string ropey counts after it, so `GiX` then `:w` wrote `one\ntwo\nX\n`.
+    /// vim's `G` is the last line of text, and the file keeps its newline.
+    #[test]
+    fn g_then_insert_on_a_file_with_a_trailing_newline_edits_the_last_line() {
+        for (on_disk, want) in [("one\ntwo\n", "one\nXtwo\n"), ("one\ntwo", "one\nXtwo")] {
+            let path = std::env::temp_dir().join(format!(
+                "shoin-G-{}-{}.md",
+                on_disk.len(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, on_disk).unwrap();
+            let mut app = App::new(Config::default(), None, None).unwrap();
+            app.buffer = Buffer::open(path.clone(), &[]).unwrap();
+            app.blocks = BlockCache::build(&app.buffer);
+
+            feed(&mut app, "G");
+            assert_eq!(app.buffer.cursor.line, 1, "{on_disk:?}: `G` is on `two`");
+            feed(&mut app, "iX");
+            esc(&mut app);
+            app.buffer.save(SavePolicy::default(), false).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{on_disk:?}");
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// `Go` opens one line below the last, with no blank line left between.
+    #[test]
+    fn g_then_o_opens_directly_below_the_last_line() {
+        let mut app = app_with("one\ntwo\n");
+        feed(&mut app, "GoX");
+        esc(&mut app);
+        assert_eq!(text(&app), "one\ntwo\nX\n");
+    }
+
+    /// `j` at the bottom and a counted `G` past the end both stop on the last
+    /// line of text.
+    #[test]
+    fn j_and_a_counted_g_stop_on_the_last_line_of_text() {
+        let mut app = app_with("one\ntwo\n");
+        feed(&mut app, "jj");
+        assert_eq!(app.buffer.cursor.line, 1, "`j` on the last line stays put");
+        feed(&mut app, "gg9G");
+        assert_eq!(app.buffer.cursor.line, 1, "`9G` clamps to the last line");
+        feed(&mut app, "ggVG");
+        assert_eq!(app.buffer.cursor.line, 1, "visual `G` too");
+        feed(&mut app, "d");
+        assert_eq!(text(&app), "", "and `VGd` takes every line");
+    }
+
+    /// `dd` on the last line leaves the cursor on the new last line, not on
+    /// the empty string after the newline.
+    #[test]
+    fn dd_on_the_last_line_lands_on_the_line_above() {
+        let mut app = app_with("one\ntwo\nthree\n");
+        feed(&mut app, "Gdd");
+        assert_eq!(text(&app), "one\ntwo\n");
+        assert_eq!(app.buffer.cursor.line, 1, "on `two`");
+        feed(&mut app, "dd");
+        assert_eq!(text(&app), "one\n", "a second `dd` takes `two`, not a phantom line");
+    }
+
+    /// `yy` and `p` on the last line put the copy directly below it.
+    #[test]
+    fn yy_then_p_on_the_last_line_duplicates_it() {
+        let mut app = app_with("one\ntwo\n");
+        feed(&mut app, "Gyyp");
+        assert_eq!(text(&app), "one\ntwo\ntwo\n");
+        assert_eq!(app.buffer.cursor.line, 2);
+        feed(&mut app, "P");
+        assert_eq!(text(&app), "one\ntwo\ntwo\ntwo\n");
+    }
+
+    /// `dG` and `yG` cover through the last line of text and no further.
+    #[test]
+    fn d_g_and_y_g_run_to_the_last_line() {
+        let mut app = app_with("one\ntwo\nthree\n");
+        feed(&mut app, "jyG");
+        let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+        assert_eq!(yanked, "two\nthree\n");
+        feed(&mut app, "dG");
+        assert_eq!(text(&app), "one\n");
+        assert_eq!(app.buffer.cursor.line, 0);
+    }
+
+    /// `J` on the last line has nothing to join, as in vim — it used to join
+    /// the trailing newline away.
+    #[test]
+    fn j_join_on_the_last_line_does_nothing() {
+        let mut app = app_with("one\ntwo\n");
+        let before = app.buffer.revision;
+        feed(&mut app, "GJ");
+        assert_eq!(text(&app), "one\ntwo\n");
+        assert_eq!(app.buffer.revision, before, "nothing was changed");
+    }
+
+    /// `dap` on the last paragraph has no blank line after it to take, so it
+    /// takes the blank lines before it instead — vim's rule.
+    #[test]
+    fn dap_on_the_last_paragraph_takes_the_blank_lines_before_it() {
+        let mut app = app_with("x\n\na\nb\n");
+        feed(&mut app, "Gdap");
+        assert_eq!(text(&app), "x\n");
+    }
+
+    /// Insert mode may still sit on the line an Enter at the very end opens,
+    /// where there was no trailing newline to begin with.
+    #[test]
+    fn insert_mode_can_type_on_the_line_after_the_last_newline() {
+        let mut app = app_with("");
+        feed(&mut app, "ia");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+        assert_eq!(app.buffer.cursor.line, 1, "not clamped back while inserting");
+        feed(&mut app, "b");
+        assert_eq!(text(&app), "a\nb");
     }
 
     /// Trailing whitespace after the last word still goes, as in vim.
