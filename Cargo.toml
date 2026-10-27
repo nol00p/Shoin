@@ -13,6 +13,10 @@ repository = "https://github.com/nol00p/Shoin"
 homepage = "https://github.com/nol00p/Shoin"
 keywords = ["markdown", "editor", "tui", "vim", "notes"]
 categories = ["text-editors", "command-line-utilities"]
+# What `cargo publish` uploads. The `shoin/*.conf` files are not optional:
+# `config/init.rs` compiles them in with `include_str!`. The docs GIFs and
+# `examples/` stay on GitHub, where the README's relative links resolve.
+include = ["/src/**/*.rs", "/shoin/*.conf", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 
 [[bin]]
 name = "shoin"
@@ -47,3 +51,8 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# What `dist` builds release binaries with (.github/workflows/release.yml).
+# It inherits everything above, so the binaries match a local release build.
+[profile.dist]
+inherits = "release"
