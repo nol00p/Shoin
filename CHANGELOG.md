@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.9
 
+- Releases now come with prebuilt binaries for macOS and Linux, on x86_64
+  and ARM, and a shell installer, attached to each GitHub release. Shoin is
+  also published on crates.io as `shoin`, so `cargo install shoin` works
+  without a clone or `--git`.
 - On a file ending in a newline, `G` now goes to the last line of text instead
   of an empty line past it, as in vim — so `GiX` no longer adds a line, and
   `Go` no longer leaves a blank one. `j`, `{count}G`, `}`, `dd`, `J` and `dap`
