@@ -4,13 +4,25 @@
   <img src="media/hero.gif" alt="Shoin's splash screen, the file tree, and a note opened from it" width="800">
 </p>
 
-Install with Cargo, write the default config once, and open a file. `i` to
+Install Shoin, write the default config once, and open a file. `i` to
 type, `Esc` to stop, `:w` to save, `:q` to quit.
 
 ## Install
 
+On macOS or Linux (x86_64 or ARM), the installer downloads a prebuilt binary
+from the [latest release](https://github.com/nol00p/shoin/releases/latest):
+
 ```sh
-cargo install --git https://github.com/nol00p/shoin
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
+```
+
+The release page also has the plain `.tar.xz` archives, with a SHA-256
+checksum for each, if you'd rather unpack the binary yourself.
+
+With Rust 1.88 or newer, build it from crates.io instead:
+
+```sh
+cargo install shoin
 ```
 
 Or from a clone:
@@ -21,8 +33,9 @@ cd shoin
 cargo install --path .
 ```
 
-Both put a `shoin` binary in `~/.cargo/bin`, which needs to be on your `PATH`.
-To try it without installing, `cargo run -- notes.md` works from a clone.
+Each of these puts a `shoin` binary in `~/.cargo/bin`, which needs to be on
+your `PATH`. To try it without installing, `cargo run -- notes.md` works from
+a clone.
 
 Then write the default config:
 
@@ -39,7 +52,8 @@ already have unless you add `--force`. ([Why it isn't automatic](design.md#the-c
 
 | | |
 |---|---|
-| **Rust** | 1.88 or newer |
+| **OS** | macOS or Linux, x86_64 or ARM — Windows is not supported yet |
+| **Rust** | 1.88 or newer, only to build from source |
 | **Terminal** | truecolor (24-bit) support |
 | **Font** | a [Nerd Font](https://www.nerdfonts.com/) — or set `glyphs.nerd_fonts = false` |
 | **PDF export only** | `pandoc` and a layout engine (`brew install pandoc typst`) |

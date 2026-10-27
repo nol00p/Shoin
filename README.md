@@ -72,16 +72,23 @@ link that didn't resolve yet.
 
 ## Install
 
+Shoin runs on **macOS and Linux**, on x86_64 and ARM. Windows isn't
+supported yet: it isn't built or tested there.
+
+The installer fetches a prebuilt binary:
+
 ```sh
-cargo install --git https://github.com/nol00p/shoin
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
 shoin --init-config        # writes the default config to ~/.config/shoin/
 ```
 
+Or build it with Cargo (Rust 1.88 or newer): `cargo install shoin`.
+
 Run `--init-config` once: the leader keys, such as `Space fe` for the file
-tree, are defined in that config and do nothing without it. You need Rust 1.88
-or newer, a truecolor terminal and a [Nerd Font](https://www.nerdfonts.com/)
-(or `glyphs.nerd_fonts = false`). [Getting started](docs/getting-started.md)
-covers installing from a clone and the optional PDF tools.
+tree, are defined in that config and do nothing without it. You need a
+truecolor terminal and a [Nerd Font](https://www.nerdfonts.com/) (or
+`glyphs.nerd_fonts = false`). [Getting started](docs/getting-started.md)
+covers the other ways to install and the optional PDF tools.
 
 ## First five minutes
 
