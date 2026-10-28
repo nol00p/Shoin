@@ -10,8 +10,8 @@
   it is back; set it to `"none"`.
 
 - `shoin -p notes.md` (`--render`) prints a file as the editor shows it —
-  concealed, styled, in the theme's colours — and exits, so a note can be
-  read without opening the editor. Piped or with `NO_COLOR` set, it prints
+  concealed, styled, in the theme's colours, embeds expanded and pictures
+  drawn — and exits, so a note can be read without opening the editor. Piped or with `NO_COLOR` set, it prints
   plain text.
 
 ## 0.1.9

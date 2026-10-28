@@ -8,8 +8,14 @@
 //!
 //! What differs from the editor is only what a printed page has no use for:
 //! there is no cursor, so no line is active and every line conceals, and no
-//! status line, scroll hint or line numbers.
+//! status line, scroll hint or line numbers. Embeds are expanded in full,
+//! whatever `transclude.embed` says: a page you only read has no cursor to
+//! open them with, and the plain-text path expands them too.
+//!
+//! Pictures are painted the way the editor paints them, outside the cells, at
+//! the boxes the frame left blank for them (`App::paint_images`).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use ratatui::backend::TestBackend;
@@ -29,6 +35,7 @@ pub fn styled(app: &mut App, width: u16) -> String {
     app.config.status.enabled = false;
     app.config.layout.scroll_hint = false;
     app.numbers = NumberMode::Off;
+    app.embed_mode = crate::transclude::Mode::Full;
 
     // One draw to fill the render cache, which then knows how many rows the
     // document wraps into; the second draw is exactly that tall.
@@ -37,7 +44,48 @@ pub fn styled(app: &mut App, width: u16) -> String {
     let pad = app.config.layout.padding_top + app.config.layout.padding_bottom;
     let height = (rows + pad as usize).clamp(1, u16::MAX as usize) as u16;
     let buf = draw(app, width, height);
-    ansi(&buf, app.theme.background.to_ratatui())
+    ansi(&buf, app.theme.background.to_ratatui(), &pictures(app))
+}
+
+/// The escapes that paint each picture, keyed by the LAST row of its box.
+///
+/// They are written once that row has been printed, not at the picture's first
+/// row: by then the terminal has scrolled to make room for the whole box, so
+/// stepping the cursor back up into it is a relative move that cannot be
+/// thrown off by a scroll. DECSC/DECRC put the cursor back after, whichever
+/// way the protocol leaves it.
+fn pictures(app: &App) -> HashMap<u16, String> {
+    let mut out: HashMap<u16, String> = HashMap::new();
+    let places = std::mem::take(&mut *app.images.borrow_mut());
+    if app.image_protocol == crate::image::Protocol::None {
+        return out;
+    }
+    let cache = app.cache.borrow();
+    for p in places {
+        let Some(crate::transclude::preview::Row::Image(pic)) = cache
+            .entry(p.line)
+            .and_then(|e| e.embed.as_ref())
+            .and_then(|x| x.rows.get(p.index))
+        else {
+            continue;
+        };
+        if pic.payload.is_empty() || p.rows == 0 {
+            continue;
+        }
+        let up = p.rows - 1;
+        let s = out.entry(p.y + up).or_default();
+        s.push_str("\x1b7");
+        if up > 0 {
+            let _ = write!(s, "\x1b[{up}A");
+        }
+        s.push('\r');
+        if p.x > 0 {
+            let _ = write!(s, "\x1b[{}C", p.x);
+        }
+        s.push_str(&crate::image::draw(app.image_protocol, &pic.payload, p.cols, p.rows));
+        s.push_str("\x1b8");
+    }
+    out
 }
 
 fn draw(app: &App, width: u16, height: u16) -> Buffer {
@@ -52,7 +100,7 @@ fn draw(app: &App, width: u16, height: u16) -> Buffer {
 /// left to the terminal, so the page sits on whatever the reader's terminal
 /// shows rather than in a painted block; anything else that has a background
 /// (a code slab, a highlight) keeps it. Blank rows at either end are dropped.
-fn ansi(buf: &Buffer, page_bg: Color) -> String {
+fn ansi(buf: &Buffer, page_bg: Color, after_row: &HashMap<u16, String>) -> String {
     let bg_of = |c: Color| if c == page_bg { Color::Reset } else { c };
     let w = buf.area.width;
     let mut lines: Vec<String> = Vec::with_capacity(buf.area.height as usize);
@@ -82,6 +130,9 @@ fn ansi(buf: &Buffer, page_bg: Color) -> String {
         }
         if current.is_some() {
             out.push_str("\x1b[0m");
+        }
+        if let Some(paint) = after_row.get(&y) {
+            out.push_str(paint);
         }
         lines.push(out);
     }
@@ -191,6 +242,37 @@ mod tests {
         let plain = strip(&styled(&mut app, 60));
         assert!(plain.contains("line 0") && plain.contains("line 299"));
         assert!(!plain.starts_with('\n') && !plain.ends_with("\n\n"), "trimmed at both ends");
+    }
+
+    /// An embed prints its note in full, even with `transclude.embed` at
+    /// its default of none, and a picture is painted into the box it left.
+    #[test]
+    fn embeds_expand_and_pictures_are_painted() {
+        let dir = std::env::temp_dir().join(format!("shoin-print-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A real PNG header, claiming 400x200 so the box is several rows tall.
+        let mut png = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89,
+        ];
+        png[16..20].copy_from_slice(&400u32.to_be_bytes());
+        png[20..24].copy_from_slice(&200u32.to_be_bytes());
+        std::fs::write(dir.join("photo.png"), &png).unwrap();
+        std::fs::write(dir.join("other.md"), "The embedded sentence.\n").unwrap();
+        let main = dir.join("main.md");
+        std::fs::write(&main, "Before.\n\n![[other]]\n\n![[photo.png]]\n\nAfter.\n").unwrap();
+
+        let mut app = App::new(Config::default(), Some(main), None).unwrap();
+        app.image_protocol = crate::image::Protocol::Kitty;
+        let out = styled(&mut app, 80);
+        let plain = strip(&out);
+        assert!(plain.contains("The embedded sentence."), "{plain}");
+        assert!(!plain.contains("![["), "{plain}");
+        assert!(plain.contains("After."), "{plain}");
+        assert_eq!(out.matches("\x1b_Ga=T").count(), 1, "one picture, painted once");
+        assert!(out.contains("\x1b7") && out.contains("\x1b8"), "the cursor is put back");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Bold is bold and the page background is left to the terminal.
