@@ -287,6 +287,47 @@ fn every_leader_binding_is_documented() {
     assert!(missing.is_empty(), "leader bindings not documented: {missing:?}");
 }
 
+/// The other live bindings in the shipped `keys.conf` — `<C-s>`, `<M-j>` —
+/// written the way the docs write keys: `Ctrl-s`, `Alt-j`.
+fn other_shipped_keys() -> BTreeSet<String> {
+    read("shoin/keys.conf")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#') && !l.starts_with("\"<leader>"))
+        .filter_map(|l| l.strip_prefix('"')?.split_once('"').map(|(key, _)| key.to_string()))
+        .map(|key| {
+            let inner = key.trim_start_matches('<').trim_end_matches('>');
+            match inner.split_once('-') {
+                Some(("C", k)) => format!("Ctrl-{k}"),
+                Some(("M", k)) => format!("Alt-{k}"),
+                Some(("S", k)) => format!("Shift-{k}"),
+                _ => inner.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Every other shipped binding is in the keys reference and in `:help` too.
+/// `Ctrl-s` shipped for a long time with neither saying so, because the
+/// check above only looks at `<leader>` keys.
+#[test]
+fn every_shipped_binding_is_documented() {
+    let keys = other_shipped_keys();
+    assert!(keys.contains("Ctrl-s"), "parsed shoin/keys.conf: {keys:?}");
+    let help = help_text();
+    let reference = read("docs/reference/keys.md");
+    let mut missing = Vec::new();
+    for key in &keys {
+        if !reference.contains(&format!("`{key}`")) {
+            missing.push(format!("docs/reference/keys.md: {key}"));
+        }
+        if !help.contains(key.as_str()) {
+            missing.push(format!(":help: {key}"));
+        }
+    }
+    assert!(missing.is_empty(), "shipped bindings not documented: {missing:?}");
+}
+
 /// The help topics the commands page names are real pages, not the
 /// "no such topic" fallback.
 #[test]

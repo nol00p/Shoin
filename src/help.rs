@@ -275,6 +275,7 @@ const BINDINGS: &[&str] = &[
     "                 above",
     "  jk             leave Insert (input.escape_alias; \"\" turns it off)",
     "  Esc  Ctrl-c    leave Insert",
+    "  Ctrl-s         save, and keep typing (in Normal mode too, as :w)",
     "  Enter          continues a list marker or quote prefix; on an empty",
     "                 item it ends the list  (editor.auto_indent)",
     "",

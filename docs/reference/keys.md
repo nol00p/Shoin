@@ -104,6 +104,7 @@ and `list_indent` and `list_outdent` (Insert) — see
 |---|---|
 | `i` `a` `I` `A` `o` `O` | insert / append / at line start / at line end / open below / open above |
 | `Esc` `Ctrl-c` `jk` | leave Insert (`jk` is `input.escape_alias`) |
+| `Ctrl-s` | save, and keep typing |
 | `Enter` | continue a list marker or quote; on an empty item, end the list |
 | `Tab` `Shift-Tab` | on a list item's line, indent / outdent the item with its sub-items (`editor.list_tab`); elsewhere `Tab` types a tab |
 
@@ -125,6 +126,7 @@ and `list_indent` and `list_outdent` (Insert) — see
 |---|---|
 | `u` `Ctrl-r` | undo / redo |
 | `.` | repeat the last change |
+| `Ctrl-s` | save, as `:w` does |
 | `/` `?` `n` `N` | search forward / back, repeat / reverse |
 | `:` | the command line — see [Commands](commands.md) |
 | `Ctrl-^` `Ctrl-6` | back to the previous buffer |
