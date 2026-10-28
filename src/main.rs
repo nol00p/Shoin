@@ -79,6 +79,12 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
 
+    /// Print this file as the editor shows it, styled, and exit — a reader's
+    /// view without opening the editor. Plain text when stdout is not a
+    /// terminal, or when `NO_COLOR` is set.
+    #[arg(long, short = 'p', value_name = "FILE")]
+    render: Option<PathBuf>,
+
     /// Print the exported document instead of writing it, so
     /// `shoin --export notes.md --stdout | pandoc …` stays a one-shot pipeline.
     /// Text formats only — a PDF is not something to print to a terminal.
@@ -107,6 +113,24 @@ fn main() -> Result<()> {
 
     if cli.print_config {
         println!("{config:#?}");
+        return Ok(());
+    }
+
+    if let Some(src) = &cli.render {
+        if !src.is_file() {
+            anyhow::bail!("{}: no such file", src.display());
+        }
+        use std::io::IsTerminal;
+        let colour = std::io::stdout().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+        if colour {
+            let width = ratatui::crossterm::terminal::size().map_or(80, |(w, _)| w);
+            let mut app = app::App::new(config, Some(src.clone()), explicit)?;
+            print!("{}", render::print::styled(&mut app, width));
+        } else {
+            let flat = transclude::compile::compile(src, &config.transclude)?;
+            print!("{}", export::plain::render(&flat, config.layout.measure, false));
+        }
         return Ok(());
     }
 

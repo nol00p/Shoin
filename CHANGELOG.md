@@ -9,6 +9,11 @@
   removes one. If you had deleted a shipped binding from your `keys.conf`,
   it is back; set it to `"none"`.
 
+- `shoin -p notes.md` (`--render`) prints a file as the editor shows it —
+  concealed, styled, in the theme's colours — and exits, so a note can be
+  read without opening the editor. Piped or with `NO_COLOR` set, it prints
+  plain text.
+
 ## 0.1.9
 
 - Releases now come with prebuilt binaries for macOS and Linux, on x86_64

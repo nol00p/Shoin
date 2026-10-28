@@ -1,0 +1,208 @@
+//! `shoin --render`: the editor's page, printed to a terminal and done.
+//!
+//! The frame is drawn by the SAME `frame::render` the editor uses, into an
+//! off-screen buffer as tall as the document, and the cells are written out as
+//! ANSI SGR. A separate ANSI writer over the parse would be a second renderer,
+//! and the two would drift: every conceal rule, slab and bullet would have to
+//! be taught twice.
+//!
+//! What differs from the editor is only what a printed page has no use for:
+//! there is no cursor, so no line is active and every line conceals, and no
+//! status line, scroll hint or line numbers.
+
+use std::fmt::Write as _;
+
+use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier};
+use ratatui::Terminal;
+use unicode_width::UnicodeWidthStr;
+
+use crate::app::App;
+use crate::render::conceal::ActiveSet;
+use crate::render::numbers::NumberMode;
+
+/// Draw `app`'s document at `width` columns and return it as ANSI text.
+pub fn styled(app: &mut App, width: u16) -> String {
+    // Park the active set past the last line, so nothing is revealed raw.
+    app.active = ActiveSet { start: usize::MAX, end: usize::MAX };
+    app.config.status.enabled = false;
+    app.config.layout.scroll_hint = false;
+    app.numbers = NumberMode::Off;
+
+    // One draw to fill the render cache, which then knows how many rows the
+    // document wraps into; the second draw is exactly that tall.
+    draw(app, width, 1);
+    let rows = app.docs[app.current()].cache.borrow().total_rows();
+    let pad = app.config.layout.padding_top + app.config.layout.padding_bottom;
+    let height = (rows + pad as usize).clamp(1, u16::MAX as usize) as u16;
+    let buf = draw(app, width, height);
+    ansi(&buf, app.theme.background.to_ratatui())
+}
+
+fn draw(app: &App, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width.max(1), height)).expect("an in-memory terminal");
+    terminal
+        .draw(|f| crate::render::frame::render(f, app))
+        .expect("drawing into memory");
+    terminal.backend().buffer().clone()
+}
+
+/// The cells of `buf` as SGR-coloured lines. The theme's own background is
+/// left to the terminal, so the page sits on whatever the reader's terminal
+/// shows rather than in a painted block; anything else that has a background
+/// (a code slab, a highlight) keeps it. Blank rows at either end are dropped.
+fn ansi(buf: &Buffer, page_bg: Color) -> String {
+    let bg_of = |c: Color| if c == page_bg { Color::Reset } else { c };
+    let w = buf.area.width;
+    let mut lines: Vec<String> = Vec::with_capacity(buf.area.height as usize);
+    for y in 0..buf.area.height {
+        // Where the row stops mattering: past its last visible glyph or
+        // non-default background.
+        let end = (0..w)
+            .rev()
+            .find(|&x| {
+                let c = &buf[(x, y)];
+                !c.symbol().trim().is_empty() || bg_of(c.bg) != Color::Reset
+            })
+            .map_or(0, |x| x + 1);
+        let mut out = String::new();
+        let mut current: Option<(Color, Color, Modifier)> = None;
+        let mut x = 0;
+        while x < end {
+            let c = &buf[(x, y)];
+            let style = (c.fg, bg_of(c.bg), c.modifier);
+            if current != Some(style) {
+                out.push_str(&sgr(style.0, style.1, style.2));
+                current = Some(style);
+            }
+            out.push_str(c.symbol());
+            // A wide glyph owns the cells after it; ratatui leaves them blank.
+            x += c.symbol().width().max(1) as u16;
+        }
+        if current.is_some() {
+            out.push_str("\x1b[0m");
+        }
+        lines.push(out);
+    }
+    let first = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+    let last = lines.iter().rposition(|l| !l.is_empty()).map_or(first, |i| i + 1);
+    let mut text = lines[first..last].join("\n");
+    text.push('\n');
+    text
+}
+
+/// One complete SGR sequence: a reset, then everything this cell asks for.
+fn sgr(fg: Color, bg: Color, m: Modifier) -> String {
+    let mut codes = vec!["0".to_string()];
+    for (bit, code) in [
+        (Modifier::BOLD, "1"),
+        (Modifier::DIM, "2"),
+        (Modifier::ITALIC, "3"),
+        (Modifier::UNDERLINED, "4"),
+        (Modifier::REVERSED, "7"),
+        (Modifier::CROSSED_OUT, "9"),
+    ] {
+        if m.contains(bit) {
+            codes.push(code.into());
+        }
+    }
+    if let Some(c) = color(fg, false) {
+        codes.push(c);
+    }
+    if let Some(c) = color(bg, true) {
+        codes.push(c);
+    }
+    let mut s = String::from("\x1b[");
+    let _ = write!(s, "{}m", codes.join(";"));
+    s
+}
+
+fn color(c: Color, bg: bool) -> Option<String> {
+    let base = if bg { 40 } else { 30 };
+    Some(match c {
+        Color::Reset => return None,
+        Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", base + 8),
+        Color::Indexed(i) => format!("{};5;{i}", base + 8),
+        Color::Black => format!("{}", base),
+        Color::Red => format!("{}", base + 1),
+        Color::Green => format!("{}", base + 2),
+        Color::Yellow => format!("{}", base + 3),
+        Color::Blue => format!("{}", base + 4),
+        Color::Magenta => format!("{}", base + 5),
+        Color::Cyan => format!("{}", base + 6),
+        Color::Gray => format!("{}", base + 7),
+        Color::DarkGray => format!("{}", base + 60),
+        Color::LightRed => format!("{}", base + 61),
+        Color::LightGreen => format!("{}", base + 62),
+        Color::LightYellow => format!("{}", base + 63),
+        Color::LightBlue => format!("{}", base + 64),
+        Color::LightMagenta => format!("{}", base + 65),
+        Color::LightCyan => format!("{}", base + 66),
+        Color::White => format!("{}", base + 67),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::render::markdown::block::BlockCache;
+    use crate::text::cursor::Cursor;
+
+    fn app_with(text: &str) -> App {
+        let mut app = App::new(Config::default(), None, None).unwrap();
+        app.theme = crate::render::theme::Theme::authored(&app.config.theme).unwrap();
+        app.buffer.insert_str(Cursor::new(0, 0), text);
+        app.blocks = BlockCache::build(&app.buffer);
+        app
+    }
+
+    fn strip(s: &str) -> String {
+        let mut out = String::new();
+        let mut esc = false;
+        for ch in s.chars() {
+            match (esc, ch) {
+                (false, '\x1b') => esc = true,
+                (true, 'm') => esc = false,
+                (true, _) => {}
+                (false, c) => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// Every line conceals, the first one included: there is no cursor to
+    /// reveal it, and a printed `**` would be a rendering bug.
+    #[test]
+    fn every_line_is_concealed() {
+        let mut app = app_with("# Title\n\nSome **bold** text.\n");
+        let plain = strip(&styled(&mut app, 60));
+        assert!(!plain.contains("**"), "{plain}");
+        assert!(!plain.contains("# "), "{plain}");
+        assert!(plain.contains("Title") && plain.contains("bold"), "{plain}");
+    }
+
+    /// The whole document is printed, not one screenful.
+    #[test]
+    fn a_long_document_prints_every_line() {
+        let text: String = (0..300).map(|i| format!("line {i}\n\n")).collect();
+        let mut app = app_with(&text);
+        let plain = strip(&styled(&mut app, 60));
+        assert!(plain.contains("line 0") && plain.contains("line 299"));
+        assert!(!plain.starts_with('\n') && !plain.ends_with("\n\n"), "trimmed at both ends");
+    }
+
+    /// Bold is bold and the page background is left to the terminal.
+    #[test]
+    fn styles_become_sgr_and_the_page_background_does_not() {
+        let mut app = app_with("Some **bold** text.\n");
+        let out = styled(&mut app, 60);
+        assert!(out.contains("\x1b[0;1;"), "bold reaches the output: {out:?}");
+        let bg = match app.theme.background.to_ratatui() {
+            Color::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
+            other => panic!("authored theme is RGB, got {other:?}"),
+        };
+        assert!(!out.contains(&bg), "the page background is not painted");
+    }
+}

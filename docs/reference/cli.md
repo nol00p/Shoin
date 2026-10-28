@@ -9,6 +9,7 @@ shoin [FILE]
   --init-config       write the shipped config to ~/.config/shoin and exit
   --force             let --init-config replace a config already there
   --zen               start with every chrome affordance hidden
+  -p, --render <FILE> print the file as the editor shows it, and exit
   --export <FILE>     export without starting the editor
   --format <FORMAT>   md | txt | html | pdf          (default: md)
   --justify           stretch html/txt to fill the measure (md, pdf: refused)
@@ -17,6 +18,11 @@ shoin [FILE]
   -h, --help          print help
   -V, --version       print the version
 ```
+
+`--render` draws the page the editor would, with every line concealed, at
+the terminal's width, and prints all of it. When stdout isn't a terminal, or
+`NO_COLOR` is set, it prints plain text instead, the same as
+`--export FILE --format txt --stdout`.
 
 Without `--out` or `--stdout`, `--export` writes `<name>.<format>` beside
 the file. With no `FILE`, Shoin opens a blank page with the splash screen.
