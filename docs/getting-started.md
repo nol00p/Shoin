@@ -4,8 +4,8 @@
   <img src="media/hero.gif" alt="Shoin's splash screen, the file tree, and a note opened from it" width="800">
 </p>
 
-Install Shoin, write the default config once, and open a file. `i` to
-type, `Esc` to stop, `:w` to save, `:q` to quit.
+Install Shoin and open a file. No config is needed. `i` to type, `Esc` to
+stop, `:w` to save, `:q` to quit.
 
 ## Install
 
@@ -76,8 +76,12 @@ Then, in order: `i` to type, `Esc` (or `jk`) to stop, `:w` to save, `:q` to
 quit. `:help` explains everything else, and `Space hl` opens one page listing
 every key.
 
+Just reading? `shoin -p notes.md` prints a note as the editor shows it, and
+`shoin -R notes.md` opens it read-only. See [Reading](reading.md).
+
 ## Where next
 
 - [Live preview](live-preview.md), the one idea the editor is built on
 - [Editing](editing.md) and [Writing](writing.md) for the keys
 - [Notes](notes.md) to link and compose files
+- [Reading](reading.md) to print, page or read a note without editing it

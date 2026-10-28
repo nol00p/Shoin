@@ -24,6 +24,10 @@ shoin --export notes.md --format html --justify --out notes.html
 No terminal is acquired, so it composes into pipelines and build scripts. The
 flags are in the [command-line reference](reference/cli.md).
 
+To read a note in the terminal rather than write a file, use `shoin -p`
+instead: it prints the page as the editor shows it, styled, with pictures.
+`--export` is for files and pipelines. See [Reading](reading.md#print-a-note).
+
 ## Formats
 
 | Format | What you get |
