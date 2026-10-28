@@ -25,11 +25,23 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
+/// The topics `:help` lists on its "no such topic" page, which is where a
+/// new page has to be added for anyone to find it.
+fn help_topics() -> Vec<String> {
+    Help::open("no such topic")
+        .lines
+        .iter()
+        .filter_map(|l| l.trim_start().strip_prefix(":help "))
+        .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+        .filter(|t| t.chars().all(|c| c.is_ascii_lowercase()))
+        .collect()
+}
+
 /// Every page of `:help`, as one text.
 fn help_text() -> String {
-    ["", "shortcuts", "bindings", "commands", "writer", "config"]
-        .iter()
-        .flat_map(|topic| Help::open(topic).lines)
+    std::iter::once(String::new())
+        .chain(help_topics().into_iter().filter(|t| t != "this"))
+        .flat_map(|topic| Help::open(&topic).lines)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -145,9 +157,21 @@ fn cli_flags() -> BTreeSet<String> {
     flags
 }
 
-/// The `--flags` written after `shoin` in `text` — `shoin --render x.md`,
+/// The short flags `shoin` accepts, each with its long form — `-R` with
+/// `--read-only` — from clap itself.
+fn cli_short_flags() -> BTreeSet<(String, String)> {
+    let mut flags: BTreeSet<(String, String)> = crate::Cli::command()
+        .get_arguments()
+        .filter_map(|a| Some((format!("-{}", a.get_short()?), format!("--{}", a.get_long()?))))
+        .collect();
+    flags.insert(("-h".to_string(), "--help".to_string()));
+    flags.insert(("-V".to_string(), "--version".to_string()));
+    flags
+}
+
+/// The flags written after `shoin` in `text` — `shoin --render x.md`,
 /// `cat x | shoin -p --pager` — leaving other tools' flags (`curl --proto`)
-/// alone.
+/// alone. A lone `-` is the stdin file, not a flag.
 fn shoin_flags(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for line in text.lines() {
@@ -156,7 +180,10 @@ fn shoin_flags(text: &str) -> BTreeSet<String> {
             let end = rest.find(['`', '|', ')', '"']).unwrap_or(rest.len());
             for word in rest[..end].split_whitespace() {
                 let word = word.trim_end_matches([',', '.', ';', ':']);
-                if word.starts_with("--") && word.len() > 2 {
+                let short = word.len() == 2
+                    && word.starts_with('-')
+                    && word[1..].chars().all(|c| c.is_ascii_alphabetic());
+                if short || word.starts_with("--") && word.len() > 2 {
                     out.insert(word.split('=').next().unwrap().to_string());
                 }
             }
@@ -184,11 +211,35 @@ fn the_command_line_page_matches_the_flags() {
     );
 }
 
-/// A `shoin --flag` anywhere in the docs, the README or `:help` is one that
-/// exists — so a removed flag cannot linger in an install guide.
+/// Every short flag clap knows is in the command-line reference beside its
+/// long form, as `-R, --read-only`, and the reference pairs no short flag
+/// clap does not — so `-p` cannot quietly come to mean something else.
+#[test]
+fn the_command_line_page_matches_the_short_flags() {
+    let flags = cli_short_flags();
+    let listed: BTreeSet<(String, String)> = read("docs/reference/cli.md")
+        .lines()
+        .filter_map(|l| {
+            let (short, rest) = l.trim_start().split_once(", ")?;
+            let long = rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).next()?;
+            let is_short = short.len() == 2 && short.starts_with('-') && short != "--";
+            (is_short && long.starts_with("--")).then(|| (short.to_string(), long.to_string()))
+        })
+        .collect();
+    let missing: Vec<_> = flags.difference(&listed).collect();
+    let unknown: Vec<_> = listed.difference(&flags).collect();
+    assert!(
+        missing.is_empty() && unknown.is_empty(),
+        "not in docs/reference/cli.md: {missing:?}\nin cli.md but not a flag: {unknown:?}"
+    );
+}
+
+/// A `shoin --flag` or `shoin -p` anywhere in the docs, the README or `:help`
+/// is one that exists — so a removed flag cannot linger in an install guide.
 #[test]
 fn every_documented_flag_exists() {
-    let flags = cli_flags();
+    let mut flags = cli_flags();
+    flags.extend(cli_short_flags().into_iter().map(|(short, _)| short));
     let mut stale = Vec::new();
     for (name, text) in all_docs().into_iter().chain([(":help".to_string(), help_text())]) {
         for flag in shoin_flags(&text) {
@@ -252,4 +303,27 @@ fn every_documented_help_topic_exists() {
         let first = Help::open(topic).lines.into_iter().next().unwrap_or_default();
         assert!(!first.starts_with("No help topic"), ":help {topic} is not a topic");
     }
+}
+
+/// Every `:help <topic>` the help or any doc points a reader to opens a real
+/// page, not the "no such topic" fallback.
+#[test]
+fn every_help_topic_mentioned_exists() {
+    let mut texts = all_docs();
+    texts.push((":help".to_string(), help_text()));
+    let mut unknown = Vec::new();
+    for (name, text) in texts {
+        for (i, m) in text.match_indices(":help ") {
+            let topic: String =
+                text[i + m.len()..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            if topic.is_empty() {
+                continue;
+            }
+            let first = Help::open(&topic).lines.into_iter().next().unwrap_or_default();
+            if first.starts_with("No help topic") {
+                unknown.push(format!("{name}: :help {topic}"));
+            }
+        }
+    }
+    assert!(unknown.is_empty(), "not :help topics: {unknown:?}");
 }

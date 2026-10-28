@@ -53,8 +53,8 @@ refused, and `<al` is how it moves out.
 
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
-the same undo step. Bullet lists are never changed.
-Turn this off with `list_renumber = false` in `[editor]`.
+the same undo step. Bullet lists are never changed. Turn this off with `list_renumber = false`
+in `[editor]`.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
 line, so Enter, Tab, and typing starts a sub-item.
@@ -75,8 +75,8 @@ Enter continues a list marker or a quote prefix, and ends the list when the
 item is empty. On a list item's line, Tab nests the item under the one above
 and Shift-Tab brings it back out, sub-items included, the same as `>al` and
 `<al`; anywhere else Tab types a tab. `list_tab = false` in `[editor]` makes
-Tab a tab on list items too. A terminal paste goes in exactly as copied: no auto-indent, no
-list continuation, and a `jk` in the pasted text stays text.
+Tab a tab on list items too. A terminal paste goes in exactly as copied: no
+auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 
 ## Details
 
@@ -95,7 +95,8 @@ list continuation, and a `jk` in the pasted text stays text.
   default was 500 ms before tmux 3.5): `set -sg escape-time 10` fixes it, and
   it is the usual advice for Vim in tmux. On macOS, Terminal.app needs "Use
   Option as Meta key" and iTerm2 needs Option set to "Esc+". Or rebind
-  `list_item_down` and `list_item_up` in `keys.conf`.
+  `list_item_down` and `list_item_up` in `keys.conf`. Tab and Shift-Tab are
+  `list_indent` and `list_outdent` under `[keys.insert]`.
 - Moving swaps the item and the items it passes as two blocks of text; the
   blank lines between them stay where they were.
 - Renumbering keeps the number a list starts at, so a list starting at `3.`
