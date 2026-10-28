@@ -50,3 +50,5 @@ setting under `[layout]` — see [Configuration](configuration.md).
   hold the numbers (`align = "left"`, or a narrow terminal) goes without
   rather than crowding the text.
 - `shoin --zen notes.md` starts in zen mode.
+- To read a page rather than write it, `:view` (or `shoin -R`) conceals every
+  line and refuses edits — see [Reading](reading.md#read-only).

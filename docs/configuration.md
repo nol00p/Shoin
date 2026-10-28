@@ -2,10 +2,11 @@
 
 Config is a folder of TOML files, `~/.config/shoin/*.conf`, merged together so
 you can split settings by category. Every key is optional, and saving a file
-updates the running editor.
+updates the running editor. You don't need a config at all: every default,
+the leader keys included, is built in.
 
 ```sh
-shoin --init-config      # write the annotated defaults to ~/.config/shoin/
+shoin --init-config      # write an editable copy of the defaults to ~/.config/shoin/
 shoin --print-config     # print the whole resolved config
 ```
 
@@ -36,6 +37,8 @@ autosave          = false # write modified named buffers on a timer
 autosave_interval = 3     # minutes between them, 1–5
 autoreload        = true  # take a file's changes back when it is edited
                           # elsewhere — only if you have nothing unsaved
+list_renumber     = true  # keep 1. 2. 3. in sequence when an item moves
+list_tab          = true  # Tab / Shift-Tab in Insert indent a list item
 
 [tree]
 show_hidden = false       # dotfiles in the file tree (H toggles it live)
@@ -73,7 +76,12 @@ everything you don't mention stays. `"none"` removes a shipped binding:
 ```toml
 [keys.normal]
 "<leader>z" = "none"
+"<C-j>"     = "list_item_down"   # Alt-j's action, for a terminal without Alt
+"<C-k>"     = "list_item_up"
 ```
+
+If you deleted a shipped binding from an older `keys.conf`, it is back now;
+set it to `"none"` instead.
 
 ## Where config is found
 
@@ -92,7 +100,11 @@ The first of these that exists wins:
   one. A malformed binding is skipped with a warning, never fatal.
 - Bindings match exactly, so one that is also the start of a longer binding
   shadows it. Shoin warns about that at load time.
-- `[keys.insert]` takes single keys only.
+- `[keys.insert]` takes single keys only. `"<S-Tab>"` names Shift-Tab.
+- `list_renumber = false` leaves the numbers of a `1.` `2.` `3.` list as you
+  wrote them when `>al`, `<al`, `Alt-j` or `Alt-k` moves an item. `list_tab =
+  false` makes Tab type a tab on a list item too — see
+  [Editing](editing.md#lists).
 - `:e!` or `:reload` re-reads the config by hand.
 - A leader that is a modifier or named key needs the same `<...>` wrapping a
   binding uses: `"<C-x>"`, not `"C-x"`.

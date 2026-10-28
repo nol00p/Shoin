@@ -2,16 +2,20 @@
 
 ```
 shoin [FILE]
+shoin -R FILE
+shoin -p FILE [--pager]
 cat notes.md | shoin [-p]
 
   --config <PATH>     use this config instead of the discovered one
                       (with --init-config, write to THIS path instead)
   --print-config      print the resolved config and exit
-  --init-config       write the shipped config to ~/.config/shoin and exit
+  --init-config       write the shipped config into your config folder
+                      (~/.config/shoin, or $XDG_CONFIG_HOME/shoin) and exit
   --force             let --init-config replace a config already there
   --zen               start with every chrome affordance hidden
-  -R, --read-only     open read-only: every line concealed, q quits
-  -p, --render [FILE] print the file as the editor shows it, and exit
+  -R, --read-only     open read-only: every line concealed, edits refused,
+                      q quits
+  -p, --render [FILE] print the file as the editor shows it, styled, and exit
                       (no FILE, or -, reads stdin)
   --pager             with --render, page it through $PAGER when it is
                       taller than the terminal (default: less -R)
@@ -21,7 +25,7 @@ cat notes.md | shoin [-p]
   --out <PATH>        where --export writes
   --stdout            print the export instead of writing it (text formats only)
   -h, --help          print help
-  -V, --version       print the version
+  -V, --version       print version
 ```
 
 `--render` draws the page the editor would, with every line concealed, at
@@ -57,7 +61,9 @@ concealed, the cursor's too, and there's no caret: `j`/`k`, `Ctrl-d`/`Ctrl-u`,
 `G`/`gg` and search scroll the page, as in `less`. `q` quits. Yanking,
 panels, `gf` and `:w` still work; anything that would change the text is
 refused with "read-only — press i to edit", and `i` then switches to
-editing. `:view` turns the mode on and off from inside the editor.
+editing. `:view` turns the mode on and off from inside the editor. The keys
+are in the [key reference](keys.md#read-only), and
+[Reading](../reading.md#read-only) walks through it.
 
 ## Other options
 

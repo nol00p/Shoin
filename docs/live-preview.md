@@ -37,4 +37,7 @@ off. [`examples/formatting.md`](../examples/formatting.md) exercises all of it.
   clipped at the edge.
 - `layout.conceal = false`, `:set conceal off` or `Space c` turns concealment
   off entirely.
+- To see every line concealed, the cursor's too, open the page read-only:
+  `shoin -R` or `:view`. `shoin -p` prints that same view to the terminal.
+  See [Reading](reading.md).
 - Why the rule is "the cursor's line is raw": [Design notes](design.md#the-cursors-line-is-always-raw).

@@ -67,6 +67,13 @@ terminal that can draw pixels — kitty, Ghostty, WezTerm, iTerm2 — the pictur
 itself is drawn there.** Everywhere else, including inside tmux, the box and
 caption stand in for it.
 
+<p align="center">
+  <img src="media/images.gif" alt="A note with a bar chart drawn in it. Moving the cursor onto the embed line shows the raw ![[words.png]] link in place of the picture; scrolling brings a second picture into view; a line typed above the chart pushes it down a row and it stays drawn" width="800">
+</p>
+
+`shoin -p` draws pictures too, when it prints a note into such a terminal.
+See [Reading](reading.md#print-a-note).
+
 ## Worked examples
 
 - [`examples/transclusion/`](../examples/transclusion/) covers every link
