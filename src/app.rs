@@ -1768,6 +1768,7 @@ impl App {
                 self.buffer.cursor.set_col(len);
                 self.enter_insert();
             }
+            Action::ListShift { outdent } => self.shift_list_item(outdent),
             Action::OpenBelow => self.open_line(false),
             Action::OpenAbove => self.open_line(true),
             Action::NormalMode => self.leave_visual(),
@@ -3751,6 +3752,31 @@ impl App {
         }
     }
 
+    /// `>al` / `<al` on the item under the cursor, from any mode — the
+    /// `list_indent` / `list_outdent` actions and Insert-mode Tab.
+    fn shift_list_item(&mut self, outdent: bool) {
+        self.refresh_blocks();
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+        match lists.item_bounds(self.buffer.cursor.line) {
+            Some((s, e)) => self.shift_list(outdent, false, s, e),
+            None => self.notify("not in a list", FlashKind::Error),
+        }
+    }
+
+    /// Whether Insert-mode Tab acts on a list item: `editor.list_tab` is on
+    /// and the cursor is on an item's own line. A continuation line, or any
+    /// other, keeps the plain Tab.
+    fn list_tab_applies(&mut self) -> bool {
+        if !self.config.editor.list_tab {
+            return false;
+        }
+        self.refresh_blocks();
+        matches!(
+            self.blocks.kinds.get(self.buffer.cursor.line),
+            Some(BlockKind::ListItem { .. })
+        )
+    }
+
     /// Put every ordered level containing one of `lines` back in sequence
     /// after `moved` (an item line) changed level. Lines outside a list, and
     /// bullet lists, are skipped.
@@ -4295,6 +4321,13 @@ impl App {
                         self.buffer.cursor = Cursor::new(c.line - 1, prev_len);
                     }
                 }
+            }
+            // On a list item, Tab and Shift-Tab move the whole item in and
+            // out — what every writing app does — rather than type a tab.
+            KeyCode::Tab | KeyCode::BackTab if self.list_tab_applies() => {
+                let outdent = key.code == KeyCode::BackTab
+                    || key.modifiers.contains(KeyModifiers::SHIFT);
+                self.shift_list_item(outdent);
             }
             KeyCode::Tab => {
                 let at = self.buffer.cursor;
@@ -7290,6 +7323,71 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
         app.sync_after_input();
         assert_eq!(text(&app), "- b\n- a\n");
+    }
+
+    fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        app.on_key(KeyEvent::new(code, modifiers));
+        app.sync_after_input();
+    }
+
+    /// The writer's flow: Enter continues the list, Tab nests the new item,
+    /// Shift-Tab brings it back — without leaving Insert.
+    #[test]
+    fn tab_in_insert_nests_a_list_item() {
+        let mut app = app_with("- a\n");
+        feed(&mut app, "A");
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        feed(&mut app, "b");
+        assert_eq!(text(&app), "- a\n    - b\n");
+        assert_eq!(app.mode, Mode::Insert);
+        key(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        feed(&mut app, "c");
+        assert_eq!(text(&app), "- a\n- bc\n", "the cursor kept its place in the text");
+    }
+
+    #[test]
+    fn tab_on_an_ordered_item_renumbers() {
+        let mut app = app_with("1. a\n2. b\n");
+        app.buffer.cursor = Cursor::new(1, 3);
+        feed(&mut app, "i");
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "1. a\n    1. b\n");
+    }
+
+    /// The same refusals as `>al`, and Insert carries on.
+    #[test]
+    fn tab_on_a_first_item_is_refused() {
+        let mut app = app_with("- a\n");
+        feed(&mut app, "A");
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "- a\n");
+        assert_eq!(flash_text(&app), "nothing to indent under");
+        assert_eq!(app.mode, Mode::Insert);
+    }
+
+    /// Off a list item's own line, or with `list_tab` off, Tab is a tab.
+    #[test]
+    fn tab_elsewhere_inserts_a_tab_unit() {
+        let mut app = app_with("prose\n");
+        feed(&mut app, "A");
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "prose    \n");
+        let mut app = app_with("- a\n- b\n");
+        app.config.editor.list_tab = false;
+        app.buffer.cursor = Cursor::new(1, 0);
+        feed(&mut app, "A");
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(text(&app), "- a\n- b    \n");
+    }
+
+    /// Terminals send Shift-Tab as a key of its own; it must be the key a
+    /// config writes as `<S-Tab>`.
+    #[test]
+    fn shift_tab_is_the_s_tab_of_a_config() {
+        let ev = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        let parsed = crate::config::keys::parse_seq("<S-Tab>", " ").unwrap();
+        assert_eq!(Key::from_event(ev), Some(parsed[0]));
     }
 
     /// `>il` leaves the children where they are, so they re-parent.

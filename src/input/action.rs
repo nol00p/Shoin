@@ -89,6 +89,9 @@ pub enum Action {
     /// `Alt-j` / `Alt-k` — move the list item under the cursor, children and
     /// all, past its next / previous sibling (past `count` of them).
     ListItemMove { down: bool },
+    /// Insert-mode `Tab` / `Shift-Tab` on a list item: `>al` / `<al` without
+    /// leaving Insert.
+    ListShift { outdent: bool },
     Undo,
     Redo,
     Repeat,
@@ -192,6 +195,8 @@ impl Action {
             "join_lines" => Action::JoinLines,
             "list_item_down" => Action::ListItemMove { down: true },
             "list_item_up" => Action::ListItemMove { down: false },
+            "list_indent" => Action::ListShift { outdent: false },
+            "list_outdent" => Action::ListShift { outdent: true },
             "toggle_bold" | "bold" => Action::ToggleBold,
             "toggle_italic" | "italic" => Action::ToggleItalic,
             "toggle_highlight" | "highlight" => Action::ToggleHighlight,

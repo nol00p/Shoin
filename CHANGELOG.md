@@ -16,6 +16,11 @@
   renumbered. The actions are `list_item_down` and `list_item_up`, for
   rebinding where Alt is awkward (tmux with a long `escape-time`, or a macOS
   terminal not sending Option as Meta). (#30)
+- In Insert mode, Tab and Shift-Tab on a list item indent and outdent it
+  with its sub-items, as `>al` and `<al` do, so Enter then Tab starts a
+  sub-item. Anywhere else Tab still types a tab, and `[editor] list_tab =
+  false` keeps it a tab on list items too. A `<S-Tab>` binding in
+  `keys.conf` now works; the key never reached it before. (#30)
 
 ## 0.1.9
 

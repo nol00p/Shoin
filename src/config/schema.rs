@@ -152,6 +152,9 @@ pub struct EditorConfig {
     /// Renumber an ordered list after an item is indented or outdented into
     /// or out of it. Off for people who write `1.` on every line on purpose.
     pub list_renumber: bool,
+    /// Insert-mode Tab / Shift-Tab on a list item indents / outdents the
+    /// item, as `>al` / `<al` do. Off, Tab inserts a tab there as anywhere.
+    pub list_tab: bool,
 }
 
 impl Default for EditorConfig {
@@ -173,6 +176,7 @@ impl Default for EditorConfig {
             undo_coalesce_ms: 400,
             scroll_off: 3,
             list_renumber: true,
+            list_tab: true,
         }
     }
 }

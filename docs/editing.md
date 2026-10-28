@@ -56,6 +56,9 @@ a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
 the same undo step. Bullet lists are never changed.
 Turn this off with `list_renumber = false` in `[editor]`.
 
+In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
+line, so Enter, Tab, and typing starts a sub-item.
+
 An indent that would break the list is refused with a message and changes
 nothing (see Details). Each command is one undo step and `.` repeats it.
 
@@ -69,7 +72,10 @@ the delete ring, newest first. `"+` is the system clipboard — see
 ## Insert mode
 
 Enter continues a list marker or a quote prefix, and ends the list when the
-item is empty. A terminal paste goes in exactly as copied: no auto-indent, no
+item is empty. On a list item's line, Tab nests the item under the one above
+and Shift-Tab brings it back out, sub-items included, the same as `>al` and
+`<al`; anywhere else Tab types a tab. `list_tab = false` in `[editor]` makes
+Tab a tab on list items too. A terminal paste goes in exactly as copied: no auto-indent, no
 list continuation, and a `jk` in the pasted text stays text.
 
 ## Details

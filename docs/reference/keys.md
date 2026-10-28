@@ -92,6 +92,7 @@ In Normal mode. See [Editing](../editing.md#lists).
 | `Alt-j` `Alt-k` | move the list item past the next / previous one, with its sub-items (a count moves it past that many) |
 | `>al` `<al` | indent / outdent the item with its sub-items |
 | `>aL` `<aL` | indent / outdent every item at that level |
+| `Tab` `Shift-Tab` | in Insert mode, the same as `>al` `<al` |
 
 ## Insert mode
 
@@ -100,6 +101,7 @@ In Normal mode. See [Editing](../editing.md#lists).
 | `i` `a` `I` `A` `o` `O` | insert / append / at line start / at line end / open below / open above |
 | `Esc` `Ctrl-c` `jk` | leave Insert (`jk` is `input.escape_alias`) |
 | `Enter` | continue a list marker or quote; on an empty item, end the list |
+| `Tab` `Shift-Tab` | on a list item's line, indent / outdent the item with its sub-items (`editor.list_tab`); elsewhere `Tab` types a tab |
 
 ## Visual mode
 
