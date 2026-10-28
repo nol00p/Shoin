@@ -96,6 +96,7 @@ covers the other ways to install and the optional PDF tools.
 ```sh
 shoin notes.md     # open a file; it's created on the first :w
 shoin -p notes.md  # print it as the editor shows it (add --pager to scroll)
+shoin -R notes.md  # open it read-only: q quits, i starts editing
 shoin              # a blank page with a few ways in drawn on it
 ```
 

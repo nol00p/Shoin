@@ -34,7 +34,7 @@ use crate::render::numbers::NumberMode;
 /// Draw `app`'s document at `width` columns and return it as ANSI text.
 pub fn styled(app: &mut App, width: u16) -> String {
     // Park the active set past the last line, so nothing is revealed raw.
-    app.active = ActiveSet { start: usize::MAX, end: usize::MAX };
+    app.active = ActiveSet::none();
     app.config.status.enabled = false;
     app.config.layout.scroll_hint = false;
     app.numbers = NumberMode::Off;

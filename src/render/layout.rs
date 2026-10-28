@@ -292,8 +292,16 @@ pub fn scroll_offset(
     cfg: &LayoutConfig,
     scroll_off: u16,
     previous: usize,
+    reading: bool,
 ) -> usize {
     let height = layout.height.max(1) as usize;
+
+    // Read-only mode has no caret, so the cursor is the top of the screen and
+    // every motion scrolls the page, as in `less`. `App` keeps the cursor from
+    // passing the row where the last screenful starts.
+    if reading {
+        return cursor_row.min(total_rows.saturating_sub(height));
+    }
 
     if cfg.typewriter {
         let anchor = (height as f32 * cfg.typewriter_anchor).round() as usize;

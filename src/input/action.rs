@@ -165,6 +165,45 @@ pub enum Operator {
 }
 
 impl Action {
+    /// Whether this changes the text, or starts Insert to change it. What
+    /// read-only mode refuses; everything else (moving, searching, yanking,
+    /// panels, saving) still works.
+    pub fn edits(&self) -> bool {
+        match self {
+            Action::Operator { op, .. } => *op != Operator::Yank,
+            Action::Insert
+            | Action::Append
+            | Action::InsertLineStart
+            | Action::AppendLineEnd
+            | Action::OpenBelow
+            | Action::OpenAbove
+            | Action::AppendParagraph
+            | Action::DeleteChar
+            | Action::DeleteCharBack
+            | Action::DeleteToEol
+            | Action::ChangeToEol
+            | Action::PasteAfter
+            | Action::PasteBefore
+            | Action::ReplaceChar(_)
+            | Action::JoinLines
+            | Action::ToggleCase
+            | Action::ListItemMove { .. }
+            | Action::ListShift { .. }
+            | Action::Undo
+            | Action::Redo
+            | Action::Repeat
+            | Action::ToggleBold
+            | Action::ToggleItalic
+            | Action::ToggleHighlight
+            | Action::ToggleCode
+            | Action::InsertLink
+            | Action::ToggleTask
+            | Action::SetHeading(_)
+            | Action::ClearHeading => true,
+            _ => false,
+        }
+    }
+
     /// Parse the action name used in `shoin.conf` `[keys.*]` tables.
     pub fn from_config_name(name: &str) -> Option<Action> {
         Some(match name {

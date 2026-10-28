@@ -46,6 +46,7 @@ Type `:` and the command, then `Enter`.
 | `:align [left\|center\|right\|justified]` | how lines sit in the column; bare cycles |
 | `:typewriter` `:tw` | typewriter scrolling |
 | `:zen` | hide all chrome |
+| `:view` | read-only mode on or off (see [Command line](cli.md#read-only)) |
 
 ## Settings
 

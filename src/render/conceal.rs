@@ -94,6 +94,12 @@ pub struct ActiveSet {
 }
 
 impl ActiveSet {
+    /// No line at all: past the end of any document. Read-only mode and
+    /// `--render`, where there is no cursor for a line to be revealed under.
+    pub fn none() -> Self {
+        ActiveSet { start: usize::MAX, end: usize::MAX }
+    }
+
     pub fn compute(mode: &Mode, cursor: &Cursor, selection_anchor: Option<Cursor>) -> Self {
         match (mode, selection_anchor) {
             (Mode::Visual | Mode::VisualLine, Some(anchor)) => ActiveSet {

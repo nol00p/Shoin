@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `shoin -R notes.md` (or `:view`) opens a page read-only: every line
+  concealed, no caret, `j`/`k` and `Ctrl-d`/`Ctrl-u` scroll as in `less`, and
+  `q` quits. An edit is refused with a message, and `i` then switches to
+  editing.
 - List items are text objects: `al` is an item with everything nested under
   it, `il` the item alone, and `aL` every item at its level. `>al` and `<al`
   indent and outdent an item together with its sub-items, `dal` deletes it
