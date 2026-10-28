@@ -88,6 +88,35 @@ fn pictures(app: &App) -> HashMap<u16, String> {
     out
 }
 
+/// Show `text` in `$PAGER`, or `less -R` when that is unset. False when no
+/// pager could be started, so the caller prints it instead.
+///
+/// Through `sh -c`, so a `PAGER` with flags (`less -FR`, `bat -p`) works the
+/// way it does for git. `LESS=R` is set when `LESS` is not, or a bare `less`
+/// would show the colours as escape codes.
+pub fn page(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let pager = std::env::var("PAGER")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| "less -R".into());
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(&pager).stdin(Stdio::piped());
+    if std::env::var_os("LESS").is_none() {
+        cmd.env("LESS", "R");
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+    // Quitting the pager before the end closes the pipe; that is not an error.
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    let _ = child.wait();
+    true
+}
+
 fn draw(app: &App, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width.max(1), height)).expect("an in-memory terminal");
     terminal

@@ -85,6 +85,11 @@ struct Cli {
     #[arg(long, short = 'p', value_name = "FILE")]
     render: Option<PathBuf>,
 
+    /// With `--render`, page the output through `$PAGER` (`less -R` when
+    /// unset) when it is taller than the terminal.
+    #[arg(long, requires = "render")]
+    pager: bool,
+
     /// Print the exported document instead of writing it, so
     /// `shoin --export notes.md --stdout | pandoc …` stays a one-shot pipeline.
     /// Text formats only — a PDF is not something to print to a terminal.
@@ -121,15 +126,26 @@ fn main() -> Result<()> {
             anyhow::bail!("{}: no such file", src.display());
         }
         use std::io::IsTerminal;
-        let colour = std::io::stdout().is_terminal()
-            && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-        if colour {
-            let width = ratatui::crossterm::terminal::size().map_or(80, |(w, _)| w);
+        let tty = std::io::stdout().is_terminal();
+        let colour = tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+        let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let paged = |text: &str| cli.pager && tty && text.lines().count() > height as usize;
+        let text = if colour {
             let mut app = app::App::new(config, Some(src.clone()), explicit)?;
-            print!("{}", render::print::styled(&mut app, width));
+            let mut text = render::print::styled(&mut app, width);
+            if paged(&text) {
+                // A pager passes colour through but not pixels: the escapes
+                // would arrive as text. The boxes are drawn as outlines then.
+                app.image_protocol = image::Protocol::None;
+                text = render::print::styled(&mut app, width);
+            }
+            text
         } else {
             let flat = transclude::compile::compile(src, &config.transclude)?;
-            print!("{}", export::plain::render(&flat, config.layout.measure, false));
+            export::plain::render(&flat, config.layout.measure, false)
+        };
+        if !(paged(&text) && render::print::page(&text)) {
+            print!("{text}");
         }
         return Ok(());
     }
