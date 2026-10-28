@@ -12,6 +12,7 @@ feature does; the edge cases are under **Details** at the end.
 - [Writing](writing.md) — writer verbs, focus, typewriter, zen, line numbers
 - [Panels](panels.md) — file tree, fuzzy finder, buffers, splits
 - [Notes](notes.md) — `[[links]]`, `![[embeds]]`, `gf`, `gx`, pictures
+- [Reading](reading.md) — print a note with `-p`, page it, read one piped in, or open it read-only with `-R`
 - [Export](export.md) — Markdown, text, HTML and PDF
 - [Files](files.md) — saving, autosave, outside edits and the `:diff` merge
 - [Configuration](configuration.md) — the config folder, themes, key bindings

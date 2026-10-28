@@ -2,13 +2,37 @@
 
 ## Unreleased
 
+Shoin now works the moment it's installed, with no config to write first,
+and it reads as well as it edits: print a note, page it, pipe one in, or open
+it read-only.
+
+**Reading**
+
+- `shoin -p notes.md` (`--render`) prints a file as the editor shows it —
+  concealed, styled, in the theme's colours, embeds expanded and pictures
+  drawn — and exits, so a note can be read without opening the editor.
+  `--pager` sends a page longer than the screen to `$PAGER` (`less -R` by
+  default). Piped or with `NO_COLOR` set, it prints plain text.
+- Shoin reads stdin. `cat notes.md | shoin` (or `shoin -`) opens the text
+  in an unnamed buffer — `:w name.md` saves it, `:q` just quits — and
+  `curl -s …/README.md | shoin -p` prints it.
 - `shoin -R notes.md` (or `:view`) opens a page read-only: every line
   concealed, no caret, `j`/`k` and `Ctrl-d`/`Ctrl-u` scroll as in `less`, and
   `q` quits. An edit is refused with a message, and `i` then switches to
   editing.
-- Shoin reads stdin. `cat notes.md | shoin` (or `shoin -`) opens the text
-  in an unnamed buffer — `:w name.md` saves it, `:q` just quits — and
-  `curl -s …/README.md | shoin -p` prints it.
+- A new [Reading](docs/reading.md) page covers all three.
+
+**Setup**
+
+- The leader bindings (`Space fe`, `Space ff`, …) work with no config, so
+  `shoin --init-config` is no longer a required first step. The shipped
+  `keys.conf` is built in and your own `[keys.*]` merge over it: a partial
+  config keeps every binding it doesn't mention, and `"<key>" = "none"`
+  removes one. If you had deleted a shipped binding from your `keys.conf`,
+  it is back; set it to `"none"`.
+
+**Lists**
+
 - List items are text objects: `al` is an item with everything nested under
   it, `il` the item alone, and `aL` every item at its level. `>al` and `<al`
   indent and outdent an item together with its sub-items, `dal` deletes it
@@ -28,17 +52,12 @@
   sub-item. Anywhere else Tab still types a tab, and `[editor] list_tab =
   false` keeps it a tab on list items too. A `<S-Tab>` binding in
   `keys.conf` now works; the key never reached it before. (#30)
-- The leader bindings (`Space fe`, `Space ff`, …) work with no config, so
-  `shoin --init-config` is no longer a required first step. The shipped
-  `keys.conf` is built in and your own `[keys.*]` merge over it: a partial
-  config keeps every binding it doesn't mention, and `"<key>" = "none"`
-  removes one. If you had deleted a shipped binding from your `keys.conf`,
-  it is back; set it to `"none"`.
-- `shoin -p notes.md` (`--render`) prints a file as the editor shows it —
-  concealed, styled, in the theme's colours, embeds expanded and pictures
-  drawn — and exits, so a note can be read without opening the editor.
-  `--pager` sends a page longer than the screen to `$PAGER` (`less -R` by
-  default). Piped or with `NO_COLOR` set, it prints plain text.
+
+**Fixes**
+
+- In iTerm2 and WezTerm, a picture that moved or was hidden — the cursor
+  reaching its `![[…]]` line, a scroll — left pieces of itself on screen.
+  Its old cells are now cleared.
 
 ## 0.1.9
 
