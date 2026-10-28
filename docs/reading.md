@@ -5,7 +5,7 @@ one piped in from another command, or open it so it can't be changed. Each
 shows the same page the editor does, with every line concealed.
 
 <p align="center">
-  <img src="media/reading.gif" alt="A note printed into the shell with shoin -p, a piped README paged through less, and a note opened read-only with shoin -R" width="800">
+  <img src="media/reading.gif" alt="A note printed into the shell with shoin -p, chapters piped through shoin -p --pager into less, and a note opened read-only with shoin -R, where dd is refused" width="800">
 </p>
 
 ## Print a note
