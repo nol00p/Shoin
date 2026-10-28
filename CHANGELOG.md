@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 Shoin now works the moment it's installed, with no config to write first,
 and it reads as well as it edits: print a note, page it, pipe one in, or open
