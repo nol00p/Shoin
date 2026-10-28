@@ -92,7 +92,28 @@ pub fn load(explicit: Option<&Path>) -> Result<Config> {
 /// directory, so this exists for tests that want a config in one literal.
 #[cfg(test)]
 pub fn parse(text: &str) -> Result<Config> {
-    from_table(toml::from_str(text)?)
+    let mut merged = shipped_keys();
+    merge_tables(&mut merged, toml::from_str(text)?);
+    from_table(merged)
+}
+
+/// The shipped `keys.conf`, as the table every config merges over.
+///
+/// `Config::default()` has empty `[keys.*]`, so without this base every
+/// `<leader>` binding did nothing until `--init-config` had been run. Layering
+/// the shipped file UNDER the user's is what makes a fresh install work, and it
+/// keeps working for a partial config: a lone `theme.conf` still gets
+/// `<leader>fe`. A shipped binding is removed by binding it to `"none"`.
+///
+/// Only `keys.conf`. Layering the other shipped files would mark every glyph
+/// as user-set, and `nerd_fonts = false` would then fall back on nothing. Their
+/// values are the serde defaults already.
+fn shipped_keys() -> toml::Table {
+    let (_, body) = init::SHIPPED
+        .iter()
+        .find(|(name, _)| *name == "keys.conf")
+        .expect("keys.conf is shipped");
+    toml::from_str(body).expect("the shipped keys.conf parses")
 }
 
 /// Deserialize the merged table, then run the one post-merge pass — settings
@@ -197,12 +218,10 @@ pub fn validate(cfg: &Config) -> Vec<String> {
     out
 }
 
-/// Deep-merge a set of `.conf` files (in order) into a single `Config`.
+/// Deep-merge a set of `.conf` files (in order) over [`shipped_keys`] into a
+/// single `Config`. No files at all is the shipped bindings over the defaults.
 fn merge_files(files: &[PathBuf]) -> Result<Config> {
-    if files.is_empty() {
-        return Ok(Config::default());
-    }
-    let mut merged = toml::Table::new();
+    let mut merged = shipped_keys();
     for f in files {
         let text = std::fs::read_to_string(f)
             .with_context(|| format!("reading config {}", f.display()))?;
@@ -505,6 +524,47 @@ mod tests {
         assert!(w.iter().any(|s| s.starts_with("cursor.normal")), "{w:?}");
         assert!(w.iter().any(|s| s.starts_with("layout.focus")), "{w:?}");
         assert!(w[0].contains("preserve"), "the message lists the legal words: {w:?}");
+    }
+
+    fn normal(cfg: &Config, key: &str) -> Option<String> {
+        cfg.keys.normal.get(key).cloned()
+    }
+
+    /// No config anywhere still has the leader bindings. Before, `[keys.*]`
+    /// was empty and `<leader>fe` did nothing until `--init-config` ran.
+    #[test]
+    fn no_config_still_has_the_shipped_bindings() {
+        let cfg = merge_files(&[]).unwrap();
+        assert_eq!(normal(&cfg, "<leader>fe").as_deref(), Some("file_tree"));
+        assert_eq!(normal(&cfg, "<C-s>").as_deref(), Some("save"));
+
+        let (_, warnings) =
+            crate::input::keymap::Keymap::from_config(&cfg.keys, &cfg.input.leader);
+        assert!(warnings.is_empty(), "the shipped bindings warn: {warnings:?}");
+    }
+
+    /// A user config merges OVER the shipped bindings: a partial config keeps
+    /// them, a rebind wins, and `"none"` removes one.
+    #[test]
+    fn a_user_config_layers_over_the_shipped_bindings() {
+        let dir = tmpdir("keys");
+        std::fs::write(dir.join("theme.conf"), "[layout]\nmeasure = 70\n").unwrap();
+        std::fs::write(
+            dir.join("keys.conf"),
+            "[keys.normal]\n\"<leader>z\" = \"none\"\n\"<leader>w\" = \"quit\"\n\"<leader>x\" = \"save\"\n",
+        )
+        .unwrap();
+
+        let cfg = load(Some(&dir)).unwrap();
+        assert_eq!(normal(&cfg, "<leader>fe").as_deref(), Some("file_tree"), "kept");
+        assert_eq!(normal(&cfg, "<leader>w").as_deref(), Some("quit"), "rebound");
+        assert_eq!(normal(&cfg, "<leader>x").as_deref(), Some("save"), "added");
+        assert_eq!(normal(&cfg, "<leader>z").as_deref(), Some("none"), "unbound");
+        assert_eq!(
+            crate::input::action::Action::from_config_name("none"),
+            Some(crate::input::action::Action::Nop)
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
 }
