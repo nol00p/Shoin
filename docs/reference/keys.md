@@ -83,6 +83,16 @@ selection. Each is one undo step.
 | `gf` | follow the link under the cursor — see [Notes](../notes.md) |
 | `gx` | open the link with the desktop |
 
+## Lists
+
+In Normal mode. See [Editing](../editing.md#lists).
+
+| Key | Does |
+|---|---|
+| `Alt-j` `Alt-k` | move the list item past the next / previous one, with its sub-items (a count moves it past that many) |
+| `>al` `<al` | indent / outdent the item with its sub-items |
+| `>aL` `<aL` | indent / outdent every item at that level |
+
 ## Insert mode
 
 | Key | Does |

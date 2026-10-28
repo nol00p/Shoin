@@ -11,6 +11,11 @@
 - Numbered lists stay in sequence when `>al` or `<al` moves an item into or
   out of them: both lists are renumbered, keeping the number each starts at,
   in the same undo step. `[editor] list_renumber = false` turns it off.
+- `Alt-j` and `Alt-k` move a list item past the next or previous one, its
+  sub-items with it; a count moves it past that many. A numbered list is
+  renumbered. The actions are `list_item_down` and `list_item_up`, for
+  rebinding where Alt is awkward (tmux with a long `escape-time`, or a macOS
+  terminal not sending Option as Meta). (#30)
 
 ## 0.1.9
 

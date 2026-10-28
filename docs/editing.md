@@ -46,9 +46,14 @@ nests an item under the one above it and takes its sub-items along, `<al`
 brings it back out, `dal` deletes the whole item, and `>aL` indents a whole
 nested level at once.
 
-Numbered lists stay in sequence: when an item moves into or out of a
-`1.` `2.` `3.` list, the numbers of both the list it left and the list it
-joined are rewritten, in the same undo step. Bullet lists are never changed.
+`Alt-j` and `Alt-k` move the item under the cursor past the next or previous
+item, its sub-items travelling with it; `3 Alt-j` moves it past three. An
+item never leaves its list this way: at the first or last item the move is
+refused, and `<al` is how it moves out.
+
+Numbered lists stay in sequence: when an item moves, or moves into or out of
+a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
+the same undo step. Bullet lists are never changed.
 Turn this off with `list_renumber = false` in `[editor]`.
 
 An indent that would break the list is refused with a message and changes
@@ -79,6 +84,14 @@ list continuation, and a `jk` in the pasted text stays text.
   so the items after it become its sub-items, as in org-mode. `>il` works the
   same way the other direction: the item moves in, its sub-items stay put and
   so belong to the item above.
+- `Alt-j` needs a terminal that sends Alt as a modifier. In tmux, a quick
+  `Esc` then `j` can arrive as `Alt-j` when `escape-time` is long (the
+  default was 500 ms before tmux 3.5): `set -sg escape-time 10` fixes it, and
+  it is the usual advice for Vim in tmux. On macOS, Terminal.app needs "Use
+  Option as Meta key" and iTerm2 needs Option set to "Esc+". Or rebind
+  `list_item_down` and `list_item_up` in `keys.conf`.
+- Moving swaps the item and the items it passes as two blocks of text; the
+  blank lines between them stay where they were.
 - Renumbering keeps the number a list starts at, so a list starting at `3.`
   still starts at `3.` after its first item moves away. A sub-list the edit
   creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists

@@ -86,6 +86,9 @@ pub enum Action {
     ReplaceChar(char),
     JoinLines,
     ToggleCase,
+    /// `Alt-j` / `Alt-k` — move the list item under the cursor, children and
+    /// all, past its next / previous sibling (past `count` of them).
+    ListItemMove { down: bool },
     Undo,
     Redo,
     Repeat,
@@ -187,6 +190,8 @@ impl Action {
             "paste_before" => Action::PasteBefore,
             "delete_char" => Action::DeleteChar,
             "join_lines" => Action::JoinLines,
+            "list_item_down" => Action::ListItemMove { down: true },
+            "list_item_up" => Action::ListItemMove { down: false },
             "toggle_bold" | "bold" => Action::ToggleBold,
             "toggle_italic" | "italic" => Action::ToggleItalic,
             "toggle_highlight" | "highlight" => Action::ToggleHighlight,

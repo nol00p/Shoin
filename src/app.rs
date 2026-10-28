@@ -1649,6 +1649,7 @@ impl App {
             Action::ReplaceChar(c) => self.replace_chars(c, count),
             Action::JoinLines => self.join_lines(count),
             Action::ToggleCase => self.toggle_case(count),
+            Action::ListItemMove { down } => self.move_list_item(down, count),
             Action::SearchNext { reverse } => {
                 let backward = match self.search.as_ref() {
                     Some(s) => s.reverse != reverse,
@@ -1846,7 +1847,8 @@ impl App {
             | Action::OnlyPane
             | Action::ReplaceChar(_)
             | Action::JoinLines
-            | Action::ToggleCase => {}
+            | Action::ToggleCase
+            | Action::ListItemMove { .. } => {}
         }
     }
 
@@ -3678,6 +3680,77 @@ impl App {
         self.buffer.cursor = Cursor::new(at.line, (at.col as isize + moved).max(0) as usize);
     }
 
+    /// `Alt-j` / `Alt-k`: move the item under the cursor, children and all,
+    /// past `count` of its siblings — stopping at the end of the list rather
+    /// than failing when the count is larger. It never leaves its list: that
+    /// is what `<al` is for.
+    ///
+    /// The item and the siblings it passes swap places as two blocks of text,
+    /// and the blank lines between them stay where they were. The cursor
+    /// follows the item, on the same character.
+    fn move_list_item(&mut self, down: bool, count: usize) {
+        self.refresh_blocks();
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+        let at = self.buffer.cursor;
+        let Some(item) = lists.item_bounds(at.line) else {
+            return self.notify("not in a list", FlashKind::Error);
+        };
+        // The far end of the siblings passed over.
+        let step = |b: (usize, usize)| match down {
+            true => lists.next_sibling_bounds(b.0),
+            false => lists.prev_sibling_bounds(b.0),
+        };
+        let Some(near) = step(item) else {
+            let why = if down { "last item" } else { "first item" };
+            return self.notify(why, FlashKind::Error);
+        };
+        let mut far = near;
+        for _ in 1..count {
+            match step(far) {
+                Some(b) => far = b,
+                None => break,
+            }
+        }
+        let past = if down { (near.0, far.1) } else { (far.0, near.1) };
+        let start = list_starts(&lists, &[item.0]).first().map(|(_, n)| *n);
+        let before = self.buffer.line_len(at.line) as isize;
+
+        // `first`, the gap, then `second` become `second`, the gap, `first`.
+        let (first, second) = if down { (item, past) } else { (past, item) };
+        let lines = |(a, b): (usize, usize)| (a..=b).map(|l| self.buffer.line_text(l)).collect::<Vec<_>>();
+        let gap: Vec<String> = (first.1 + 1..second.0).map(|l| self.buffer.line_text(l)).collect();
+        let swapped = [lines(second), gap.clone(), lines(first)].concat().join("\n");
+
+        let from = self.buffer.rope.line_to_char(first.0);
+        let to = self.buffer.char_index(Cursor::new(second.1, self.buffer.line_len(second.1)));
+        self.buffer.delete_chars(from, to);
+        self.buffer.insert_str(Cursor::new(first.0, 0), &swapped);
+
+        let new_start = if down { first.0 + (second.1 - second.0 + 1) + gap.len() } else { first.0 };
+        let line = new_start + (at.line - item.0);
+        // Its own list, counting from where it started — the other lists the
+        // two blocks hold moved whole, so their numbers are still in order.
+        if self.config.editor.list_renumber && start.is_some() {
+            self.refresh_blocks();
+            let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+            let edits = lists.renumber(line, start);
+            self.apply_renumber(edits);
+        }
+        // The line's text only changed if its number did.
+        let moved = self.buffer.line_len(line) as isize - before;
+        self.buffer.cursor = Cursor::new(line, (at.col as isize + moved).max(0) as usize);
+    }
+
+    /// Rewrite the ordinals `edits` name. Each is on a line of its own and
+    /// leaves the line count alone, so the order they go in does not matter.
+    fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
+        for r in edits {
+            let start = self.buffer.char_index(Cursor::new(r.line, r.cols.start));
+            self.buffer.delete_chars(start, start + r.cols.len());
+            self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
+        }
+    }
+
     /// Put every ordered level containing one of `lines` back in sequence
     /// after `moved` (an item line) changed level. Lines outside a list, and
     /// bullet lists, are skipped.
@@ -3701,11 +3774,7 @@ impl App {
             .flat_map(|&l| lists.renumber(l, Some(start(&lists.level_items(l)))))
             .map(|r| (r.line, r))
             .collect();
-        for r in edits.into_values() {
-            let start = self.buffer.char_index(Cursor::new(r.line, r.cols.start));
-            self.buffer.delete_chars(start, start + r.cols.len());
-            self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
-        }
+        self.apply_renumber(edits.into_values());
     }
 
     /// `>`/`<` over whole lines. One indent unit is `tab_width` spaces, or a
@@ -7112,6 +7181,115 @@ mod tests {
         app.buffer.cursor = Cursor::new(1, 0);
         feed(&mut app, ">al");
         assert_eq!(text(&app), "1. a\n    2. b\n3. c\n");
+    }
+
+    /// `Alt-{c}`, the way a terminal reports it.
+    fn alt(app: &mut App, c: char) {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        app.sync_after_input();
+    }
+
+    #[test]
+    fn alt_j_and_alt_k_move_an_item_with_its_children() {
+        let t = "- a\n  - a1\n- b\n- c\n";
+        let mut app = app_with(t);
+        app.buffer.cursor = Cursor::new(0, 2);
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- a\n  - a1\n- c\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 2), "the cursor follows the item");
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), t);
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 2));
+    }
+
+    /// The two items swap; the blank line between them stays put.
+    #[test]
+    fn moving_a_loose_item_keeps_the_gap() {
+        let mut app = app_with("- a\n\n- b\n  more\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n  more\n\n- a\n");
+        assert_eq!(app.buffer.cursor.line, 3);
+    }
+
+    #[test]
+    fn a_count_moves_past_that_many_and_stops_at_the_end() {
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        feed(&mut app, "2");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- c\n- a\n- d\n");
+        feed(&mut app, "9");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- c\n- d\n- a\n");
+    }
+
+    /// An item never leaves its list by moving: past the first or last
+    /// sibling is refused, and so is a line outside any list.
+    #[test]
+    fn moves_off_the_end_of_a_list_are_refused() {
+        let t = "- p\n  - x\n  - y\n- q\n";
+        let mut app = app_with(t);
+        app.buffer.cursor = Cursor::new(2, 0);
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), t);
+        assert_eq!(flash_text(&app), "last item");
+        app.buffer.cursor = Cursor::new(0, 0);
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), t);
+        assert_eq!(flash_text(&app), "first item");
+        let mut app = app_with("prose\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "prose\n");
+        assert_eq!(flash_text(&app), "not in a list");
+    }
+
+    #[test]
+    fn moving_an_ordered_item_renumbers_its_list() {
+        let mut app = app_with("1. a\n2. b\n3. c\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "1. b\n2. a\n3. c\n");
+        // The list keeps the number it starts at.
+        let mut app = app_with("3. a\n4. b\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "3. b\n4. a\n");
+    }
+
+    #[test]
+    fn a_move_is_one_undo_step_and_repeats() {
+        let mut app = app_with("- a\n- b\n- c\n");
+        alt(&mut app, 'j');
+        feed(&mut app, ".");
+        assert_eq!(text(&app), "- b\n- c\n- a\n");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- b\n- a\n- c\n");
+    }
+
+    #[test]
+    fn moving_the_last_item_of_a_file_with_no_final_newline() {
+        let mut app = app_with("- a\n- b");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- a");
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "- a\n- b");
+    }
+
+    /// Moving is Normal-mode only: in Visual, `Alt-j` is still `j`.
+    #[test]
+    fn alt_j_in_visual_mode_is_j() {
+        let mut app = app_with("- a\n- b\n");
+        feed(&mut app, "v");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- a\n- b\n");
+        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(app.buffer.cursor.line, 1);
+    }
+
+    /// The move is an action like any other, so `keys.conf` can rebind it.
+    #[test]
+    fn list_item_moves_can_be_rebound() {
+        let mut app = app_with_keys("- a\n- b\n", &[("<C-j>", "list_item_down")]);
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        app.sync_after_input();
+        assert_eq!(text(&app), "- b\n- a\n");
     }
 
     /// `>il` leaves the children where they are, so they re-parent.

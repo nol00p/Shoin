@@ -32,7 +32,8 @@ desk built into a bay by the window, and nothing else in the room.
   → [Live preview](docs/live-preview.md)
 - **Vim grammar, plus writer verbs.** Operators, motions, text objects, counts,
   registers and `.` — and `gb` for bold, `gt` to tick a task, `g1`–`g6` for
-  headings, `>al` to nest a list item with everything under it. → [Editing](docs/editing.md) · [Writing](docs/writing.md)
+  headings, `>al` and `Alt-j` to nest and move a list item with everything
+  under it. → [Editing](docs/editing.md) · [Writing](docs/writing.md)
 - **Notes that compose.** `[[links]]` you walk with `gf`, `![[embeds]]` that
   pull one note into another, and export to Markdown, text, HTML or PDF.
   → [Notes](docs/notes.md) · [Export](docs/export.md)
