@@ -8,13 +8,11 @@
   config keeps every binding it doesn't mention, and `"<key>" = "none"`
   removes one. If you had deleted a shipped binding from your `keys.conf`,
   it is back; set it to `"none"`.
-
 - `shoin -p notes.md` (`--render`) prints a file as the editor shows it —
   concealed, styled, in the theme's colours, embeds expanded and pictures
   drawn — and exits, so a note can be read without opening the editor.
   `--pager` sends a page longer than the screen to `$PAGER` (`less -R` by
-  default). Piped or with `NO_COLOR` set, it prints
-  plain text.
+  default). Piped or with `NO_COLOR` set, it prints plain text.
 
 ## 0.1.9
 
