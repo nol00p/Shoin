@@ -148,6 +148,20 @@ impl Buffer {
         })
     }
 
+    /// Text with no file behind it, read from stdin. It has no name, so `:w`
+    /// asks for one, and it starts unmodified: the text still exists wherever
+    /// it was piped from, so leaving without saving loses nothing, and `q`
+    /// after reading should just quit. Always Markdown, since that is what
+    /// gets piped into a Markdown editor.
+    pub fn unnamed(bytes: Vec<u8>) -> Result<Self> {
+        let loaded = open::decode(bytes, "stdin", Syntax::Markdown)?;
+        let mut b = Buffer::empty();
+        b.rope = loaded.rope;
+        b.line_ending = loaded.line_ending;
+        b.final_newline = loaded.final_newline;
+        Ok(b)
+    }
+
     /// Atomic: temp file in the same directory, fsync, rename. SPEC.md §10.
     ///
     /// `force` is `:w!` — write even though the file changed underneath us.
@@ -395,6 +409,21 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Piped text has no name and nothing unsaved, and keeps its line ending
+    /// for the `:w` that names it.
+    #[test]
+    fn piped_text_is_unnamed_and_clean() {
+        let b = Buffer::unnamed(b"# Title\r\nBody\r\n".to_vec()).unwrap();
+        assert!(b.path.is_none());
+        assert!(!b.modified);
+        assert_eq!(b.syntax, Syntax::Markdown);
+        assert_eq!(b.line_ending, LineEnding::Crlf);
+        assert_eq!(b.line_text(0), "# Title");
+
+        let err = Buffer::unnamed(b"ok\xff".to_vec()).err().expect("refused");
+        assert!(err.to_string().starts_with("stdin is not valid UTF-8"), "{err}");
+    }
 
     /// Words are counted on runs of non-whitespace, so punctuation and CJK
     /// come out the way a writer expects to be told.

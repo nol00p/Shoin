@@ -20,13 +20,19 @@ pub struct Loaded {
 
 pub fn load(path: &Path, plain_text_exts: &[String]) -> Result<Loaded> {
     let bytes = std::fs::read(path)?;
+    let syntax = syntax_for(path, plain_text_exts);
+    decode(bytes, &path.display().to_string(), syntax)
+}
 
+/// Bytes that did not come from a file — piped in on stdin — as a buffer's
+/// contents. `what` names them in the error.
+pub fn decode(bytes: Vec<u8>, what: &str, syntax: Syntax) -> Result<Loaded> {
     let text = String::from_utf8(bytes).map_err(|e| {
         let pos = e.utf8_error().valid_up_to();
         anyhow!(
             "{} is not valid UTF-8 (first bad byte at offset {}). \
              Shoin refuses to open it rather than corrupt it on save.",
-            path.display(),
+            what,
             pos
         )
     })?;
@@ -45,7 +51,7 @@ pub fn load(path: &Path, plain_text_exts: &[String]) -> Result<Loaded> {
         rope: Rope::from_str(&normalized),
         line_ending,
         final_newline,
-        syntax: syntax_for(path, plain_text_exts),
+        syntax,
     })
 }
 
