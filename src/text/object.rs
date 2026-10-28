@@ -12,6 +12,7 @@
 
 use super::buffer::Buffer;
 use super::cursor::Cursor;
+use super::list::Lists;
 use super::motion::char_class;
 
 /// A resolved object: an absolute char range, END EXCLUSIVE.
@@ -38,7 +39,9 @@ impl ObjectRange {
 ///
 /// Counts are not applied: `d2iw` behaves as `diw`. Vim's counted objects are
 /// rare in prose and the grammar has nowhere to put the count today.
-pub fn resolve(buffer: &Buffer, key: char, around: bool) -> Option<ObjectRange> {
+///
+/// `lists` is only read by the list objects, `l` and `L`.
+pub fn resolve(buffer: &Buffer, lists: &Lists, key: char, around: bool) -> Option<ObjectRange> {
     let cursor = buffer.cursor;
     match key {
         'w' => word(buffer, cursor, around, false),
@@ -50,6 +53,11 @@ pub fn resolve(buffer: &Buffer, key: char, around: bool) -> Option<ObjectRange> 
         '[' | ']' => pair(buffer, cursor, '[', ']', around),
         '{' | '}' | 'B' => pair(buffer, cursor, '{', '}', around),
         '<' | '>' => pair(buffer, cursor, '<', '>', around),
+        // `al` is the item with its children, `il` without them. `aL` is the
+        // whole level; `iL` is not defined yet.
+        'l' if around => whole_lines(buffer, lists.item_bounds(cursor.line)?),
+        'l' => whole_lines(buffer, lists.own_bounds(cursor.line)?),
+        'L' if around => whole_lines(buffer, lists.level_bounds(cursor.line)?),
         _ => None,
     }
 }
@@ -158,8 +166,13 @@ fn paragraph_object(buffer: &Buffer, line: usize, around: bool) -> Option<Object
         }
     }
 
+    whole_lines(buffer, (s, e))
+}
+
+/// Lines `s..=e` with their newlines, as a linewise range.
+fn whole_lines(buffer: &Buffer, (s, e): (usize, usize)) -> Option<ObjectRange> {
     let start = buffer.rope.line_to_char(s);
-    let end = if e < last {
+    let end = if e < buffer.last_line() {
         buffer.rope.line_to_char(e + 1)
     } else {
         buffer.rope.len_chars()
@@ -323,6 +336,7 @@ fn pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::markdown::block::BlockCache;
     use ropey::Rope;
 
     fn buf(text: &str, line: usize, col: usize) -> Buffer {
@@ -332,6 +346,12 @@ mod tests {
         b
     }
 
+    /// `resolve` with the buffer's own list view, tab width 4.
+    fn obj(b: &Buffer, key: char, around: bool) -> Option<ObjectRange> {
+        let cache = BlockCache::build(b);
+        resolve(b, &Lists::new(b, &cache.kinds, 4), key, around)
+    }
+
     fn text_of(b: &Buffer, r: ObjectRange) -> String {
         b.rope.slice(r.start..r.end).to_string()
     }
@@ -339,71 +359,71 @@ mod tests {
     #[test]
     fn inner_and_around_word() {
         let b = buf("the quick fox\n", 0, 6); // inside "quick"
-        assert_eq!(text_of(&b, resolve(&b, 'w', false).unwrap()), "quick");
-        assert_eq!(text_of(&b, resolve(&b, 'w', true).unwrap()), "quick ");
+        assert_eq!(text_of(&b, obj(&b, 'w', false).unwrap()), "quick");
+        assert_eq!(text_of(&b, obj(&b, 'w', true).unwrap()), "quick ");
     }
 
     /// On the last word there is no trailing space, so `aw` eats the leading one.
     #[test]
     fn around_word_at_end_of_line_takes_leading_space() {
         let b = buf("the quick fox\n", 0, 11);
-        assert_eq!(text_of(&b, resolve(&b, 'w', true).unwrap()), " fox");
+        assert_eq!(text_of(&b, obj(&b, 'w', true).unwrap()), " fox");
     }
 
     /// Punctuation is its own class: `iw` on `,` is the comma, not the word.
     #[test]
     fn word_objects_follow_character_class() {
         let b = buf("one, two\n", 0, 3);
-        assert_eq!(text_of(&b, resolve(&b, 'w', false).unwrap()), ",");
+        assert_eq!(text_of(&b, obj(&b, 'w', false).unwrap()), ",");
         // `iW` is whitespace-delimited, so it takes the comma with the word.
         let b = buf("one, two\n", 0, 1);
-        assert_eq!(text_of(&b, resolve(&b, 'W', false).unwrap()), "one,");
+        assert_eq!(text_of(&b, obj(&b, 'W', false).unwrap()), "one,");
     }
 
     #[test]
     fn paragraph_is_linewise_and_around_takes_the_blank_line() {
         let b = buf("a one\na two\n\nb one\n", 0, 2);
-        let inner = resolve(&b, 'p', false).unwrap();
+        let inner = obj(&b, 'p', false).unwrap();
         assert!(inner.linewise);
         assert_eq!(text_of(&b, inner), "a one\na two\n");
-        assert_eq!(text_of(&b, resolve(&b, 'p', true).unwrap()), "a one\na two\n\n");
+        assert_eq!(text_of(&b, obj(&b, 'p', true).unwrap()), "a one\na two\n\n");
     }
 
     #[test]
     fn sentence_stops_at_the_terminator() {
         let b = buf("One thing. Two things. Three.\n", 0, 12);
-        assert_eq!(text_of(&b, resolve(&b, 's', false).unwrap()), "Two things.");
-        assert_eq!(text_of(&b, resolve(&b, 's', true).unwrap()), "Two things. ");
+        assert_eq!(text_of(&b, obj(&b, 's', false).unwrap()), "Two things.");
+        assert_eq!(text_of(&b, obj(&b, 's', true).unwrap()), "Two things. ");
     }
 
     #[test]
     fn quotes_pair_left_to_right() {
         let b = buf("say \"hello there\" now\n", 0, 8);
-        assert_eq!(text_of(&b, resolve(&b, '"', false).unwrap()), "hello there");
-        assert_eq!(text_of(&b, resolve(&b, '"', true).unwrap()), "\"hello there\" ");
+        assert_eq!(text_of(&b, obj(&b, '"', false).unwrap()), "hello there");
+        assert_eq!(text_of(&b, obj(&b, '"', true).unwrap()), "\"hello there\" ");
     }
 
     /// The cursor before the quotes still finds the first pair on the line.
     #[test]
     fn quotes_found_from_before_them() {
         let b = buf("say \"hi\" now\n", 0, 0);
-        assert_eq!(text_of(&b, resolve(&b, '"', false).unwrap()), "hi");
+        assert_eq!(text_of(&b, obj(&b, '"', false).unwrap()), "hi");
     }
 
     #[test]
     fn brackets_nest_and_span_lines() {
         let b = buf("f(a, g(b),\n  c)\n", 0, 3);
-        assert_eq!(text_of(&b, resolve(&b, '(', false).unwrap()), "a, g(b),\n  c");
-        assert_eq!(text_of(&b, resolve(&b, '(', true).unwrap()), "(a, g(b),\n  c)");
+        assert_eq!(text_of(&b, obj(&b, '(', false).unwrap()), "a, g(b),\n  c");
+        assert_eq!(text_of(&b, obj(&b, '(', true).unwrap()), "(a, g(b),\n  c)");
         // Inside the nested pair, the inner one wins.
         let b = buf("f(a, g(b),\n  c)\n", 0, 7);
-        assert_eq!(text_of(&b, resolve(&b, 'b', false).unwrap()), "b");
+        assert_eq!(text_of(&b, obj(&b, 'b', false).unwrap()), "b");
     }
 
     #[test]
     fn unmatched_bracket_is_no_object() {
         let b = buf("no brackets here\n", 0, 4);
-        assert!(resolve(&b, '(', false).is_none());
+        assert!(obj(&b, '(', false).is_none());
     }
 
     /// An empty pair has an empty inside — no object, so the operator no-ops
@@ -411,7 +431,38 @@ mod tests {
     #[test]
     fn empty_pair_has_no_inside() {
         let b = buf("f()\n", 0, 2);
-        assert!(resolve(&b, '(', false).is_none());
-        assert_eq!(text_of(&b, resolve(&b, '(', true).unwrap()), "()");
+        assert!(obj(&b, '(', false).is_none());
+        assert_eq!(text_of(&b, obj(&b, '(', true).unwrap()), "()");
+    }
+
+    #[test]
+    fn list_item_objects() {
+        let t = "- a\n  - b\n  - c\n- d\n";
+        let b = buf(t, 1, 3);
+        assert_eq!(text_of(&b, obj(&b, 'l', true).unwrap()), "  - b\n");
+        let b = buf(t, 0, 0);
+        let al = obj(&b, 'l', true).unwrap();
+        assert!(al.linewise);
+        assert_eq!(text_of(&b, al), "- a\n  - b\n  - c\n");
+        assert_eq!(text_of(&b, obj(&b, 'l', false).unwrap()), "- a\n");
+        // `aL` is every sibling, each with its children.
+        let b = buf(t, 2, 0);
+        assert_eq!(text_of(&b, obj(&b, 'L', true).unwrap()), "  - b\n  - c\n");
+        assert!(obj(&b, 'L', false).is_none(), "iL is not defined");
+    }
+
+    /// The last item of a file with no final newline ends at the text's end.
+    #[test]
+    fn list_item_object_at_the_end_of_the_file() {
+        let b = buf("- a\n- b", 1, 0);
+        assert_eq!(text_of(&b, obj(&b, 'l', true).unwrap()), "- b");
+    }
+
+    #[test]
+    fn list_objects_outside_a_list_are_no_object() {
+        let b = buf("just prose\n", 0, 2);
+        assert!(obj(&b, 'l', true).is_none());
+        assert!(obj(&b, 'l', false).is_none());
+        assert!(obj(&b, 'L', true).is_none());
     }
 }

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- List items are text objects: `al` is an item with everything nested under
+  it, `il` the item alone, and `aL` every item at its level. `>al` and `<al`
+  indent and outdent an item together with its sub-items, `dal` deletes it
+  whole. An indent that would break the list (the first item, an outdent at
+  the top level, a top-level list 4 columns in) is refused with a message
+  instead of applied. (#29)
+- Numbered lists stay in sequence when `>al` or `<al` moves an item into or
+  out of them: both lists are renumbered, keeping the number each starts at,
+  in the same undo step. `[editor] list_renumber = false` turns it off.
+- `Alt-j` and `Alt-k` move a list item past the next or previous one, its
+  sub-items with it; a count moves it past that many. A numbered list is
+  renumbered. The actions are `list_item_down` and `list_item_up`, for
+  rebinding where Alt is awkward (tmux with a long `escape-time`, or a macOS
+  terminal not sending Option as Meta). (#30)
+- In Insert mode, Tab and Shift-Tab on a list item indent and outdent it
+  with its sub-items, as `>al` and `<al` do, so Enter then Tab starts a
+  sub-item. Anywhere else Tab still types a tab, and `[editor] list_tab =
+  false` keeps it a tab on list items too. A `<S-Tab>` binding in
+  `keys.conf` now works; the key never reached it before. (#30)
 - The leader bindings (`Space fe`, `Space ff`, …) work with no config, so
   `shoin --init-config` is no longer a required first step. The shipped
   `keys.conf` is built in and your own `[keys.*]` merge over it: a partial

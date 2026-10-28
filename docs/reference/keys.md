@@ -30,7 +30,7 @@ line.
 | Key | Does |
 |---|---|
 | `d` `c` `y` | delete / change / yank — `dd` `cc` `yy` for the line |
-| `>` `<` | indent / outdent (`>>`, `>ip`) |
+| `>` `<` | indent / outdent (`>>`, `>ip`); `>al` `<al` move a list item in or out with its sub-items |
 | `gu` `gU` | lowercase / uppercase (`guiw`, `gUU`) |
 | `D` `C` `Y` | delete / change / yank to the end of the line |
 | `x` `X` | delete the character under / before the cursor |
@@ -52,8 +52,11 @@ After an operator, or in Visual mode: `diw`, `ca(`, `vip`.
 | `ip` `ap` | a paragraph (linewise) |
 | `i"` `i'` `` i` `` | inside quotes; `a"` and so on include the quotes |
 | `i(` `i[` `i{` `i<` | inside brackets; `a(` and so on include them (`b` = `()`, `B` = `{}`) |
+| `il` `al` | a list item, without / with its sub-items (linewise) |
+| `aL` | every item at the same level of a list, each with its sub-items (linewise) |
 
-Brackets may span lines.
+Brackets may span lines. `>` and `<` over a list object refuse a shift that
+would break the list — see [Editing](../editing.md#lists).
 
 ## Registers
 
@@ -80,6 +83,17 @@ selection. Each is one undo step.
 | `gf` | follow the link under the cursor — see [Notes](../notes.md) |
 | `gx` | open the link with the desktop |
 
+## Lists
+
+In Normal mode. See [Editing](../editing.md#lists).
+
+| Key | Does |
+|---|---|
+| `Alt-j` `Alt-k` | move the list item past the next / previous one, with its sub-items (a count moves it past that many) |
+| `>al` `<al` | indent / outdent the item with its sub-items |
+| `>aL` `<aL` | indent / outdent every item at that level |
+| `Tab` `Shift-Tab` | in Insert mode, the same as `>al` `<al` |
+
 ## Insert mode
 
 | Key | Does |
@@ -87,6 +101,7 @@ selection. Each is one undo step.
 | `i` `a` `I` `A` `o` `O` | insert / append / at line start / at line end / open below / open above |
 | `Esc` `Ctrl-c` `jk` | leave Insert (`jk` is `input.escape_alias`) |
 | `Enter` | continue a list marker or quote; on an empty item, end the list |
+| `Tab` `Shift-Tab` | on a list item's line, indent / outdent the item with its sub-items (`editor.list_tab`); elsewhere `Tab` types a tab |
 
 ## Visual mode
 

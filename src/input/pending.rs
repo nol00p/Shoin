@@ -91,7 +91,9 @@ impl Key {
             Ct::Char(c) => KeyCode::Char(c),
             Ct::Enter => KeyCode::Enter,
             Ct::Esc => KeyCode::Esc,
-            Ct::Tab => KeyCode::Tab,
+            // Shift-Tab arrives as its own key; folded back to Tab + Shift so
+            // a config's `<S-Tab>` names it.
+            Ct::Tab | Ct::BackTab => KeyCode::Tab,
             Ct::Backspace => KeyCode::Backspace,
             Ct::Delete => KeyCode::Delete,
             Ct::Up => KeyCode::Up,
@@ -110,7 +112,8 @@ impl Key {
             ctrl: m.contains(KeyModifiers::CONTROL),
             alt: m.contains(KeyModifiers::ALT),
             // A letter already carries its case; only flag Shift for named keys.
-            shift: m.contains(KeyModifiers::SHIFT) && !matches!(code, KeyCode::Char(_)),
+            shift: (m.contains(KeyModifiers::SHIFT) && !matches!(code, KeyCode::Char(_)))
+                || ev.code == Ct::BackTab,
         })
     }
 

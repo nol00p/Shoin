@@ -32,7 +32,8 @@ desk built into a bay by the window, and nothing else in the room.
   → [Live preview](docs/live-preview.md)
 - **Vim grammar, plus writer verbs.** Operators, motions, text objects, counts,
   registers and `.` — and `gb` for bold, `gt` to tick a task, `g1`–`g6` for
-  headings. → [Editing](docs/editing.md) · [Writing](docs/writing.md)
+  headings, `>al` and `Alt-j` to nest and move a list item with everything
+  under it. → [Editing](docs/editing.md) · [Writing](docs/writing.md)
 - **Notes that compose.** `[[links]]` you walk with `gf`, `![[embeds]]` that
   pull one note into another, and export to Markdown, text, HTML or PDF.
   → [Notes](docs/notes.md) · [Export](docs/export.md)
@@ -115,7 +116,7 @@ shoin              # a blank page with a few ways in drawn on it
 
 - [Getting started](docs/getting-started.md) — install, requirements, first run
 - [Live preview](docs/live-preview.md) — how concealment works
-- [Editing](docs/editing.md) — motions, operators, text objects, registers
+- [Editing](docs/editing.md) — motions, operators, text objects, lists, registers
 - [Clipboard](docs/clipboard.md) — system clipboard, SSH, pasting
 - [Writing](docs/writing.md) — writer verbs, focus, typewriter and zen modes
 - [Panels](docs/panels.md) — file tree, finder, buffers, splits
