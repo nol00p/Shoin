@@ -83,6 +83,8 @@ version and then the file's, in the order shown on screen.
 - Saving through a symlink writes the file it points to rather than replacing
   the link.
 - `:w other.md` won't overwrite an existing file without `!`.
+- Text piped in (`git show HEAD:notes.md | shoin`) opens with no filename
+  until `:w name.md` gives it one. See [Reading](reading.md#from-a-pipe).
 - A buffer with no filename yet is skipped by autosave, and the autosave clock
   restarts on every write.
 - A `touch` that changes no bytes is ignored, a file still being written is

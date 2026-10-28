@@ -67,6 +67,9 @@ terminal that can draw pixels — kitty, Ghostty, WezTerm, iTerm2 — the pictur
 itself is drawn there.** Everywhere else, including inside tmux, the box and
 caption stand in for it.
 
+`shoin -p` draws pictures too, when it prints a note into such a terminal.
+See [Reading](reading.md#print-a-note).
+
 ## Worked examples
 
 - [`examples/transclusion/`](../examples/transclusion/) covers every link
