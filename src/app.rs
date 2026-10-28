@@ -2985,6 +2985,14 @@ impl App {
         }
     }
 
+    /// Start on `buffer` instead of the blank page: text piped in on stdin.
+    pub fn open_unnamed(&mut self, buffer: Buffer) {
+        self.buffer = buffer;
+        // Built here, not by `refresh_blocks`: both buffers are at revision 0,
+        // which it would take to mean nothing changed.
+        self.blocks = BlockCache::build(&self.buffer);
+    }
+
     /// Turn zen mode on or off, remembering what it hid so leaving it restores
     /// the user's own settings rather than a hardcoded default.
     pub fn set_zen(&mut self, on: bool) {
