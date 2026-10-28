@@ -132,12 +132,16 @@ fn main() -> Result<()> {
 
     if let Some(src) = &cli.render {
         use std::io::IsTerminal;
+        // `-p`'s file is optional, so in `shoin -p --pager notes.md` (or
+        // `shoin notes.md -p`) clap hands the file to FILE instead. It is the
+        // same file either way.
+        let src = src.clone().or_else(|| cli.file.clone());
         // A bare `-p` at a prompt would sit waiting for typed input, which
         // nobody means. `-p -` still reads the terminal, as `cat -` does.
         if src.is_none() && std::io::stdin().is_terminal() {
             anyhow::bail!("--render needs a FILE, or text piped in");
         }
-        let src = src.clone().unwrap_or_else(|| PathBuf::from("-"));
+        let src = src.unwrap_or_else(|| PathBuf::from("-"));
         let src = &src;
         let piped = if is_stdin(src) { Some(read_stdin()?) } else { None };
         if piped.is_none() && !src.is_file() {
@@ -179,7 +183,7 @@ fn main() -> Result<()> {
             export::plain::render(&flat, config.layout.measure, false)
         };
         if !(paged(&text) && render::print::page(&text)) {
-            print!("{text}");
+            print_out(&text)?;
         }
         return Ok(());
     }
@@ -208,9 +212,9 @@ fn main() -> Result<()> {
             }
             let flat = transclude::compile::compile(src, &config.transclude)?;
             match format {
-                export::Format::Text => print!("{}", export::plain::render(&flat, page.measure, page.justify)),
-                export::Format::Html => print!("{}", export::html::render(&flat, &title, &page)),
-                _ => print!("{flat}"),
+                export::Format::Text => print_out(&export::plain::render(&flat, page.measure, page.justify))?,
+                export::Format::Html => print_out(&export::html::render(&flat, &title, &page))?,
+                _ => print_out(&flat)?,
             }
             return Ok(());
         }
@@ -290,4 +294,16 @@ fn read_stdin() -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::io::stdin().read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+/// Write to stdout for a pipeline. A reader that stops early (`| head`) closes
+/// the pipe, and that is the reader's choice, not an error: `print!` would
+/// panic on it.
+fn print_out(text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => Ok(other?),
+    }
 }

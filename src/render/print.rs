@@ -198,7 +198,7 @@ fn ansi(
 }
 
 /// One complete SGR sequence: a reset, then everything this cell asks for.
-fn sgr(fg: Color, bg: Color, m: Modifier) -> String {
+pub(crate) fn sgr(fg: Color, bg: Color, m: Modifier) -> String {
     let mut codes = vec!["0".to_string()];
     for (bit, code) in [
         (Modifier::BOLD, "1"),

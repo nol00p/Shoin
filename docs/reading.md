@@ -89,8 +89,6 @@ from inside the editor.
 - A bare `shoin -p` at a prompt, with nothing piped in, is an error rather
   than a wait for typed input. `shoin -p -` reads what you type, as `cat -`
   does.
-- `-p` takes an optional file, so `--pager` goes after the file or before
-  `-p`: `shoin -p --pager notes.md` reads no file and fails.
 - `$PAGER` is run through `sh`, so it can carry flags. `LESS=R` is set when
   `LESS` isn't, so colour reaches `less`.
 - Text that isn't valid UTF-8, piped or from a file, is refused with an

@@ -710,15 +710,26 @@ impl App {
             self.refresh_focus();
             self.sync_cursor_shape();
             if self.needs_redraw {
-                {
+                let blanks = {
                     let snapshot = &*self;
-                    terminal.draw(|f| frame::render(f, snapshot))?;
+                    let frame = terminal.draw(|f| frame::render(f, snapshot))?;
+                    self.unpaint_moved_pictures(frame.buffer)
+                };
+                let places = self.visible_pictures();
+                if !blanks.is_empty() {
+                    use std::io::Write;
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(blanks.as_bytes());
+                    let _ = stdout.flush();
+                    // Those pixels are gone, so whatever is still placed must
+                    // be painted again.
+                    self.painted.borrow_mut().0.clear();
                 }
                 // Only after a redraw, which is the whole economy of it: the
                 // payload goes down the wire once per frame that changed, not
                 // once per frame. ratatui has just repainted the cells the
                 // pictures sat on, so they have to go back.
-                self.paint_images();
+                self.paint_images(places);
                 self.needs_redraw = false;
             }
             self.step()?;
@@ -727,6 +738,59 @@ impl App {
         let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
         set_cursor_color(None);
         Ok(())
+    }
+
+    /// Erase the pixels of iTerm2 pictures that moved or went away.
+    ///
+    /// An iTerm2 picture is the content of the cells it covers, and goes only
+    /// when something is written over them. ratatui writes only the cells that
+    /// CHANGED, and a picture's box is blank before and after, so the cells of
+    /// an old box that are still blank are never written and keep the old
+    /// pixels. This writes exactly those cells, as `buf` (the frame just
+    /// drawn) has them, so the screen and ratatui's idea of it stay the same.
+    /// A cell that now holds text was already rewritten by ratatui. Kitty
+    /// pictures are separate objects, revoked by `image::clear` instead.
+    fn unpaint_moved_pictures(&self, buf: &ratatui::buffer::Buffer) -> String {
+        let painted = self.painted.borrow();
+        if self.image_protocol != crate::image::Protocol::Iterm2 || painted.0.is_empty() {
+            return String::new();
+        }
+        let now = self.images.borrow();
+        let mut out = String::new();
+        for p in painted.0.iter().filter(|p| !now.contains(p)) {
+            for y in p.y..(p.y + p.rows).min(buf.area.bottom()) {
+                for x in p.x..(p.x + p.cols).min(buf.area.right()) {
+                    let cell = &buf[(x, y)];
+                    if cell.symbol() == " " {
+                        out.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
+                        out.push_str(&crate::render::print::sgr(cell.fg, cell.bg, cell.modifier));
+                        out.push(' ');
+                    }
+                }
+            }
+        }
+        if !out.is_empty() {
+            // DECSC/DECRC: ratatui has put the caret where the document wants it.
+            out = format!("\x1b7{out}\x1b[0m\x1b8");
+        }
+        out
+    }
+
+    /// The pictures the frame just drawn reserved boxes for, less the ones that
+    /// must not be painted.
+    fn visible_pictures(&self) -> Vec<crate::render::Placement> {
+        let mut places = std::mem::take(&mut *self.images.borrow_mut());
+        // A picture that does not fit on screen is not drawn at all; see
+        // `Placement::fits_in` for why that is the safe answer rather than a
+        // lazy one.
+        places.retain(|p| p.fits_in(self.term_size));
+        // A spotlight box was summoned to be read. Anything it covers stands
+        // down until it closes — an overlay competing with a photograph for
+        // the same cells is a fight the overlay has to win.
+        if let Some(box_) = self.overlay.get() {
+            places.retain(|p| !p.overlaps(box_));
+        }
+        places
     }
 
     /// Draw the frame's pictures over the boxes the renderer reserved for them.
@@ -740,21 +804,10 @@ impl App {
     /// A failed write is dropped on purpose. A terminal that will not take an
     /// image still has a document to show, and an editor that quit over a
     /// picture would be a worse editor.
-    fn paint_images(&self) {
+    fn paint_images(&self, places: Vec<crate::render::Placement>) {
         use std::io::Write;
-        let mut places = std::mem::take(&mut *self.images.borrow_mut());
         if self.image_protocol == crate::image::Protocol::None {
             return;
-        }
-        // A picture that does not fit on screen is not drawn at all; see
-        // `Placement::fits_in` for why that is the safe answer rather than a
-        // lazy one.
-        places.retain(|p| p.fits_in(self.term_size));
-        // A spotlight box was summoned to be read. Anything it covers stands
-        // down until it closes — an overlay competing with a photograph for
-        // the same cells is a fight the overlay has to win.
-        if let Some(box_) = self.overlay.get() {
-            places.retain(|p| !p.overlaps(box_));
         }
 
         // Nothing moved and nothing resized, so what is on screen is still
@@ -5339,6 +5392,36 @@ mod tests {
     fn esc(app: &mut App) {
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.sync_after_input();
+    }
+
+    /// An iTerm2 picture that went away has the cells it covered rewritten —
+    /// the blank ones only, as the frame now has them — and a picture that is
+    /// still in place costs nothing.
+    #[test]
+    fn a_moved_iterm2_picture_has_its_blank_cells_rewritten() {
+        use ratatui::buffer::Buffer as Frame;
+        use ratatui::layout::Rect;
+        let mut app = app_with("text\n");
+        app.image_protocol = crate::image::Protocol::Iterm2;
+        let old = crate::render::Placement { x: 2, y: 1, cols: 3, rows: 2, line: 0, index: 0 };
+        *app.painted.borrow_mut() = (vec![old], (20, 5));
+
+        let mut buf = Frame::empty(Rect::new(0, 0, 20, 5));
+        buf[(3, 1)].set_symbol("x"); // text now drawn over one cell of the old box
+        let out = app.unpaint_moved_pictures(&buf);
+        let moves = out.matches('H').count();
+        assert_eq!(moves, 5, "six cells, one holds text now: {out:?}");
+        assert!(!out.contains("[2;4H"), "the text cell is ratatui's, left alone");
+        assert!(out.starts_with("\x1b7") && out.ends_with("\x1b8"));
+
+        // Still placed where it was: nothing to undo.
+        app.images.borrow_mut().push(old);
+        assert!(app.unpaint_moved_pictures(&buf).is_empty());
+
+        // Kitty pictures are objects, revoked another way.
+        app.images.borrow_mut().clear();
+        app.image_protocol = crate::image::Protocol::Kitty;
+        assert!(app.unpaint_moved_pictures(&buf).is_empty());
     }
 
     /// Read-only mode refuses every way of changing the text, and says so,
