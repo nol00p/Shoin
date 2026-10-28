@@ -44,6 +44,11 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Open read-only: every line concealed, edits refused, `q` quits.
+    /// `i` after the refusal message, or `:view`, switches to editing.
+    #[arg(long = "read-only", short = 'R')]
+    read_only: bool,
+
     /// Start with every chrome affordance hidden.
     #[arg(long)]
     zen: bool,
@@ -238,6 +243,9 @@ fn main() -> Result<()> {
     // cannot silently drop it.
     if cli.zen {
         app.set_zen(true);
+    }
+    if cli.read_only {
+        app.set_view(true);
     }
 
     let mut terminal = ratatui::init();

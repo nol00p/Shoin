@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `shoin -R notes.md` (or `:view`) opens a page read-only: every line
+  concealed, no caret, `j`/`k` and `Ctrl-d`/`Ctrl-u` scroll as in `less`, and
+  `q` quits. An edit is refused with a message, and `i` then switches to
+  editing.
 - Shoin reads stdin. `cat notes.md | shoin` (or `shoin -`) opens the text
   in an unnamed buffer — `:w name.md` saves it, `:q` just quits — and
   `curl -s …/README.md | shoin -p` prints it.

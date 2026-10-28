@@ -221,6 +221,7 @@ fn render_pane(
         &cfg.layout,
         cfg.editor.scroll_off,
         pane.scroll.get(),
+        app.view,
     );
     // Persist the computed top, not just the value this frame drew: without
     // this, `scroll_offset`'s "stay put unless the cursor leaves the padded
@@ -341,7 +342,9 @@ fn render_pane(
 
     render_scroll_hint(frame, app, rect, &text_area, top, cache.total_rows());
 
-    if !focused {
+    // Read-only mode has no caret: every line is concealed, so a column in
+    // the source does not name a cell on screen, and there is nothing to type.
+    if !focused || app.view {
         return None;
     }
     let screen_row = cursor_row.saturating_sub(top);
@@ -1029,6 +1032,7 @@ pub fn visible_line_range(app: &App, area: Rect) -> Option<(usize, usize)> {
         &cfg.layout,
         cfg.editor.scroll_off,
         app.scroll_hint(),
+        app.view,
     );
     let first = cache.row(top)?.line();
     let last_row = (top + lay.height as usize)
@@ -1101,6 +1105,7 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
         &cfg.layout,
         cfg.editor.scroll_off,
         app.scroll_hint(),
+        app.view,
     );
 
     if lay.height == 0 {

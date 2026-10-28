@@ -365,6 +365,7 @@ const COMMANDS: &[&str] = &[
     "                        separate layout.align setting (center | left).",
     "  :typewriter  :tw      toggle typewriter scrolling",
     "  :zen                  toggle all chrome at once",
+    "  :view                 read-only: all concealed, q quits, i edits",
     "  :set <k> [on|off]     conceal/typewriter/mouse/focus/numbers/code_syntax",
     "  :set measure=72       text width in columns (:set measure to read it)",
     "  :set line_spacing=1   blank rows between lines, 0-4",

@@ -92,6 +92,11 @@ pub struct Buffer {
     /// costs one branch in `edit.rs` and is the escape hatch if embeds ever
     /// become editable — auditing every mutation site later would not be.
     pub readonly_ranges: Vec<std::ops::Range<usize>>,
+
+    /// The whole buffer refuses edits: read-only mode (`shoin -R`, `:view`).
+    /// The app refuses editing commands before they get here, with a message;
+    /// this is the guarantee underneath, for any path that does not.
+    pub read_only: bool,
 }
 
 impl Buffer {
@@ -111,6 +116,7 @@ impl Buffer {
             dirty_line: None,
             conflict: false,
             readonly_ranges: Vec::new(),
+            read_only: false,
             words: std::cell::Cell::new(None),
         }
     }
@@ -144,6 +150,7 @@ impl Buffer {
             dirty_line: None,
             conflict: false,
             readonly_ranges: Vec::new(),
+            read_only: false,
             words: std::cell::Cell::new(None),
         })
     }

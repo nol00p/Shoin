@@ -63,6 +63,9 @@ impl Buffer {
     /// Undo the last step: invert its changes (in reverse) directly on the rope,
     /// bypassing recording, and restore the pre-command cursor.
     pub fn undo(&mut self) -> bool {
+        if self.read_only {
+            return false;
+        }
         let step = match self.history.undo() {
             Some(s) => s,
             None => return false,
@@ -89,6 +92,9 @@ impl Buffer {
 
     /// Redo the last undone step: re-apply its changes forward.
     pub fn redo(&mut self) -> bool {
+        if self.read_only {
+            return false;
+        }
         let step = match self.history.redo() {
             Some(s) => s,
             None => return false,
@@ -131,7 +137,8 @@ impl Buffer {
     /// is what keeps the guarantee cheap to reintroduce. See
     /// `Buffer::readonly_ranges` and SPEC.md §14.5.
     fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
-        !self
+        !self.read_only
+            && !self
             .readonly_ranges
             .iter()
             .any(|r| range.start < r.end && r.start < range.end)

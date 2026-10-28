@@ -230,6 +230,12 @@ pub struct App {
     /// to offer `--init-config` to a reader who has none — see
     /// `config::init` for why the editor does not just write one.
     pub configured: bool,
+    /// Read-only mode (`shoin -R`, `:view`): every line concealed, no caret,
+    /// edits refused, `q` quits. See [`App::set_view`].
+    pub view: bool,
+    /// An edit was just refused in read-only mode, so an `i` now means "let
+    /// me edit" rather than being refused again.
+    edit_offered: bool,
     /// How much of an `![[…]]` line expands in place. Starts at
     /// `transclude.embed`; `:embed [mode]` changes it.
     pub embed_mode: crate::transclude::Mode,
@@ -629,6 +635,8 @@ impl App {
             next_pane_id: 2,
             splash_art,
             configured,
+            view: false,
+            edit_offered: false,
             embed_mode: crate::transclude::Mode::parse(&config.transclude.embed)
                 .unwrap_or_default(),
             last_embed_mode: crate::transclude::Mode::Short,
@@ -1570,7 +1578,10 @@ impl App {
         }
         let len = self.buffer.line_len(self.buffer.cursor.line);
         self.buffer.cursor.clamp(len, past_end);
-        self.active = ActiveSet::compute(&self.mode, &self.buffer.cursor, self.anchor);
+        if self.view {
+            self.clamp_reading_cursor();
+        }
+        self.active = self.active_set(self.anchor);
         // The focused pane remembers where it is, so leaving and coming back
         // lands in the same place even if another pane moved the document's
         // live cursor meanwhile.
@@ -1612,6 +1623,17 @@ impl App {
     /// config bindings, the built-in grammar and `:` commands all land here,
     /// which is what keeps undo grouping and dot-repeat tractable (SPEC §7.2).
     fn run(&mut self, cmd: Command) {
+        if self.view && cmd.action.edits() {
+            // Refused once with a way out, then the way out: `i` after the
+            // message is the reader who found the editor and wants it.
+            if !(self.edit_offered && cmd.action == Action::Insert) {
+                self.edit_offered = true;
+                self.notify("read-only — press i to edit", FlashKind::Info);
+                return;
+            }
+            self.set_view(false);
+        }
+        self.edit_offered = false;
         // The register the `"x` prefix named; `store_register`/`take_register`
         // consume it, and anything that does not use it must not keep it.
         self.pending_register = cmd.register;
@@ -1983,6 +2005,13 @@ impl App {
         if self.tree.as_ref().is_some_and(|t| t.focused) || text.is_empty() {
             return;
         }
+        // A paste into the text is an edit like any other, and goes through
+        // the same refusal (and the same `i` after it).
+        if self.view {
+            self.edit_offered = true;
+            self.notify("read-only — press i to edit", FlashKind::Info);
+            return;
+        }
         // Over a selection, the selection ends first; a drag made while
         // inserting goes back to the insert session it came out of.
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
@@ -2328,7 +2357,8 @@ impl App {
             return true;
         }
         match Buffer::open(path.clone(), &self.config.markdown.plain_text_extensions) {
-            Ok(buffer) => {
+            Ok(mut buffer) => {
+                buffer.read_only = self.view;
                 self.docs.push(BufferState::new(buffer));
                 self.switch_to(self.docs.len() - 1);
                 self.notify(format!("opened {}", path.display()), FlashKind::Info);
@@ -2686,7 +2716,7 @@ impl App {
         // The block cache of a document edited while it was in the background
         // (there is no such path today, but reload could add one) resyncs on
         // the next frame through the usual revision check.
-        self.active = ActiveSet::compute(&self.mode, &self.buffer.cursor, None);
+        self.active = self.active_set(None);
         self.touch_status();
     }
 
@@ -2945,6 +2975,16 @@ impl App {
     /// Normal and Visual mode are one line of code each now: hand the key to
     /// the grammar (SPEC.md §7.2) and run whatever command comes back.
     fn on_key_normal(&mut self, key: KeyEvent) {
+        // `q` leaves a page you are only reading, as it leaves `less`. Only as
+        // a whole command: `"q` and `fq` still get their q.
+        if self.view
+            && self.pending.is_clean()
+            && key.code == KeyCode::Char('q')
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+        {
+            self.try_quit(false);
+            return;
+        }
         self.feed_pending(key, Table::Normal);
     }
 
@@ -2983,6 +3023,58 @@ impl App {
         if !self.buffer.redo() {
             self.notify("already at newest change", FlashKind::Info);
         }
+    }
+
+    /// In read-only mode the cursor is the top of the screen (see
+    /// `layout::scroll_offset`). Past the row where the last screenful starts
+    /// it would move with nothing on screen moving, and `k` would then seem
+    /// dead until it came back — so it stops there, as `less` does at the end.
+    fn clamp_reading_cursor(&mut self) {
+        let height = self.viewport_height();
+        let line = {
+            let cache = self.cache.borrow();
+            let last_top = cache.total_rows().saturating_sub(height);
+            let (row, _) = cache.locate(self.buffer.cursor.line, 0);
+            if row <= last_top {
+                return;
+            }
+            match cache.row(last_top) {
+                Some(r) => r.line(),
+                None => return,
+            }
+        };
+        self.buffer.cursor = Cursor::new(line, 0);
+    }
+
+    /// The lines shown raw: the cursor's (or the selection's), or none at all
+    /// in read-only mode, where there is nothing to edit under a cursor.
+    fn active_set(&self, anchor: Option<Cursor>) -> ActiveSet {
+        if self.view {
+            ActiveSet::none()
+        } else {
+            ActiveSet::compute(&self.mode, &self.buffer.cursor, anchor)
+        }
+    }
+
+    /// Enter or leave read-only mode, for every open buffer: a page to read,
+    /// not to edit. Every line conceals, the caret is hidden, an edit is
+    /// refused with a message, and `q` quits. Leaving it is `i` after that
+    /// message, or `:view` again.
+    pub fn set_view(&mut self, on: bool) {
+        self.view = on;
+        // Entering says "i to edit", so the very next `i` does exactly that.
+        self.edit_offered = on;
+        for doc in &mut self.docs {
+            doc.buffer.read_only = on;
+        }
+        if on {
+            self.leave_visual();
+            self.notify("read-only — q to quit, i to edit", FlashKind::Info);
+        } else {
+            self.notify("editing", FlashKind::Info);
+        }
+        self.active = self.active_set(self.anchor);
+        self.needs_redraw = true;
     }
 
     /// Start on `buffer` instead of the blank page: text piped in on stdin.
@@ -4787,6 +4879,7 @@ impl App {
                 }
             }
             "only" | "on" => self.only_pane(),
+            "view" => self.set_view(!self.view),
             "bn" | "bnext" => self.cycle_buffer(true),
             "bp" | "bprev" | "bprevious" => self.cycle_buffer(false),
             "b" | "buffer" => {
@@ -5242,6 +5335,78 @@ mod tests {
     fn esc(app: &mut App) {
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.sync_after_input();
+    }
+
+    /// Read-only mode refuses every way of changing the text, and says so,
+    /// while moving, yanking and searching still work.
+    #[test]
+    fn read_only_refuses_edits_and_says_so() {
+        let mut app = app_with("# Title\n\n- one\n- two\n");
+        app.set_view(true);
+        let before = text(&app);
+
+        feed(&mut app, "jj"); // a move: allowed, and it ends the offer to edit
+        assert_eq!(app.buffer.cursor.line, 2);
+        for keys in ["dd", "x", "p", ">al", "u", "o", "gb"] {
+            feed(&mut app, keys);
+            esc(&mut app);
+            assert_eq!(text(&app), before, "{keys} changed the text");
+        }
+        assert!(flash_text(&app).contains("read-only"), "{}", flash_text(&app));
+        app.on_paste("pasted".into());
+        assert_eq!(text(&app), before, "a paste is an edit too");
+
+        feed(&mut app, "yy");
+        assert_eq!(text(&app), before);
+        assert!(app.view, "nothing above left read-only mode");
+        // Underneath the refusals, the buffer itself will not change.
+        assert!(!app.buffer.insert_str(Cursor::new(0, 0), "x"));
+    }
+
+    /// `i` right after a refusal (or right after entering) is the way out.
+    #[test]
+    fn i_after_the_refusal_starts_editing() {
+        let mut app = app_with("hello\n");
+        app.set_view(true);
+        feed(&mut app, "i");
+        assert!(!app.view && matches!(app.mode, Mode::Insert), "first i edits");
+        feed(&mut app, "X");
+        assert_eq!(text(&app), "Xhello\n");
+        esc(&mut app);
+
+        app.set_view(true);
+        feed(&mut app, "l"); // any other command ends the offer
+        feed(&mut app, "i");
+        assert!(app.view, "refused once");
+        assert!(flash_text(&app).contains("press i"), "{}", flash_text(&app));
+        feed(&mut app, "i");
+        assert!(!app.view && matches!(app.mode, Mode::Insert));
+    }
+
+    /// Every line conceals, the cursor's included, and `q` quits.
+    #[test]
+    fn read_only_conceals_everything_and_q_quits() {
+        let mut app = app_with("**bold**\n");
+        // As if opened from disk: nothing unsaved for `q` to stop at.
+        app.buffer.saved_state = app.buffer.history.state();
+        app.buffer.sync_modified();
+        app.set_view(true);
+        app.sync_after_input();
+        assert!(!app.active.contains(0), "no line is revealed");
+        feed(&mut app, "q");
+        assert!(app.quit);
+    }
+
+    /// `:view` turns it on and off, and a file opened meanwhile is read-only
+    /// too.
+    #[test]
+    fn view_toggles_from_the_command_line() {
+        let mut app = app_with("text\n");
+        app.run_command("view");
+        assert!(app.view && app.buffer.read_only);
+        app.run_command("view");
+        assert!(!app.view && !app.buffer.read_only);
+        assert!(app.active.contains(0), "the cursor line is raw again");
     }
 
     /// A queue that is already full is drained in a handful of batches, not one
