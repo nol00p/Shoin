@@ -94,6 +94,10 @@ In Normal mode. See [Editing](../editing.md#lists).
 | `>aL` `<aL` | indent / outdent every item at that level |
 | `Tab` `Shift-Tab` | in Insert mode, the same as `>al` `<al` |
 
+To rebind them, the actions are `list_item_down` and `list_item_up` (Normal)
+and `list_indent` and `list_outdent` (Insert) — see
+[Configuration](../configuration.md#key-bindings).
+
 ## Insert mode
 
 | Key | Does |
@@ -124,6 +128,23 @@ In Normal mode. See [Editing](../editing.md#lists).
 | `/` `?` `n` `N` | search forward / back, repeat / reverse |
 | `:` | the command line — see [Commands](commands.md) |
 | `Ctrl-^` `Ctrl-6` | back to the previous buffer |
+
+## Read-only
+
+With `shoin -R` or `:view`. Every line is concealed and there is no caret.
+See [Reading](../reading.md#read-only).
+
+| Key | Does |
+|---|---|
+| `j` `k` | scroll a line down / up |
+| `Ctrl-d` `Ctrl-u` | half a page down / up |
+| `gg` `G` | top / bottom |
+| `/` `?` `n` `N` | search |
+| `q` | quit |
+| `i` | switch to editing |
+
+An edit is refused with "read-only — press i to edit". Yanking, panels, `gf`
+and `:w` still work.
 
 ## Leader keys
 
