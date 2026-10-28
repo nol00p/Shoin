@@ -37,6 +37,11 @@ desk built into a bay by the window, and nothing else in the room.
 - **Notes that compose.** `[[links]]` you walk with `gf`, `![[embeds]]` that
   pull one note into another, and export to Markdown, text, HTML or PDF.
   → [Notes](docs/notes.md) · [Export](docs/export.md)
+- **Reads like a pager, too.** `shoin -p notes.md` prints a note as the
+  editor shows it — concealed, embeds expanded, pictures drawn — and
+  `--pager` pages it. Pipe text in (`curl -s …/README.md | shoin -p`), or
+  open a note with `shoin -R` to read it without changing it.
+  → [Reading](docs/reading.md)
 - **Careful with your files.** Atomic saves, no autosave unless you ask, and
   a merge view when something else edits a file you're working on.
   → [Files](docs/files.md)
@@ -61,6 +66,22 @@ link that didn't resolve yet.
 
 <p align="center">
   <img src="docs/media/transclusion.gif" alt="An essay built from embedded notes, followed and edited with gf" width="800">
+</p>
+
+**Pictures in the text** — `![[picture.png]]` drawn as real pixels in the
+column, giving way to its raw link on the cursor's line, and moving with the
+text around it. Needs kitty, Ghostty, WezTerm or iTerm2.
+
+<p align="center">
+  <img src="docs/media/images.gif" alt="A note with a picture drawn in it; the picture gives way to its raw link on the cursor's line and moves with the text" width="800">
+</p>
+
+**Reading without editing** — `shoin -p` printing a note into the shell, a
+piped file paged through `less`, and `shoin -R` scrolling a note that can't
+be changed.
+
+<p align="center">
+  <img src="docs/media/reading.gif" alt="A note printed into the shell with shoin -p, a piped file paged through less, and a note opened read-only with shoin -R" width="800">
 </p>
 
 **A tour** — writer verbs, Insert mode, focus mode and the file tree.
@@ -94,11 +115,11 @@ covers the other ways to install and the optional PDF tools.
 ## First five minutes
 
 ```sh
-shoin notes.md     # open a file; it's created on the first :w
-shoin -p notes.md  # print it as the editor shows it (add --pager to scroll)
-cat notes.md | shoin -p   # …or print whatever is piped in
-shoin -R notes.md  # open it read-only: q quits, i starts editing
-shoin              # a blank page with a few ways in drawn on it
+shoin notes.md            # open a file; it's created on the first :w
+shoin                     # a blank page with a few ways in drawn on it
+shoin -p notes.md         # print it as the editor shows it (--pager to page it)
+shoin -R notes.md         # read it: j/k scroll, q quits, i edits
+cat README.md | shoin -p  # anything piped in
 ```
 
 | Do this | Press |
@@ -123,6 +144,7 @@ shoin              # a blank page with a few ways in drawn on it
 - [Writing](docs/writing.md) — writer verbs, focus, typewriter and zen modes
 - [Panels](docs/panels.md) — file tree, finder, buffers, splits
 - [Notes](docs/notes.md) — links, embeds, `gf`, pictures
+- [Reading](docs/reading.md) — print or page a note, read one piped in, open it read-only
 - [Export](docs/export.md) — Markdown, text, HTML, PDF, from the editor or the shell
 - [Files](docs/files.md) — saving, autosave, outside edits and `:diff`
 - [Configuration](docs/configuration.md) — the config folder, themes, key bindings
