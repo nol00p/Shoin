@@ -30,6 +30,9 @@ writing to your home folder without being asked, which is the same rule that
 keeps it from autosaving your documents. So it is one command, and it refuses
 to overwrite a config you already have.
 
+It is also optional. The shipped key bindings are compiled in and sit under
+whatever config you have, so a fresh install works without writing anything.
+
 ## No writes you didn't ask for
 
 Autosave is off by default, because a writing tool shouldn't make writes you

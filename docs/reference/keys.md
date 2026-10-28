@@ -127,9 +127,9 @@ In Normal mode. See [Editing](../editing.md#lists).
 
 ## Leader keys
 
-These are the shipped defaults in `keys.conf`. They need a config, so run
-`shoin --init-config` once. Remap them under `[keys.normal]` and
-`[keys.visual]`.
+These are the shipped defaults in `keys.conf`, and they're built in. Remap
+them under `[keys.normal]` and `[keys.visual]`, or set one to `"none"` to
+remove it.
 
 | Key | Does |
 |---|---|

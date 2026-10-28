@@ -37,16 +37,16 @@ Each of these puts a `shoin` binary in `~/.cargo/bin`, which needs to be on
 your `PATH`. To try it without installing, `cargo run -- notes.md` works from
 a clone.
 
-Then write the default config:
+Shoin needs no config. The leader bindings — `Space fe` for the file tree,
+`Space ff` for the finder, and the rest — are built in. To change settings,
+write an annotated copy of the defaults:
 
 ```sh
 shoin --init-config          # → ~/.config/shoin/*.conf
 ```
 
-Do this once. Shoin starts without a config, but the leader bindings — `Space
-fe` for the file tree, `Space ff` for the finder, and the rest — are defined
-in it, so they do nothing until it exists. It never overwrites a config you
-already have unless you add `--force`. ([Why it isn't automatic](design.md#the-config-is-one-command-not-automatic).)
+It never overwrites a config you already have unless you add `--force`.
+([Why it isn't automatic](design.md#the-config-is-one-command-not-automatic).)
 
 ## Requirements
 

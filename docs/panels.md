@@ -48,5 +48,5 @@ panes.
 - Renaming or moving a file you have open carries the buffer with it.
 - In a tree prompt, `Ctrl-u` clears it and `Esc` abandons it.
 - Dotfile visibility is remembered; the default is `tree.show_hidden`.
-- The leader keys are defined in the config written by `shoin --init-config`
-  (see [Getting started](getting-started.md#install)).
+- The leader keys are built in. Remap them under `[keys.normal]` (see
+  [Configuration](configuration.md#key-bindings)).
