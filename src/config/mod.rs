@@ -526,6 +526,34 @@ mod tests {
         assert!(w[0].contains("preserve"), "the message lists the legal words: {w:?}");
     }
 
+    /// Only `keys.conf` is built in; the other shipped files are meant to
+    /// spell out the serde defaults. If one drifted, a fresh install and an
+    /// `--init-config` install would quietly behave differently.
+    #[test]
+    fn the_shipped_files_say_what_the_defaults_do() {
+        let mut merged = toml::Table::new();
+        for (_, body) in init::SHIPPED {
+            merge_tables(&mut merged, toml::from_str(body).unwrap());
+        }
+        let shipped = from_table(merged).unwrap();
+        let default = Config::default();
+
+        macro_rules! same {
+            ($($section:ident),*) => {$(
+                assert_eq!(
+                    format!("{:#?}", shipped.$section),
+                    format!("{:#?}", default.$section),
+                    concat!("shoin/*.conf [", stringify!($section), "] differs from the default"),
+                );
+            )*};
+        }
+        same!(layout, status, cursor, editor, input, markdown, glyphs, splash, tree, transclude);
+
+        // `[theme]` is raw strings either way; compare what they resolve to.
+        let theme = |c: &Config| crate::render::theme::Theme::from_config(&c.theme).unwrap();
+        assert!(theme(&shipped) == theme(&default), "shoin/theme.conf differs from the default theme");
+    }
+
     fn normal(cfg: &Config, key: &str) -> Option<String> {
         cfg.keys.normal.get(key).cloned()
     }
