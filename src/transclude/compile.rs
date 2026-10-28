@@ -74,13 +74,18 @@ pub fn whole_line_embed(line: &str) -> Option<Link> {
 
 /// Flatten `path` into a single document.
 pub fn compile(path: &Path, cfg: &TranscludeConfig) -> Result<String> {
-    let text = read(path)?;
+    compile_text(&read(path)?, path, cfg)
+}
+
+/// [`compile`] for text that is not read from `path`, such as stdin. Links
+/// resolve as though it were a file at `path`.
+pub fn compile_text(text: &str, path: &Path, cfg: &TranscludeConfig) -> Result<String> {
     let root = search_root(path, cfg);
     let mut stack = vec![canonical(path)];
     let mut out = String::new();
     // The composition file keeps its own front matter (§14.4); only embedded
     // files are stripped.
-    expand(&text, path, &root, cfg, 0, &mut stack, &mut out)?;
+    expand(text, path, &root, cfg, 0, &mut stack, &mut out)?;
     // Block ids go from the WHOLE document, not just from embedded text. They
     // are addresses rather than prose, and the composition's own are as much
     // noise in a compiled document as an embed's. Done once at the end so the
@@ -301,6 +306,20 @@ mod tests {
         let d = std::env::temp_dir().join(format!("shoin-tc-{tag}-{t}-{n}"));
         std::fs::create_dir_all(d.join("fragments")).unwrap();
         d
+    }
+
+    /// Text that was never a file compiles exactly as the same text in a file
+    /// at that path: embeds resolve from where it is said to be.
+    #[test]
+    fn text_compiles_as_if_it_were_the_file() {
+        let d = vault("text");
+        write(&d, "fragments/a.md", "Alpha body.\n");
+        let body = "# Doc\n\n![[fragments/a]]\n";
+        let main = write(&d, "main.md", body);
+        let from_file = compile(&main, &cfg()).unwrap();
+        let from_text = compile_text(body, &d.join("stdin.md"), &cfg()).unwrap();
+        assert_eq!(from_text, from_file);
+        assert!(from_text.contains("Alpha body."), "{from_text}");
     }
 
     fn write(dir: &Path, rel: &str, body: &str) -> PathBuf {

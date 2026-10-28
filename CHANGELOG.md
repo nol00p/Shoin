@@ -6,6 +6,9 @@
   concealed, no caret, `j`/`k` and `Ctrl-d`/`Ctrl-u` scroll as in `less`, and
   `q` quits. An edit is refused with a message, and `i` then switches to
   editing.
+- Shoin reads stdin. `cat notes.md | shoin` (or `shoin -`) opens the text
+  in an unnamed buffer — `:w name.md` saves it, `:q` just quits — and
+  `curl -s …/README.md | shoin -p` prints it.
 - List items are text objects: `al` is an item with everything nested under
   it, `il` the item alone, and `aL` every item at its level. `>al` and `<al`
   indent and outdent an item together with its sub-items, `dal` deletes it

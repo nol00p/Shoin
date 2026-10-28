@@ -36,7 +36,8 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "shoin", version, about = "A no-clutter terminal Markdown editor")]
 struct Cli {
-    /// File to open. Created on first save if it does not exist.
+    /// File to open. Created on first save if it does not exist. `-`, or no
+    /// file with text piped in, reads stdin into an unnamed buffer.
     file: Option<PathBuf>,
 
     /// Use this config file instead of the discovered one.
@@ -87,8 +88,9 @@ struct Cli {
     /// Print this file as the editor shows it, styled, and exit — a reader's
     /// view without opening the editor. Plain text when stdout is not a
     /// terminal, or when `NO_COLOR` is set.
-    #[arg(long, short = 'p', value_name = "FILE")]
-    render: Option<PathBuf>,
+    /// `-`, or no FILE at all, reads stdin: `curl …/README.md | shoin -p`.
+    #[arg(long, short = 'p', value_name = "FILE", num_args = 0..=1)]
+    render: Option<Option<PathBuf>>,
 
     /// With `--render`, page the output through `$PAGER` (`less -R` when
     /// unset) when it is taller than the terminal.
@@ -127,16 +129,31 @@ fn main() -> Result<()> {
     }
 
     if let Some(src) = &cli.render {
-        if !src.is_file() {
+        use std::io::IsTerminal;
+        // A bare `-p` at a prompt would sit waiting for typed input, which
+        // nobody means. `-p -` still reads the terminal, as `cat -` does.
+        if src.is_none() && std::io::stdin().is_terminal() {
+            anyhow::bail!("--render needs a FILE, or text piped in");
+        }
+        let src = src.clone().unwrap_or_else(|| PathBuf::from("-"));
+        let src = &src;
+        let piped = if is_stdin(src) { Some(read_stdin()?) } else { None };
+        if piped.is_none() && !src.is_file() {
             anyhow::bail!("{}: no such file", src.display());
         }
-        use std::io::IsTerminal;
         let tty = std::io::stdout().is_terminal();
         let colour = tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
         let (width, height) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         let paged = |text: &str| cli.pager && tty && text.lines().count() > height as usize;
         let text = if colour {
-            let mut app = app::App::new(config, Some(src.clone()), explicit)?;
+            let mut app = match &piped {
+                Some(bytes) => {
+                    let mut app = app::App::new(config, None, explicit)?;
+                    app.open_unnamed(text::buffer::Buffer::unnamed(bytes.clone())?);
+                    app
+                }
+                None => app::App::new(config, Some(src.clone()), explicit)?,
+            };
             let mut text = render::print::styled(&mut app, width);
             if paged(&text) {
                 // A pager passes colour through but not pixels: the escapes
@@ -146,7 +163,17 @@ fn main() -> Result<()> {
             }
             text
         } else {
-            let flat = transclude::compile::compile(src, &config.transclude)?;
+            let flat = match &piped {
+                Some(bytes) => {
+                    let text = String::from_utf8(bytes.clone())
+                        .map_err(|_| anyhow::anyhow!("stdin is not valid UTF-8"))?;
+                    // Links resolve from the working directory, as they do in
+                    // an unnamed buffer.
+                    let here = std::env::current_dir()?.join("stdin.md");
+                    transclude::compile::compile_text(&text, &here, &config.transclude)?
+                }
+                None => transclude::compile::compile(src, &config.transclude)?,
+            };
             export::plain::render(&flat, config.layout.measure, false)
         };
         if !(paged(&text) && render::print::page(&text)) {
@@ -195,7 +222,23 @@ fn main() -> Result<()> {
     }
 
     let mouse = config.input.mouse;
-    let mut app = app::App::new(config, cli.file, explicit)?;
+    // `shoin -`, or plain `shoin` at the end of a pipe. Read before the
+    // terminal is set up: the editor then takes its keys from /dev/tty, which
+    // crossterm opens by itself when stdin is not a terminal.
+    use std::io::IsTerminal;
+    let piped = match &cli.file {
+        Some(f) if is_stdin(f) => true,
+        None => !std::io::stdin().is_terminal(),
+        Some(_) => false,
+    };
+    let mut app = if piped {
+        let bytes = read_stdin()?;
+        let mut app = app::App::new(config, None, explicit)?;
+        app.open_unnamed(text::buffer::Buffer::unnamed(bytes)?);
+        app
+    } else {
+        app::App::new(config, cli.file, explicit)?
+    };
     // Applied through `App` rather than by editing the config, so a hot reload
     // cannot silently drop it.
     if cli.zen {
@@ -233,4 +276,16 @@ fn main() -> Result<()> {
     ratatui::restore();
 
     result
+}
+
+/// `-` is stdin, as it is for most tools that take a file.
+fn is_stdin(path: &std::path::Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+fn read_stdin() -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
