@@ -1052,9 +1052,13 @@ impl App {
         }
     }
 
-    /// Enable or disable terminal mouse capture at runtime.
+    /// Enable or disable terminal mouse capture at runtime. Not under
+    /// `cargo test`, where stdout is the test runner's terminal, not ours.
     fn set_mouse_capture(&self, on: bool) {
         use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+        if cfg!(test) {
+            return;
+        }
         let _ = if on {
             execute!(std::io::stdout(), EnableMouseCapture)
         } else {
@@ -4850,7 +4854,7 @@ impl App {
         }
     }
 
-    fn run_command(&mut self, cmd: &str) {
+    pub(crate) fn run_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
         let (name, arg) = match cmd.split_once(char::is_whitespace) {
             Some((n, a)) => (n, a.trim()),

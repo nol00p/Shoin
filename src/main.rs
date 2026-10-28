@@ -17,6 +17,8 @@ mod app;
 mod clipboard;
 mod config;
 mod diff;
+#[cfg(test)]
+mod docs_sync;
 mod export;
 mod finder;
 mod fs;
