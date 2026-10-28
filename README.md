@@ -76,12 +76,12 @@ text around it. Needs kitty, Ghostty, WezTerm or iTerm2.
   <img src="docs/media/images.gif" alt="A note with a picture drawn in it; the picture gives way to its raw link on the cursor's line and moves with the text" width="800">
 </p>
 
-**Reading without editing** — `shoin -p` printing a note into the shell, a
-piped file paged through `less`, and `shoin -R` scrolling a note that can't
+**Reading without editing** — `shoin -p` printing a note into the shell,
+piped chapters paged through `less`, and `shoin -R` scrolling a note that can't
 be changed.
 
 <p align="center">
-  <img src="docs/media/reading.gif" alt="A note printed into the shell with shoin -p, a piped file paged through less, and a note opened read-only with shoin -R" width="800">
+  <img src="docs/media/reading.gif" alt="A note printed into the shell with shoin -p, chapters piped through shoin -p --pager into less, and a note opened read-only with shoin -R, where dd is refused" width="800">
 </p>
 
 **A tour** — writer verbs, Insert mode, focus mode and the file tree.
