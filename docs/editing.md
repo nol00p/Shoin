@@ -46,6 +46,11 @@ nests an item under the one above it and takes its sub-items along, `<al`
 brings it back out, `dal` deletes the whole item, and `>aL` indents a whole
 nested level at once.
 
+Numbered lists stay in sequence: when an item moves into or out of a
+`1.` `2.` `3.` list, the numbers of both the list it left and the list it
+joined are rewritten, in the same undo step. Bullet lists are never changed.
+Turn this off with `list_renumber = false` in `[editor]`.
+
 An indent that would break the list is refused with a message and changes
 nothing (see Details). Each command is one undo step and `.` repeats it.
 
@@ -74,6 +79,12 @@ list continuation, and a `jk` in the pasted text stays text.
   so the items after it become its sub-items, as in org-mode. `>il` works the
   same way the other direction: the item moves in, its sub-items stay put and
   so belong to the item above.
+- Renumbering keeps the number a list starts at, so a list starting at `3.`
+  still starts at `3.` after its first item moves away. A sub-list the edit
+  creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists
+  the edit touched are renumbered; others in the file stay as written, even
+  if their numbers are out of order. Going from `9.` to `10.` pushes that
+  item's text one column right; the lines under it are not re-aligned.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.

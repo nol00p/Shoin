@@ -149,6 +149,9 @@ pub struct EditorConfig {
     pub clipboard_background: bool,
     pub undo_coalesce_ms: u64,
     pub scroll_off: u16,
+    /// Renumber an ordered list after an item is indented or outdented into
+    /// or out of it. Off for people who write `1.` on every line on purpose.
+    pub list_renumber: bool,
 }
 
 impl Default for EditorConfig {
@@ -169,6 +172,7 @@ impl Default for EditorConfig {
             clipboard_background: false,
             undo_coalesce_ms: 400,
             scroll_off: 3,
+            list_renumber: true,
         }
     }
 }

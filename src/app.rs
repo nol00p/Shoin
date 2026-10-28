@@ -3648,12 +3648,64 @@ impl App {
         if let Some(why) = refusal {
             return self.notify(why, FlashKind::Error);
         }
+        // A shift changes columns, never line numbers, so these still name
+        // the same text afterwards: the item, the neighbours it may have left
+        // behind, its first child (which `>il` and `<il` re-parent), and the
+        // list it is about to join. A whole level keeps every relationship,
+        // so there is nothing to redo.
+        let mut touched = Vec::new();
+        if !level {
+            let prev = lists.prev_sibling_bounds(line).map(|b| b.0);
+            touched.push(line);
+            touched.extend(lists.first_child(line));
+            touched.extend(prev);
+            touched.extend(lists.next_sibling_bounds(line).map(|b| b.0));
+            if outdent {
+                touched.extend(lists.parent(line));
+            } else {
+                touched.extend(prev.and_then(|p| lists.first_child(p)));
+            }
+        }
+        let starts = list_starts(&lists, &touched);
 
         let at = self.buffer.cursor;
         let before = self.buffer.line_len(at.line) as isize;
         self.shift_lines(l1, l2, outdent);
+        if self.config.editor.list_renumber && !touched.is_empty() {
+            self.renumber_lists(&touched, &starts, l1);
+        }
         let moved = self.buffer.line_len(at.line) as isize - before;
         self.buffer.cursor = Cursor::new(at.line, (at.col as isize + moved).max(0) as usize);
+    }
+
+    /// Put every ordered level containing one of `lines` back in sequence
+    /// after `moved` (an item line) changed level. Lines outside a list, and
+    /// bullet lists, are skipped.
+    ///
+    /// A list keeps the start number it had: `starts` are the levels as they
+    /// were, and a level now counts from the old one it shares an item with —
+    /// the moved item aside, since it just arrived. Sharing none, it is a
+    /// sub-list the edit created, and counts from 1.
+    fn renumber_lists(&mut self, lines: &[usize], starts: &[(Vec<usize>, u64)], moved: usize) {
+        self.refresh_blocks();
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+        let start = |items: &[usize]| {
+            starts
+                .iter()
+                .find(|(old, _)| old.iter().any(|i| *i != moved && items.contains(i)))
+                .map_or(1, |(_, n)| *n)
+        };
+        // Keyed by line: two of `lines` in one level ask for the same edits.
+        let edits: std::collections::BTreeMap<usize, list::Renumber> = lines
+            .iter()
+            .flat_map(|&l| lists.renumber(l, Some(start(&lists.level_items(l)))))
+            .map(|r| (r.line, r))
+            .collect();
+        for r in edits.into_values() {
+            let start = self.buffer.char_index(Cursor::new(r.line, r.cols.start));
+            self.buffer.delete_chars(start, start + r.cols.len());
+            self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
+        }
     }
 
     /// `>`/`<` over whole lines. One indent unit is `tab_width` spaces, or a
@@ -5035,6 +5087,19 @@ fn closer_of(c: char) -> Option<char> {
 /// `"+` and `"*`: the system clipboard.
 fn is_clipboard_register(name: char) -> bool {
     matches!(name, '+' | '*')
+}
+
+/// The ordered levels containing `lines`, each as its item lines and the
+/// number it starts from. What `App::renumber_lists` keeps a list's start by.
+fn list_starts(lists: &Lists, lines: &[usize]) -> Vec<(Vec<usize>, u64)> {
+    lines
+        .iter()
+        .filter_map(|&l| {
+            let items = lists.level_items(l);
+            let (start, _) = lists.ordinal(*items.first()?)?;
+            Some((items, start))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -6998,6 +7063,55 @@ mod tests {
         assert_eq!(text(&app), "- p\n      - a\n        - a1\n      - b\n- q\n");
         feed(&mut app, "<aL");
         assert_eq!(text(&app), "- p\n  - a\n    - a1\n  - b\n- q\n");
+    }
+
+    /// An item nested into a sub-list of its own starts it at 1, and the list
+    /// it left closes the gap.
+    #[test]
+    fn indenting_an_ordered_item_renumbers_both_lists() {
+        let mut app = app_with("1. a\n2. b\n3. c\n");
+        app.buffer.cursor = Cursor::new(1, 3);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "1. a\n    1. b\n2. c\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 7));
+        // Joining a sub-list that is already there puts it at the end.
+        let mut app = app_with("1. a\n    1. x\n2. b\n3. c\n");
+        app.buffer.cursor = Cursor::new(2, 0);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "1. a\n    1. x\n    2. b\n2. c\n");
+        // Renumbering is part of the same undo step.
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "1. a\n    1. x\n2. b\n3. c\n");
+    }
+
+    /// Every list keeps the number it started at: the one joined, the one
+    /// left, and the one the moved item's old siblings now form under it.
+    #[test]
+    fn renumbered_lists_keep_their_start() {
+        let mut app = app_with("5. p\n    3. x\n    4. y\n    5. z\n6. q\n");
+        app.buffer.cursor = Cursor::new(2, 0);
+        feed(&mut app, "<al");
+        assert_eq!(text(&app), "5. p\n    3. x\n6. y\n    3. z\n7. q\n");
+    }
+
+    /// `10.` becoming `1.` moves the text after it, and the cursor with it.
+    #[test]
+    fn a_renumbered_ordinal_can_change_width() {
+        let t: String = (1..=10).map(|i| format!("{i}. i{i}\n")).collect();
+        let mut app = app_with(&t);
+        app.buffer.cursor = Cursor::new(9, 4); // on the `i` of `10. i10`
+        feed(&mut app, ">al");
+        assert_eq!(app.buffer.line_text(9), "    1. i10");
+        assert_eq!(app.buffer.cursor, Cursor::new(9, 7));
+    }
+
+    #[test]
+    fn list_renumber_off_leaves_the_numbers() {
+        let mut app = app_with("1. a\n2. b\n3. c\n");
+        app.config.editor.list_renumber = false;
+        app.buffer.cursor = Cursor::new(1, 0);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "1. a\n    2. b\n3. c\n");
     }
 
     /// `>il` leaves the children where they are, so they re-parent.

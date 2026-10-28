@@ -49,7 +49,7 @@ show_hidden = false       # dotfiles in the file tree (H toggles it live)
 | `[layout]` | measure, alignment, focus, numbers, typewriter, conceal, line spacing |
 | `[theme]` | every color, from the background to syntax highlighting and diff |
 | `[input]` | leader, mouse, the Insert-mode escape alias |
-| `[editor]` | indenting, pairs, saving, autosave, autoreload, clipboard |
+| `[editor]` | indenting, pairs, list numbering, saving, autosave, autoreload, clipboard |
 | `[tree]` | file-tree options |
 | `[transclude]` | how embeds resolve and display |
 | `[markdown]` | which syntax is styled: tags, wiki links, highlight, tables, code |

@@ -8,6 +8,9 @@
   whole. An indent that would break the list (the first item, an outdent at
   the top level, a top-level list 4 columns in) is refused with a message
   instead of applied. (#29)
+- Numbered lists stay in sequence when `>al` or `<al` moves an item into or
+  out of them: both lists are renumbered, keeping the number each starts at,
+  in the same undo step. `[editor] list_renumber = false` turns it off.
 
 ## 0.1.9
 
