@@ -30,7 +30,7 @@ line.
 | Key | Does |
 |---|---|
 | `d` `c` `y` | delete / change / yank — `dd` `cc` `yy` for the line |
-| `>` `<` | indent / outdent (`>>`, `>ip`) |
+| `>` `<` | indent / outdent (`>>`, `>ip`); `>al` `<al` move a list item in or out with its sub-items |
 | `gu` `gU` | lowercase / uppercase (`guiw`, `gUU`) |
 | `D` `C` `Y` | delete / change / yank to the end of the line |
 | `x` `X` | delete the character under / before the cursor |
@@ -52,8 +52,11 @@ After an operator, or in Visual mode: `diw`, `ca(`, `vip`.
 | `ip` `ap` | a paragraph (linewise) |
 | `i"` `i'` `` i` `` | inside quotes; `a"` and so on include the quotes |
 | `i(` `i[` `i{` `i<` | inside brackets; `a(` and so on include them (`b` = `()`, `B` = `{}`) |
+| `il` `al` | a list item, without / with its sub-items (linewise) |
+| `aL` | every item at the same level of a list, each with its sub-items (linewise) |
 
-Brackets may span lines.
+Brackets may span lines. `>` and `<` over a list object refuse a shift that
+would break the list — see [Editing](../editing.md#lists).
 
 ## Registers
 

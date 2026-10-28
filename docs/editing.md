@@ -37,6 +37,18 @@ Text objects work after an operator or in Visual mode: `iw`/`aw` for a word,
 `is`/`as` a sentence, `ip`/`ap` a paragraph, `i"` inside quotes, `i(` `i[`
 `i{` `i<` inside brackets (which may span lines).
 
+## Lists
+
+A list item is a text object too. `al` is the item with its continuation
+lines and everything nested under it, `il` is the item without its sub-items,
+and `aL` is every item at the same level, each with its sub-items. So `>al`
+nests an item under the one above it and takes its sub-items along, `<al`
+brings it back out, `dal` deletes the whole item, and `>aL` indents a whole
+nested level at once.
+
+An indent that would break the list is refused with a message and changes
+nothing (see Details). Each command is one undo step and `.` repeats it.
+
 ## Registers
 
 `"ayy` yanks into register `a` and `"ap` pastes from it; `"A` appends to it.
@@ -52,6 +64,23 @@ list continuation, and a `jk` in the pasted text stays text.
 
 ## Details
 
+- Which indents are refused: `>al` on the first item of a list or sub-list
+  (there is no item above it to nest under), `<al` and `<aL` on a top-level
+  item (nowhere to go), and `>aL` when it would put a top-level list 4 or
+  more columns in — other Markdown tools, GitHub's included, read that as a
+  code block. With the default `tab_width` of 4 that means a top-level
+  level does not indent at all; a nested one always can.
+- Outdenting an item from the middle of a sub-list keeps the text in order,
+  so the items after it become its sub-items, as in org-mode. `>il` works the
+  same way the other direction: the item moves in, its sub-items stay put and
+  so belong to the item above.
+- An item is its line, the lines that continue it (including an unindented
+  "lazy" line right after it), and everything indented deeper below it, blank
+  lines in between included. A blank line after an item is never part of it.
+  An item is nested under the nearest less-indented item above it, the rule
+  HTML export uses, so `- a` / `   - b` / `  - c` makes `b` and `c` both
+  sub-items of `a`. A switch between `-` and `1.` at one depth starts a new
+  list. A tab counts as `tab_width` columns.
 - Shoin's operators and motions are checked against Vim's behaviour, down to
   edge cases such as `dw` on a line's last word, `cw` on a word's last
   character and `d}` stopping at a blank line. The [Changelog](../CHANGELOG.md)

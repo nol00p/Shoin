@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- List items are text objects: `al` is an item with everything nested under
+  it, `il` the item alone, and `aL` every item at its level. `>al` and `<al`
+  indent and outdent an item together with its sub-items, `dal` deletes it
+  whole. An indent that would break the list (the first item, an outdent at
+  the top level, a top-level list 4 columns in) is refused with a message
+  instead of applied. (#29)
+
 ## 0.1.9
 
 - Releases now come with prebuilt binaries for macOS and Linux, on x86_64

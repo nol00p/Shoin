@@ -45,6 +45,7 @@ use crate::export::Format;
 use crate::text::buffer::Buffer;
 use crate::text::cursor::Cursor;
 use crate::text::motion::{self, Motion};
+use crate::text::list::{self, Lists};
 use crate::text::object;
 use crate::transclude::{compile, link};
 
@@ -3062,6 +3063,9 @@ impl App {
         let Some((first, last, linewise)) = self.object_bounds(obj, around) else {
             return;
         };
+        if matches!(op, Operator::Indent | Operator::Outdent) && matches!(obj, 'l' | 'L') {
+            return self.shift_list(op == Operator::Outdent, obj == 'L', first.line, last.line);
+        }
         if linewise {
             self.operate_linewise(op, first.line, last.line);
         } else {
@@ -3070,8 +3074,11 @@ impl App {
     }
 
     /// The cursors bounding a text object, and whether it is linewise.
-    fn object_bounds(&self, obj: char, around: bool) -> Option<(Cursor, Cursor, bool)> {
-        let range = object::resolve(&self.buffer, obj, around)?;
+    fn object_bounds(&mut self, obj: char, around: bool) -> Option<(Cursor, Cursor, bool)> {
+        // The list objects read line kinds, which must describe this text.
+        self.refresh_blocks();
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+        let range = object::resolve(&self.buffer, &lists, obj, around)?;
         if range.end <= range.start {
             return None;
         }
@@ -3614,6 +3621,39 @@ impl App {
         let at = self.idx_to_cursor(start);
         self.buffer.delete_chars(start, end);
         self.buffer.insert_str(at, &mapped);
+    }
+
+    /// `>al` `<al` `>il` `<il` `>aL` `<aL`: shift lines `l1..=l2` of the item
+    /// (or level) under the cursor, unless that would break the list's
+    /// structure — then refuse, change nothing, and say why. The cursor stays
+    /// on the same character of text.
+    fn shift_list(&mut self, outdent: bool, level: bool, l1: usize, l2: usize) {
+        let width = self.config.editor.tab_width.max(1);
+        let line = self.buffer.cursor.line;
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, width);
+        let top_level = lists.parent(line).is_none();
+        let refusal = if outdent {
+            top_level.then_some("already at the top level")
+        } else if level {
+            // A top-level list indented 4 columns is an indented code block
+            // to every other Markdown tool. Shoin would still call it a list,
+            // which only hides the problem. A tab is `width` columns too.
+            let to = list::indent_cols(&self.buffer.line_text(l1), width) + width;
+            (top_level && to >= 4).then_some("a top-level list 4 columns in reads as code")
+        } else {
+            // The first child has nothing to nest under: it would only look
+            // deeper while staying the same child of the same parent.
+            lists.prev_sibling_bounds(line).is_none().then_some("nothing to indent under")
+        };
+        if let Some(why) = refusal {
+            return self.notify(why, FlashKind::Error);
+        }
+
+        let at = self.buffer.cursor;
+        let before = self.buffer.line_len(at.line) as isize;
+        self.shift_lines(l1, l2, outdent);
+        let moved = self.buffer.line_len(at.line) as isize - before;
+        self.buffer.cursor = Cursor::new(at.line, (at.col as isize + moved).max(0) as usize);
     }
 
     /// `>`/`<` over whole lines. One indent unit is `tab_width` spaces, or a
@@ -6897,6 +6937,96 @@ mod tests {
         // `>ip` is linewise over the paragraph and skips the blank line.
         feed(&mut app, ">ip");
         assert_eq!(text(&app), "    one\n    two\n\nthree\n");
+    }
+
+    /// `>al` nests an item under its previous sibling, children and all, and
+    /// leaves the cursor on the same character.
+    #[test]
+    fn indent_a_list_item_with_its_children() {
+        let mut app = app_with("- a\n- b\n  - c\n- d\n");
+        app.buffer.cursor = Cursor::new(1, 2);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "- a\n    - b\n      - c\n- d\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 6));
+        feed(&mut app, "<al");
+        assert_eq!(text(&app), "- a\n- b\n  - c\n- d\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 2));
+    }
+
+    #[test]
+    fn list_item_indent_is_one_undo_step_and_repeats() {
+        let mut app = app_with("- a\n- b\n- c\n");
+        app.buffer.cursor = Cursor::new(1, 0);
+        feed(&mut app, ">al");
+        feed(&mut app, "j.");
+        assert_eq!(text(&app), "- a\n    - b\n    - c\n");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- a\n    - b\n- c\n");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- a\n- b\n- c\n");
+    }
+
+    /// The shifts that would break a list's structure change nothing.
+    #[test]
+    fn list_shifts_that_break_the_structure_are_refused() {
+        let t = "- a\n  - b\n  - c\n";
+        // A first child has nothing to nest under.
+        let mut app = app_with(t);
+        app.buffer.cursor = Cursor::new(1, 0);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), t);
+        assert_eq!(flash_text(&app), "nothing to indent under");
+        // A top-level item has nowhere to outdent to.
+        let mut app = app_with(t);
+        feed(&mut app, "<al");
+        assert_eq!(text(&app), t);
+        assert_eq!(flash_text(&app), "already at the top level");
+        // A top-level level 4 columns in would read as code.
+        let mut app = app_with(t);
+        feed(&mut app, ">aL");
+        assert_eq!(text(&app), t);
+        assert_eq!(flash_text(&app), "a top-level list 4 columns in reads as code");
+    }
+
+    /// A nested level shifts as one: the first sibling goes with the rest, so
+    /// nothing is re-parented.
+    #[test]
+    fn indent_and_outdent_a_nested_level() {
+        let mut app = app_with("- p\n  - a\n    - a1\n  - b\n- q\n");
+        app.buffer.cursor = Cursor::new(3, 0);
+        feed(&mut app, ">aL");
+        assert_eq!(text(&app), "- p\n      - a\n        - a1\n      - b\n- q\n");
+        feed(&mut app, "<aL");
+        assert_eq!(text(&app), "- p\n  - a\n    - a1\n  - b\n- q\n");
+    }
+
+    /// `>il` leaves the children where they are, so they re-parent.
+    #[test]
+    fn indent_an_item_without_its_children() {
+        let mut app = app_with("- a\n- b\n  - c\n");
+        app.buffer.cursor = Cursor::new(1, 0);
+        feed(&mut app, ">il");
+        assert_eq!(text(&app), "- a\n    - b\n  - c\n");
+    }
+
+    #[test]
+    fn delete_and_select_a_list_item() {
+        let mut app = app_with("- a\n  - a1\n- b\n");
+        feed(&mut app, "dal");
+        assert_eq!(text(&app), "- b\n");
+        let mut app = app_with("- a\n  - a1\n- b\n");
+        feed(&mut app, "val");
+        assert_eq!(app.mode, Mode::VisualLine);
+        assert_eq!(app.buffer.cursor.line, 1);
+    }
+
+    /// Outside a list the object fails like `i(` outside parentheses.
+    #[test]
+    fn list_object_outside_a_list_does_nothing() {
+        let mut app = app_with("prose\n");
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "prose\n");
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]

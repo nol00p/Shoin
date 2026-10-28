@@ -7,7 +7,7 @@ feature does; the edge cases are under **Details** at the end.
 
 - [Getting started](getting-started.md) — install, requirements, first run
 - [Live preview](live-preview.md) — the cursor's line is raw, the rest is finished
-- [Editing](editing.md) — motions, operators, text objects, registers, Insert mode
+- [Editing](editing.md) — motions, operators, text objects, lists, registers, Insert mode
 - [Clipboard](clipboard.md) — the system clipboard, over SSH too, and pasting
 - [Writing](writing.md) — writer verbs, focus, typewriter, zen, line numbers
 - [Panels](panels.md) — file tree, fuzzy finder, buffers, splits
