@@ -22,8 +22,8 @@ shoin [FILE]
 ```
 
 `--render` draws the page the editor would, with every line concealed, at
-the terminal's width, and prints all of it. Every `![[embed]]` is expanded
-in full, and pictures are drawn in a terminal that can show them (the same
+the terminal's width, and prints all of it. Front matter is left out,
+every `![[embed]]` is expanded in full, and pictures are drawn in a terminal that can show them (the same
 detection as the editor's). When stdout isn't a terminal, or
 `NO_COLOR` is set, it prints plain text instead, the same as
 `--export FILE --format txt --stdout`.

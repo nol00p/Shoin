@@ -12,6 +12,9 @@
 //! whatever `transclude.embed` says: a page you only read has no cursor to
 //! open them with, and the plain-text path expands them too.
 //!
+//! Front matter is left out, as every export leaves it out: it is metadata
+//! about the page, not part of it.
+//!
 //! Pictures are painted the way the editor paints them, outside the cells, at
 //! the boxes the frame left blank for them (`App::paint_images`).
 
@@ -44,7 +47,24 @@ pub fn styled(app: &mut App, width: u16) -> String {
     let pad = app.config.layout.padding_top + app.config.layout.padding_bottom;
     let height = (rows + pad as usize).clamp(1, u16::MAX as usize) as u16;
     let buf = draw(app, width, height);
-    ansi(&buf, app.theme.background.to_ratatui(), &pictures(app))
+    let top = app.config.layout.padding_top.min(height / 4);
+    let hidden = top..top.saturating_add(front_matter_rows(app));
+    ansi(&buf, app.theme.background.to_ratatui(), &pictures(app), hidden)
+}
+
+/// How many rows the document's front matter takes, and the blank lines after
+/// it: the same lines `strip_front_matter` drops from every export.
+fn front_matter_rows(app: &App) -> u16 {
+    let b = &app.buffer;
+    let text: String = (0..b.line_count()).map(|l| b.line_text(l) + "\n").collect();
+    let body = crate::transclude::link::strip_front_matter(&text);
+    let lines = text[..text.len() - body.len()].matches('\n').count();
+    if lines == 0 {
+        return 0;
+    }
+    let cache = app.cache.borrow();
+    let rows = if lines < b.line_count() { cache.locate(lines, 0).0 } else { cache.total_rows() };
+    rows.min(u16::MAX as usize) as u16
 }
 
 /// The escapes that paint each picture, keyed by the LAST row of its box.
@@ -129,11 +149,16 @@ fn draw(app: &App, width: u16, height: u16) -> Buffer {
 /// left to the terminal, so the page sits on whatever the reader's terminal
 /// shows rather than in a painted block; anything else that has a background
 /// (a code slab, a highlight) keeps it. Blank rows at either end are dropped.
-fn ansi(buf: &Buffer, page_bg: Color, after_row: &HashMap<u16, String>) -> String {
+fn ansi(
+    buf: &Buffer,
+    page_bg: Color,
+    after_row: &HashMap<u16, String>,
+    hidden: std::ops::Range<u16>,
+) -> String {
     let bg_of = |c: Color| if c == page_bg { Color::Reset } else { c };
     let w = buf.area.width;
     let mut lines: Vec<String> = Vec::with_capacity(buf.area.height as usize);
-    for y in 0..buf.area.height {
+    for y in (0..buf.area.height).filter(|y| !hidden.contains(y)) {
         // Where the row stops mattering: past its last visible glyph or
         // non-default background.
         let end = (0..w)
@@ -302,6 +327,21 @@ mod tests {
         assert_eq!(out.matches("\x1b_Ga=T").count(), 1, "one picture, painted once");
         assert!(out.contains("\x1b7") && out.contains("\x1b8"), "the cursor is put back");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Front matter is metadata, so the printed page starts at the body.
+    #[test]
+    fn front_matter_is_left_out() {
+        let mut app = app_with("---\ntitle: Secret\ntags: [a]\n---\n\n# Heading\n\nBody.\n");
+        let plain = strip(&styled(&mut app, 60));
+        assert!(!plain.contains("title") && !plain.contains("---"), "{plain}");
+        assert!(plain.trim_start().starts_with("Heading"), "{plain}");
+        assert!(plain.contains("Body."), "{plain}");
+
+        // Without any, nothing is cut.
+        let mut app = app_with("Para one.\n\n---\n\nPara two.\n");
+        let plain = strip(&styled(&mut app, 60));
+        assert!(plain.trim_start().starts_with("Para one.") && plain.contains("Para two."), "{plain}");
     }
 
     /// Bold is bold and the page background is left to the terminal.
