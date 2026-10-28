@@ -66,7 +66,14 @@ moves with it: `"s" = "operator_delete"` keeps counts, text objects and the
 doubled form (`ss`) all working.
 
 The leader keys are bindings in `keys.conf` like any other — remap them, or
-add your own.
+add your own. The shipped `keys.conf` is built in, and your `[keys.*]` merge
+over it: a binding you write replaces the shipped one for that key, and
+everything you don't mention stays. `"none"` removes a shipped binding:
+
+```toml
+[keys.normal]
+"<leader>z" = "none"
+```
 
 ## Where config is found
 

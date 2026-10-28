@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The leader bindings (`Space fe`, `Space ff`, …) work with no config, so
+  `shoin --init-config` is no longer a required first step. The shipped
+  `keys.conf` is built in and your own `[keys.*]` merge over it: a partial
+  config keeps every binding it doesn't mention, and `"<key>" = "none"`
+  removes one. If you had deleted a shipped binding from your `keys.conf`,
+  it is back; set it to `"none"`.
+
 ## 0.1.9
 
 - Releases now come with prebuilt binaries for macOS and Linux, on x86_64
