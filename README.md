@@ -97,14 +97,19 @@ be changed.
 Shoin runs on **macOS and Linux**, on x86_64 and ARM. Windows isn't
 supported yet: it isn't built or tested there.
 
-The installer fetches a prebuilt binary:
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install nol00p/tap/shoin
+```
+
+Or with the installer, which fetches a prebuilt binary:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
 ```
 
-With Homebrew: `brew install nol00p/tap/shoin`. Or build it with Cargo
-(Rust 1.88 or newer): `cargo install shoin`.
+Or build it with Cargo (Rust 1.88 or newer): `cargo install shoin`.
 
 It works with no config: the leader keys, such as `Space fe` for the file
 tree, are built in. `shoin --init-config` writes an annotated copy of the
