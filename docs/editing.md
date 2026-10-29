@@ -96,7 +96,9 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   so the items after it become its sub-items, as in org-mode. `>il` works the
   same way the other direction: the item moves in, its sub-items stay put and
   so belong to the item above.
-- `Alt-j` needs a terminal that sends Alt as a modifier. In tmux, a quick
+- Shoin turns on the kitty keyboard protocol, so in kitty, Ghostty, WezTerm,
+  foot and Alacritty `Alt-j` always arrives as one key, even over SSH. Other
+  terminals need to send Alt as a modifier. In tmux, a quick
   `Esc` then `j` can arrive as `Alt-j` when `escape-time` is long (the
   default was 500 ms before tmux 3.5): `set -sg escape-time 10` fixes it, and
   it is the usual advice for Vim in tmux. On macOS, Terminal.app needs "Use
