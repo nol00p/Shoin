@@ -9,23 +9,15 @@ stop, `:w` to save, `:q` to quit.
 
 ## Install
 
-On macOS or Linux (x86_64 or ARM), the installer downloads a prebuilt binary
-from the [latest release](https://github.com/nol00p/shoin/releases/latest):
+Shoin runs on macOS and Linux, on x86_64 or ARM.
 
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
-```
-
-With [Homebrew](https://brew.sh), on macOS or Linux:
+**macOS**, with [Homebrew](https://brew.sh):
 
 ```sh
 brew install nol00p/tap/shoin
 ```
 
-The release page also has the plain `.tar.xz` archives, with a SHA-256
-checksum for each, if you'd rather unpack the binary yourself.
-
-With Rust 1.88 or newer, build it from crates.io instead:
+**macOS or Linux**, with Cargo (Rust 1.88 or newer), from crates.io:
 
 ```sh
 cargo install shoin
@@ -39,9 +31,19 @@ cd shoin
 cargo install --path .
 ```
 
-Each of these puts a `shoin` binary in `~/.cargo/bin`, which needs to be on
-your `PATH`. To try it without installing, `cargo run -- notes.md` works from
-a clone.
+**macOS or Linux**, with the installer, which downloads a prebuilt binary
+from the [latest release](https://github.com/nol00p/shoin/releases/latest):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
+```
+
+The release page also has the plain `.tar.xz` archives, with a SHA-256
+checksum for each, if you'd rather unpack the binary yourself.
+
+Homebrew puts `shoin` on your `PATH` for you. Cargo and the installer put it
+in `~/.cargo/bin`, which needs to be on your `PATH`. To try it without
+installing, `cargo run -- notes.md` works from a clone.
 
 Shoin needs no config. The leader bindings — `Space fe` for the file tree,
 `Space ff` for the finder, and the rest — are built in. To change settings,
