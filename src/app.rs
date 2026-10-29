@@ -3792,13 +3792,40 @@ impl App {
         let line = self.buffer.cursor.line;
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, width);
         let top_level = lists.parent(line).is_none();
+        let at_col = lists.item_indent(line).unwrap_or(0);
+        // How far to shift, in the document's own steps rather than always
+        // `tab_width`. Out, the item lands on its parent's column: it becomes
+        // the parent's sibling, and a deeper item cannot skip a level. In, it
+        // lines up with the children it joins, or else nests by the step the
+        // nearest nesting in the file uses.
+        //
+        // A whole level moves by one step either way, and out no further than
+        // its parent's column. Its own distance from that parent is what
+        // changes, so it is not a measure of the step.
+        let skip = if level { lists.level_items(line) } else { Vec::new() };
+        let step = lists.step(line, &skip).unwrap_or(width);
+        let gap = lists.parent(line).map(|p| at_col.saturating_sub(lists.item_indent(p).unwrap_or(0)));
+        let cols = if outdent && level {
+            gap.map_or(step, |g| step.min(g))
+        } else if outdent {
+            gap.unwrap_or(width)
+        } else if level {
+            step
+        } else {
+            lists
+                .prev_sibling_bounds(line)
+                .and_then(|(p, _)| lists.first_child(p))
+                .and_then(|c| lists.item_indent(c))
+                .filter(|&c| c > at_col)
+                .map_or(step, |c| c - at_col)
+        };
         let refusal = if outdent {
             top_level.then_some("already at the top level")
         } else if level {
             // A top-level list indented 4 columns is an indented code block
             // to every other Markdown tool. Shoin would still call it a list,
             // which only hides the problem. A tab is `width` columns too.
-            let to = list::indent_cols(&self.buffer.line_text(l1), width) + width;
+            let to = list::indent_cols(&self.buffer.line_text(l1), width) + cols;
             (top_level && to >= 4).then_some("a top-level list 4 columns in reads as code")
         } else {
             // The first child has nothing to nest under: it would only look
@@ -3830,7 +3857,7 @@ impl App {
 
         let at = self.buffer.cursor;
         let before = self.buffer.line_len(at.line) as isize;
-        self.shift_lines(l1, l2, outdent);
+        self.shift_lines_by(l1, l2, outdent, cols);
         if self.config.editor.list_renumber && !touched.is_empty() {
             self.renumber_lists(&touched, &starts, l1);
         }
@@ -3965,10 +3992,20 @@ impl App {
     /// indenting whitespace-only lines just leaves trailing whitespace behind.
     fn shift_lines(&mut self, l1: usize, l2: usize, outdent: bool) {
         let width = self.config.editor.tab_width.max(1);
-        let unit: String = if self.config.editor.expand_tab {
-            " ".repeat(width)
+        self.shift_lines_by(l1, l2, outdent, width);
+    }
+
+    /// `shift_lines` by `cols` columns instead of one indent unit. Indenting
+    /// inserts tabs only when `expand_tab` is off and `cols` is whole tabs,
+    /// spaces otherwise; outdenting removes leading whitespace up to `cols`
+    /// columns, a tab counting as `tab_width`.
+    fn shift_lines_by(&mut self, l1: usize, l2: usize, outdent: bool, cols: usize) {
+        let width = self.config.editor.tab_width.max(1);
+        let cols = cols.max(1);
+        let unit: String = if !self.config.editor.expand_tab && cols.is_multiple_of(width) {
+            "\t".repeat(cols / width)
         } else {
-            "\t".to_string()
+            " ".repeat(cols)
         };
         for line in l1..=l2.min(self.buffer.line_count().saturating_sub(1)) {
             let text = self.buffer.line_text(line);
@@ -3979,20 +4016,18 @@ impl App {
                 self.buffer.insert_str(Cursor::new(line, 0), &unit);
                 continue;
             }
-            // Outdent removes one tab, or up to `width` leading spaces.
             let mut drop = 0usize;
-            for (i, c) in text.chars().enumerate() {
-                if i >= width {
+            let mut gone = 0usize;
+            for c in text.chars() {
+                if gone >= cols {
                     break;
                 }
                 match c {
-                    '\t' => {
-                        drop = i + 1;
-                        break;
-                    }
-                    ' ' => drop = i + 1,
+                    '\t' => gone += width,
+                    ' ' => gone += 1,
                     _ => break,
                 }
+                drop += 1;
             }
             if drop > 0 {
                 let start = self.buffer.char_index(Cursor::new(line, 0));
@@ -7370,13 +7405,13 @@ mod tests {
     /// leaves the cursor on the same character.
     #[test]
     fn indent_a_list_item_with_its_children() {
-        let mut app = app_with("- a\n- b\n  - c\n- d\n");
+        let mut app = app_with("- a\n- b\n    - c\n- d\n");
         app.buffer.cursor = Cursor::new(1, 2);
         feed(&mut app, ">al");
-        assert_eq!(text(&app), "- a\n    - b\n      - c\n- d\n");
+        assert_eq!(text(&app), "- a\n    - b\n        - c\n- d\n");
         assert_eq!(app.buffer.cursor, Cursor::new(1, 6));
         feed(&mut app, "<al");
-        assert_eq!(text(&app), "- a\n- b\n  - c\n- d\n");
+        assert_eq!(text(&app), "- a\n- b\n    - c\n- d\n");
         assert_eq!(app.buffer.cursor, Cursor::new(1, 2));
     }
 
@@ -7409,6 +7444,7 @@ mod tests {
         assert_eq!(text(&app), t);
         assert_eq!(flash_text(&app), "already at the top level");
         // A top-level level 4 columns in would read as code.
+        let t = "- a\n    - b\n";
         let mut app = app_with(t);
         feed(&mut app, ">aL");
         assert_eq!(text(&app), t);
@@ -7422,7 +7458,7 @@ mod tests {
         let mut app = app_with("- p\n  - a\n    - a1\n  - b\n- q\n");
         app.buffer.cursor = Cursor::new(3, 0);
         feed(&mut app, ">aL");
-        assert_eq!(text(&app), "- p\n      - a\n        - a1\n      - b\n- q\n");
+        assert_eq!(text(&app), "- p\n    - a\n      - a1\n    - b\n- q\n");
         feed(&mut app, "<aL");
         assert_eq!(text(&app), "- p\n  - a\n    - a1\n  - b\n- q\n");
     }
@@ -7656,7 +7692,50 @@ mod tests {
         let mut app = app_with("- a\n- b\n  - c\n");
         app.buffer.cursor = Cursor::new(1, 0);
         feed(&mut app, ">il");
-        assert_eq!(text(&app), "- a\n    - b\n  - c\n");
+        assert_eq!(text(&app), "- a\n  - b\n  - c\n");
+    }
+
+    /// A list shifts by the step the file already nests by, not `tab_width`:
+    /// found in another list when its own does not nest, and taken from the
+    /// children an item joins when it has some.
+    #[test]
+    fn indent_matches_the_files_own_step() {
+        let mut app = app_with("- x\n  - y\n\ntext\n\n- a\n- b\n");
+        app.buffer.cursor = Cursor::new(6, 0);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "- x\n  - y\n\ntext\n\n- a\n  - b\n");
+        // Joining children three columns in, it lines up with them.
+        let mut app = app_with("- a\n   - a1\n- b\n");
+        app.buffer.cursor = Cursor::new(2, 0);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "- a\n   - a1\n   - b\n");
+        // With nothing nested anywhere, one step is `tab_width`.
+        let mut app = app_with("- a\n- b\n");
+        app.buffer.cursor = Cursor::new(1, 0);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "- a\n    - b\n");
+    }
+
+    /// Out, an item lands on its parent's column, one level up — never past
+    /// it, whatever `tab_width` is.
+    #[test]
+    fn outdent_lands_on_the_parents_column() {
+        let mut app = app_with("- a\n  - b\n    - c\n");
+        app.buffer.cursor = Cursor::new(2, 0);
+        feed(&mut app, "<al");
+        assert_eq!(text(&app), "- a\n  - b\n  - c\n");
+    }
+
+    /// A file that nests with tabs keeps nesting with tabs.
+    #[test]
+    fn a_tab_nested_list_indents_with_a_tab() {
+        let mut app = app_with("- a\n\t- a1\n- b\n");
+        app.config.editor.expand_tab = false;
+        app.buffer.cursor = Cursor::new(2, 0);
+        feed(&mut app, ">al");
+        assert_eq!(text(&app), "- a\n\t- a1\n\t- b\n");
+        feed(&mut app, "<al");
+        assert_eq!(text(&app), "- a\n\t- a1\n- b\n");
     }
 
     #[test]

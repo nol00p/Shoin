@@ -132,6 +132,31 @@ impl<'a> Lists<'a> {
         items
     }
 
+    /// How far this document nests a child inside its parent, in columns: the
+    /// parent→child step of the nesting nearest to `line`, so a file that
+    /// nests by 2 keeps nesting by 2 whatever `tab_width` says. `None` when no
+    /// list in the document nests. Items in `skip` are not measured: a level
+    /// being shifted would otherwise count its own distance from its parent.
+    pub fn step(&self, line: usize, skip: &[usize]) -> Option<usize> {
+        let last = self.buffer.last_line();
+        // Outward from `line`, alternating below and above.
+        let near = (0..=last).flat_map(|d| {
+            let below = (d > 0).then(|| line.checked_add(d)).flatten();
+            [line.checked_sub(d), below]
+        });
+        near.flatten()
+            .filter(|&l| l <= last && self.is_item(l) && !skip.contains(&l))
+            .find_map(|l| {
+                let parent = self.parent_of(l)?;
+                Some(self.indent(l) - self.indent(parent))
+            })
+    }
+
+    /// The column the item containing `line` sits at.
+    pub fn item_indent(&self, line: usize) -> Option<usize> {
+        self.item_at(line).map(|s| self.indent(s))
+    }
+
     /// The number of the ordered item on `line`, and the chars its digits
     /// span. `None` for a bullet, a line that is not an item, or a number too
     /// long to count with.
@@ -525,6 +550,20 @@ mod tests {
             assert_eq!(l.parent(1), Some(0));
             assert_eq!(l.next_sibling_bounds(0), Some((2, 2)));
         });
+    }
+
+    #[test]
+    fn step_is_the_nearest_nesting() {
+        // Its own list nests by 2.
+        assert_eq!(with("- a\n  - b\n- c\n", |l| l.step(2, &[])), Some(2));
+        // A flat list takes the step of the nearest list that nests.
+        let t = "- x\n   - y\n\np\n\n- a\n- b\n\np\n\n- m\n  - n\n";
+        assert_eq!(with(t, |l| l.step(6, &[])), Some(3));
+        assert_eq!(with(t, |l| l.step(10, &[])), Some(2));
+        // A tab is `tab_width` columns.
+        assert_eq!(with("- a\n\t- b\n", |l| l.step(0, &[])), Some(4));
+        // Nothing nests.
+        assert_eq!(with("- a\n- b\n", |l| l.step(0, &[])), None);
     }
 
     #[test]
