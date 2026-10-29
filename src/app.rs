@@ -1073,7 +1073,7 @@ impl App {
     fn absorb(&mut self, event: CtEvent) {
         match event {
             CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                self.on_key(key);
+                self.on_key(crate::input::legacy::normalize(key));
                 self.sync_after_input();
                 self.needs_redraw = true;
             }

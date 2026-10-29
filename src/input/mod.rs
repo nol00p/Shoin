@@ -3,5 +3,6 @@
 pub mod action;
 pub mod bindings;
 pub mod keymap;
+pub mod legacy;
 pub mod mode;
 pub mod pending;
