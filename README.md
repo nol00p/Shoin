@@ -103,7 +103,8 @@ The installer fetches a prebuilt binary:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
 ```
 
-Or build it with Cargo (Rust 1.88 or newer): `cargo install shoin`.
+With Homebrew: `brew install nol00p/tap/shoin`. Or build it with Cargo
+(Rust 1.88 or newer): `cargo install shoin`.
 
 It works with no config: the leader keys, such as `Space fe` for the file
 tree, are built in. `shoin --init-config` writes an annotated copy of the
