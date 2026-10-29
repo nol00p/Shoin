@@ -11,6 +11,10 @@
   as before, and `Ctrl-[` still leaves Insert everywhere.
 - A crash no longer leaves the shell with mouse reporting or bracketed paste
   switched on.
+- Indenting a list item follows how the file already nests instead of always
+  using `tab_width`: a list nested by 2 stays nested by 2, an item lines up
+  with the sub-items it joins, and Shift-Tab / `<al` puts an item on its
+  parent's column, so it can no longer skip a level.
 
 ## 0.2.0
 

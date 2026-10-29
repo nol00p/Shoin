@@ -84,8 +84,14 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   (there is no item above it to nest under), `<al` and `<aL` on a top-level
   item (nowhere to go), and `>aL` when it would put a top-level list 4 or
   more columns in — other Markdown tools, GitHub's included, read that as a
-  code block. With the default `tab_width` of 4 that means a top-level
-  level does not indent at all; a nested one always can.
+  code block. In a file that nests by 4, a top-level level does not indent
+  at all; a nested one always can.
+- How far an item moves follows the file, not `tab_width`. `<al` puts it on
+  its parent's column. `>al` lines it up with the sub-items it joins, or, when
+  the item above has none, nests it by the step of the nearest nested list in
+  the file (2 for `- a` / `  - b`). `>aL` and `<aL` move a level by that step.
+  Only a file where nothing nests yet uses `tab_width`. With `expand_tab = false`
+  a step of whole tabs is written as tabs.
 - Outdenting an item from the middle of a sub-list keeps the text in order,
   so the items after it become its sub-items, as in org-mode. `>il` works the
   same way the other direction: the item moves in, its sub-items stay put and
