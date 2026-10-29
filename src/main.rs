@@ -256,8 +256,8 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
     use ratatui::crossterm::event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture,
+        EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     };
     if mouse {
         let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
@@ -275,13 +275,46 @@ fn main() -> Result<()> {
     // paste into Normal mode runs as commands. Unconditional for the same
     // reason focus reporting is: a terminal without it just sends keys.
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+    // The kitty keyboard protocol reports Ctrl/Alt chords as one sequence, so
+    // `Alt-h` cannot split into Esc + `h` (over SSH, in tmux) and `Ctrl-h` is
+    // not Backspace. Alternate keys keep the case of a Shift chord (`Alt-J`).
+    // A terminal without the protocol ignores the request and sends legacy
+    // keys; `input::legacy` folds the keys that differ back to their old
+    // meaning either way.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        )
+    );
+    // `ratatui::init`'s panic hook restores raw mode and the screen but knows
+    // nothing of the modes above: a crash would leave the shell with mouse
+    // reports and kitty-encoded keys. Release them first, then run its hook.
+    let restore_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        release_terminal_modes();
+        restore_hook(info);
+    }));
     let result = app.run_loop(&mut terminal);
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableFocusChange);
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    release_terminal_modes();
     ratatui::restore();
 
     result
+}
+
+/// Undo every mode `main` turned on after `ratatui::init`, in reverse order.
+/// Each is harmless to undo when it was never on, so this runs unconditionally
+/// on the way out, whether the editor quit or panicked.
+fn release_terminal_modes() {
+    use ratatui::crossterm::event::{
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
+    };
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableFocusChange);
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
 }
 
 /// `-` is stdin, as it is for most tools that take a file.

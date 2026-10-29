@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Fixes**
+
+- Ctrl and Alt chords arrive intact in terminals with the kitty keyboard
+  protocol (kitty, Ghostty, WezTerm, foot, Alacritty, recent iTerm2):
+  `Alt-j`/`Alt-k` no longer split into Esc and a letter over SSH or on a slow
+  link, and `Ctrl-h` is no longer read as Backspace. Other terminals behave
+  as before, and `Ctrl-[` still leaves Insert everywhere.
+- A crash no longer leaves the shell with mouse reporting or bracketed paste
+  switched on.
+
 ## 0.2.0
 
 Shoin now works the moment it's installed, with no config to write first,
