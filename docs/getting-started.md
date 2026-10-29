@@ -16,6 +16,12 @@ from the [latest release](https://github.com/nol00p/shoin/releases/latest):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
 ```
 
+With [Homebrew](https://brew.sh), on macOS or Linux:
+
+```sh
+brew install nol00p/tap/shoin
+```
+
 The release page also has the plain `.tar.xz` archives, with a SHA-256
 checksum for each, if you'd rather unpack the binary yourself.
 
