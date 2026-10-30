@@ -141,7 +141,15 @@ impl BlockCache {
             // scan would stop before it ever reclassified the edit. Typing
             // `- ` in front of a paragraph left the line a paragraph until the
             // file was reloaded.
-            if can_early_stop && i >= edited {
+            //
+            // Not above a table's delimiter row, though: `classify` just made
+            // this line a paragraph, and only the delimiter row's own pass
+            // promotes it back to the table's header. Stopping here left an
+            // edited header row unstyled until something rescanned the table.
+            let opens_table = i + 1 < n
+                && self.kinds[i + 1] == BlockKind::Table
+                && self.carry[i + 1] != Carry::InTable;
+            if can_early_stop && i >= edited && !opens_table {
                 if let Some(old) = old_next {
                     if next == old {
                         break;
@@ -513,6 +521,20 @@ mod tests {
     fn a_rule_is_not_a_table_delimiter() {
         assert_eq!(kind("---"), BlockKind::Rule);
         assert_eq!(kind("| --- | --- |"), BlockKind::Table);
+    }
+
+    /// Editing the header row in place keeps it the table's header: the
+    /// rescan has to reach the delimiter row below, which promotes it.
+    #[test]
+    fn editing_the_header_row_keeps_it_a_header() {
+        let mut b = buf("intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
+        let mut cache = BlockCache::build(&b);
+        assert_eq!(cache.kinds[2], BlockKind::Table);
+
+        b.insert_str(Cursor::new(2, 3), "x");
+        cache.invalidate_from(&b, 2);
+        assert_eq!(cache.kinds[2], BlockKind::Table, "header row stays a header");
+        assert_eq!(cache.kinds, BlockCache::build(&b).kinds);
     }
 
     /// Removing the delimiter row must demote the header again. This is why
