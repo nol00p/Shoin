@@ -34,7 +34,8 @@ off. [`examples/formatting.md`](../examples/formatting.md) exercises all of it.
 - An `![[embed]]` on the cursor's line also shows its raw source, which is why
   embedded text can't be edited by accident. See [Notes](notes.md).
 - Table rows never wrap. A row wider than the pane stays on one line and is
-  clipped at the edge.
+  clipped at the edge. Shoin lines the columns up in the file when you
+  leave Insert, or on `ga`. See [Writing](writing.md#writer-verbs).
 - `layout.conceal = false`, `:set conceal off` or `Space c` turns concealment
   off entirely.
 - To see every line concealed, the cursor's too, open the page read-only:

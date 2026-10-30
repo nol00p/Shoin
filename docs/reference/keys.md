@@ -77,6 +77,7 @@ selection. Each is one undo step.
 |---|---|
 | `gb` `gi` `gh` `gk` | toggle **bold**, *italic*, `==highlight==`, `` `code` `` |
 | `gt` | toggle a task checkbox (adds one to a plain list item) |
+| `ga` | align the table under the cursor (`editor.table_align = "auto"` also does it on leaving Insert) |
 | `gl` | wrap as a `[link](url)`, cursor in the URL |
 | `g1`–`g6` `g0` | set the heading level / strip it |
 | `gp` | start the next paragraph |

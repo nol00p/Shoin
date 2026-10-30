@@ -103,6 +103,7 @@ pub enum Action {
     ToggleCode,
     InsertLink,
     ToggleTask,
+    AlignTable,
     SetHeading(u8),
     ClearHeading,
 
@@ -198,6 +199,7 @@ impl Action {
             | Action::ToggleCode
             | Action::InsertLink
             | Action::ToggleTask
+            | Action::AlignTable
             | Action::SetHeading(_)
             | Action::ClearHeading => true,
             _ => false,
@@ -242,6 +244,7 @@ impl Action {
             "toggle_code" | "code" => Action::ToggleCode,
             "insert_link" | "link" => Action::InsertLink,
             "toggle_task" | "task" => Action::ToggleTask,
+            "align_table" | "table" => Action::AlignTable,
             "clear_heading" => Action::ClearHeading,
             "cycle_focus" | "focus" => Action::CycleFocus,
             "toggle_typewriter" | "typewriter" => Action::ToggleTypewriter,

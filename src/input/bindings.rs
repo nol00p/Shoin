@@ -168,6 +168,7 @@ pub fn after_prefix(prefix: char, key: Key, visual_mode: bool) -> Option<Verb> {
         ('g', 'k') => Verb::Act(Action::ToggleCode),
         ('g', 'l') => Verb::Act(Action::InsertLink),
         ('g', 't') => Verb::Act(Action::ToggleTask),
+        ('g', 'a') => Verb::Act(Action::AlignTable),
         ('g', 'f') => Verb::Act(Action::FollowLink),
         ('g', 'x') => Verb::Act(Action::OpenExternal),
         ('g', 'p') => Verb::Act(Action::AppendParagraph),

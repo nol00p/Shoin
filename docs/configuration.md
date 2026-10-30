@@ -39,6 +39,8 @@ autoreload        = true  # take a file's changes back when it is edited
                           # elsewhere — only if you have nothing unsaved
 list_renumber     = true  # keep 1. 2. 3. in sequence when an item moves
 list_tab          = true  # Tab / Shift-Tab in Insert indent a list item
+table_align       = "auto" # line up a table's columns on leaving Insert;
+                           # "manual" leaves it to ga
 
 [tree]
 show_hidden = false       # dotfiles in the file tree (H toggles it live)
@@ -105,6 +107,8 @@ The first of these that exists wins:
   wrote them when `>al`, `<al`, `Alt-j` or `Alt-k` moves an item. `list_tab =
   false` makes Tab type a tab on a list item too — see
   [Editing](editing.md#lists).
+- `table_align = "manual"` stops Shoin rewriting a table when you leave
+  Insert; `ga` still aligns it on demand. See [Writing](writing.md#writer-verbs).
 - `:e!` or `:reload` re-reads the config by hand.
 - A leader that is a modifier or named key needs the same `<...>` wrapping a
   binding uses: `"<C-x>"`, not `"C-x"`.

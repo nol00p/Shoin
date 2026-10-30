@@ -14,6 +14,7 @@ mode. Each is a single undo step.
   gi  *italic*        gl  wrap as a [link](url), cursor in the URL slot
   gh  ==highlight==   g1..g6  set the heading level    g0  strip it
   gk  `code`          gp  start the next paragraph
+                      ga  align the table under the cursor
 
   gf  follow the link under the cursor      gx  open it with the desktop
 ```
@@ -21,6 +22,15 @@ mode. Each is a single undo step.
 On a plain list item, `gt` adds an empty checkbox. `gl` writes a link and `gf`
 walks it — see [Notes](notes.md). In Visual mode, `Space b` and `Space i` also
 toggle bold and italic.
+
+`ga` pads every cell of a table to its column's width, in the file itself,
+so the `|`s line up in any editor. The delimiter row is redrawn to match and
+keeps its `:--:` alignment markers; cells in a right or centered column are
+padded that way. It works from any row and is one undo step.
+
+You rarely need `ga` by hand: leaving Insert after an edit in a table aligns
+it, and the same `u` that takes back the typing takes back the alignment.
+`editor.table_align = "manual"` turns that off and leaves it to `ga`.
 
 ## Writing modes
 
