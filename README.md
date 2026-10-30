@@ -28,7 +28,9 @@ desk built into a bay by the window, and nothing else in the room.
   file tree, finder and splits open on a key and close on the same key.
   → [Panels](docs/panels.md)
 - **Live preview that never lies.** The line under the cursor shows raw
-  Markdown; every other line shows the finished text.
+  Markdown; every other line shows the finished text: headings, bold and
+  italic, quotes, task lists, tables and highlighted code. Tables line up
+  their columns in the file as you type.
   → [Live preview](docs/live-preview.md)
 - **Vim grammar, plus writer verbs.** Operators, motions, text objects, counts,
   registers and `.` — and `gb` for bold, `gt` to tick a task, `g1`–`g6` for
@@ -52,6 +54,13 @@ desk built into a bay by the window, and nothing else in the room.
 highlighted in seventeen languages.
 
 ## See it work
+
+**Formatting** — the finished page with the cursor's line raw, `gb`, `gi` and
+`g2` in place, and a table that lines itself up on Esc.
+
+<p align="center">
+  <img src="docs/media/formatting.gif" alt="A note with headings, bold, italic, a quote, tasks, a table and code; the cursor's line shows its Markdown, and a new table row lines the columns up on Esc" width="800">
+</p>
 
 **Editing prose with Vim's grammar** — `ciw` and `.`, moving a paragraph with
 `dap` and `p`, `ci(`, list items that continue themselves, undo and redo.

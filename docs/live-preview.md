@@ -1,7 +1,7 @@
 # Live preview
 
 <p align="center">
-  <img src="media/tour.gif" alt="The cursor's line showing raw Markdown while the lines around it are rendered" width="800">
+  <img src="media/formatting.gif" alt="The cursor's line showing raw Markdown while the lines around it are rendered, and a table lining itself up on Esc" width="800">
 </p>
 
 The line under the cursor shows its raw Markdown. Every other line shows the
