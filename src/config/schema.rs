@@ -155,6 +155,9 @@ pub struct EditorConfig {
     /// Insert-mode Tab / Shift-Tab on a list item indents / outdents the
     /// item, as `>al` / `<al` do. Off, Tab inserts a tab there as anywhere.
     pub list_tab: bool,
+    /// `auto`: leaving Insert after an edit in a table aligns its columns,
+    /// as `ga` does. `manual`: only `ga` does.
+    pub table_align: String,
 }
 
 impl Default for EditorConfig {
@@ -177,6 +180,7 @@ impl Default for EditorConfig {
             scroll_off: 3,
             list_renumber: true,
             list_tab: true,
+            table_align: "auto".into(),
         }
     }
 }

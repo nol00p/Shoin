@@ -161,6 +161,12 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         crate::fs::save::FinalNewline::parse(&cfg.editor.final_newline).is_some(),
         "preserve · always · never",
     );
+    check(
+        "editor.table_align",
+        &cfg.editor.table_align,
+        crate::text::table::TableAlign::parse(&cfg.editor.table_align).is_some(),
+        "auto · manual",
+    );
     {
         // A number, so the value shown is the number that was written — the
         // point of the message is that 9 is not one of five, not that "9" is

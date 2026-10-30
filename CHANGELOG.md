@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Writing**
+
+- Tables line up as you write them: leaving Insert after an edit in a table
+  pads every cell to its column's width in the file, redraws the delimiter
+  row to match and keeps `:--:` alignment markers. `ga` does the same on
+  demand; `editor.table_align = "manual"` leaves it to `ga` alone (#50).
+
 **Fixes**
 
 - Ctrl and Alt chords arrive intact in terminals with the kitty keyboard

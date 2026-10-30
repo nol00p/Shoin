@@ -47,6 +47,7 @@ use crate::text::cursor::Cursor;
 use crate::text::motion::{self, Motion};
 use crate::text::list::{self, Lists};
 use crate::text::object;
+use crate::text::table::{self, TableAlign};
 use crate::transclude::{compile, link};
 
 const TICK: Duration = Duration::from_millis(100);
@@ -1871,6 +1872,7 @@ impl App {
             Action::ToggleHighlight => self.writer_toggle("=="),
             Action::ToggleCode => self.writer_toggle("`"),
             Action::ToggleTask => self.toggle_task(),
+            Action::AlignTable => self.align_table(),
             Action::InsertLink => self.wrap_link(),
             Action::SetHeading(n) => self.set_heading(n),
             Action::ClearHeading => self.set_heading(0),
@@ -3455,6 +3457,48 @@ impl App {
         }
     }
 
+    /// `ga`: pad every cell of the table under the cursor to its column's
+    /// width, in the file. The cursor stays on the same character of the
+    /// same cell; an already aligned table is left untouched, so `ga` on one
+    /// adds nothing to undo.
+    fn align_table(&mut self) {
+        if !self.align_table_at_cursor() {
+            self.notify("not in a table", FlashKind::Error);
+        }
+    }
+
+    /// `editor.table_align = "auto"`: leaving Insert after an edit in a table
+    /// aligns it, as `ga` would. It joins the Insert session's undo step, so
+    /// one `u` takes back the typing and the alignment together. Anywhere
+    /// else it does nothing, and says nothing.
+    fn auto_align_table(&mut self) {
+        let auto = TableAlign::parse(&self.config.editor.table_align) == Some(TableAlign::Auto);
+        if auto && self.buffer.revision != self.dot_rev {
+            self.align_table_at_cursor();
+        }
+    }
+
+    /// Align the table on the cursor's line. False when it is not in one.
+    fn align_table_at_cursor(&mut self) -> bool {
+        self.refresh_blocks();
+        let at = self.buffer.cursor;
+        let Some((s, e)) = table::bounds(&self.blocks.kinds, at.line) else {
+            return false;
+        };
+        let rows: Vec<String> = (s..=e).map(|l| self.buffer.line_text(l)).collect();
+        let aligned = table::align(&rows);
+        if aligned == rows {
+            return true;
+        }
+        let from = self.buffer.rope.line_to_char(s);
+        let to = self.buffer.char_index(Cursor::new(e, self.buffer.line_len(e)));
+        self.buffer.delete_chars(from, to);
+        self.buffer.insert_str(Cursor::new(s, 0), &aligned.join("\n"));
+        let col = table::cursor_col(&rows[at.line - s], &aligned[at.line - s], at.col);
+        self.buffer.cursor = Cursor::new(at.line, col);
+        true
+    }
+
     /// `g1`..`g6` set the heading level of the current line; `g0` strips it.
     fn set_heading(&mut self, level: u8) {
         let line = self.buffer.cursor.line;
@@ -4441,6 +4485,7 @@ impl App {
             let col = self.buffer.cursor.col - 1;
             self.buffer.cursor.set_col(col);
         }
+        self.auto_align_table();
         self.touch_status();
     }
 
@@ -8382,6 +8427,64 @@ mod tests {
             feed(&mut app, "gt");
             assert_eq!(text(&app), after, "gt on {before:?}");
         }
+    }
+
+    /// `ga` aligns the whole table from any row, keeps the cursor on its
+    /// character, and is one undo step.
+    #[test]
+    fn ga_aligns_the_table_under_the_cursor() {
+        let messy = "intro\n\n| Name | Role |\n|---|---|\n| Alice | Maintainer |\n| Bob | Docs |\n";
+        let mut app = app_with(messy);
+        feed(&mut app, "5G$ga");
+        assert_eq!(
+            text(&app),
+            "intro\n\n| Name  | Role       |\n|-------|------------|\n| Alice | Maintainer |\n| Bob   | Docs       |\n"
+        );
+        assert_eq!(app.buffer.cursor, Cursor::new(4, 21), "still on the closing bar");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), messy);
+    }
+
+    /// `table_align = "auto"`: Esc after typing in a table aligns it, and
+    /// one `u` takes back both.
+    #[test]
+    fn leaving_insert_in_a_table_aligns_it() {
+        let messy = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let mut app = app_with(messy);
+        feed(&mut app, "3G$iXYZ");
+        esc(&mut app);
+        assert_eq!(text(&app), "| a   | b     |\n|-----|-------|\n| 1   | 2 XYZ |\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(2, 12), "still on the Z");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), messy);
+    }
+
+    #[test]
+    fn leaving_insert_without_an_edit_leaves_the_table() {
+        let messy = "| a | b |\n|---|---|\n";
+        let mut app = app_with(messy);
+        feed(&mut app, "i");
+        esc(&mut app);
+        assert_eq!(text(&app), messy);
+    }
+
+    #[test]
+    fn table_align_manual_waits_for_ga() {
+        let mut app = app_with("| a | b |\n|---|---|\n");
+        app.config.editor.table_align = "manual".into();
+        feed(&mut app, "AX");
+        esc(&mut app);
+        assert_eq!(text(&app), "| a | b |X\n|---|---|\n");
+        feed(&mut app, "ga");
+        assert_eq!(text(&app), "| a   | b   | X   |\n|-----|-----|-----|\n");
+    }
+
+    #[test]
+    fn ga_outside_a_table_says_so() {
+        let mut app = app_with("just prose\n");
+        feed(&mut app, "ga");
+        assert_eq!(text(&app), "just prose\n");
+        assert_eq!(flash_text(&app), "not in a table");
     }
 
     #[test]
