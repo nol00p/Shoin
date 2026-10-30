@@ -11,6 +11,8 @@
 
 **Fixes**
 
+- Typing in a table's header row no longer turns it into plain text until
+  the file is reloaded.
 - Ctrl and Alt chords arrive intact in terminals with the kitty keyboard
   protocol (kitty, Ghostty, WezTerm, foot, Alacritty, recent iTerm2):
   `Alt-j`/`Alt-k` no longer split into Esc and a letter over SSH or on a slow

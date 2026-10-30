@@ -8479,6 +8479,17 @@ mod tests {
         assert_eq!(text(&app), "| a   | b   | X   |\n|-----|-----|-----|\n");
     }
 
+    /// Aligning rewrites the header row, and it has to come out of that
+    /// still the table's header, not a paragraph of `|`s.
+    #[test]
+    fn aligning_keeps_the_header_row_a_header() {
+        let mut app = app_with("# T\n\nlist\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nend\n");
+        feed(&mut app, "7Go| longer cell | x |");
+        esc(&mut app);
+        app.refresh_blocks();
+        assert_eq!(app.blocks.kinds[4], BlockKind::Table);
+    }
+
     #[test]
     fn ga_outside_a_table_says_so() {
         let mut app = app_with("just prose\n");
