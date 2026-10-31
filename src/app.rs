@@ -2406,7 +2406,9 @@ impl App {
         }
         if let Some(path) = to_open {
             if self.open_file(path) {
-                if let Some(t) = self.tree.as_mut() {
+                if self.config.tree.close_on_open {
+                    self.tree = None;
+                } else if let Some(t) = self.tree.as_mut() {
                     t.focused = false; // hand focus back to the editor
                 }
             }
@@ -9110,6 +9112,28 @@ mod tests {
         prompt_type(&mut app, "inner.md");
         prompt_enter(&mut app);
         assert!(dir.join("notes/inner.md").is_file());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Opening a file leaves the tree beside the editor for the next one,
+    /// unless `tree.close_on_open` asks for it to go.
+    #[test]
+    fn tree_stays_open_after_opening_unless_asked() {
+        let dir = two_files();
+        let mut app = tree_on(&dir);
+        app.tree.as_mut().unwrap().focused = true;
+        app.tree.as_mut().unwrap().select_path(&dir.join("one.md"));
+        feed(&mut app, "l");
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("one.md").as_path()));
+        assert!(app.tree.as_ref().is_some_and(|t| !t.focused), "open, focus handed back");
+
+        let mut app = tree_on(&dir);
+        app.config.tree.close_on_open = true;
+        app.tree.as_mut().unwrap().focused = true;
+        app.tree.as_mut().unwrap().select_path(&dir.join("one.md"));
+        feed(&mut app, "l");
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("one.md").as_path()));
+        assert!(app.tree.is_none(), "closed once the file opened");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -192,6 +192,9 @@ pub struct TreeConfig {
     /// Dotfiles listed from the start. `H` still toggles it live; this is only
     /// the state each session opens the tree with.
     pub show_hidden: bool,
+    /// Close the tree once it has opened a file, instead of leaving it
+    /// beside the editor for the next one.
+    pub close_on_open: bool,
 }
 
 #[derive(Debug, Deserialize)]

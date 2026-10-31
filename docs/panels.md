@@ -48,5 +48,7 @@ panes.
 - Renaming or moving a file you have open carries the buffer with it.
 - In a tree prompt, `Ctrl-u` clears it and `Esc` abandons it.
 - Dotfile visibility is remembered; the default is `tree.show_hidden`.
+- Opening a file hands focus back to the editor and leaves the tree open for
+  the next one. `tree.close_on_open = true` closes it instead.
 - The leader keys are built in. Remap them under `[keys.normal]` (see
   [Configuration](configuration.md#key-bindings)).
