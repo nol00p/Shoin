@@ -447,6 +447,7 @@ const CONFIG: &[&str] = &[
     "            list_tab (Tab / Shift-Tab in Insert indent a list item),",
     "            table_align (auto: Esc lines up a table you edited; manual: ga)",
     "  [tree]    show_hidden — dotfiles in the file tree (H toggles it live)",
+    "            close_on_open — close the tree once it opens a file",
     "  [transclude]  embed, root, max_depth, heading_offset, border",
     "  [status]  enabled, flash_ms, show",
     "  [cursor]  normal, insert, visual, blink",

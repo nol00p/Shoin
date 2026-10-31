@@ -9,6 +9,8 @@
   rebind as `scroll_view_down` / `scroll_view_up`. The mouse wheel now
   scrolls the page the same way, three lines a notch, instead of dragging the
   cursor (#54).
+- `tree.close_on_open = true` closes the file tree once it opens a file,
+  instead of leaving it beside the editor (#55).
 
 **Fixes**
 

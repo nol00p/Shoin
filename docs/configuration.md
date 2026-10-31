@@ -44,6 +44,7 @@ table_align       = "auto" # line up a table's columns on leaving Insert;
 
 [tree]
 show_hidden = false       # dotfiles in the file tree (H toggles it live)
+close_on_open = false     # close the tree once it opens a file
 
 [keys.normal]
 "<leader>w" = "save"
