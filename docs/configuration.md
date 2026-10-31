@@ -71,7 +71,8 @@ root = "file"             # where Space fe / ff open: "file" (the edited
 
 A binding may name a whole **verb**, not just an action, so the Vim grammar
 moves with it: `"s" = "operator_delete"` keeps counts, text objects and the
-doubled form (`ss`) all working.
+doubled form (`ss`) all working. Every name you can bind, with its default
+key, is listed under [Action names](reference/keys.md#action-names).
 
 The leader keys are bindings in `keys.conf` like any other — remap them, or
 add your own. The shipped `keys.conf` is built in, and your `[keys.*]` merge

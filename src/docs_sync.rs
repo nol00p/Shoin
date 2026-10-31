@@ -312,6 +312,81 @@ fn every_shipped_binding_is_documented() {
     assert!(missing.is_empty(), "shipped bindings not documented: {missing:?}");
 }
 
+/// Every name a `[keys.*]` binding can use, read from the three parsers'
+/// match arms (`Action::from_config_name`, `Verb::from_config_name`,
+/// `motion_by_name`): every `"name" =>` arm in those two files that yields an
+/// `Action`, `Verb` or `Motion`. The empty name is left out; `heading_N`,
+/// matched by prefix, is checked apart.
+fn action_names() -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for file in ["src/input/action.rs", "src/input/bindings.rs"] {
+        for line in read(file).lines() {
+            let Some((arm, result)) = line.trim().split_once("=>") else { continue };
+            let arm = arm.trim();
+            // Only arms that make something bindable: `Root::parse` matches
+            // words too, but they are `tree.root` values, not actions.
+            let bindable = ["Action::", "Verb::", "Motion::"].iter().any(|t| result.contains(t));
+            if !arm.starts_with('"') || !bindable {
+                continue;
+            }
+            for name in arm.split('|').map(|n| n.trim().trim_matches('"')) {
+                if !name.is_empty() {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The "Action names" section of the keys reference: its own text, and the
+/// names in the first two columns of its tables.
+fn documented_action_names() -> (String, BTreeSet<String>) {
+    let page = read("docs/reference/keys.md");
+    let start = page.find("\n## Action names").expect("keys.md has an Action names section");
+    let rest = &page[start + 1..];
+    let section = match rest[3..].find("\n## ") {
+        Some(end) => &rest[..end + 3],
+        None => rest,
+    };
+    let mut names = BTreeSet::new();
+    for row in section.lines().filter(|l| l.starts_with('|')) {
+        for cell in row.split('|').skip(1).take(2) {
+            for (i, tok) in cell.split('`').enumerate() {
+                let is_name = !tok.is_empty()
+                    && tok.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '!');
+                if i % 2 == 1 && is_name {
+                    names.insert(tok.to_string());
+                }
+            }
+        }
+    }
+    (section.to_string(), names)
+}
+
+/// Every bindable action name is in the keys reference, and every name it
+/// lists binds. Before this the names were written down only in the code,
+/// and a key can't be rebound to something nobody can name.
+#[test]
+fn every_action_name_is_documented() {
+    let (section, documented) = documented_action_names();
+    let names = action_names();
+    assert!(names.contains("save") && names.contains("operator_delete") && names.contains("move_down"));
+
+    let missing: Vec<_> = names
+        .iter()
+        .filter(|n| !section.contains(&format!("`{n}`")))
+        .collect();
+    assert!(missing.is_empty(), "action names not in docs/reference/keys.md: {missing:?}");
+    assert!(section.contains("`heading_1`"), "the heading_N actions");
+
+    let bogus: Vec<_> = documented
+        .iter()
+        .filter(|n| crate::input::bindings::Verb::from_config_name(n).is_none())
+        .collect();
+    assert!(bogus.is_empty(), "documented action names that don't bind: {bogus:?}");
+}
+
 /// The help topics the commands page names are real pages, not the
 /// "no such topic" fallback.
 #[test]

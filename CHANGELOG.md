@@ -28,6 +28,8 @@
 - `:help <word>` opens help at a key, command, setting or section
   (`:help gb`, `:help view`, `:help measure`, `:help tree`). Inside help,
   `/` searches every tab and `n` / `N` move between matches.
+- The keys reference lists every action name a binding can use, with its
+  other spellings and default key (#59).
 
 **Fixes**
 

@@ -228,3 +228,141 @@ remove it.
 | `l` `f` `b` | set every difference to live / file / both |
 | `w` | commit the merge and write it |
 | `q` `Esc` | abort |
+
+## Action names
+
+The names a binding in `keys.conf` can use, under `[keys.normal]`,
+`[keys.insert]` or `[keys.visual]`. The second column lists other spellings
+of the same name. Default key is where the action already is, if anywhere.
+See [Configuration](../configuration.md#key-bindings) for how bindings merge.
+
+### Grammar
+
+These are pieces of the Vim grammar, not finished commands, so a key bound to
+one keeps its counts, text objects and doubled form: `"s" = "operator_delete"`
+gives `ss`, `siw` and `2s3w`.
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `operator_delete` | `delete` | `d` | delete over a motion or object |
+| `operator_change` | `change` | `c` | delete over a motion or object, then Insert |
+| `operator_yank` | `yank` | `y` | copy over a motion or object |
+| `operator_indent` | `indent` | `>` | indent over a motion or object |
+| `operator_outdent` | `outdent` | `<` | outdent over a motion or object |
+| `operator_lowercase` | `lowercase` | `gu` (`u` in Visual) | lowercase over a motion or object |
+| `operator_uppercase` | `uppercase` | `gU` (`U` in Visual) | uppercase over a motion or object |
+| `inner_object` | | `i` | the inside of a text object (`diw`) |
+| `around_object` | | `a` | a text object with its surroundings (`daw`) |
+| `register` | | `"` | name the register for the next command |
+| `replace_char` | | `r` | replace the character under the cursor |
+| `find_char` | | `f` | to the next given character on the line |
+| `find_char_back` | | `F` | to the previous given character |
+| `till_char` | | `t` | to just before the next given character |
+| `till_char_back` | | `T` | to just after the previous given character |
+| `goto_line` | | `G` | the last line, or line N with a count |
+| `goto_line_first` | | `gg` | the first line, or line N with a count |
+
+### Motions
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `move_left` `move_right` | | `h` `l` | a character left / right |
+| `move_up` `move_down` | | `k` `j` | a line up / down |
+| `word_forward` `word_back` | | `w` `b` | next / previous word start |
+| `word_end` | | `e` | end of the word |
+| `line_start` | | `0` | start of the line |
+| `line_first_non_blank` | | `^` | first non-blank of the line |
+| `line_end` | | `$` | end of the line |
+| `paragraph_forward` `paragraph_back` | | `}` `{` | next / previous paragraph |
+| `half_page_down` `half_page_up` | | `Ctrl-d` `Ctrl-u` | half a page |
+| `page_down` `page_up` | | `Ctrl-f` `Ctrl-b` | a page |
+| `screen_top` `screen_middle` `screen_bottom` | | `H` `M` `L` | top / middle / bottom of the screen |
+
+### Editing
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `insert` `append` | | `i` `a` | Insert before / after the cursor |
+| `insert_line_start` `append_line_end` | | `I` `A` | Insert at the line's start / end |
+| `open_below` `open_above` | | `o` `O` | a new line below / above, in Insert |
+| `normal_mode` | `escape` | `Esc` | back to Normal |
+| `visual` `visual_line` | | `v` `V` | Visual charwise / linewise |
+| `delete_char` | | `x` | delete the character under the cursor |
+| `join_lines` | | `J` | join the next line onto this one |
+| `paste_after` | `paste` | `p` | paste after the cursor |
+| `paste_before` | | `P` | paste before the cursor |
+| `move_lines_down` | `move_line_down` | | move the selected lines (the cursor's line in Normal) down, keeping them selected |
+| `move_lines_up` | `move_line_up` | | the same, up |
+| `undo` `redo` | | `u` `Ctrl-r` | undo / redo |
+| `repeat` | | `.` | repeat the last change |
+| `list_item_down` `list_item_up` | | `Alt-j` `Alt-k` | move the list item past the next / previous one |
+| `list_indent` `list_outdent` | | `Tab` `Shift-Tab` (Insert) | indent / outdent the list item |
+
+### Writer verbs
+
+In Normal mode on the word under the cursor, in Visual on the selection.
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `toggle_bold` | `bold` | `gb`, `Space b` (Visual) | toggle `**bold**` |
+| `toggle_italic` | `italic` | `gi`, `Space i` (Visual) | toggle `*italic*` |
+| `toggle_highlight` | `highlight` | `gh` | toggle `==highlight==` |
+| `toggle_code` | `code` | `gk` | toggle `` `code` `` |
+| `insert_link` | `link` | `gl` | wrap as a link, cursor in the URL |
+| `toggle_task` | `task` | `gt` | toggle a task checkbox |
+| `align_table` | `table` | `ga` | align the table under the cursor |
+| `heading_1` … `heading_6` | | `g1` … `g6` | set the heading level |
+| `clear_heading` | | `g0` | strip the heading |
+
+### Files, search and commands
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `save` | `write` | `Ctrl-s`, `Space w` | save |
+| `save_stay_insert` | | `Ctrl-s` (Insert) | save without leaving Insert |
+| `save_quit` | `write_quit` `wq` | | save and quit |
+| `quit` | | `Space q` | quit, refusing with unsaved changes |
+| `force_quit` | `quit!` | | quit, discarding changes |
+| `command` | | `:` | the command line |
+| `search_forward` | `search` | `/` | search forward |
+| `search_backward` | | `?` | search backward |
+| `follow_link` | `follow` `goto_file` | `gf` | follow the link under the cursor |
+| `open_external` | `open_url` `xdg_open` | `gx` | open the link with the desktop |
+
+### View
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `scroll_view_down` | `scroll_down` | `Ctrl-e` | scroll the page a line down |
+| `scroll_view_up` | `scroll_up` | `Ctrl-y` | scroll the page a line up |
+| `cycle_focus` | `focus` | `Space F` | cycle focus mode |
+| `toggle_typewriter` | `typewriter` | `Space t` | typewriter scrolling on / off |
+| `toggle_conceal` | `conceal` | `Space c` | concealment on / off |
+| `toggle_zen` | `zen` | `Space z` | zen mode on / off |
+| `toggle_numbers` | `numbers` `number` | `Space n` | line numbers on / off |
+| `cycle_align` | `align` | `Space a` | cycle text alignment |
+| `toggle_view` | `view` `read_only` | `Space v` | read-only mode on / off, as `:view` |
+| `help` | `shortcuts` | `Space hl` | the shortcuts page |
+
+### Panels and panes
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `file_tree` | `file_explorer` `tree` | `Space fe` | file tree in this file's folder, or the launch folder with `tree.root = "cwd"` |
+| `file_tree_home` | `file_explorer_home` | `Space fE` | file tree over `$HOME` |
+| `find_file` | `fuzzy_find` `files` | `Space ff` | fuzzy finder in this file's folder, or the launch folder with `tree.root = "cwd"` |
+| `find_file_home` | `fuzzy_find_home` | `Space fF` | fuzzy finder over `$HOME` |
+| `file_tree_cwd` | `file_explorer_cwd` | | file tree in the folder Shoin was launched from |
+| `find_file_cwd` | `fuzzy_find_cwd` | | fuzzy finder in the folder Shoin was launched from |
+| `find_buffer` | `buffers` `switch_buffer` | `Space fb` | switch buffer |
+| `alternate_buffer` | `alternate` `alt_buffer` | `Ctrl-^` | back to the previous buffer |
+| `split_vertical` | `vsplit` | `Space sv` | split beside, or close the split |
+| `split_horizontal` | `split` | `Space ss` | split below, or close the split |
+| `close_pane` | | `Ctrl-w q` | close this pane |
+| `only_pane` | `only` | `Space so` | keep only this pane |
+
+### Unbinding
+
+| Name | Also | Default key | Does |
+|---|---|---|---|
+| `none` | `nop` `""` | | nothing: removes a binding, shipped or built in |
