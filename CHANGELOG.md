@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Editing**
+
+- `Ctrl-e` / `Ctrl-y` scroll the page a line without moving the cursor,
+  which only follows when it would leave the screen. They take a count, and
+  rebind as `scroll_view_down` / `scroll_view_up`. The mouse wheel now
+  scrolls the page the same way, three lines a notch, instead of dragging the
+  cursor (#54).
+
 **Fixes**
 
 - On Linux the config no longer reloads over and over while the editor

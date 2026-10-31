@@ -70,6 +70,9 @@ pub enum Action {
     RepeatFind { reverse: bool },
     /// `*`.
     SearchWordUnderCursor,
+    /// `Ctrl-e` / `Ctrl-y` — scroll the page a row, leaving the cursor where
+    /// it is unless it would go off screen.
+    ScrollView { down: bool },
     /// `gp` — a new paragraph below, in Insert.
     AppendParagraph,
     /// `<C-w>` window commands, by their second key.
@@ -234,6 +237,8 @@ impl Action {
             "paste_before" => Action::PasteBefore,
             "delete_char" => Action::DeleteChar,
             "join_lines" => Action::JoinLines,
+            "scroll_view_down" | "scroll_down" => Action::ScrollView { down: true },
+            "scroll_view_up" | "scroll_up" => Action::ScrollView { down: false },
             "list_item_down" => Action::ListItemMove { down: true },
             "list_item_up" => Action::ListItemMove { down: false },
             "list_indent" => Action::ListShift { outdent: false },

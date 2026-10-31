@@ -91,6 +91,8 @@ pub fn normal(key: Key) -> Option<Verb> {
         (KeyCode::Char('u'), false) => Verb::Act(Action::Undo),
         (KeyCode::Char('r'), true) => Verb::Act(Action::Redo),
         (KeyCode::Char('s'), true) => Verb::Act(Action::Save),
+        (KeyCode::Char('e'), true) => Verb::Act(Action::ScrollView { down: true }),
+        (KeyCode::Char('y'), true) => Verb::Act(Action::ScrollView { down: false }),
         // Both spellings, as vim documents them: terminals disagree about
         // whether the chord arrives as `^` or as the `6` the key is printed
         // with, and a reader should not have to know which one theirs sends.

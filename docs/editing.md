@@ -126,7 +126,8 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   lists each one.
 - The escape alias is `input.escape_alias` (default `jk`); set it to `""` to
   turn it off.
-- With the mouse on, a drag selects text the way `mouse=a` does in Vim.
+- With the mouse on, a drag selects text the way `mouse=a` does in Vim, and
+  the wheel scrolls the page three lines at a time, like `Ctrl-e` / `Ctrl-y`.
   Dragging while in Insert mode gives Vim's `-- (insert) VISUAL --`: an
   operator or `Esc` hands typing back. `:set mouse off` gives selection back
   to the terminal.

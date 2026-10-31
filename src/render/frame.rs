@@ -1042,6 +1042,68 @@ pub fn visible_line_range(app: &App, area: Rect) -> Option<(usize, usize)> {
     Some((first, last))
 }
 
+/// `Ctrl-e` / `Ctrl-y` and the wheel: the focused pane's top row moved by
+/// `delta` rows, and the cursor to go with it. The cursor stays where it is
+/// unless the new view would leave it outside `scroll_off`, and then it moves
+/// just far enough, onto the nearest row of text — vim's rule, which is what
+/// lets the page move under a cursor that is not meant to.
+pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Cursor)> {
+    let cfg = &app.config;
+    let rect = focused_rect(app, area)?;
+    let lay = Layout::compute(&cfg.layout, rect.width, rect.height, 0);
+
+    let mut cache = app.cache.borrow_mut();
+    cache.sync(app, lay.measure);
+
+    let cursor = app.buffer.cursor;
+    let total = cache.total_rows();
+    if total == 0 {
+        return None;
+    }
+    let (cursor_row, _) = cache.locate(cursor.line, cursor.col);
+    let top = scroll_offset(
+        cursor_row,
+        total,
+        &lay,
+        &cfg.layout,
+        cfg.editor.scroll_off,
+        app.scroll_hint(),
+        app.view,
+    );
+    let height = (lay.height as usize).max(1);
+    let pad = (cfg.editor.scroll_off as usize).min(height.saturating_sub(1) / 2);
+    // `scroll_offset` pulls the top back to keep `pad` rows above the cursor,
+    // so a top any later than this would only be undone on the next frame.
+    let last_top = (total - 1).saturating_sub(pad);
+    let new_top = (top as isize + delta).clamp(0, last_top as isize) as usize;
+
+    let lo = if new_top == 0 { 0 } else { new_top + pad };
+    let hi = (new_top + height - 1).saturating_sub(pad).min(total - 1).max(lo);
+    let down = cursor_row < lo;
+    let mut row = match cursor_row {
+        r if r < lo => lo,
+        r if r > hi => hi,
+        _ => return Some((new_top, cursor)),
+    };
+    // Line spacing's air has no text to stand on: step past it, away from
+    // the edge the cursor was pushed off.
+    while cache.row(row).is_some_and(|r| r.is_spacer()) {
+        match down {
+            true if row < hi => row += 1,
+            false if row > lo => row -= 1,
+            _ => break,
+        }
+    }
+    let target = cache.row(row)?;
+    let line = target.line();
+    let len = app.buffer.line_len(line);
+    // The first row of a line keeps the column, as `j` does; a later row of a
+    // wrapped one starts where that row does.
+    let first = cache.locate(line, 0).0 == row;
+    let col = if first { cursor.col } else { target.start_col };
+    Some((new_top, Cursor::new(line, col.min(len))))
+}
+
 /// The rect the focused pane occupies.
 fn focused_rect(app: &App, area: Rect) -> Option<Rect> {
     app.layout

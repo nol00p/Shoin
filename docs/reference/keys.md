@@ -21,6 +21,7 @@ Motions take a count, such as `3w`.
 | `H` `M` `L` | top / middle / bottom of the visible screen |
 | `Ctrl-d` `Ctrl-u` | half a page down / up |
 | `Ctrl-f` `Ctrl-b` | a full page down / up |
+| `Ctrl-e` `Ctrl-y` | scroll the page a line down / up; the cursor stays put |
 
 ## Operators
 
