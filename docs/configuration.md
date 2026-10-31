@@ -101,7 +101,8 @@ The first of these that exists wins:
 - A parse error keeps the running config instead of dropping you into a broken
   one. A malformed binding is skipped with a warning, never fatal.
 - Bindings match exactly, so one that is also the start of a longer binding
-  shadows it. Shoin warns about that at load time.
+  shadows it. Shoin warns about that at load time. To bind a prefix key such
+  as `<leader>f` on its own, set the bindings under it to `"none"`.
 - `[keys.insert]` takes single keys only. `"<S-Tab>"` names Shift-Tab.
 - `list_renumber = false` leaves the numbers of a `1.` `2.` `3.` list as you
   wrote them when `>al`, `<al`, `Alt-j` or `Alt-k` moves an item. `list_tab =

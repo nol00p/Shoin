@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+**Fixes**
+
+- On Linux the config no longer reloads over and over while the editor
+  runs. Reading the config counted as a change to it, so each reload set off
+  the next, and a config with a warning flashed that warning forever (#53).
+- Setting the bindings under a prefix to `"none"` no longer warns when the
+  prefix itself is bound: `"<leader>fe" = "none"` frees `<leader>f` for your
+  own binding.
+
 ## 0.2.1
 
 **Writing**
