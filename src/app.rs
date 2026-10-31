@@ -1131,7 +1131,7 @@ impl App {
     }
 
     /// Left-click positions the cursor and drag-selects from it; the wheel
-    /// scrolls by moving it.
+    /// scrolls the page, as `Ctrl-e` / `Ctrl-y` do.
     fn on_mouse(&mut self, m: MouseEvent) {
         if !self.config.input.mouse {
             return;
@@ -1222,8 +1222,8 @@ impl App {
             // The selection outlives the button: releasing leaves Visual mode
             // up, so `y`, `d` and `<leader>b` all have something to act on.
             MouseEventKind::Up(MouseButton::Left) => self.drag_from = None,
-            MouseEventKind::ScrollDown => self.move_by(Motion::Down, 3),
-            MouseEventKind::ScrollUp => self.move_by(Motion::Up, 3),
+            MouseEventKind::ScrollDown => self.scroll_view(3),
+            MouseEventKind::ScrollUp => self.scroll_view(-3),
             _ => {}
         }
     }
@@ -1657,6 +1657,27 @@ impl App {
         }
     }
 
+    /// Scroll the focused pane `delta` rows, down when positive. Typewriter
+    /// and read-only mode tie the view to the cursor, so there the cursor is
+    /// what moves; elsewhere the page moves and the cursor only follows when
+    /// it would leave the screen (`frame::scrolled_view`).
+    fn scroll_view(&mut self, delta: isize) {
+        if self.view || self.config.layout.typewriter {
+            let m = if delta > 0 { Motion::Down } else { Motion::Up };
+            self.move_by(m, delta.unsigned_abs());
+            if self.view {
+                self.clamp_reading_cursor();
+            }
+            return;
+        }
+        let area = Rect { x: 0, y: 0, width: self.term_size.0, height: self.term_size.1 };
+        let Some((top, cursor)) = frame::scrolled_view(self, area, delta) else { return };
+        if let Some(pane) = self.focused_pane() {
+            pane.scroll.set(top);
+        }
+        self.buffer.cursor = cursor;
+    }
+
     /// The current text-area height in rows, for paging motions.
     fn viewport_height(&self) -> usize {
         let reserved = if self.config.status.enabled { 1 } else { 0 };
@@ -1714,6 +1735,10 @@ impl App {
                 if let Some(anchor) = self.anchor.replace(self.buffer.cursor) {
                     self.buffer.cursor = anchor;
                 }
+            }
+            Action::ScrollView { down } => {
+                let rows = count as isize;
+                self.scroll_view(if down { rows } else { -rows });
             }
             Action::DeleteChar => self.delete_chars_under(count),
             Action::DeleteCharBack => self.delete_chars_before(count),
@@ -1922,6 +1947,7 @@ impl App {
             | Action::SearchNext { .. }
             | Action::RepeatFind { .. }
             | Action::SearchWordUnderCursor
+            | Action::ScrollView { .. }
             | Action::AppendParagraph
             | Action::Window(_)
             | Action::ToggleSplit { .. }
@@ -8662,6 +8688,72 @@ mod tests {
         app.buffer.cursor = Cursor::new(0, 0);
         feed(&mut app, "dL");
         assert!(app.buffer.line_count() < 41, "dL removed the visible block");
+    }
+
+    fn scroll_app() -> App {
+        let doc: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        let mut app = app_with(&doc);
+        app.term_size = (80, 30);
+        app
+    }
+
+    /// `Ctrl-e` moves the page, not the cursor, while the cursor has room.
+    #[test]
+    fn ctrl_e_scrolls_the_page_under_the_cursor() {
+        let mut app = scroll_app();
+        app.buffer.cursor = Cursor::new(10, 2);
+        ctrl(&mut app, 'e');
+        assert_eq!(app.scroll_hint(), 1);
+        assert_eq!(app.buffer.cursor, Cursor::new(10, 2), "the cursor stays put");
+        feed(&mut app, "4");
+        ctrl(&mut app, 'e');
+        assert_eq!(app.scroll_hint(), 5, "a count scrolls that many rows");
+    }
+
+    /// A cursor about to leave the screen is carried along, `scroll_off` in
+    /// from the edge, keeping its column.
+    #[test]
+    fn scrolling_carries_a_cursor_at_the_edge() {
+        let mut app = scroll_app();
+        let pad = app.config.editor.scroll_off as usize;
+        app.buffer.cursor = Cursor::new(0, 3);
+        feed(&mut app, "20");
+        ctrl(&mut app, 'e');
+        assert_eq!(app.scroll_hint(), 20);
+        assert_eq!(app.buffer.cursor, Cursor::new(20 + pad, 3));
+
+        feed(&mut app, "20");
+        ctrl(&mut app, 'y');
+        assert_eq!(app.scroll_hint(), 0);
+        let bottom = app.viewport_height() - 1 - pad;
+        assert_eq!(app.buffer.cursor, Cursor::new(bottom, 3));
+        ctrl(&mut app, 'y');
+        assert_eq!(app.scroll_hint(), 0, "nothing above the first line");
+    }
+
+    /// The wheel scrolls the page the same way, three rows a notch.
+    #[test]
+    fn the_wheel_scrolls_the_page() {
+        let mut app = scroll_app();
+        app.buffer.cursor = Cursor::new(10, 0);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
+        assert_eq!(app.scroll_hint(), 3);
+        assert_eq!(app.buffer.cursor.line, 10);
+        mouse(&mut app, MouseEventKind::ScrollUp, 10, 10);
+        assert_eq!(app.scroll_hint(), 0);
+        assert_eq!(app.buffer.cursor.line, 10);
+    }
+
+    /// Typewriter mode pins the cursor's row, so scrolling moves the cursor.
+    #[test]
+    fn scrolling_in_typewriter_mode_moves_the_cursor() {
+        let mut app = scroll_app();
+        app.config.layout.typewriter = true;
+        app.buffer.cursor = Cursor::new(10, 0);
+        ctrl(&mut app, 'e');
+        assert_eq!(app.buffer.cursor.line, 11);
+        ctrl(&mut app, 'y');
+        assert_eq!(app.buffer.cursor.line, 10);
     }
 
     #[test]
