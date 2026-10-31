@@ -1755,6 +1755,7 @@ impl App {
             Action::JoinLines => self.join_lines(count),
             Action::ToggleCase => self.toggle_case(count),
             Action::ListItemMove { down } => self.move_list_item(down, count),
+            Action::MoveLines { down } => self.move_lines(down, count),
             Action::SearchNext { reverse } => {
                 let backward = match self.search.as_ref() {
                     Some(s) => s.reverse != reverse,
@@ -1956,7 +1957,8 @@ impl App {
             | Action::ReplaceChar(_)
             | Action::JoinLines
             | Action::ToggleCase
-            | Action::ListItemMove { .. } => {}
+            | Action::ListItemMove { .. }
+            | Action::MoveLines { .. } => {}
         }
     }
 
@@ -4005,6 +4007,38 @@ impl App {
         // The line's text only changed if its number did.
         let moved = self.buffer.line_len(line) as isize - before;
         self.buffer.cursor = Cursor::new(line, (at.col as isize + moved).max(0) as usize);
+    }
+
+    /// `move_lines_down` / `move_lines_up`: the selected lines (the cursor's
+    /// line outside Visual) swap with the `count` lines past them, like Vim's
+    /// `:'<,'>m '>+1 | gv`. Both ends of the selection move with the text, so
+    /// it stays selected for the next press, and each press is its own undo
+    /// step because every Visual key opens one. A count reaching past the
+    /// buffer's end goes as far as it can; none to go at all is refused.
+    fn move_lines(&mut self, down: bool, count: usize) {
+        let cur = self.buffer.cursor;
+        let anchor = self.anchor;
+        let other = anchor.unwrap_or(cur);
+        let (top, bot) = (cur.line.min(other.line), cur.line.max(other.line));
+        let room = if down { self.buffer.last_line() - bot } else { top };
+        let n = count.min(room);
+        if n == 0 {
+            let why = if down { "last line" } else { "first line" };
+            return self.notify(why, FlashKind::Error);
+        }
+        // `first` then `second` become `second` then `first`.
+        let (first, second) = if down { ((top, bot), (bot + 1, bot + n)) } else { ((top - n, top - 1), (top, bot)) };
+        let lines = |(a, b): (usize, usize)| (a..=b).map(|l| self.buffer.line_text(l)).collect::<Vec<_>>();
+        let swapped = [lines(second), lines(first)].concat().join("\n");
+
+        let from = self.buffer.rope.line_to_char(first.0);
+        let to = self.buffer.char_index(Cursor::new(second.1, self.buffer.line_len(second.1)));
+        self.buffer.delete_chars(from, to);
+        self.buffer.insert_str(Cursor::new(first.0, 0), &swapped);
+
+        let line = |l: usize| if down { l + n } else { l - n };
+        self.buffer.cursor = Cursor::new(line(cur.line), cur.col);
+        self.anchor = anchor.map(|a| Cursor::new(line(a.line), a.col));
     }
 
     /// Rewrite the ordinals `edits` name. Each is on a line of its own and
@@ -8670,6 +8704,53 @@ mod tests {
         app.buffer.cursor = Cursor::new(0, 0);
         app.blocks = BlockCache::build(&app.buffer);
         app
+    }
+
+    /// `move_lines_down` / `move_lines_up` bound in Visual, as people bind
+    /// `J` / `K`: the selected lines move a line a press and stay selected,
+    /// each press is one undo step, and a count moves further.
+    #[test]
+    fn visual_move_lines_keeps_the_selection() {
+        let mut app = app_with("a\nb\nc\nd\ne\n");
+        app.config.keys.visual.insert("J".into(), "move_lines_down".into());
+        app.config.keys.visual.insert("K".into(), "move_lines_up".into());
+        app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+
+        feed(&mut app, "jVj"); // b and c
+        feed(&mut app, "J");
+        assert_eq!(text(&app), "a\nd\nb\nc\ne\n");
+        assert!(matches!(app.mode, Mode::VisualLine), "still selecting");
+        assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (2, 3));
+
+        feed(&mut app, "J");
+        assert_eq!(text(&app), "a\nd\ne\nb\nc\n");
+        feed(&mut app, "J"); // nowhere left to go
+        assert_eq!(text(&app), "a\nd\ne\nb\nc\n");
+
+        feed(&mut app, "3K"); // a count past the top stops at it
+        assert_eq!(text(&app), "b\nc\na\nd\ne\n");
+        assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (0, 1));
+
+        esc(&mut app);
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "a\nd\ne\nb\nc\n", "one press, one undo step");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "a\nd\nb\nc\ne\n");
+    }
+
+    /// Outside Visual the cursor's line moves, and its column comes along.
+    #[test]
+    fn move_lines_in_normal_moves_the_cursor_line() {
+        let mut app = app_with_keys("one\ntwo\nthree", &[("<C-j>", "move_lines_down")]);
+        app.buffer.cursor = Cursor::new(0, 2);
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        app.sync_after_input();
+        assert_eq!(text(&app), "two\none\nthree");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 2));
+        // Onto the last line, which has no newline after it.
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        app.sync_after_input();
+        assert_eq!(text(&app), "two\nthree\none");
     }
 
     #[test]

@@ -108,6 +108,10 @@ pub enum Action {
     /// `Alt-j` / `Alt-k` — move the list item under the cursor, children and
     /// all, past its next / previous sibling (past `count` of them).
     ListItemMove { down: bool },
+    /// `move_lines_down` / `move_lines_up` — the lines of the Visual selection
+    /// (the cursor's line outside Visual) past the next / previous `count`
+    /// lines, still selected. Plain lines: no list knowledge, no renumbering.
+    MoveLines { down: bool },
     /// Insert-mode `Tab` / `Shift-Tab` on a list item: `>al` / `<al` without
     /// leaving Insert.
     ListShift { outdent: bool },
@@ -208,6 +212,7 @@ impl Action {
             | Action::JoinLines
             | Action::ToggleCase
             | Action::ListItemMove { .. }
+            | Action::MoveLines { .. }
             | Action::ListShift { .. }
             | Action::Undo
             | Action::Redo
@@ -257,6 +262,8 @@ impl Action {
             "scroll_view_up" | "scroll_up" => Action::ScrollView { down: false },
             "list_item_down" => Action::ListItemMove { down: true },
             "list_item_up" => Action::ListItemMove { down: false },
+            "move_lines_down" | "move_line_down" => Action::MoveLines { down: true },
+            "move_lines_up" | "move_line_up" => Action::MoveLines { down: false },
             "list_indent" => Action::ListShift { outdent: false },
             "list_outdent" => Action::ListShift { outdent: true },
             "toggle_bold" | "bold" => Action::ToggleBold,

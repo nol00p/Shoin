@@ -15,6 +15,9 @@
   launched from instead of the edited file's folder, so a vault of notes in
   subfolders shows whole. The `file_tree_cwd` / `find_file_cwd` actions go
   there whatever the setting (#56).
+- `move_lines_down` / `move_lines_up` move the lines of a Visual selection
+  (or the cursor's line) down or up and keep them selected. They take a
+  count and are unbound: bind them to `J` / `K` under `[keys.visual]` (#57).
 
 **Fixes**
 
