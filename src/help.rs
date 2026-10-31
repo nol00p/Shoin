@@ -488,6 +488,7 @@ $XDG_CONFIG_HOME/shoin/ :: then the usual home, ~/.config/shoin/
 shoin --init-config :: write an annotated copy of every file below to start from
 shoin --print-config :: print the config in effect
 :e! :reload :: re-read it now
+> Every action name a [keys.*] binding can use, with its other spellings and default key, is listed in docs/reference/keys.md under Action names.
 ";
 
 // ------------------------------------------------------------------- pages
