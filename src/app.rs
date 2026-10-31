@@ -2220,10 +2220,19 @@ impl App {
             .unwrap_or_else(|| self.cwd())
     }
 
+    /// `Root::File` is what the plain `file_tree` / `find_file` ask for, so
+    /// it is the one `tree.root` can redirect — to the launch folder, for a
+    /// vault whose notes live in subfolders. An unknown word keeps the file's
+    /// folder (and is named by the config check).
     fn root_dir(&self, root: Root) -> PathBuf {
+        let root = match root {
+            Root::File => Root::parse(&self.config.tree.root).unwrap_or(Root::File),
+            other => other,
+        };
         match root {
             Root::File => self.file_dir(),
             Root::Home => self.home(),
+            Root::Cwd => self.cwd(),
         }
     }
 
@@ -6064,6 +6073,27 @@ mod tests {
             app.root_dir(Root::Home),
             "fe and fE must not open the same listing"
         );
+    }
+
+    /// `tree.root = "cwd"` moves the plain tree and finder to the launch
+    /// folder, so a vault opens whole; the `_cwd` actions go there whatever
+    /// the setting, and `_home` is untouched by it.
+    #[test]
+    fn tree_root_cwd_opens_the_launch_folder() {
+        let mut app = app_with("x\n");
+        let home = app.home();
+        app.buffer.path = Some(home.join("vault").join("sub").join("note.md"));
+        let near = home.join("vault").join("sub");
+
+        assert_eq!(app.root_dir(Root::File), near, "the default is the file's folder");
+        assert_eq!(app.root_dir(Root::Cwd), app.cwd());
+
+        app.config.tree.root = "cwd".into();
+        assert_eq!(app.root_dir(Root::File), app.cwd());
+        assert_eq!(app.root_dir(Root::Home), home);
+
+        app.config.tree.root = "nonsense".into();
+        assert_eq!(app.root_dir(Root::File), near, "an unknown word falls back");
     }
 
     /// `refresh_blocks` rescans from the edited line instead of rebuilding.

@@ -50,5 +50,8 @@ panes.
 - Dotfile visibility is remembered; the default is `tree.show_hidden`.
 - Opening a file hands focus back to the editor and leaves the tree open for
   the next one. `tree.close_on_open = true` closes it instead.
+- `tree.root = "cwd"` opens `Space fe` and `Space ff` on the folder Shoin was
+  launched from — the whole vault rather than the note's subfolder. To keep
+  both, bind `file_tree_cwd` / `find_file_cwd` to keys of their own.
 - The leader keys are built in. Remap them under `[keys.normal]` (see
   [Configuration](configuration.md#key-bindings)).

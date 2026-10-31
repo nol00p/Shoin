@@ -204,6 +204,12 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         "left · center · right · justified",
     );
     check(
+        "tree.root",
+        &cfg.tree.root,
+        crate::input::action::Root::parse(&cfg.tree.root).is_some(),
+        "file · cwd",
+    );
+    check(
         "transclude.embed",
         &cfg.transclude.embed,
         crate::transclude::Mode::parse(&cfg.transclude.embed).is_some(),
