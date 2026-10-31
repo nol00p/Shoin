@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use super::action::Action;
 use super::bindings::Verb;
 use super::pending::Key;
 use crate::config::keys::parse_seq;
@@ -65,7 +66,12 @@ impl Keymap {
                 };
                 match Verb::from_config_name(action) {
                     Some(verb) => {
-                        written.push((seq.clone(), keys));
+                        // `"none"` stays in the map, where it overrides a
+                        // built-in, but it is no binding to shadow: unbinding
+                        // `<leader>fe` is how `<leader>f` is taken over.
+                        if verb != Verb::Act(Action::Nop) {
+                            written.push((seq.clone(), keys));
+                        }
                         map.insert(seq, verb);
                     }
                     None => warnings.push(format!("key {keys:?}: unknown action {action:?}")),
@@ -154,6 +160,17 @@ mod tests {
             warnings.iter().any(|w| w.contains("can never run")),
             "expected a shadowing warning, got {warnings:?}"
         );
+    }
+
+    /// Unbinding everything under a prefix is how the prefix itself is taken
+    /// over, so a `"none"` binding is not one it shadows.
+    #[test]
+    fn an_unbound_binding_is_not_shadowed() {
+        let (_, warnings) = Keymap::from_config(
+            &keys(&[("<leader>f", "file_tree"), ("<leader>fe", "none")]),
+            " ",
+        );
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     }
 
     /// Sibling bindings under one prefix are not shadowing — neither is a

@@ -294,6 +294,12 @@ impl ConfigWatcher {
         let filter = only.as_ref().and_then(|p| p.file_name().map(|n| n.to_owned()));
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
+            // inotify reports every open and close, our own reads included:
+            // counting those would make each reload trigger the next. A write
+            // also arrives as a Modify, so nothing real is lost.
+            if matches!(event.kind, notify::EventKind::Access(_)) {
+                return;
+            }
             let ours = match &filter {
                 Some(name) => event.paths.iter().any(|p| p.file_name() == Some(name.as_os_str())),
                 None => true,
@@ -480,6 +486,26 @@ mod tests {
         }
         assert!(seen, "a rename over the config should wake the watcher");
         assert_eq!(watcher.reload().unwrap().layout.measure, 42);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Reloading reads the config, and inotify reports every open and close
+    /// of a file in the watched directory. If reads counted as changes, each
+    /// reload would wake the watcher for the next one, forever.
+    #[test]
+    fn reading_the_config_is_not_a_change() {
+        let dir = tmpdir("read");
+        std::fs::write(dir.join("layout.conf"), "[layout]\nmeasure = 60\n").unwrap();
+
+        let watcher = ConfigWatcher::new(Some(dir.clone()))
+            .unwrap()
+            .expect("a watcher for an explicit path");
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = watcher.changed();
+
+        assert_eq!(watcher.reload().unwrap().layout.measure, 60);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!watcher.changed(), "a reload should not wake the watcher");
         std::fs::remove_dir_all(&dir).ok();
     }
 
