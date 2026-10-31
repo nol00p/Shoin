@@ -122,6 +122,17 @@ and `list_indent` and `list_outdent` (Insert) — see
 | `i{obj}` `a{obj}` | select a text object (`viw`, `vap`) |
 | `Space b` `Space i` | toggle bold / italic |
 
+`move_lines_down` and `move_lines_up` move the selected lines down or up a
+line and keep them selected, like Vim's `:'<,'>m '>+1 | gv`. They take a
+count, each press is one undo step, and in Normal mode they move the cursor's
+line. They have no key until you give them one:
+
+```toml
+[keys.visual]
+"J" = "move_lines_down"
+"K" = "move_lines_up"
+```
+
 ## Other
 
 | Key | Does |

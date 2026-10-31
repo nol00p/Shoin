@@ -462,6 +462,7 @@ const CONFIG: &[&str] = &[
     "merge over it. A binding you write replaces that key's; the rest stay.",
     "     \"<leader>z\" = \"none\"     removes a shipped binding",
     "     \"<C-j>\" = \"list_item_down\"  Ctrl-j as well as Alt-j (list_item_up: Alt-k)",
+    "     [keys.visual] \"J\" = \"move_lines_down\"  move selected lines (up: move_lines_up)",
     "",
     "Bindings name any VERB, not just a discrete action, so the Vim grammar",
     "itself is remappable and keeps working:",
