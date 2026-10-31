@@ -25,25 +25,9 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
-/// The topics `:help` lists on its "no such topic" page, which is where a
-/// new page has to be added for anyone to find it.
-fn help_topics() -> Vec<String> {
-    Help::open("no such topic")
-        .lines
-        .iter()
-        .filter_map(|l| l.trim_start().strip_prefix(":help "))
-        .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
-        .filter(|t| t.chars().all(|c| c.is_ascii_lowercase()))
-        .collect()
-}
-
 /// Every page of `:help`, as one text.
 fn help_text() -> String {
-    std::iter::once(String::new())
-        .chain(help_topics().into_iter().filter(|t| t != "this"))
-        .flat_map(|topic| Help::open(&topic).lines)
-        .collect::<Vec<_>>()
-        .join("\n")
+    Help::all_text()
 }
 
 /// Every Markdown file a reader sees: the README and everything under docs/.
@@ -274,11 +258,11 @@ fn every_leader_binding_is_documented() {
     let mut missing = Vec::new();
     for key in &keys {
         // Followed by a space or the end, so `f` is not found inside `fe`.
-        let in_help = help.match_indices(&format!("<leader>{key}")).any(|(i, m)| {
+        let in_help = help.match_indices(&format!("Space {key}")).any(|(i, m)| {
             help[i + m.len()..].chars().next().is_none_or(char::is_whitespace)
         });
         if !in_help {
-            missing.push(format!(":help: <leader>{key}"));
+            missing.push(format!(":help: Space {key}"));
         }
         if !reference.contains(&format!("`Space {key}`")) {
             missing.push(format!("docs/reference/keys.md: Space {key}"));
@@ -341,8 +325,7 @@ fn every_documented_help_topic_exists() {
         .collect();
     assert!(!topics.is_empty(), "no topics found in: {line}");
     for topic in topics {
-        let first = Help::open(topic).lines.into_iter().next().unwrap_or_default();
-        assert!(!first.starts_with("No help topic"), ":help {topic} is not a topic");
+        assert!(Help::knows(topic), ":help {topic} opens nothing");
     }
 }
 
@@ -360,8 +343,7 @@ fn every_help_topic_mentioned_exists() {
             if topic.is_empty() {
                 continue;
             }
-            let first = Help::open(&topic).lines.into_iter().next().unwrap_or_default();
-            if first.starts_with("No help topic") {
+            if !Help::knows(&topic) {
                 unknown.push(format!("{name}: :help {topic}"));
             }
         }

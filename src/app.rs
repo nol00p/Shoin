@@ -2167,10 +2167,34 @@ impl App {
         self.help = Some(Help::open(topic));
     }
 
-    /// Scroll or close the help overlay.
+    /// Scroll, search or close the help overlay.
     fn on_key_help(&mut self, key: KeyEvent) {
         let Some(help) = &mut self.help else { return };
-        let max = help.lines.len().saturating_sub(1);
+        help.status = None;
+        // A `/` search being typed owns the keys until Enter or Esc.
+        if let Some(typed) = help.typing.as_mut() {
+            match key.code {
+                KeyCode::Esc => help.typing = None,
+                KeyCode::Backspace if typed.is_empty() => help.typing = None,
+                KeyCode::Backspace => {
+                    typed.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => typed.clear(),
+                KeyCode::Char(c) => typed.push(c),
+                KeyCode::Enter => {
+                    let q = help.typing.take().unwrap_or_default();
+                    if !q.is_empty() {
+                        if !help.search(&q, false) {
+                            help.status = Some(format!("not found: {q}"));
+                        }
+                        help.query = Some(q);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        let max = help.rows().len().saturating_sub(1);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.help = None,
             KeyCode::Char('j') | KeyCode::Down => help.scroll = (help.scroll + 1).min(max),
@@ -2179,6 +2203,15 @@ impl App {
             KeyCode::Char('u') | KeyCode::PageUp => help.scroll = help.scroll.saturating_sub(10),
             KeyCode::Char('g') | KeyCode::Home => help.scroll = 0,
             KeyCode::Char('G') | KeyCode::End => help.scroll = max,
+            KeyCode::Char('/') => help.typing = Some(String::new()),
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => help.switch(true),
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => help.switch(false),
+            KeyCode::Char(c @ '1'..='9') => help.show(c as usize - '1' as usize),
+            KeyCode::Char(c @ ('n' | 'N')) => match help.query.clone() {
+                Some(q) if !help.search(&q, c == 'N') => help.status = Some(format!("not found: {q}")),
+                Some(_) => {}
+                None => help.status = Some("no search yet — / to search".into()),
+            },
             _ => {}
         }
     }
@@ -5651,6 +5684,53 @@ mod tests {
         assert_eq!(text(&app), "ello\n", "editing works again");
     }
 
+    /// `:help <word>` opens at the line, and inside help `/` searches the
+    /// page, `n` goes on, and a miss says so instead of moving.
+    #[test]
+    fn help_opens_at_a_word_and_searches() {
+        let mut app = app_with("x\n");
+        app.run_command("help gb");
+        let h = app.help.as_ref().expect("help open");
+        assert!(h.rows()[h.mark.unwrap()].plain().contains("gb"));
+        assert_eq!(h.cats[h.cat].name, "Writing");
+
+        // Tab and Shift-Tab walk the categories; a digit jumps to one.
+        feed(&mut app, "1");
+        assert_eq!(app.help.as_ref().unwrap().cat, 0);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.help.as_ref().unwrap().cat, 1);
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        let h = app.help.as_ref().unwrap();
+        assert_eq!(h.cat, h.cats.len() - 1, "round to the last");
+
+        feed(&mut app, "/");
+        assert_eq!(app.help.as_ref().unwrap().typing.as_deref(), Some(""));
+        feed(&mut app, "heading");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let h = app.help.as_ref().unwrap();
+        assert!(h.typing.is_none());
+        let first = (h.cat, h.mark.unwrap());
+        assert!(h.rows()[first.1].plain().to_lowercase().contains("heading"));
+        feed(&mut app, "n");
+        let h = app.help.as_ref().unwrap();
+        assert_ne!((h.cat, h.mark.unwrap()), first, "n moves on");
+
+        feed(&mut app, "/zzqx");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let h = app.help.as_ref().unwrap();
+        assert_eq!(h.status.as_deref(), Some("not found: zzqx"));
+        feed(&mut app, "j");
+        assert!(app.help.as_ref().unwrap().status.is_none(), "cleared by the next key");
+
+        // Esc while typing drops the search, not the page.
+        feed(&mut app, "/abc");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.help.as_ref().is_some_and(|h| h.typing.is_none()));
+        feed(&mut app, "q");
+        assert!(app.help.is_none());
+    }
+
     /// `:view` turns it on and off, and a file opened meanwhile is read-only
     /// too.
     #[test]
@@ -8783,7 +8863,7 @@ mod tests {
     fn leader_hl_opens_the_shortcuts_help() {
         let mut app = app_with_keys("word\n", &[("<leader>hl", "help")]);
         feed(&mut app, " hl");
-        assert_eq!(app.help.as_ref().map(|h| h.title.as_str()), Some("shortcuts"));
+        assert_eq!(app.help.as_ref().map(|h| h.cats[h.cat].name), Some("Basics"));
 
         feed(&mut app, "q");
         assert!(app.help.is_none(), "q closes it");
@@ -9642,7 +9722,8 @@ mod tests {
         let mut app = app_with("hi\n");
         cmd(&mut app, ":help bindings");
         assert!(app.help.is_some());
-        assert_eq!(app.help.as_ref().unwrap().title, "bindings");
+        let h = app.help.as_ref().unwrap();
+        assert_eq!(h.cats[h.cat].name, "Navigation");
         feed(&mut app, "jjj"); // scroll down
         assert_eq!(app.help.as_ref().unwrap().scroll, 3);
         feed(&mut app, "q"); // close

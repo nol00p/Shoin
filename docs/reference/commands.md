@@ -67,4 +67,5 @@ Type `:` and the command, then `Enter`.
 | Command | Does |
 |---|---|
 | `:e!` `:reload` | re-read the config |
-| `:help [topic]` | help — topics: `shortcuts`, `bindings`, `commands`, `writer`, `config` |
+| `:help [topic]` | help, a tab per category — topics: `basics`, `navigation`, `editing`, `writing`, `view`, `files`, `config`. `Tab` and `Shift-Tab` switch tab |
+| `:help <word>` | help opened at a key, command, setting or section: `:help gb`, `:help view`, `:help measure`, `:help tree`. Inside help, `/` searches every tab and `n` `N` move between matches |
