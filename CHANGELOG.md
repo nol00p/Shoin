@@ -18,6 +18,8 @@
 - `move_lines_down` / `move_lines_up` move the lines of a Visual selection
   (or the cursor's line) down or up and keep them selected. They take a
   count and are unbound: bind them to `J` / `K` under `[keys.visual]` (#57).
+- `Space v` turns read-only mode on and off, as `:view` does. It is the
+  `toggle_view` action, so it can be rebound (#58).
 
 **Fixes**
 

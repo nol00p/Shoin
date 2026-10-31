@@ -603,6 +603,7 @@ mod tests {
         let cfg = merge_files(&[]).unwrap();
         assert_eq!(normal(&cfg, "<leader>fe").as_deref(), Some("file_tree"));
         assert_eq!(normal(&cfg, "<C-s>").as_deref(), Some("save"));
+        assert_eq!(normal(&cfg, "<leader>v").as_deref(), Some("toggle_view"));
 
         let (_, warnings) =
             crate::input::keymap::Keymap::from_config(&cfg.keys, &cfg.input.leader);

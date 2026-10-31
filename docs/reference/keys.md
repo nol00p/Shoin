@@ -146,7 +146,7 @@ line. They have no key until you give them one:
 
 ## Read-only
 
-With `shoin -R` or `:view`. Every line is concealed and there is no caret.
+With `shoin -R`, `:view` or `Space v`. Every line is concealed and there is no caret.
 See [Reading](../reading.md#read-only).
 
 | Key | Does |
@@ -157,6 +157,7 @@ See [Reading](../reading.md#read-only).
 | `/` `?` `n` `N` | search |
 | `q` | quit |
 | `i` | switch to editing |
+| `Space v` | switch to editing (it also turns read-only on) |
 
 An edit is refused with "read-only — press i to edit". Yanking, panels, `gf`
 and `:w` still work.
@@ -177,6 +178,7 @@ remove it.
 | `Space c` | concealment on / off |
 | `Space n` | line numbers |
 | `Space a` | cycle text alignment |
+| `Space v` | read-only on / off, as `:view` |
 | `Space fe` `Space fE` | file tree in this file's folder / in `$HOME` |
 | `Space ff` `Space fF` | find a file in this file's folder / in `$HOME` |
 | `Space fb` | switch buffer |
