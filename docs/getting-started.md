@@ -85,7 +85,13 @@ quit. `:help` explains everything else, and `Space hl` opens one page listing
 every key.
 
 Just reading? `shoin -p notes.md` prints a note as the editor shows it, and
-`shoin -R notes.md` opens it read-only. See [Reading](reading.md).
+`shoin -R notes.md` opens it read-only. Inside the editor, `:view` or `Space v`
+switches to that read-only view and back. See [Reading](reading.md).
+
+`Space n` turns on line numbers. For Vim's relative numbers, which make counts
+like `5j` easy to read off, set `numbers = "relative"` under `[layout]` or try
+`:number relative`. To let a transparent terminal show through, set
+`background = "none"` under `[theme]`.
 
 ## Where next
 

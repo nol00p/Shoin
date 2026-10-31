@@ -969,8 +969,10 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
     frame.render_widget(Paragraph::new(lines), body);
 }
 
-/// Draw the `:help` overlay: a near-full-screen bordered panel with the scrolled
-/// help text and a hint in the title bar.
+/// Draw the `:help` overlay: a rounded box over the page, the categories as
+/// tabs along its top — the current one underlined in the accent — and the
+/// current category's rows below, scrolled. Keys, descriptions and prose each
+/// take a colour the theme already has, so help looks like the rest of Shoin.
 fn render_help(frame: &mut Frame, app: &App, help: &Help, area: Rect) {
     let theme = &app.theme;
     let margin = 2u16;
@@ -982,36 +984,95 @@ fn render_help(frame: &mut Frame, app: &App, help: &Help, area: Rect) {
     };
 
     let accent = theme.link.to_ratatui();
+    let dim = theme.text_dim.to_ratatui();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .style(Style::default().bg(theme.background.to_ratatui()))
-        .title(Span::styled(
-            format!(" help: {} ", help.title),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(
-            Line::from(Span::styled(
-                " j/k scroll · q close ",
-                Style::default().fg(theme.text_dim.to_ratatui()),
-            ))
-            .right_aligned(),
-        );
+        .title(Span::styled(" help ", Style::default().fg(accent).add_modifier(Modifier::BOLD)))
+        .title_bottom({
+            // The `/` being typed, else what the last key had to say, else
+            // the keys.
+            let (text, color) = match (&help.typing, &help.status) {
+                (Some(q), _) => (format!(" /{q}\u{2502} "), theme.text.to_ratatui()),
+                (None, Some(msg)) => (format!(" {msg} "), theme.text.to_ratatui()),
+                (None, None) => (" Tab category · / search · n/N next · q close ".to_string(), dim),
+            };
+            Line::from(Span::styled(text, Style::default().fg(color))).right_aligned()
+        });
     let inner = block.inner(rect);
-
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
+    if inner.height < 4 || inner.width < 4 {
+        return;
+    }
 
-    let view_h = inner.height as usize;
-    let max_scroll = help.lines.len().saturating_sub(view_h);
+    // The tabs, and the accent line under the current one.
+    let mut tabs = vec![Span::raw(" ")];
+    let mut under = vec![Span::raw(" ")];
+    for (i, cat) in help.cats.iter().enumerate() {
+        let label = format!(" {} ", cat.name);
+        let w = label.chars().count();
+        if i == help.cat {
+            tabs.push(Span::styled(label, Style::default().fg(accent).add_modifier(Modifier::BOLD)));
+            under.push(Span::styled("\u{2501}".repeat(w), Style::default().fg(accent)));
+        } else {
+            tabs.push(Span::styled(label, Style::default().fg(dim)));
+            under.push(Span::raw(" ".repeat(w)));
+        }
+        tabs.push(Span::raw(" "));
+        under.push(Span::raw(" "));
+    }
+    let row = |dy: u16, h: u16| Rect { x: inner.x, y: inner.y + dy, width: inner.width, height: h };
+    frame.render_widget(Paragraph::new(Line::from(tabs)), row(0, 1));
+    frame.render_widget(Paragraph::new(Line::from(under)), row(1, 1));
+
+    let body = Rect { x: inner.x + 1, width: inner.width - 1, ..row(3, inner.height - 3) };
+    let rows = help.rows();
+    let max_scroll = rows.len().saturating_sub(body.height as usize);
     let scroll = help.scroll.min(max_scroll) as u16;
-    let lines: Vec<Line> = help
-        .lines
-        .iter()
-        .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(theme.text.to_ratatui()))))
-        .collect();
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    let lines: Vec<Line> =
+        rows.iter().enumerate().map(|(i, r)| help_row(app, r, help.mark == Some(i))).collect();
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
+}
+
+/// One help row in the theme's colours: headings in the accent, keys in the
+/// code colour, descriptions in the text colour with their `·` separators
+/// dimmed, prose and notes dimmed.
+fn help_row(app: &App, row: &crate::help::Row, marked: bool) -> Line<'static> {
+    use crate::help::Row;
+    let theme = &app.theme;
+    let fg = |c: ThemeColor| Style::default().fg(c.to_ratatui());
+    let mut line = match row {
+        Row::Title(t, note) => {
+            let mut spans = vec![Span::styled(t.clone(), fg(theme.link).add_modifier(Modifier::BOLD))];
+            if !note.is_empty() {
+                spans.push(Span::styled(format!("   {note}"), fg(theme.text_dim)));
+            }
+            Line::from(spans)
+        }
+        Row::Entry { keys, desc, width } => {
+            let mut spans = vec![
+                Span::raw("  "),
+                Span::styled(format!("{keys:<width$}"), fg(theme.code)),
+                Span::raw("  "),
+            ];
+            for (i, part) in desc.split(" · ").enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" · ", fg(theme.text_dim)));
+                }
+                spans.push(Span::styled(part.to_string(), fg(theme.text)));
+            }
+            Line::from(spans)
+        }
+        Row::Text(t) => Line::from(Span::styled(format!("  {t}"), fg(theme.text_dim))),
+        Row::Blank => Line::default(),
+    };
+    if marked {
+        line = line.style(Style::default().bg(theme.selection.to_ratatui()));
+    }
+    line
 }
 
 /// The first and last buffer lines visible IN THE FOCUSED PANE, recomputing the

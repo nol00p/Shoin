@@ -26,7 +26,7 @@ numbers    = "off"        # "relative" or "absolute" line-number gutter
 [theme]
 # The default is Tokyo Night (dark). Override individual colors, or point
 # `name` at ~/.config/shoin/themes/<name>.toml.
-background = "#1a1b26"
+background = "#1a1b26"     # "none" for the terminal's own (a transparent one too)
 text       = "#c0caf5"
 
 [input]

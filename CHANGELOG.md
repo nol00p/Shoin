@@ -20,6 +20,14 @@
   count and are unbound: bind them to `J` / `K` under `[keys.visual]` (#57).
 - `Space v` turns read-only mode on and off, as `:view` does. It is the
   `toggle_view` action, so it can be rebound (#58).
+- Help is reorganised by what you want to do, one tab per category: Basics,
+  Navigation, Editing, Writing, View, Files and Config. `Tab` / `Shift-Tab`
+  switch tabs, and keys, descriptions and notes each take a theme colour.
+  The Config tab explains every option of every config file, read from the
+  shipped `.conf` files themselves.
+- `:help <word>` opens help at a key, command, setting or section
+  (`:help gb`, `:help view`, `:help measure`, `:help tree`). Inside help,
+  `/` searches every tab and `n` / `N` move between matches.
 
 **Fixes**
 
