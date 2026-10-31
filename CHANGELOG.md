@@ -11,6 +11,10 @@
   cursor (#54).
 - `tree.close_on_open = true` closes the file tree once it opens a file,
   instead of leaving it beside the editor (#55).
+- `tree.root = "cwd"` opens `Space fe` / `Space ff` on the folder Shoin was
+  launched from instead of the edited file's folder, so a vault of notes in
+  subfolders shows whole. The `file_tree_cwd` / `find_file_cwd` actions go
+  there whatever the setting (#56).
 
 **Fixes**
 

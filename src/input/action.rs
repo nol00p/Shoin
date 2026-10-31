@@ -28,6 +28,22 @@ pub enum Root {
     File,
     /// `$HOME` — everything you might have written.
     Home,
+    /// The folder Shoin was launched from — the whole vault, when the note
+    /// being edited sits in one of its subfolders.
+    Cwd,
+}
+
+impl Root {
+    /// `[tree] root`: what `file_tree` / `find_file` open on. Only the near
+    /// views are offered — `$HOME` already has its own keys. `None` for a
+    /// spelling this does not know, so the config check can name it.
+    pub fn parse(s: &str) -> Option<Root> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "file" => Root::File,
+            "cwd" => Root::Cwd,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,6 +278,8 @@ impl Action {
             "file_tree_home" | "file_explorer_home" => Action::FileTree { root: Root::Home },
             "find_file" | "fuzzy_find" | "files" => Action::FindFile { root: Root::File },
             "find_file_home" | "fuzzy_find_home" => Action::FindFile { root: Root::Home },
+            "file_tree_cwd" | "file_explorer_cwd" => Action::FileTree { root: Root::Cwd },
+            "find_file_cwd" | "fuzzy_find_cwd" => Action::FindFile { root: Root::Cwd },
             "alternate_buffer" | "alternate" | "alt_buffer" => Action::AlternateBuffer,
             "follow_link" | "follow" | "goto_file" => Action::FollowLink,
             "open_external" | "open_url" | "xdg_open" => Action::OpenExternal,

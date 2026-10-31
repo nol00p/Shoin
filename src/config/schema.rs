@@ -186,7 +186,7 @@ impl Default for EditorConfig {
 }
 
 /// `[tree]` — the file-tree pane.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct TreeConfig {
     /// Dotfiles listed from the start. `H` still toggles it live; this is only
@@ -195,6 +195,20 @@ pub struct TreeConfig {
     /// Close the tree once it has opened a file, instead of leaving it
     /// beside the editor for the next one.
     pub close_on_open: bool,
+    /// Where `file_tree` / `find_file` (`<leader>fe` / `<leader>ff`) open:
+    /// `"file"`, the edited file's folder, or `"cwd"`, the folder Shoin was
+    /// launched from. The `_home` and `_cwd` actions ignore it.
+    pub root: String,
+}
+
+impl Default for TreeConfig {
+    fn default() -> Self {
+        Self {
+            show_hidden: false,
+            close_on_open: false,
+            root: "file".into(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
