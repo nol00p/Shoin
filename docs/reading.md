@@ -81,8 +81,9 @@ text is refused with "read-only — press i to edit".
 
 Opening read-only shows "read-only — q to quit, i to edit", so an `i`
 straight away starts editing. After any other key, the first `i` is refused
-with the message, and the next `i` edits. `:view` turns read-only on and off
-from inside the editor.
+with the message, and the next `i` edits. `:view` or `Space v` turns
+read-only on and off from inside the editor; the key is the `toggle_view`
+action, so it can be rebound.
 
 ## Details
 
@@ -94,7 +95,7 @@ from inside the editor.
 - Text that isn't valid UTF-8, piped or from a file, is refused with an
   error, never converted.
 - `-R` applies to every buffer opened after it too, by `:e`, `gf` or the
-  file tree, until `:view` or `i` turns it off.
+  file tree, until `:view`, `Space v` or `i` turns it off.
 - In read-only mode `q` acts like `:q`: it closes the page, and refuses if
   there are unsaved changes. Once you've switched to editing, `q` no longer
   quits; use `:q`, or `:q!` to discard changes.

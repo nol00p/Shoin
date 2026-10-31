@@ -138,6 +138,9 @@ pub enum Action {
     CycleFocus,
     ToggleTypewriter,
     ToggleZen,
+    /// Read-only mode on or off, as `:view` does. Not an edit, so it works
+    /// from inside read-only mode — that is the point of it.
+    ToggleView,
     /// The line-number gutter, off ↔ whichever mode (`relative`/`absolute`)
     /// was last chosen. `:number [mode]` reaches the modes directly.
     ToggleNumbers,
@@ -278,6 +281,7 @@ impl Action {
             "toggle_typewriter" | "typewriter" => Action::ToggleTypewriter,
             "toggle_conceal" | "conceal" => Action::ToggleConceal,
             "toggle_zen" | "zen" => Action::ToggleZen,
+            "toggle_view" | "view" | "read_only" => Action::ToggleView,
             "toggle_numbers" | "numbers" | "number" => Action::ToggleNumbers,
             "cycle_align" | "align" => Action::CycleAlign,
             "help" | "shortcuts" => Action::Help,

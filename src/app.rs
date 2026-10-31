@@ -1931,6 +1931,7 @@ impl App {
                 self.open_finder(root);
             }
             Action::ToggleZen => self.set_zen(self.zen.is_none()),
+            Action::ToggleView => self.set_view(!self.view),
             // Recognized, deliberately nothing — `"" = "nop"` unbinds a key.
             Action::Nop => {}
             // Handled in `run`, where the count they take is still in hand.
@@ -5633,6 +5634,21 @@ mod tests {
         assert!(!app.active.contains(0), "no line is revealed");
         feed(&mut app, "q");
         assert!(app.quit);
+    }
+
+    /// `Space v` (`toggle_view`) is `:view` on a key, and works from inside
+    /// read-only mode too — it is not an edit, so it is not refused.
+    #[test]
+    fn leader_v_toggles_read_only() {
+        let mut app = app_with_keys("hello\n", &[("<leader>v", "toggle_view")]);
+        feed(&mut app, " v");
+        assert!(app.view, "on");
+        assert!(app.buffer.read_only);
+        feed(&mut app, " v");
+        assert!(!app.view, "off again, from inside read-only");
+        assert!(!app.buffer.read_only);
+        feed(&mut app, "x");
+        assert_eq!(text(&app), "ello\n", "editing works again");
     }
 
     /// `:view` turns it on and off, and a file opened meanwhile is read-only
