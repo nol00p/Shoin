@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+**Help**
+
+- Help is reorganised by what you want to do, one tab per category: Basics,
+  Navigation, Editing, Writing, View, Files and Config. `Tab` / `Shift-Tab`
+  or `1`–`7` switch tabs, and keys, descriptions and notes each take a theme
+  colour. The Config tab explains every option of every config file, read
+  from the shipped `.conf` files themselves.
+- `:help <word>` opens help at a key, command, setting or section
+  (`:help gb`, `:help view`, `:help measure`, `:help tree`). Inside help,
+  `/` searches every tab and `n` / `N` move between matches.
+- A hint bar along the bottom shows the keys that matter right now: in each
+  mode, in the file tree, the finder and prompts, and after `<leader>`, `g`
+  or `Ctrl-w`, what can follow, read from your own bindings. It gives way
+  to the status line, hides in zen mode, and sits on the theme's
+  `status_bg`, now Tokyo Night's own statusline colour. `[hints] enabled =
+  false` or `:set hints off` turns it off (#60).
+- The leader keys work from the file tree too, and `<leader>hl` there opens
+  help at the tree's keys (#60).
+- Help and the docs write leader keys as `<leader>fe` rather than
+  `Space fe`, since the leader can be remapped.
+- The keys reference lists every action name a binding can use, with its
+  other spellings and default key (#59).
+
 **Editing**
 
 - `Ctrl-e` / `Ctrl-y` scroll the page a line without moving the cursor,
@@ -9,34 +32,22 @@
   rebind as `scroll_view_down` / `scroll_view_up`. The mouse wheel now
   scrolls the page the same way, three lines a notch, instead of dragging the
   cursor (#54).
-- `tree.close_on_open = true` closes the file tree once it opens a file,
-  instead of leaving it beside the editor (#55).
-- `tree.root = "cwd"` opens `Space fe` / `Space ff` on the folder Shoin was
-  launched from instead of the edited file's folder, so a vault of notes in
-  subfolders shows whole. The `file_tree_cwd` / `find_file_cwd` actions go
-  there whatever the setting (#56).
 - `move_lines_down` / `move_lines_up` move the lines of a Visual selection
   (or the cursor's line) down or up and keep them selected. They take a
   count and are unbound: bind them to `J` / `K` under `[keys.visual]` (#57).
-- `Space v` turns read-only mode on and off, as `:view` does. It is the
+- `<leader>v` turns read-only mode on and off, as `:view` does. It is the
   `toggle_view` action, so it can be rebound (#58).
-- Help is reorganised by what you want to do, one tab per category: Basics,
-  Navigation, Editing, Writing, View, Files and Config. `Tab` / `Shift-Tab`
-  switch tabs, and keys, descriptions and notes each take a theme colour.
-  The Config tab explains every option of every config file, read from the
-  shipped `.conf` files themselves.
-- `:help <word>` opens help at a key, command, setting or section
-  (`:help gb`, `:help view`, `:help measure`, `:help tree`). Inside help,
-  `/` searches every tab and `n` / `N` move between matches.
-- The keys reference lists every action name a binding can use, with its
-  other spellings and default key (#59).
-- A hint bar in the bottom row shows the keys that matter right now: in
-  each mode, in the file tree, the finder and prompts, and after `Space`,
-  `g` or `Ctrl-w`, what can follow. It gives way to the status line and
-  hides in zen mode. `[hints] enabled = false` or `:set hints off` turns it
-  off (#60).
-- The leader keys work from the file tree, and `<leader>hl` there opens
-  help at the tree's keys (#60).
+
+**Files and panels**
+
+- `tree.close_on_open = true` closes the file tree once it opens a file,
+  instead of leaving it beside the editor (#55).
+- `tree.root = "cwd"` opens `<leader>fe` / `<leader>ff` on the folder Shoin
+  was launched from instead of the edited file's folder, so a vault of notes
+  in subfolders shows whole. The `file_tree_cwd` / `find_file_cwd` actions
+  go there whatever the setting (#56).
+- `background = "none"` in the theme, now documented, uses the terminal's
+  own background, so a transparent terminal shows through.
 
 **Fixes**
 
