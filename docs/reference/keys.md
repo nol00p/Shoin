@@ -208,6 +208,7 @@ remove it.
 | `H` | show / hide dotfiles |
 | `a` | new file (end with `/` for a folder) |
 | `r` `m` `d` | rename / move / delete |
+| `?` | the tree's keys, in `:help` |
 | `q` | close the tree |
 
 ## Fuzzy finder

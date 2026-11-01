@@ -30,6 +30,12 @@
   `/` searches every tab and `n` / `N` move between matches.
 - The keys reference lists every action name a binding can use, with its
   other spellings and default key (#59).
+- A hint bar in the bottom row shows the keys that matter right now: in
+  each mode, in the file tree, the finder and prompts, and after `Space`,
+  `g` or `Ctrl-w`, what can follow. It gives way to the status line and
+  hides in zen mode. `[hints] enabled = false` or `:set hints off` turns it
+  off (#60).
+- `?` in the file tree opens help at the tree's keys (#60).
 
 **Fixes**
 

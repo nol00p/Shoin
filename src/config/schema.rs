@@ -23,6 +23,7 @@ pub struct Config {
     pub splash: SplashConfig,
     pub tree: TreeConfig,
     pub transclude: TranscludeConfig,
+    pub hints: HintsConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +183,21 @@ impl Default for EditorConfig {
             list_tab: true,
             table_align: "auto".into(),
         }
+    }
+}
+
+/// `[hints]` — the hint bar: the keys that matter right now, in the status
+/// line's row whenever it has nothing to say.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct HintsConfig {
+    /// Off for someone who knows the keys: the row stays empty.
+    pub enabled: bool,
+}
+
+impl Default for HintsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 

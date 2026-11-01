@@ -95,12 +95,17 @@ pub fn render(frame: &mut Frame, app: &App) {
         );
     }
 
-    // --- status line ---
+    // --- status line, or the hint bar in its place ---
     //
     // One for the whole window, not one per pane: it is a transient flash, and
-    // repeating it beside itself would be noise.
+    // repeating it beside itself would be noise. When it has nothing to say,
+    // the hint bar takes the row: the keys that matter right now.
+    let status = if cfg.status.enabled { status_text(app) } else { None };
+    if status.is_none() {
+        render_hint_bar(frame, app, ea);
+    }
     if cfg.status.enabled {
-        if let Some(status) = status_text(app) {
+        if let Some(status) = status {
             let style = match app.flash.as_ref().map(|f| &f.kind) {
                 Some(FlashKind::Error) => Style::default().fg(Color::Red),
                 _ => Style::default().add_modifier(Modifier::DIM),
@@ -147,12 +152,58 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+/// The hint bar: the keys that matter right now, in the status line's row,
+/// starting where the text column starts — or further left, toward the
+/// window's edge, when that is what it takes to fit: after `Space` there are
+/// a dozen keys to name. Keys take the
+/// colour the start screen gives its keys, what they do is dimmed, and hints
+/// that still don't fit are dropped from the end rather than cut in half.
+fn render_hint_bar(frame: &mut Frame, app: &App, ea: Rect) {
+    let hints = crate::render::hints::hints(app);
+    if hints.is_empty() || ea.height <= STATUS_ROWS {
+        return;
+    }
+    let lay = Layout::compute(&app.config.layout, ea.width, ea.height, STATUS_ROWS);
+    let sep = "  ";
+    let width = |(k, d): &(String, String)| k.chars().count() + 1 + d.chars().count();
+    let total: usize = hints.iter().map(width).sum::<usize>() + sep.len() * (hints.len() - 1);
+    // Under the text column when the hints fit there; slid left toward the
+    // window's edge (one column of air) when they don't.
+    let room = ea.width.saturating_sub(2) as usize;
+    let left = (lay.margin_left as usize).min(room.saturating_sub(total)).max(1) as u16;
+    let rect = Rect {
+        x: ea.x + left,
+        y: ea.y + ea.height - STATUS_ROWS,
+        width: ea.width.saturating_sub(left + 1),
+        height: STATUS_ROWS,
+    };
+    let key_style = ThemeStyle::fg(app.theme.list_bullet).to_ratatui();
+    let dim = Style::default().fg(app.theme.text_dim.to_ratatui());
+    let mut spans: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+    for (i, h) in hints.iter().enumerate() {
+        let gap = if i == 0 { "" } else { sep };
+        let w = gap.len() + width(h);
+        if used + w > rect.width as usize {
+            break;
+        }
+        used += w;
+        spans.push(Span::styled(gap, dim));
+        spans.push(Span::styled(h.0.clone(), key_style));
+        spans.push(Span::styled(format!(" {}", h.1), dim));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
 /// The area the pane tree divides: the frame, less the tree sidebar and the row
 /// the status line reserves. `App` asks for this too, so click routing and the
 /// screen motions use the same geometry the renderer did.
 pub fn pane_area(app: &App, area: Rect) -> Rect {
     let tw = tree_width(app, area);
-    let reserved = if app.config.status.enabled { STATUS_ROWS } else { 0 };
+    // The hint bar shares the status row, so either keeps it — but not in
+    // zen, which hides both.
+    let hints = app.config.hints.enabled && !app.zen_on();
+    let reserved = if app.config.status.enabled || hints { STATUS_ROWS } else { 0 };
     Rect {
         x: area.x + tw,
         y: area.y,

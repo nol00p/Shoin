@@ -42,6 +42,9 @@ list_tab          = true  # Tab / Shift-Tab in Insert indent a list item
 table_align       = "auto" # line up a table's columns on leaving Insert;
                            # "manual" leaves it to ga
 
+[hints]
+enabled = true            # the key hints in the bottom row; false hides them
+
 [tree]
 show_hidden = false       # dotfiles in the file tree (H toggles it live)
 close_on_open = false     # close the tree once it opens a file
@@ -63,6 +66,7 @@ root = "file"             # where Space fe / ff open: "file" (the edited
 | `[markdown]` | which syntax is styled: tags, wiki links, highlight, tables, code |
 | `[glyphs]` | bullets, task boxes, bars and icons; `nerd_fonts = false` for plain fallbacks |
 | `[status]` | whether the status line appears, for how long, and what it shows |
+| `[hints]` | the hint bar: the keys that matter right now, in the status line's row |
 | `[cursor]` | cursor shape per mode, and blink |
 | `[splash]` | the start screen picture: built-in, `"none"`, or a path to your own |
 | `[keys.normal]` `[keys.insert]` `[keys.visual]` | key bindings |

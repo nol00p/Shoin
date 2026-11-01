@@ -28,6 +28,7 @@ collapses, and `q` closes the tree.
 | `r` / `m` / `d` | rename / move / delete |
 | `g` `G` `R` | top, bottom, refresh |
 | `Ctrl-w h` / `Ctrl-w l` | back and forth between the tree and the editor |
+| `?` | these keys, in `:help` |
 
 ## Fuzzy finder
 

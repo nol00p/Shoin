@@ -538,6 +538,7 @@ cat notes.md | shoin :: piped text, in an unnamed buffer: :w name.md saves it, :
 cat notes.md | shoin -p :: print piped text
 
 ## This help
+hint bar :: the bottom row shows the keys for right now, and after Space, g or Ctrl-w what can follow. :set hints off hides it; [hints] enabled = false for good
 Tab Shift-Tab :: next · previous category; 1 to 7 jump to one
 j k :: scroll; d u half a page, g G top · bottom
 / :: search every category; n N next · previous match
@@ -682,7 +683,7 @@ Space a :: cycle how lines sit in the column
 :zen :: hide all chrome
 
 ## Settings, live
-:set <key> [on|off] :: conceal · typewriter · mouse · focus · numbers · code_syntax
+:set <key> [on|off] :: conceal · typewriter · mouse · focus · numbers · code_syntax · hints
 :set measure=72 :: the text width in columns; :set measure reads it
 :set line_spacing=1 :: blank rows between lines, 0 to 4
 
@@ -727,6 +728,7 @@ H :: show · hide dotfiles; remembered, tree.show_hidden to start with
 a :: new file in this folder; end the name with / for a folder
 r m d :: rename · move · delete. Delete asks first, and says how much a folder holds
 Ctrl-w h l :: between the tree and the editor
+? :: these keys, here in help
 q :: close the tree
 > A prompt takes Ctrl-u to clear it and Esc to abandon it. Renaming or moving a file you have open carries the buffer with it.
 

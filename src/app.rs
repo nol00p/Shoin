@@ -1963,7 +1963,7 @@ impl App {
         }
     }
 
-    fn on_key(&mut self, key: KeyEvent) {
+    pub(crate) fn on_key(&mut self, key: KeyEvent) {
         // The help overlay owns all input while it is open.
         if self.help.is_some() {
             self.on_key_help(key);
@@ -2395,9 +2395,12 @@ impl App {
         let mut prompt = None;
         let mut flash = None;
         let mut remember_hidden = None;
+        let mut show_keys = false;
         if let Some(tree) = self.tree.as_mut() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => close = true,
+                // Help at the tree's own section, whatever `[hints]` says.
+                KeyCode::Char('?') => show_keys = true,
                 KeyCode::Char('j') | KeyCode::Down => tree.down(),
                 KeyCode::Char('k') | KeyCode::Up => tree.up(),
                 KeyCode::Char('h') | KeyCode::Left => tree.collapse_or_parent(),
@@ -2442,6 +2445,10 @@ impl App {
         }
         if let Some(msg) = flash {
             self.notify(msg, FlashKind::Info);
+        }
+        if show_keys {
+            self.help = Some(Help::open("tree"));
+            return;
         }
         if let Some(kind) = prompt {
             return self.tree_prompt(kind);
@@ -3219,6 +3226,16 @@ impl App {
 
     /// Turn zen mode on or off, remembering what it hid so leaving it restores
     /// the user's own settings rather than a hardcoded default.
+    /// Whether zen mode is on: no chrome, the hint bar included.
+    pub fn zen_on(&self) -> bool {
+        self.zen.is_some()
+    }
+
+    /// The command being typed, for the hint bar to say what can follow it.
+    pub fn pending(&self) -> &Pending {
+        &self.pending
+    }
+
     pub fn set_zen(&mut self, on: bool) {
         match (on, self.zen.take()) {
             (true, None) => {
@@ -5404,6 +5421,14 @@ impl App {
             }
             "code_syntax" | "syntax" => {
                 self.config.markdown.code_syntax = resolve(val, self.config.markdown.code_syntax);
+            }
+            // The hint bar. Says which way it went: turned off, the row just
+            // goes quiet, which would look like nothing happened.
+            "hints" => {
+                let on = resolve(val, self.config.hints.enabled);
+                self.config.hints.enabled = on;
+                let msg = if on { "hints on" } else { "hints off · [hints] enabled = false keeps it off" };
+                return self.notify(msg, FlashKind::Info);
             }
             "typewriter" | "tw" => {
                 self.config.layout.typewriter = resolve(val, self.config.layout.typewriter);
@@ -9320,6 +9345,22 @@ mod tests {
         prompt_enter(&mut app);
         assert!(dir.join("notes/inner.md").is_file());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `?` in the tree opens help at the tree's section, and `q` there comes
+    /// back to the tree.
+    #[test]
+    fn question_mark_in_the_tree_opens_its_help() {
+        let mut app = app_with("x\n");
+        let root = app.cwd();
+        app.toggle_tree(root);
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let h = app.help.as_ref().expect("help open");
+        assert_eq!(h.cats[h.cat].name, "Files");
+        assert!(h.rows()[h.mark.unwrap()].plain().contains("File tree"));
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.help.is_none());
+        assert!(app.tree.as_ref().is_some_and(|t| t.focused), "back in the tree");
     }
 
     /// Opening a file leaves the tree beside the editor for the next one,

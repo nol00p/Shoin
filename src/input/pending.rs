@@ -169,6 +169,14 @@ impl Pending {
 
     /// A clean state with no half-typed command — a command boundary, which is
     /// what dot-recording and the user keymap both key off.
+    /// The built-in prefix waiting for its second key (`g`, `z`, `Ctrl-w`).
+    pub fn prefix(&self) -> Option<char> {
+        match self.awaiting {
+            Some(Awaiting::Prefix(p)) => Some(p),
+            _ => None,
+        }
+    }
+
     pub fn is_clean(&self) -> bool {
         self.count.is_none()
             && self.op_count.is_none()
