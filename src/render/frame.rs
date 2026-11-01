@@ -59,9 +59,12 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Split off a left column for the file tree, if open. It is chrome, not a
     // view onto a document, so it sits OUTSIDE the pane tree.
+    // The bottom row belongs to the status line and the hint bar across the
+    // whole window, so the tree stops above it like the panes do.
     let tw = tree_width(app, area);
     if let Some(tree) = &app.tree {
-        let tree_rect = Rect { x: area.x, y: area.y, width: tw, height: area.height };
+        let height = area.height.saturating_sub(bottom_rows(app));
+        let tree_rect = Rect { x: area.x, y: area.y, width: tw, height };
         render_tree(frame, app, tree, tree_rect);
     }
     let ea = Rect {
@@ -102,7 +105,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     // the hint bar takes the row: the keys that matter right now.
     let status = if cfg.status.enabled { status_text(app) } else { None };
     if status.is_none() {
-        render_hint_bar(frame, app, ea);
+        render_hint_bar(frame, app, area, ea);
     }
     if cfg.status.enabled {
         if let Some(status) = status {
@@ -158,9 +161,9 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// a dozen keys to name. Keys take the
 /// colour the start screen gives its keys, what they do is dimmed, and hints
 /// that still don't fit are dropped from the end rather than cut in half.
-fn render_hint_bar(frame: &mut Frame, app: &App, ea: Rect) {
+fn render_hint_bar(frame: &mut Frame, app: &App, area: Rect, ea: Rect) {
     let hints = crate::render::hints::hints(app);
-    if hints.is_empty() || ea.height <= STATUS_ROWS {
+    if hints.is_empty() || area.height <= STATUS_ROWS {
         return;
     }
     let lay = Layout::compute(&app.config.layout, ea.width, ea.height, STATUS_ROWS);
@@ -168,13 +171,16 @@ fn render_hint_bar(frame: &mut Frame, app: &App, ea: Rect) {
     let width = |(k, d): &(String, String)| k.chars().count() + 1 + d.chars().count();
     let total: usize = hints.iter().map(width).sum::<usize>() + sep.len() * (hints.len() - 1);
     // Under the text column when the hints fit there; slid left toward the
-    // window's edge (one column of air) when they don't.
-    let room = ea.width.saturating_sub(2) as usize;
-    let left = (lay.margin_left as usize).min(room.saturating_sub(total)).max(1) as u16;
+    // window's edge (one column of air) when they don't — under the tree, if
+    // it is open. The tree's own hints start at its edge, below it.
+    let tree_focused = app.tree.as_ref().is_some_and(|t| t.focused);
+    let preferred = if tree_focused { 1 } else { (ea.x - area.x + lay.margin_left) as usize };
+    let room = area.width.saturating_sub(2) as usize;
+    let left = preferred.min(room.saturating_sub(total)).max(1) as u16;
     let rect = Rect {
-        x: ea.x + left,
-        y: ea.y + ea.height - STATUS_ROWS,
-        width: ea.width.saturating_sub(left + 1),
+        x: area.x + left,
+        y: area.y + area.height - STATUS_ROWS,
+        width: area.width.saturating_sub(left + 1),
         height: STATUS_ROWS,
     };
     let key_style = ThemeStyle::fg(app.theme.list_bullet).to_ratatui();
@@ -195,15 +201,19 @@ fn render_hint_bar(frame: &mut Frame, app: &App, ea: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
+/// Rows kept at the bottom of the window for the status line and the hint
+/// bar: one while either is on, none in zen or with both off.
+pub fn bottom_rows(app: &App) -> u16 {
+    let hints = app.config.hints.enabled && !app.zen_on();
+    if app.config.status.enabled || hints { STATUS_ROWS } else { 0 }
+}
+
 /// The area the pane tree divides: the frame, less the tree sidebar and the row
 /// the status line reserves. `App` asks for this too, so click routing and the
 /// screen motions use the same geometry the renderer did.
 pub fn pane_area(app: &App, area: Rect) -> Rect {
     let tw = tree_width(app, area);
-    // The hint bar shares the status row, so either keeps it — but not in
-    // zen, which hides both.
-    let hints = app.config.hints.enabled && !app.zen_on();
-    let reserved = if app.config.status.enabled || hints { STATUS_ROWS } else { 0 };
+    let reserved = bottom_rows(app);
     Rect {
         x: area.x + tw,
         y: area.y,

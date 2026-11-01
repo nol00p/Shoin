@@ -2471,7 +2471,8 @@ impl App {
     /// changes. Returns whether it opened.
     /// A left-click inside the tree pane: focus it and select the clicked row.
     fn tree_click(&mut self, row: u16) {
-        let h = self.term_size.1 as usize;
+        // The tree's height as drawn: the window less the bottom row.
+        let h = self.term_size.1.saturating_sub(crate::render::frame::bottom_rows(self)) as usize;
         if let Some(tree) = self.tree.as_mut() {
             tree.focused = true;
             let len = tree.entries.len();
