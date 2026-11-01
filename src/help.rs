@@ -198,13 +198,17 @@ impl Help {
     /// Where `word` is documented. Tried in turn, each through every category
     /// before the next: a row that LISTS it as a key, command or setting, a
     /// section heading, then any mention of it as a whole word. `view` also
-    /// finds `:view`, and `<leader>fe` finds `Space fe`. Basics comes last:
+    /// finds `:view`, and `<leader>fe` finds `<leader>fe`. Basics comes last:
     /// it repeats keys whose home is elsewhere.
     fn find(&self, word: &str) -> Option<(usize, usize)> {
         if word.is_empty() {
             return None;
         }
-        let word = word.replace("<leader>", "Space ");
+        // `:help Space fe` means the leader key, which help writes `<leader>`.
+        let word = match word.strip_prefix("Space ").or_else(|| word.strip_prefix("space ")) {
+            Some(rest) => format!("<leader>{rest}"),
+            None => word.to_string(),
+        };
         let lower = word.to_lowercase();
         let colon = format!(":{lower}");
         let lists = |row: &Row| match row {
@@ -506,27 +510,27 @@ Command :: : then a command, Enter to run it
 ## First keys
 i :: start typing
 Esc :: stop typing
-:w :: save — Ctrl-s and Space w too
+:w :: save — Ctrl-s and <leader>w too
 :q :: close this buffer; the last one quits
 u Ctrl-r :: undo · redo
 . :: repeat the last change
 
-## Leader keys — Space, or [input] leader
-Space hl :: this help
-Space w Space q :: save · quit
-Space fe Space fE :: file tree in this file's folder · over $HOME
-Space ff Space fF :: find a file in this file's folder · over $HOME
-Space fb :: switch buffer
-Space sv Space ss :: split beside · below — again to close it
-Space so :: keep only this pane
-Space F :: cycle focus mode
-Space t :: typewriter scrolling
-Space z :: zen: all chrome on · off
-Space c :: concealment on · off
-Space n :: line numbers
-Space a :: cycle text alignment
-Space v :: read-only on · off, as :view
-Space b Space i :: bold · italic, on a Visual selection
+## Leader keys — <leader> is Space unless you remap it: [input] leader
+<leader>hl :: this help
+<leader>w <leader>q :: save · quit
+<leader>fe <leader>fE :: file tree in this file's folder · over $HOME
+<leader>ff <leader>fF :: find a file in this file's folder · over $HOME
+<leader>fb :: switch buffer
+<leader>sv <leader>ss :: split beside · below — again to close it
+<leader>so :: keep only this pane
+<leader>F :: cycle focus mode
+<leader>t :: typewriter scrolling
+<leader>z :: zen: all chrome on · off
+<leader>c :: concealment on · off
+<leader>n :: line numbers
+<leader>a :: cycle text alignment
+<leader>v :: read-only on · off, as :view
+<leader>b <leader>i :: bold · italic, on a Visual selection
 > These are the shipped keys.conf, built in. Rebind any of them under [keys.normal] and [keys.visual], or set one to \"none\" to remove it — see Config.
 
 ## Starting
@@ -538,6 +542,7 @@ cat notes.md | shoin :: piped text, in an unnamed buffer: :w name.md saves it, :
 cat notes.md | shoin -p :: print piped text
 
 ## This help
+hint bar :: the bottom row shows the keys for right now, and after <leader>, g or Ctrl-w what can follow. :set hints off hides it; [hints] enabled = false for good
 Tab Shift-Tab :: next · previous category; 1 to 7 jump to one
 j k :: scroll; d u half a page, g G top · bottom
 / :: search every category; n N next · previous match
@@ -646,7 +651,7 @@ gi :: toggle *italic*
 gh :: toggle ==highlight==
 gk :: toggle `code`
 gl :: wrap as a [link](url), the cursor in the URL
-Space b Space i :: bold · italic, on a Visual selection
+<leader>b <leader>i :: bold · italic, on a Visual selection
 
 ## Blocks
 g1 to g6 :: set the line's heading level
@@ -669,26 +674,26 @@ gp :: start the next paragraph, in Insert
 
 const VIEW: &str = "
 ## Toggles
-Space c :: concealment on · off — :set conceal
-Space F :: cycle focus: off · paragraph · sentence
+<leader>c :: concealment on · off — :set conceal
+<leader>F :: cycle focus: off · paragraph · sentence
 :focus [mode] :: pick one; bare cycles
-Space t :: typewriter scrolling — :typewriter, :tw
-Space z :: zen: hide all chrome — :zen
-Space n :: line numbers on · off
+<leader>t :: typewriter scrolling — :typewriter, :tw
+<leader>z :: zen: hide all chrome — :zen
+<leader>n :: line numbers on · off
 :number [mode] :: relative · absolute; bare toggles off and back to your last mode
-Space a :: cycle how lines sit in the column
+<leader>a :: cycle how lines sit in the column
 :align [mode] :: left · center · right · justified; bare cycles. Where the column itself sits is layout.align
 :typewriter :tw :: typewriter scrolling
 :zen :: hide all chrome
 
 ## Settings, live
-:set <key> [on|off] :: conceal · typewriter · mouse · focus · numbers · code_syntax
+:set <key> [on|off] :: conceal · typewriter · mouse · focus · numbers · code_syntax · hints
 :set measure=72 :: the text width in columns; :set measure reads it
 :set line_spacing=1 :: blank rows between lines, 0 to 4
 
-## Read-only — shoin -R, :view or Space v
+## Read-only — shoin -R, :view or <leader>v
 :view :: read-only on · off: every line concealed, no caret
-Space v :: the same on a key (toggle_view); in read-only too, to switch back
+<leader>v :: the same on a key (toggle_view); in read-only too, to switch back
 j k :: scroll a line
 Ctrl-d Ctrl-u :: half a page
 gg G :: top · bottom
@@ -717,7 +722,7 @@ const FILES: &str = "
 :export [md|txt|html|pdf] [justify] :: write the finished document out, through a dialog with a name you can change. html is one self-contained page; pdf needs pandoc and a layout engine (typst is the smallest). justify stretches html and txt to fill the measure
 
 ## File tree — beside the page
-Space fe Space fE :: open it in this file's folder · over $HOME; again to close. tree.root = \"cwd\" opens Space fe and Space ff where Shoin was launched instead; file_tree_cwd and find_file_cwd always do
+<leader>fe <leader>fE :: open it in this file's folder · over $HOME; again to close. tree.root = \"cwd\" opens <leader>fe and <leader>ff where Shoin was launched instead; file_tree_cwd and find_file_cwd always do
 j k :: move
 l Enter o :: open a file · expand a folder
 h :: collapse
@@ -727,11 +732,12 @@ H :: show · hide dotfiles; remembered, tree.show_hidden to start with
 a :: new file in this folder; end the name with / for a folder
 r m d :: rename · move · delete. Delete asks first, and says how much a folder holds
 Ctrl-w h l :: between the tree and the editor
+<leader>hl :: these keys, here in help — the leader keys work from the tree too
 q :: close the tree
 > A prompt takes Ctrl-u to clear it and Esc to abandon it. Renaming or moving a file you have open carries the buffer with it.
 
 ## Fuzzy finder
-Space ff Space fF :: find a file in this file's folder · over $HOME
+<leader>ff <leader>fF :: find a file in this file's folder · over $HOME
 type :: narrow the list
 Ctrl-n Ctrl-p :: next · previous match; the arrows too
 Ctrl-u :: clear the query
@@ -739,7 +745,7 @@ Enter Esc :: open · close
 
 ## Buffers — several files open at once
 :e <path> :: open a file in a new buffer
-Space fb :: switch buffer, in the finder
+<leader>fb :: switch buffer, in the finder
 :ls :buffers :: list open buffers; ▸ marks this one
 :b <name> :b <n> :: switch by name fragment or number
 :bn :bp :: next · previous buffer, round the list
@@ -748,8 +754,8 @@ Ctrl-^ Ctrl-6 :: back to the previous buffer; twice lands where you started
 :set clipboard [on|off] :: plain y d p use the system clipboard too, as Vim's unnamedplus. \"+ and \"* reach it either way. :set cb
 
 ## Panes
-Space sv Space ss :: split beside · below — again to close it
-Space so :: keep only this pane
+<leader>sv <leader>ss :: split beside · below — again to close it
+<leader>so :: keep only this pane
 :sp :vs :: split horizontally · vertically
 :close :: close the focused pane
 :only :: close every pane but this one
@@ -802,7 +808,8 @@ mod tests {
             ("measure", "Config", "measure = 72"),
             ("layout.measure", "Config", "measure = 72"),
             ("n", "Navigation", "n N"),
-            ("<leader>fe", "Files", "Space fe"),
+            ("<leader>fe", "Files", "<leader>fe"),
+            ("Space fe", "Files", "<leader>fe"),
             ("dd", "Editing", "dd cc yy"),
             ("background", "Config", "background"),
         ] {

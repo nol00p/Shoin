@@ -27,7 +27,7 @@ use crate::finder::{self, Finder};
 use crate::tree::{Activate, FileTree};
 use crate::input::action::{Action, Operator, Root, Target};
 use crate::input::bindings::{Command, Verb};
-use crate::input::keymap::Keymap;
+use crate::input::keymap::{Keymap, Lookup};
 use crate::input::mode::{Mode, Prompt, PromptKind};
 use crate::input::pending::{Key, Pending, Resolution, Table};
 use crate::render::cache::RenderCache;
@@ -1921,7 +1921,11 @@ impl App {
             // Not toggle symmetry: once open, the overlay owns all input
             // (`on_key_help`), so a repeat of this binding never reaches here
             // to close it — q / Esc does that, same as `:help` opened it.
-            Action::Help => self.open_help("shortcuts"),
+            // From the focused tree, help opens at the tree's own keys.
+            Action::Help => {
+                let in_tree = self.tree.as_ref().is_some_and(|t| t.focused);
+                self.open_help(if in_tree { "tree" } else { "shortcuts" });
+            }
             Action::FollowLink => self.follow_link(),
             Action::OpenExternal => self.open_external(),
             Action::AlternateBuffer => self.alternate_buffer(),
@@ -1963,7 +1967,7 @@ impl App {
         }
     }
 
-    fn on_key(&mut self, key: KeyEvent) {
+    pub(crate) fn on_key(&mut self, key: KeyEvent) {
         // The help overlay owns all input while it is open.
         if self.help.is_some() {
             self.on_key_help(key);
@@ -2389,6 +2393,18 @@ impl App {
             self.tree_window_prefix = true;
             return;
         }
+        // Leader sequences reach the keymap from the tree too, so the leader
+        // keys mean the same everywhere: `<leader>hl` opens help (at the
+        // tree's keys), `<leader>fe` closes the tree, `<leader>ff` finds. Only
+        // a key that starts or continues one is passed on; the tree's own
+        // single keys stay the tree's.
+        if let Some(k) = Key::from_event(key) {
+            let starts = matches!(self.keymap.lookup("normal", &[k]), Lookup::Prefix);
+            if starts || !self.pending.partial.is_empty() {
+                self.feed_pending(key, Table::Normal);
+                return;
+            }
+        }
 
         let mut close = false;
         let mut to_open = None;
@@ -2464,7 +2480,8 @@ impl App {
     /// changes. Returns whether it opened.
     /// A left-click inside the tree pane: focus it and select the clicked row.
     fn tree_click(&mut self, row: u16) {
-        let h = self.term_size.1 as usize;
+        // The tree's height as drawn: the window less the bottom row.
+        let h = self.term_size.1.saturating_sub(crate::render::frame::bottom_rows(self)) as usize;
         if let Some(tree) = self.tree.as_mut() {
             tree.focused = true;
             let len = tree.entries.len();
@@ -3219,6 +3236,16 @@ impl App {
 
     /// Turn zen mode on or off, remembering what it hid so leaving it restores
     /// the user's own settings rather than a hardcoded default.
+    /// Whether zen mode is on: no chrome, the hint bar included.
+    pub fn zen_on(&self) -> bool {
+        self.zen.is_some()
+    }
+
+    /// The command being typed, for the hint bar to say what can follow it.
+    pub fn pending(&self) -> &Pending {
+        &self.pending
+    }
+
     pub fn set_zen(&mut self, on: bool) {
         match (on, self.zen.take()) {
             (true, None) => {
@@ -5404,6 +5431,14 @@ impl App {
             }
             "code_syntax" | "syntax" => {
                 self.config.markdown.code_syntax = resolve(val, self.config.markdown.code_syntax);
+            }
+            // The hint bar. Says which way it went: turned off, the row just
+            // goes quiet, which would look like nothing happened.
+            "hints" => {
+                let on = resolve(val, self.config.hints.enabled);
+                self.config.hints.enabled = on;
+                let msg = if on { "hints on" } else { "hints off · [hints] enabled = false keeps it off" };
+                return self.notify(msg, FlashKind::Info);
             }
             "typewriter" | "tw" => {
                 self.config.layout.typewriter = resolve(val, self.config.layout.typewriter);
@@ -9320,6 +9355,25 @@ mod tests {
         prompt_enter(&mut app);
         assert!(dir.join("notes/inner.md").is_file());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The leader keys work from the tree: `<leader>hl` opens help at the
+    /// tree's section — `q` there comes back to the tree — and `<leader>fe`
+    /// closes the tree it opened.
+    #[test]
+    fn leader_keys_work_from_the_tree() {
+        let mut app = app_with_keys("x\n", &[("<leader>hl", "help"), ("<leader>fe", "file_tree")]);
+        let root = app.cwd();
+        app.toggle_tree(root);
+        feed(&mut app, " hl");
+        let h = app.help.as_ref().expect("help open");
+        assert_eq!(h.cats[h.cat].name, "Files");
+        assert!(h.rows()[h.mark.unwrap()].plain().contains("File tree"));
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.help.is_none());
+        assert!(app.tree.as_ref().is_some_and(|t| t.focused), "back in the tree");
+        feed(&mut app, " fe");
+        assert!(app.tree.is_none(), "the same key that opened it closes it");
     }
 
     /// Opening a file leaves the tree beside the editor for the next one,

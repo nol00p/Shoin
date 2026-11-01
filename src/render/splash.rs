@@ -219,6 +219,11 @@ fn hints(app: &App) -> Vec<(String, &'static str)> {
             "an editable copy of the config",
         ));
     }
+    // The hint bar is on by default; the one screen with room to say so also
+    // says how to turn it off.
+    if app.config.hints.enabled {
+        out.push((":set hints off".into(), "hide the key hints below"));
+    }
     out
 }
 

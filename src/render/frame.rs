@@ -59,9 +59,12 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Split off a left column for the file tree, if open. It is chrome, not a
     // view onto a document, so it sits OUTSIDE the pane tree.
+    // The bottom row belongs to the status line and the hint bar across the
+    // whole window, so the tree stops above it like the panes do.
     let tw = tree_width(app, area);
     if let Some(tree) = &app.tree {
-        let tree_rect = Rect { x: area.x, y: area.y, width: tw, height: area.height };
+        let height = area.height.saturating_sub(bottom_rows(app));
+        let tree_rect = Rect { x: area.x, y: area.y, width: tw, height };
         render_tree(frame, app, tree, tree_rect);
     }
     let ea = Rect {
@@ -95,12 +98,25 @@ pub fn render(frame: &mut Frame, app: &App) {
         );
     }
 
-    // --- status line ---
+    // --- status line, or the hint bar in its place ---
     //
     // One for the whole window, not one per pane: it is a transient flash, and
-    // repeating it beside itself would be noise.
+    // repeating it beside itself would be noise. When it has nothing to say,
+    // the hint bar takes the row: the keys that matter right now.
+    let status = if cfg.status.enabled { status_text(app) } else { None };
+    // The row is a bar, in `status_bg`, whenever something is in it — so the
+    // hints and a flash that replaces them sit on the same strip.
+    let hints = crate::render::hints::hints(app);
+    if (status.is_some() || !hints.is_empty()) && area.height > STATUS_ROWS {
+        let row = Rect { y: area.y + area.height - STATUS_ROWS, height: STATUS_ROWS, ..area };
+        let bar = Style::default().bg(app.theme.status_bg.to_ratatui());
+        frame.render_widget(Block::default().style(bar), row);
+    }
+    if status.is_none() {
+        render_hint_bar(frame, app, area, ea, &hints);
+    }
     if cfg.status.enabled {
-        if let Some(status) = status_text(app) {
+        if let Some(status) = status {
             let style = match app.flash.as_ref().map(|f| &f.kind) {
                 Some(FlashKind::Error) => Style::default().fg(Color::Red),
                 _ => Style::default().add_modifier(Modifier::DIM),
@@ -147,12 +163,64 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+/// The hint bar: the keys that matter right now, in the status line's row,
+/// starting where the text column starts — or further left, toward the
+/// window's edge, when that is what it takes to fit: after `Space` there are
+/// a dozen keys to name. Keys take the
+/// colour the start screen gives its keys, what they do is dimmed, and hints
+/// that still don't fit are dropped from the end rather than cut in half.
+fn render_hint_bar(frame: &mut Frame, app: &App, area: Rect, ea: Rect, hints: &[crate::render::hints::Hint]) {
+    if hints.is_empty() || area.height <= STATUS_ROWS {
+        return;
+    }
+    let lay = Layout::compute(&app.config.layout, ea.width, ea.height, STATUS_ROWS);
+    let sep = "  ";
+    let width = |(k, d): &(String, String)| k.chars().count() + 1 + d.chars().count();
+    let total: usize = hints.iter().map(width).sum::<usize>() + sep.len() * (hints.len() - 1);
+    // Under the text column when the hints fit there; slid left toward the
+    // window's edge (one column of air) when they don't — under the tree, if
+    // it is open. The tree's own hints start at its edge, below it.
+    let tree_focused = app.tree.as_ref().is_some_and(|t| t.focused);
+    let preferred = if tree_focused { 1 } else { (ea.x - area.x + lay.margin_left) as usize };
+    let room = area.width.saturating_sub(2) as usize;
+    let left = preferred.min(room.saturating_sub(total)).max(1) as u16;
+    let rect = Rect {
+        x: area.x + left,
+        y: area.y + area.height - STATUS_ROWS,
+        width: area.width.saturating_sub(left + 1),
+        height: STATUS_ROWS,
+    };
+    let key_style = ThemeStyle::fg(app.theme.list_bullet).to_ratatui();
+    let dim = Style::default().fg(app.theme.text_dim.to_ratatui());
+    let mut spans: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+    for (i, h) in hints.iter().enumerate() {
+        let gap = if i == 0 { "" } else { sep };
+        let w = gap.len() + width(h);
+        if used + w > rect.width as usize {
+            break;
+        }
+        used += w;
+        spans.push(Span::styled(gap, dim));
+        spans.push(Span::styled(h.0.clone(), key_style));
+        spans.push(Span::styled(format!(" {}", h.1), dim));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+/// Rows kept at the bottom of the window for the status line and the hint
+/// bar: one while either is on, none in zen or with both off.
+pub fn bottom_rows(app: &App) -> u16 {
+    let hints = app.config.hints.enabled && !app.zen_on();
+    if app.config.status.enabled || hints { STATUS_ROWS } else { 0 }
+}
+
 /// The area the pane tree divides: the frame, less the tree sidebar and the row
 /// the status line reserves. `App` asks for this too, so click routing and the
 /// screen motions use the same geometry the renderer did.
 pub fn pane_area(app: &App, area: Rect) -> Rect {
     let tw = tree_width(app, area);
-    let reserved = if app.config.status.enabled { STATUS_ROWS } else { 0 };
+    let reserved = bottom_rows(app);
     Rect {
         x: area.x + tw,
         y: area.y,
@@ -2949,10 +3017,16 @@ mod tests {
         let app = app_with("hello world\n");
         let buf = render_to(&app, 40, 6);
         let bg = app.theme.background.to_ratatui();
+        // Every cell above the bottom row; that row is the hint bar, in its
+        // own `status_bg` from edge to edge.
+        let (w, h) = (buf.area.width, buf.area.height);
         assert!(
-            buf.content().iter().all(|c| c.bg == bg),
+            (0..h - 1).all(|y| (0..w).all(|x| buf[(x, y)].bg == bg)),
             "every cell should carry the theme background"
         );
+        let bar = app.theme.status_bg.to_ratatui();
+        assert!((0..w).all(|x| buf[(x, h - 1)].bg == bar), "the bottom row is a bar");
+        assert_ne!(bar, bg, "and it reads as one");
     }
 
     /// `layout.stable_gutter`: a heading's TEXT stays in the same column

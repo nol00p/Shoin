@@ -60,7 +60,7 @@ Type `:` and the command, then `Enter`.
 | `:set autosave_interval=3` | minutes between autosaves, 1–5 |
 | `:set autoreload [on\|off]` | take outside changes when nothing is unsaved |
 | `:set clipboard [on\|off]` | plain `y` `d` `p` use the system clipboard (`:set cb`) |
-| `:set conceal\|typewriter\|mouse\|focus\|numbers\|code_syntax [on\|off]` | toggle these |
+| `:set conceal\|typewriter\|mouse\|focus\|numbers\|code_syntax\|hints [on\|off]` | toggle these; `hints` is the key-hint bar |
 
 ## Config and help
 

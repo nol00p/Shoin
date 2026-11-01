@@ -124,8 +124,8 @@ cargo install shoin
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nol00p/shoin/releases/latest/download/shoin-installer.sh | sh
 ```
 
-It works with no config: the leader keys, such as `Space fe` for the file
-tree, are built in. `shoin --init-config` writes an annotated copy of the
+It works with no config: the leader keys, such as `<leader>fe` for the file
+tree, are built in. `<leader>` is `Space` unless you remap it. `shoin --init-config` writes an annotated copy of the
 config to `~/.config/shoin/` when you want to change it. You need a
 truecolor terminal and a [Nerd Font](https://www.nerdfonts.com/) (or
 `glyphs.nerd_fonts = false`). [Getting started](docs/getting-started.md)
@@ -146,10 +146,10 @@ cat README.md | shoin -p  # anything piped in
 | Type, then stop typing | `i` … `Esc` (or `jk`) |
 | Save, quit | `:w`, `:q` |
 | Bold the word under the cursor | `gb` |
-| Open the file tree | `Space fe` |
+| Open the file tree | `<leader>fe` |
 | Follow a `[[link]]`, then come back | `gf`, then `Ctrl-^` |
 | Dim everything but this paragraph | `:focus paragraph` |
-| See every key on one page | `Space hl` |
+| See every key on one page | `<leader>hl` |
 
 `:help` inside the editor explains the rest: `:help bindings`,
 `:help commands`, `:help writer` and `:help config`.

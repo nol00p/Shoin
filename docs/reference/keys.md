@@ -1,7 +1,8 @@
 # Keys
 
-Every key Shoin answers to, by mode. `Space` is the leader (`[input].leader`).
-Inside the editor, `Space hl` or `:help shortcuts` shows the same map.
+Every key Shoin answers to, by mode. `<leader>` is the leader key: `Space`
+unless you remap it with `[input].leader`.
+Inside the editor, `<leader>hl` or `:help shortcuts` shows the same map.
 
 ## Motions
 
@@ -120,7 +121,7 @@ and `list_indent` and `list_outdent` (Insert) — see
 | `o` | swap ends |
 | `>` `<` `u` `U` | indent / outdent / lowercase / uppercase |
 | `i{obj}` `a{obj}` | select a text object (`viw`, `vap`) |
-| `Space b` `Space i` | toggle bold / italic |
+| `<leader>b` `<leader>i` | toggle bold / italic |
 
 `move_lines_down` and `move_lines_up` move the selected lines down or up a
 line and keep them selected, like Vim's `:'<,'>m '>+1 | gv`. They take a
@@ -146,7 +147,7 @@ line. They have no key until you give them one:
 
 ## Read-only
 
-With `shoin -R`, `:view` or `Space v`. Every line is concealed and there is no caret.
+With `shoin -R`, `:view` or `<leader>v`. Every line is concealed and there is no caret.
 See [Reading](../reading.md#read-only).
 
 | Key | Does |
@@ -157,7 +158,7 @@ See [Reading](../reading.md#read-only).
 | `/` `?` `n` `N` | search |
 | `q` | quit |
 | `i` | switch to editing |
-| `Space v` | switch to editing (it also turns read-only on) |
+| `<leader>v` | switch to editing (it also turns read-only on) |
 
 An edit is refused with "read-only — press i to edit". Yanking, panels, `gf`
 and `:w` still work.
@@ -170,20 +171,20 @@ remove it.
 
 | Key | Does |
 |---|---|
-| `Space hl` | the shortcuts page |
-| `Space w` `Space q` | save / quit |
-| `Space F` | cycle focus mode |
-| `Space t` | typewriter scrolling |
-| `Space z` | zen mode |
-| `Space c` | concealment on / off |
-| `Space n` | line numbers |
-| `Space a` | cycle text alignment |
-| `Space v` | read-only on / off, as `:view` |
-| `Space fe` `Space fE` | file tree in this file's folder / in `$HOME` |
-| `Space ff` `Space fF` | find a file in this file's folder / in `$HOME` |
-| `Space fb` | switch buffer |
-| `Space sv` `Space ss` | split beside / below — again to close |
-| `Space so` | keep only this pane |
+| `<leader>hl` | the shortcuts page |
+| `<leader>w` `<leader>q` | save / quit |
+| `<leader>F` | cycle focus mode |
+| `<leader>t` | typewriter scrolling |
+| `<leader>z` | zen mode |
+| `<leader>c` | concealment on / off |
+| `<leader>n` | line numbers |
+| `<leader>a` | cycle text alignment |
+| `<leader>v` | read-only on / off, as `:view` |
+| `<leader>fe` `<leader>fE` | file tree in this file's folder / in `$HOME` |
+| `<leader>ff` `<leader>fF` | find a file in this file's folder / in `$HOME` |
+| `<leader>fb` | switch buffer |
+| `<leader>sv` `<leader>ss` | split beside / below — again to close |
+| `<leader>so` | keep only this pane |
 
 ## Panes
 
@@ -208,6 +209,7 @@ remove it.
 | `H` | show / hide dotfiles |
 | `a` | new file (end with `/` for a folder) |
 | `r` `m` `d` | rename / move / delete |
+| `<leader>hl` | the tree's keys, in `:help` — the leader keys work from the tree |
 | `q` | close the tree |
 
 ## Fuzzy finder
@@ -304,8 +306,8 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 
 | Name | Also | Default key | Does |
 |---|---|---|---|
-| `toggle_bold` | `bold` | `gb`, `Space b` (Visual) | toggle `**bold**` |
-| `toggle_italic` | `italic` | `gi`, `Space i` (Visual) | toggle `*italic*` |
+| `toggle_bold` | `bold` | `gb`, `<leader>b` (Visual) | toggle `**bold**` |
+| `toggle_italic` | `italic` | `gi`, `<leader>i` (Visual) | toggle `*italic*` |
 | `toggle_highlight` | `highlight` | `gh` | toggle `==highlight==` |
 | `toggle_code` | `code` | `gk` | toggle `` `code` `` |
 | `insert_link` | `link` | `gl` | wrap as a link, cursor in the URL |
@@ -318,10 +320,10 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 
 | Name | Also | Default key | Does |
 |---|---|---|---|
-| `save` | `write` | `Ctrl-s`, `Space w` | save |
+| `save` | `write` | `Ctrl-s`, `<leader>w` | save |
 | `save_stay_insert` | | `Ctrl-s` (Insert) | save without leaving Insert |
 | `save_quit` | `write_quit` `wq` | | save and quit |
-| `quit` | | `Space q` | quit, refusing with unsaved changes |
+| `quit` | | `<leader>q` | quit, refusing with unsaved changes |
 | `force_quit` | `quit!` | | quit, discarding changes |
 | `command` | | `:` | the command line |
 | `search_forward` | `search` | `/` | search forward |
@@ -335,31 +337,31 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 |---|---|---|---|
 | `scroll_view_down` | `scroll_down` | `Ctrl-e` | scroll the page a line down |
 | `scroll_view_up` | `scroll_up` | `Ctrl-y` | scroll the page a line up |
-| `cycle_focus` | `focus` | `Space F` | cycle focus mode |
-| `toggle_typewriter` | `typewriter` | `Space t` | typewriter scrolling on / off |
-| `toggle_conceal` | `conceal` | `Space c` | concealment on / off |
-| `toggle_zen` | `zen` | `Space z` | zen mode on / off |
-| `toggle_numbers` | `numbers` `number` | `Space n` | line numbers on / off |
-| `cycle_align` | `align` | `Space a` | cycle text alignment |
-| `toggle_view` | `view` `read_only` | `Space v` | read-only mode on / off, as `:view` |
-| `help` | `shortcuts` | `Space hl` | the shortcuts page |
+| `cycle_focus` | `focus` | `<leader>F` | cycle focus mode |
+| `toggle_typewriter` | `typewriter` | `<leader>t` | typewriter scrolling on / off |
+| `toggle_conceal` | `conceal` | `<leader>c` | concealment on / off |
+| `toggle_zen` | `zen` | `<leader>z` | zen mode on / off |
+| `toggle_numbers` | `numbers` `number` | `<leader>n` | line numbers on / off |
+| `cycle_align` | `align` | `<leader>a` | cycle text alignment |
+| `toggle_view` | `view` `read_only` | `<leader>v` | read-only mode on / off, as `:view` |
+| `help` | `shortcuts` | `<leader>hl` | the shortcuts page |
 
 ### Panels and panes
 
 | Name | Also | Default key | Does |
 |---|---|---|---|
-| `file_tree` | `file_explorer` `tree` | `Space fe` | file tree in this file's folder, or the launch folder with `tree.root = "cwd"` |
-| `file_tree_home` | `file_explorer_home` | `Space fE` | file tree over `$HOME` |
-| `find_file` | `fuzzy_find` `files` | `Space ff` | fuzzy finder in this file's folder, or the launch folder with `tree.root = "cwd"` |
-| `find_file_home` | `fuzzy_find_home` | `Space fF` | fuzzy finder over `$HOME` |
+| `file_tree` | `file_explorer` `tree` | `<leader>fe` | file tree in this file's folder, or the launch folder with `tree.root = "cwd"` |
+| `file_tree_home` | `file_explorer_home` | `<leader>fE` | file tree over `$HOME` |
+| `find_file` | `fuzzy_find` `files` | `<leader>ff` | fuzzy finder in this file's folder, or the launch folder with `tree.root = "cwd"` |
+| `find_file_home` | `fuzzy_find_home` | `<leader>fF` | fuzzy finder over `$HOME` |
 | `file_tree_cwd` | `file_explorer_cwd` | | file tree in the folder Shoin was launched from |
 | `find_file_cwd` | `fuzzy_find_cwd` | | fuzzy finder in the folder Shoin was launched from |
-| `find_buffer` | `buffers` `switch_buffer` | `Space fb` | switch buffer |
+| `find_buffer` | `buffers` `switch_buffer` | `<leader>fb` | switch buffer |
 | `alternate_buffer` | `alternate` `alt_buffer` | `Ctrl-^` | back to the previous buffer |
-| `split_vertical` | `vsplit` | `Space sv` | split beside, or close the split |
-| `split_horizontal` | `split` | `Space ss` | split below, or close the split |
+| `split_vertical` | `vsplit` | `<leader>sv` | split beside, or close the split |
+| `split_horizontal` | `split` | `<leader>ss` | split below, or close the split |
 | `close_pane` | | `Ctrl-w q` | close this pane |
-| `only_pane` | `only` | `Space so` | keep only this pane |
+| `only_pane` | `only` | `<leader>so` | keep only this pane |
 
 ### Unbinding
 

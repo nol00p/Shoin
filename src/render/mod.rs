@@ -7,6 +7,7 @@ pub mod cache;
 pub mod conceal;
 pub mod focus;
 pub mod frame;
+pub mod hints;
 pub mod indent;
 pub mod layout;
 pub mod numbers;
