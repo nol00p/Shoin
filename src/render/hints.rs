@@ -70,16 +70,17 @@ pub fn hints(app: &App) -> Vec<Hint> {
         _ => {}
     }
     if app.tree.as_ref().is_some_and(|t| t.focused) {
+        // Most used first: whatever doesn't fit drops off the end.
         return list(&[
             ("l", "open"),
+            ("q", "close"),
             ("a", "new"),
             ("r", "rename"),
             ("m", "move"),
             ("d", "delete"),
+            ("?", "help"),
             ("- =", "root"),
             ("H", "dotfiles"),
-            ("?", "help"),
-            ("q", "close"),
         ]);
     }
     if app.view {
