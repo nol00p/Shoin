@@ -297,7 +297,9 @@ impl Default for Theme {
             ],
 
             status_fg: rgb(0x56, 0x5f, 0x89),
-            status_bg: Color::None,
+            // Tokyo Night's bg_dark, its own statusline background: a shade
+            // under the page, so the bottom row reads as a bar, quietly.
+            status_bg: rgb(0x16, 0x16, 0x1e),
             error: rgb(0xf7, 0x76, 0x8e),
 
             dim_markers: true,

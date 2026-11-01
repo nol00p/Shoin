@@ -104,8 +104,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     // repeating it beside itself would be noise. When it has nothing to say,
     // the hint bar takes the row: the keys that matter right now.
     let status = if cfg.status.enabled { status_text(app) } else { None };
+    // The row is a bar, in `status_bg`, whenever something is in it — so the
+    // hints and a flash that replaces them sit on the same strip.
+    let hints = crate::render::hints::hints(app);
+    if (status.is_some() || !hints.is_empty()) && area.height > STATUS_ROWS {
+        let row = Rect { y: area.y + area.height - STATUS_ROWS, height: STATUS_ROWS, ..area };
+        let bar = Style::default().bg(app.theme.status_bg.to_ratatui());
+        frame.render_widget(Block::default().style(bar), row);
+    }
     if status.is_none() {
-        render_hint_bar(frame, app, area, ea);
+        render_hint_bar(frame, app, area, ea, &hints);
     }
     if cfg.status.enabled {
         if let Some(status) = status {
@@ -161,8 +169,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 /// a dozen keys to name. Keys take the
 /// colour the start screen gives its keys, what they do is dimmed, and hints
 /// that still don't fit are dropped from the end rather than cut in half.
-fn render_hint_bar(frame: &mut Frame, app: &App, area: Rect, ea: Rect) {
-    let hints = crate::render::hints::hints(app);
+fn render_hint_bar(frame: &mut Frame, app: &App, area: Rect, ea: Rect, hints: &[crate::render::hints::Hint]) {
     if hints.is_empty() || area.height <= STATUS_ROWS {
         return;
     }
@@ -3010,10 +3017,16 @@ mod tests {
         let app = app_with("hello world\n");
         let buf = render_to(&app, 40, 6);
         let bg = app.theme.background.to_ratatui();
+        // Every cell above the bottom row; that row is the hint bar, in its
+        // own `status_bg` from edge to edge.
+        let (w, h) = (buf.area.width, buf.area.height);
         assert!(
-            buf.content().iter().all(|c| c.bg == bg),
+            (0..h - 1).all(|y| (0..w).all(|x| buf[(x, y)].bg == bg)),
             "every cell should carry the theme background"
         );
+        let bar = app.theme.status_bg.to_ratatui();
+        assert!((0..w).all(|x| buf[(x, h - 1)].bg == bar), "the bottom row is a bar");
+        assert_ne!(bar, bg, "and it reads as one");
     }
 
     /// `layout.stable_gutter`: a heading's TEXT stays in the same column
