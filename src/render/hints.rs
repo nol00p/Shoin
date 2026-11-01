@@ -105,7 +105,6 @@ pub fn hints(app: &App) -> Vec<Hint> {
             hint("v", "select"),
             hint("/", "search"),
             hint(":", "command"),
-            hint(&leader, "more"),
             hint(&format!("{leader} hl"), "help"),
         ],
     }
