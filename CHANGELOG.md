@@ -35,7 +35,8 @@
   `g` or `Ctrl-w`, what can follow. It gives way to the status line and
   hides in zen mode. `[hints] enabled = false` or `:set hints off` turns it
   off (#60).
-- `?` in the file tree opens help at the tree's keys (#60).
+- The leader keys work from the file tree, and `<leader>hl` there opens
+  help at the tree's keys (#60).
 
 **Fixes**
 

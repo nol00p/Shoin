@@ -27,7 +27,7 @@ use crate::finder::{self, Finder};
 use crate::tree::{Activate, FileTree};
 use crate::input::action::{Action, Operator, Root, Target};
 use crate::input::bindings::{Command, Verb};
-use crate::input::keymap::Keymap;
+use crate::input::keymap::{Keymap, Lookup};
 use crate::input::mode::{Mode, Prompt, PromptKind};
 use crate::input::pending::{Key, Pending, Resolution, Table};
 use crate::render::cache::RenderCache;
@@ -1921,7 +1921,11 @@ impl App {
             // Not toggle symmetry: once open, the overlay owns all input
             // (`on_key_help`), so a repeat of this binding never reaches here
             // to close it — q / Esc does that, same as `:help` opened it.
-            Action::Help => self.open_help("shortcuts"),
+            // From the focused tree, help opens at the tree's own keys.
+            Action::Help => {
+                let in_tree = self.tree.as_ref().is_some_and(|t| t.focused);
+                self.open_help(if in_tree { "tree" } else { "shortcuts" });
+            }
             Action::FollowLink => self.follow_link(),
             Action::OpenExternal => self.open_external(),
             Action::AlternateBuffer => self.alternate_buffer(),
@@ -2389,18 +2393,27 @@ impl App {
             self.tree_window_prefix = true;
             return;
         }
+        // Leader sequences reach the keymap from the tree too, so the leader
+        // keys mean the same everywhere: `<leader>hl` opens help (at the
+        // tree's keys), `<leader>fe` closes the tree, `<leader>ff` finds. Only
+        // a key that starts or continues one is passed on; the tree's own
+        // single keys stay the tree's.
+        if let Some(k) = Key::from_event(key) {
+            let starts = matches!(self.keymap.lookup("normal", &[k]), Lookup::Prefix);
+            if starts || !self.pending.partial.is_empty() {
+                self.feed_pending(key, Table::Normal);
+                return;
+            }
+        }
 
         let mut close = false;
         let mut to_open = None;
         let mut prompt = None;
         let mut flash = None;
         let mut remember_hidden = None;
-        let mut show_keys = false;
         if let Some(tree) = self.tree.as_mut() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => close = true,
-                // Help at the tree's own section, whatever `[hints]` says.
-                KeyCode::Char('?') => show_keys = true,
                 KeyCode::Char('j') | KeyCode::Down => tree.down(),
                 KeyCode::Char('k') | KeyCode::Up => tree.up(),
                 KeyCode::Char('h') | KeyCode::Left => tree.collapse_or_parent(),
@@ -2445,10 +2458,6 @@ impl App {
         }
         if let Some(msg) = flash {
             self.notify(msg, FlashKind::Info);
-        }
-        if show_keys {
-            self.help = Some(Help::open("tree"));
-            return;
         }
         if let Some(kind) = prompt {
             return self.tree_prompt(kind);
@@ -9348,20 +9357,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `?` in the tree opens help at the tree's section, and `q` there comes
-    /// back to the tree.
+    /// The leader keys work from the tree: `<leader>hl` opens help at the
+    /// tree's section — `q` there comes back to the tree — and `<leader>fe`
+    /// closes the tree it opened.
     #[test]
-    fn question_mark_in_the_tree_opens_its_help() {
-        let mut app = app_with("x\n");
+    fn leader_keys_work_from_the_tree() {
+        let mut app = app_with_keys("x\n", &[("<leader>hl", "help"), ("<leader>fe", "file_tree")]);
         let root = app.cwd();
         app.toggle_tree(root);
-        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        feed(&mut app, " hl");
         let h = app.help.as_ref().expect("help open");
         assert_eq!(h.cats[h.cat].name, "Files");
         assert!(h.rows()[h.mark.unwrap()].plain().contains("File tree"));
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(app.help.is_none());
         assert!(app.tree.as_ref().is_some_and(|t| t.focused), "back in the tree");
+        feed(&mut app, " fe");
+        assert!(app.tree.is_none(), "the same key that opened it closes it");
     }
 
     /// Opening a file leaves the tree beside the editor for the next one,

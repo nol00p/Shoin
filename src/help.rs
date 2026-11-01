@@ -732,7 +732,7 @@ H :: show · hide dotfiles; remembered, tree.show_hidden to start with
 a :: new file in this folder; end the name with / for a folder
 r m d :: rename · move · delete. Delete asks first, and says how much a folder holds
 Ctrl-w h l :: between the tree and the editor
-? :: these keys, here in help
+<leader>hl :: these keys, here in help — the leader keys work from the tree too
 q :: close the tree
 > A prompt takes Ctrl-u to clear it and Esc to abandon it. Renaming or moving a file you have open carries the buffer with it.
 

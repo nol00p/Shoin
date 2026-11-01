@@ -209,7 +209,7 @@ remove it.
 | `H` | show / hide dotfiles |
 | `a` | new file (end with `/` for a folder) |
 | `r` `m` `d` | rename / move / delete |
-| `?` | the tree's keys, in `:help` |
+| `<leader>hl` | the tree's keys, in `:help` — the leader keys work from the tree |
 | `q` | close the tree |
 
 ## Fuzzy finder
