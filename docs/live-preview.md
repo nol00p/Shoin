@@ -36,7 +36,7 @@ off. [`examples/formatting.md`](../examples/formatting.md) exercises all of it.
 - Table rows never wrap. A row wider than the pane stays on one line and is
   clipped at the edge. Shoin lines the columns up in the file when you
   leave Insert, or on `ga`. See [Writing](writing.md#writer-verbs).
-- `layout.conceal = false`, `:set conceal off` or `Space c` turns concealment
+- `layout.conceal = false`, `:set conceal off` or `<leader>c` turns concealment
   off entirely.
 - To see every line concealed, the cursor's too, open the page read-only:
   `shoin -R` or `:view`. `shoin -p` prints that same view to the terminal.

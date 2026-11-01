@@ -29,4 +29,4 @@ feature does; the edge cases are under **Details** at the end.
 - [Changelog](../CHANGELOG.md)
 
 Inside the editor, `:help` covers the same ground: `:help shortcuts` (or
-`Space hl`) lists every key on one page.
+`<leader>hl`) lists every key on one page.

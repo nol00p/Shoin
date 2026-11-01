@@ -20,7 +20,7 @@ mode. Each is a single undo step.
 ```
 
 On a plain list item, `gt` adds an empty checkbox. `gl` writes a link and `gf`
-walks it — see [Notes](notes.md). In Visual mode, `Space b` and `Space i` also
+walks it — see [Notes](notes.md). In Visual mode, `<leader>b` and `<leader>i` also
 toggle bold and italic.
 
 `ga` pads every cell of a table to its column's width, in the file itself,
@@ -46,8 +46,8 @@ it, and the same `u` that takes back the typing takes back the alignment.
   :set line_spacing=1               blank rows between lines, 0–4
 ```
 
-Most have a leader key too: `Space F` cycles focus, `Space t` typewriter,
-`Space z` zen, `Space n` line numbers and `Space a` alignment. Each also has a
+Most have a leader key too: `<leader>F` cycles focus, `<leader>t` typewriter,
+`<leader>z` zen, `<leader>n` line numbers and `<leader>a` alignment. Each also has a
 setting under `[layout]` — see [Configuration](configuration.md).
 
 ## Details

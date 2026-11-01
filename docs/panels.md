@@ -2,15 +2,16 @@
 
 Shoin has no permanent interface. The file tree, the fuzzy finder, the buffer
 list and splits appear when you call them and leave when you're done — each
-opens and closes on the same key. `Space` is the leader.
+opens and closes on the same key. `<leader>` is `Space` unless you remap it
+(`[input] leader`).
 
 | | |
 |---|---|
-| `Space fe` / `Space fE` | file tree — this file's folder, or all of `$HOME` |
-| `Space ff` / `Space fF` | fuzzy finder — this file's folder, or all of `$HOME` |
-| `Space fb` | switch buffer |
+| `<leader>fe` / `<leader>fE` | file tree — this file's folder, or all of `$HOME` |
+| `<leader>ff` / `<leader>fF` | fuzzy finder — this file's folder, or all of `$HOME` |
+| `<leader>fb` | switch buffer |
 | `Ctrl-^` / `Ctrl-6` | back to the previous buffer — press again to return |
-| `Space sv` / `Space ss` | split beside / below |
+| `<leader>sv` / `<leader>ss` | split beside / below |
 | `Ctrl-w` + `h j k l` | move between panes |
 | `:e <path>` | open another file |
 | `:q` / `:Q` | close this buffer (the last one quits) / quit every buffer |
@@ -51,7 +52,7 @@ panes.
 - Dotfile visibility is remembered; the default is `tree.show_hidden`.
 - Opening a file hands focus back to the editor and leaves the tree open for
   the next one. `tree.close_on_open = true` closes it instead.
-- `tree.root = "cwd"` opens `Space fe` and `Space ff` on the folder Shoin was
+- `tree.root = "cwd"` opens `<leader>fe` and `<leader>ff` on the folder Shoin was
   launched from — the whole vault rather than the note's subfolder. To keep
   both, bind `file_tree_cwd` / `find_file_cwd` to keys of their own.
 - The leader keys are built in. Remap them under `[keys.normal]` (see

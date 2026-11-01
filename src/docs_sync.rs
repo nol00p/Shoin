@@ -258,14 +258,14 @@ fn every_leader_binding_is_documented() {
     let mut missing = Vec::new();
     for key in &keys {
         // Followed by a space or the end, so `f` is not found inside `fe`.
-        let in_help = help.match_indices(&format!("Space {key}")).any(|(i, m)| {
+        let in_help = help.match_indices(&format!("<leader>{key}")).any(|(i, m)| {
             help[i + m.len()..].chars().next().is_none_or(char::is_whitespace)
         });
         if !in_help {
-            missing.push(format!(":help: Space {key}"));
+            missing.push(format!(":help: <leader>{key}"));
         }
-        if !reference.contains(&format!("`Space {key}`")) {
-            missing.push(format!("docs/reference/keys.md: Space {key}"));
+        if !reference.contains(&format!("`<leader>{key}`")) {
+            missing.push(format!("docs/reference/keys.md: <leader>{key}"));
         }
     }
     assert!(missing.is_empty(), "leader bindings not documented: {missing:?}");

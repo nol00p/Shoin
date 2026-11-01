@@ -45,8 +45,9 @@ Homebrew puts `shoin` on your `PATH` for you. Cargo and the installer put it
 in `~/.cargo/bin`, which needs to be on your `PATH`. To try it without
 installing, `cargo run -- notes.md` works from a clone.
 
-Shoin needs no config. The leader bindings — `Space fe` for the file tree,
-`Space ff` for the finder, and the rest — are built in. To change settings,
+Shoin needs no config. The leader bindings — `<leader>fe` for the file tree,
+`<leader>ff` for the finder, and the rest — are built in. `<leader>` is
+`Space` unless you remap it with `[input] leader`. To change settings,
 write an annotated copy of the defaults:
 
 ```sh
@@ -81,19 +82,19 @@ is drawn, not typed. The buffer underneath is empty, so the first key you press
 is the first character of the file, and the picture is gone that same frame.
 
 Then, in order: `i` to type, `Esc` (or `jk`) to stop, `:w` to save, `:q` to
-quit. `:help` explains everything else, and `Space hl` opens one page listing
+quit. `:help` explains everything else, and `<leader>hl` opens one page listing
 every key.
 
 Just reading? `shoin -p notes.md` prints a note as the editor shows it, and
-`shoin -R notes.md` opens it read-only. Inside the editor, `:view` or `Space v`
+`shoin -R notes.md` opens it read-only. Inside the editor, `:view` or `<leader>v`
 switches to that read-only view and back. See [Reading](reading.md).
 
 While you learn, the bottom row shows the keys that matter right now: in
-each mode, in the file tree, and after a key like `Space` or `g` that waits
+each mode, in the file tree, and after a key like `<leader>` or `g` that waits
 for another. `:set hints off` hides it for the session, and
 `enabled = false` under `[hints]` for good.
 
-`Space n` turns on line numbers. For Vim's relative numbers, which make counts
+`<leader>n` turns on line numbers. For Vim's relative numbers, which make counts
 like `5j` easy to read off, set `numbers = "relative"` under `[layout]` or try
 `:number relative`. To let a transparent terminal show through, set
 `background = "none"` under `[theme]`.
