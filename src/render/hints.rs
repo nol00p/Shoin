@@ -8,8 +8,9 @@
 //! so a rebound key shows as what it now does.
 //!
 //! `[hints] enabled = false` turns all of it off, and zen mode hides it with
-//! the rest of the chrome. Help, `:diff` and the start screen carry their own
-//! keys, so the bar stays out of their way.
+//! the rest of the chrome. Help and `:diff` carry their own keys, so the bar
+//! stays out of their way, and so does the start screen — but only for the
+//! plain Normal hints it already lists.
 
 use crate::app::App;
 use crate::config::keys::parse_seq;
@@ -26,7 +27,6 @@ pub fn hints(app: &App) -> Vec<Hint> {
         || app.zen_on()
         || app.help.is_some()
         || app.diff.is_some()
-        || splash::active(app)
     {
         return Vec::new();
     }
@@ -82,6 +82,12 @@ pub fn hints(app: &App) -> Vec<Hint> {
             hint("- =", "root"),
             hint("H", "dotfiles"),
         ];
+    }
+    // The start screen lists the ways in itself, so the plain Normal hints
+    // would only repeat it. Everything above — a prefix, an operator, the
+    // tree opened from it — still shows: that is a newcomer's first minute.
+    if splash::active(app) {
+        return Vec::new();
     }
     if app.view {
         return vec![
@@ -339,6 +345,29 @@ mod tests {
         app.on_key(KeyEvent::new(Ct::Esc, KeyModifiers::NONE));
         app.set_view(true);
         assert!(keys(&hints(&app)).contains(&"Space v"));
+    }
+
+    /// On the start screen (no file, nothing typed) the plain hints give way
+    /// to its own list, but the tree opened from it, the leader and `g`
+    /// still show theirs: that is exactly where a newcomer starts.
+    #[test]
+    fn the_start_screen_hides_only_the_plain_hints() {
+        let cfg = crate::config::parse("").unwrap();
+        let mut app = App::new(cfg, None, None).unwrap();
+        assert!(splash::active(&app), "a bare start");
+        assert!(hints(&app).is_empty(), "the start screen lists these itself");
+
+        press(&mut app, ' ');
+        assert!(hints(&app).contains(&("f…".into(), "files".into())), "{:?}", hints(&app));
+        press(&mut app, 'f');
+        press(&mut app, 'e');
+        assert!(app.tree.as_ref().is_some_and(|t| t.focused));
+        assert!(splash::active(&app), "still the start screen beside the tree");
+        assert!(keys(&hints(&app)).contains(&"q"), "the tree's keys: {:?}", hints(&app));
+
+        app.tree = None;
+        press(&mut app, 'g');
+        assert!(keys(&hints(&app)).contains(&"b i h k"));
     }
 
     #[test]
