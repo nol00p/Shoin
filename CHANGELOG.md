@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+**Fixes**
+
+- Started with no file, Shoin showed no hint bar at all while the start
+  screen was up: not after `<leader>`, `g` or `Ctrl-w`, and not in the file
+  tree opened from it. Only the plain Normal-mode hints give way to the start
+  screen now, since it lists those itself.
+
 ## 0.2.2
 
 **Help**
