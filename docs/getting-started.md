@@ -82,8 +82,8 @@ is drawn, not typed. The buffer underneath is empty, so the first key you press
 is the first character of the file, and the picture is gone that same frame.
 
 Then, in order: `i` to type, `Esc` (or `jk`) to stop, `:w` to save, `:q` to
-quit. `:help` explains everything else, and `<leader>hl` opens one page listing
-every key.
+quit. `:help` (or `<leader>hl`) explains everything else, in tabs by task
+with search, and `:help <word>` opens at any key or setting.
 
 Just reading? `shoin -p notes.md` prints a note as the editor shows it, and
 `shoin -R notes.md` opens it read-only. Inside the editor, `:view` or `<leader>v`
