@@ -28,5 +28,6 @@ feature does; the edge cases are under **Details** at the end.
 - [Design notes](design.md) — why Shoin works the way it does
 - [Changelog](../CHANGELOG.md)
 
-Inside the editor, `:help` covers the same ground: `:help shortcuts` (or
-`<leader>hl`) lists every key on one page.
+Inside the editor, `:help` (or `<leader>hl`) covers the same ground in tabs
+by task, with search, and `:help <word>` opens at any key, command or
+setting.

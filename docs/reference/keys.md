@@ -2,7 +2,8 @@
 
 Every key Shoin answers to, by mode. `<leader>` is the leader key: `Space`
 unless you remap it with `[input].leader`.
-Inside the editor, `<leader>hl` or `:help shortcuts` shows the same map.
+Inside the editor, `<leader>hl` or `:help` shows the same keys by task, with
+search.
 
 ## Motions
 
