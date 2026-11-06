@@ -139,6 +139,7 @@ fn write_pdf(markdown: &str, dest: &Path) -> Result<()> {
     let mut child = Command::new(tool)
         .arg("--from=markdown")
         .arg(format!("--pdf-engine={engine}"))
+        .args(engine_args(engine))
         .arg("--output")
         .arg(dest)
         .stdin(Stdio::piped())
@@ -180,6 +181,19 @@ const PDF_ENGINES: &[&str] = &[
     "weasyprint",
     "wkhtmltopdf",
 ];
+
+/// What pandoc needs to be told for `engine` to work out of the box.
+///
+/// pandoc's Typst template passes `font: ()` when no main font is given, and
+/// Typst 0.15 rejects an empty font list, so every export failed with "font
+/// fallback list must not be empty". Libertinus Serif is built into the typst
+/// binary, so naming it works on any machine with typst, fonts installed or not.
+fn engine_args(engine: &str) -> &'static [&'static str] {
+    match engine {
+        "typst" => &["--variable=mainfont:Libertinus Serif"],
+        _ => &[],
+    }
+}
 
 /// The first executable named `name` on `PATH`.
 fn which(name: &str) -> Option<PathBuf> {
@@ -358,6 +372,12 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn typst_is_given_a_font_and_the_others_are_left_alone() {
+        assert!(engine_args("typst").iter().any(|a| a.starts_with("--variable=mainfont:")));
+        assert!(engine_args("xelatex").is_empty());
     }
 
     /// Exporting over the document you are exporting would destroy it.
