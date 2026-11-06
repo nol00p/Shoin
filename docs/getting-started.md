@@ -65,7 +65,7 @@ It never overwrites a config you already have unless you add `--force`.
 | **Rust** | 1.88 or newer, only to build from source |
 | **Terminal** | truecolor (24-bit) support |
 | **Font** | a [Nerd Font](https://www.nerdfonts.com/) — or set `glyphs.nerd_fonts = false` |
-| **PDF export only** | `pandoc` and a layout engine (`brew install pandoc typst`) |
+| **PDF export only** | `pandoc` and a layout engine: `brew install pandoc typst` on macOS; on Linux, pandoc from your package manager and typst from [its releases](https://github.com/typst/typst/releases) |
 
 Markdown, text and HTML export need nothing beyond the binary.
 

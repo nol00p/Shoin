@@ -133,7 +133,7 @@ fn write_pdf(markdown: &str, dest: &Path) -> Result<()> {
     // that is actually installed turns "'pdflatex' not found" into a working
     // export on any machine with one of these.
     let Some(engine) = PDF_ENGINES.iter().find(|e| which(e).is_some()) else {
-        bail!("pandoc has no PDF engine — try: brew install typst");
+        bail!("{NO_ENGINE}");
     };
 
     let mut child = Command::new(tool)
@@ -165,6 +165,15 @@ fn write_pdf(markdown: &str, dest: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// What to say when pandoc is there but no engine is. Homebrew is the easy
+/// way to get typst on macOS; on Linux, distros differ (Fedora has no typst
+/// package at all), and the release binary from GitHub works everywhere.
+const NO_ENGINE: &str = if cfg!(target_os = "macos") {
+    "pandoc has no PDF engine — try: brew install typst"
+} else {
+    "no PDF engine — get typst at github.com/typst/typst"
+};
 
 /// PDF engines pandoc can drive, cheapest first.
 ///
@@ -372,6 +381,13 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The status line is one row, so the hint must fit it whole.
+    #[test]
+    fn the_no_engine_hint_names_typst_and_fits_the_status_line() {
+        assert!(NO_ENGINE.contains("engine") && NO_ENGINE.contains("typst"), "{NO_ENGINE}");
+        assert!(NO_ENGINE.len() < 64, "{NO_ENGINE}");
     }
 
     #[test]
