@@ -113,7 +113,8 @@ The first of these that exists wins:
   as `<leader>f` on its own, set the bindings under it to `"none"`.
 - `[keys.insert]` takes single keys only. `"<S-Tab>"` names Shift-Tab.
 - `list_renumber = false` leaves the numbers of a `1.` `2.` `3.` list as you
-  wrote them when `>al`, `<al`, `Alt-j` or `Alt-k` moves an item. `list_tab =
+  wrote them when `>al`, `<al`, `Alt-j` or `Alt-k` moves an item, and so
+  never re-indents the lines under a number that would have widened. `list_tab =
   false` makes Tab type a tab on a list item too — see
   [Editing](editing.md#lists).
 - `table_align = "manual"` stops Shoin rewriting a table when you leave

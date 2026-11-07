@@ -55,9 +55,9 @@ on it for the next press.
 
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
-the same undo step. When a number gets wider or narrower (`9.` → `10.`), the
-lines of its item move with its text, sub-items and code blocks included. Bullet lists are never renumbered. Turn this off with `list_renumber = false`
-in `[editor]`.
+the same undo step. When a number gets wider (`9.` → `10.`), lines of its
+item that would fall out of it move in by the difference. Bullet lists are
+never renumbered. Turn both off with `list_renumber = false` in `[editor]`.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
 line, so Enter, Tab, and typing starts a sub-item.
@@ -116,16 +116,18 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   so a parent always moves with its children. The items touched have to be
   siblings in one list: a selection across two lists, or across a paragraph,
   is refused.
-- When a renumber changes a number's width, the item's lines move with its
-  text a block at a time: a sub-item with everything under it, a fenced or
-  `$$` block, or a single line. A block that starts at or past the item's
-  text column moves whole, so it keeps its shape and other Markdown tools
-  still read it as part of the item. A block that starts short of it, such
-  as lazy text or a sub-item indented by 2 under `9.`, stays whole, and a
-  moved sub-item's own lazy lines stay too. Narrowing only ever takes
-  spaces, never text. Blocks
-  with a tab-indented line stay, and so does an item with a tab before or
-  right after its number, where columns depend on tab stops.
+- When a number widens, its item's text column moves right (`9. ` is 3
+  columns, `10. ` is 4), and a line left at the old column would no longer
+  belong to the item in other Markdown tools. So the item's lines are taken
+  a block at a time (a sub-item with everything under it, a fenced or `$$`
+  block, or a single line), and a block whose first line sits at the old
+  text column, short of the new one, moves in just far enough. Blocks that
+  are already deep enough stay, so a list nested by 4 keeps its 4-space
+  steps; so do blocks short of the old column, such as lazy text. Within a
+  moving block, lines indented less than its first line, and tab-indented
+  lines, stay. An item with a tab before or after its marker is left alone,
+  since tab stops decide its columns. When a number narrows nothing moves:
+  every line is still inside the item.
 - Shoin itself does not yet read a fence or `$$` block indented 4 or more
   columns, even inside a list item, so one moved from column 3 to 4 under a
   `10.` shows as plain text in the editor. Other Markdown tools read it as

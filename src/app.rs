@@ -4081,7 +4081,8 @@ impl App {
         }
         let past = if down { (near.0, far.1) } else { (far.0, near.1) };
         let start = list_starts(&lists, &[item.0]).first().map(|(_, n)| *n);
-        // Each end's line length, to follow a renumber that widens it.
+        // Each end's line length, to follow a renumber or realign that
+        // widens its line.
         let width = |c: Cursor| self.buffer.line_len(c.line) as isize;
         let (cursor_was, anchor_was) = (width(at), anchor.map(width));
 
@@ -4107,8 +4108,8 @@ impl App {
             self.apply_renumber(edits);
         }
         // An end inside the block moves with its line, and its column with the
-        // line's text, which only changed if its number did. An end on a
-        // blank line outside it lands on the block's edge.
+        // line's text, which changed if its number did or the realign moved
+        // it in. An end on a blank line outside it lands on the block's edge.
         let follow = |buffer: &Buffer, c: Cursor, was: isize| {
             if c.line < item.0 {
                 Cursor::new(new_start, 0)
@@ -7960,12 +7961,14 @@ mod tests {
         feed(&mut app, "j");
         alt(&mut app, 'j');
         assert_eq!(text(&app), "8. h\n9. j\n10. i\n    more\n");
+        // Narrowing moves nothing: `more` is still inside the item.
         alt(&mut app, 'k');
-        assert_eq!(text(&app), "8. h\n9. i\n   more\n10. j\n", "and back when it narrows");
+        assert_eq!(text(&app), "8. h\n9. i\n    more\n10. j\n");
 
         esc(&mut app);
         feed(&mut app, "u");
-        assert_eq!(text(&app), "8. h\n9. j\n10. i\n    more\n", "renumber and shift: one undo step");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "8. h\n9. i\n   more\n10. j\n", "renumber and shift: one undo step");
     }
 
     /// Sub-items and a code block keep their shape, so a CommonMark reader
@@ -8003,12 +8006,21 @@ mod tests {
         let mut app = app_with("9. h\n10. i\n    - x\nlazy\n");
         feed(&mut app, "j");
         alt(&mut app, 'k');
-        assert_eq!(text(&app), "9. i\n   - x\nlazy\n10. h\n");
+        assert_eq!(text(&app), "9. i\n    - x\nlazy\n10. h\n");
 
         let mut app = app_with("8. a\n100. b\n     - x\nz\nw\nqq\n");
         feed(&mut app, "j");
         alt(&mut app, 'k');
-        assert_eq!(text(&app), "8. b\n   - x\nz\nw\nqq\n9. a\n");
+        assert_eq!(text(&app), "8. b\n     - x\nz\nw\nqq\n9. a\n");
+    }
+
+    /// A list nested by 4, as `>al` makes it, keeps its 4-space steps.
+    #[test]
+    fn four_space_nesting_survives_a_move_across_ten() {
+        let mut app = app_with("8. h\n    - hh\n9. i\n    - ii\n10. j\n    - jj\n");
+        feed(&mut app, "jj");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "8. h\n    - hh\n9. j\n    - jj\n10. i\n    - ii\n");
     }
 
     /// Nested numbers that both widen add up for the lines inside both.
