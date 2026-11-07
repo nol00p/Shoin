@@ -31,7 +31,7 @@ pub fn render(text: &str, measure: u16, justify: bool) -> String {
     let mut in_fence = false;
 
     for (i, line) in text.lines().enumerate() {
-        let (kind, next) = classify(line, &carry, i == 0);
+        let (kind, next) = classify(line, &carry, i == 0, md.math);
         carry = next;
 
         match &kind {

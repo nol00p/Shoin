@@ -28,6 +28,8 @@ pub enum Inline {
     Autolink,
     /// `\*` — the backslash is dimmed, the next char is literal.
     Escape,
+    /// Inline LaTeX delimited by `$…$`
+    Latex,
 }
 
 pub struct InlineSpan {
@@ -117,6 +119,13 @@ fn match_at(chars: &[char], i: usize, cfg: &MarkdownConfig) -> Option<InlineSpan
         '=' if cfg.highlight => pair_at(chars, i, '=', Inline::Highlight),
         '#' if cfg.tags => tag_at(chars, i),
         'h' => autolink_at(chars, i),
+        '$' if cfg.math => {
+            if chars.get(i + 1) == Some(&'$') {
+                latex_delimited_at(chars, i)
+            } else {
+                latex_at(chars, i)
+            }
+        }
         _ => None,
     }
 }
@@ -179,6 +188,53 @@ fn code_at(chars: &[char], i: usize) -> Option<InlineSpan> {
         outer: i..close + r,
         inner: open_end..close,
     })
+}
+
+fn latex_at(chars: &[char], i: usize) -> Option<InlineSpan> {
+    // Pandoc rule: opening $ must be immediately followed by a non-whitespace character.
+    let next_char = chars.get(i + 1)?;
+    if next_char.is_whitespace() || *next_char == '$' {
+        return None;
+    }
+
+    let mut j = i + 1;
+    while j < chars.len() {
+        if chars[j] == '$' {
+            // Pandoc rule: closing $ must be preceded by a non-whitespace character
+            // and must NOT be followed by an ASCII digit.
+            let prev_char = chars[j - 1];
+            if prev_char.is_whitespace() {
+                return None;
+            }
+            if let Some(after) = chars.get(j + 1) {
+                if after.is_ascii_digit() {
+                    return None;
+                }
+            }
+            return (j > i + 1).then_some(InlineSpan {
+                kind: Inline::Latex,
+                outer: i..j + 1,
+                inner: i + 1..j,
+            });
+        }
+        j += 1;
+    }
+    None
+}
+
+fn latex_delimited_at(chars: &[char], i: usize) -> Option<InlineSpan> {
+    let mut j = i + 2;
+    while j < chars.len() {
+        if chars[j] == '$' && chars.get(j + 1) == Some(&'$') {
+            return (j > i + 2).then_some(InlineSpan {
+                kind: Inline::Latex,
+                outer: i..j + 2,
+                inner: i + 2..j,
+            });
+        }
+        j += 1;
+    }
+    None
 }
 
 /// `*` / `**` / `***`. The run length picks italic / bold / both.
@@ -420,6 +476,10 @@ fn body_style(kind: Inline, base: Style, theme: &Theme) -> Style {
             s.fg = theme.tag;
             s.bg = theme.tag_bg;
         }
+        Inline::Latex => {
+            s.fg = theme.code;
+            s.bg = theme.code_bg;
+        }
         // The backslash is the marker; the escaped char shows in the base style.
         Inline::Escape => {}
     }
@@ -566,6 +626,37 @@ mod tests {
         cfg.tags = false;
         cfg.highlight = false;
         assert!(scan("[[note]] #tag ==hi==", &cfg).is_empty());
+    }
+
+    #[test]
+    fn inline_latex_is_detected_when_enabled() {
+        let mut cfg = md();
+        cfg.math = true;
+        let spans = scan("area $x^2$", &cfg);
+        assert_eq!(spans.len(), 1);
+        let span = &spans[0];
+        assert_eq!(span.kind, Inline::Latex);
+        assert_eq!(text("area $x^2$", &span.inner), "x^2");
+        assert!(scan("$unclosed", &cfg).is_empty());
+        let spans_display = scan(r"$$\nabla \cdot \vec{E}$$", &cfg);
+        assert_eq!(spans_display.len(), 1);
+        let display = &spans_display[0];
+        assert_eq!(display.kind, Inline::Latex);
+        assert_eq!(
+            text(r"$$\nabla \cdot \vec{E}$$", &display.inner),
+            r"\nabla \cdot \vec{E}"
+        );
+        // Pandoc rule tests:
+        assert!(scan("costs $5 and $10", &cfg).is_empty());
+        assert!(scan("costs $ 5$", &cfg).is_empty());
+        assert!(scan("costs $5 $", &cfg).is_empty());
+        // \( is an escaped parenthesis, not math:
+        assert_eq!(scan(r"area \(x^2\)", &cfg)[0].kind, Inline::Escape);
+
+        // When math is false, $...$ is plain text:
+        let mut cfg_off = md();
+        cfg_off.math = false;
+        assert!(scan("area $x^2$", &cfg_off).is_empty());
     }
 
     #[test]

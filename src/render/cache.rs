@@ -449,6 +449,10 @@ fn spacer_rows(spacing: usize, doc: &BufferState, line: usize, n: usize) -> usiz
         // A fence is a slab and a table is a grid. Both are shapes the reader
         // measures by eye, and a row of air inside one breaks the shape.
         Some(BlockKind::FenceOpen(_) | BlockKind::FenceBody { .. } | BlockKind::FrontMatter) => 0,
+        Some(BlockKind::MathBlock) => match doc.blocks.kinds.get(line + 1) {
+            Some(BlockKind::MathBlock) => 0,
+            _ => spacing,
+        },
         Some(BlockKind::Table) => match doc.blocks.kinds.get(line + 1) {
             Some(BlockKind::Table) => 0,
             _ => spacing,
@@ -465,8 +469,12 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
 
     // `[markdown] tables = false` opts out of table rendering; the classifier
     // stays as it is and the line simply renders as the prose it also is.
+    // `math = false` is handled by the classifier itself, which then never
+    // opens a math block; this only covers a frame drawn before the block
+    // cache has caught up with a config change.
     let block = match block {
         BlockKind::Table if !cfg.markdown.tables => BlockKind::Paragraph,
+        BlockKind::MathBlock if !cfg.markdown.math => BlockKind::Paragraph,
         other => other,
     };
 
@@ -532,6 +540,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
                 &app.config.transclude,
                 measure,
                 app.embed_mode,
+                app.config.markdown.math,
             )
         })
     } else {
@@ -542,7 +551,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     // wrap would break that layout onto several ragged rows instead of leaving
     // it aligned. Overflow past the measure is clipped at the pane edge, same
     // as any other unwrapped line.
-    let (wrap_raw, wrap_concealed) = if block == BlockKind::Table {
+    let (wrap_raw, wrap_concealed) = if block == BlockKind::Table || block == BlockKind::MathBlock {
         (no_wrap(&source), no_wrap(&concealed))
     } else {
         (
@@ -577,7 +586,7 @@ mod tests {
         let mut app = App::new(Config::default(), None, None).unwrap();
         app.buffer.insert_str(Cursor::new(0, 0), text);
         app.buffer.cursor = Cursor::new(0, 0);
-        app.blocks = BlockCache::build(&app.buffer);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
         app.buffer.dirty_line = None;
         app
     }
@@ -994,6 +1003,23 @@ mod tests {
             0,
             "turning hanging_indent off must re-parse the line"
         );
+    }
+
+    #[test]
+    fn lone_dollar_line_followed_by_heading_with_math_disabled() {
+        let mut app = app_with("$$\n# Heading\n$$\\alpha$$\n");
+        app.config.markdown.math = false;
+        sync(&mut app);
+        // The block cache follows the setting, not only the render cache:
+        // list editing and table motions read these kinds too.
+        assert_eq!(
+            app.blocks.kinds[..3],
+            [BlockKind::Paragraph, BlockKind::Heading(1), BlockKind::Paragraph]
+        );
+        let cache = app.cache.borrow();
+        assert_eq!(cache.entry(0).unwrap().block, BlockKind::Paragraph);
+        assert_eq!(cache.entry(1).unwrap().block, BlockKind::Heading(1));
+        assert_eq!(cache.entry(2).unwrap().block, BlockKind::Paragraph);
     }
 
 }

@@ -355,7 +355,7 @@ mod tests {
     /// Runs `f` against the lists of `text` with a tab width of 4.
     fn with<T>(text: &str, f: impl FnOnce(&Lists) -> T) -> T {
         let b = buf(text);
-        let cache = BlockCache::build(&b);
+        let cache = BlockCache::build(&b, true);
         f(&Lists::new(&b, &cache.kinds, 4))
     }
 
