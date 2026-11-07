@@ -56,7 +56,7 @@ on it for the next press.
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
 the same undo step. When a number gets wider or narrower (`9.` → `10.`), the
-lines of its item move with its text, sub-items included. Bullet lists are never changed. Turn this off with `list_renumber = false`
+lines of its item move with its text, sub-items and code blocks included. Bullet lists are never changed. Turn this off with `list_renumber = false`
 in `[editor]`.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
@@ -116,17 +116,23 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   so a parent always moves with its children. The items touched have to be
   siblings in one list: a selection across two lists, or across a paragraph,
   is refused.
-- When a renumber changes a number's width, every line of the item indented
-  at least to its text column moves by the same amount, so the item keeps its
-  shape and other Markdown tools still read its sub-items as part of it.
-  Lines indented less, such as lazy continuation lines, and lines indented
-  with tabs stay where they are.
+- When a renumber changes a number's width, the item's lines move with its
+  text a block at a time: a sub-item with everything under it, a fenced or
+  `$$` block, or a single line. A block that starts at or past the item's
+  text column moves whole, so it keeps its shape and other Markdown tools
+  still read it as part of the item. A block that starts short of it, such
+  as lazy text or a sub-item indented by 2 under `9.`, stays whole. Blocks
+  with a tab-indented line stay, and so does an item with a tab before or
+  right after its number, where columns depend on tab stops.
+- Shoin itself does not yet read a fence or `$$` block indented 4 or more
+  columns, even inside a list item, so one moved from column 3 to 4 under a
+  `10.` shows as plain text in the editor. Other Markdown tools read it as
+  code, as they should.
 - Renumbering keeps the number a list starts at, so a list starting at `3.`
   still starts at `3.` after its first item moves away. A sub-list the edit
   creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists
   the edit touched are renumbered; others in the file stay as written, even
-  if their numbers are out of order. Going from `9.` to `10.` pushes that
-  item's text one column right; the lines under it are not re-aligned.
+  if their numbers are out of order.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.

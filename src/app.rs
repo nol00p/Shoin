@@ -4159,53 +4159,24 @@ impl App {
     /// leaves the line count alone, so the order they go in does not matter.
     ///
     /// A number that changes width (`9.` → `10.`) moves the item's text, so
-    /// every line of the item indented at least to its old text column, sub-
-    /// items included, moves by the same amount: the item keeps its shape,
-    /// and a CommonMark reader still finds the sub-items inside it. Lines
-    /// indented less (lazy text, a hand-placed indent) and lines indented
-    /// with tabs stay where they are. The shifts are worked out on the text
-    /// before any edit, and nested items that both widen add up.
+    /// the item's lines move with it (`Lists::realign`), in the same step.
     fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
         let edits: Vec<list::Renumber> = edits.into_iter().collect();
         self.refresh_blocks();
-        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
-        let leading = |text: &str| -> Option<usize> {
-            let ws: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-            (!ws.contains('\t')).then_some(ws.len())
-        };
-        let mut shifts: std::collections::BTreeMap<usize, isize> = std::collections::BTreeMap::new();
-        for r in &edits {
-            let delta = r.number.chars().count() as isize - r.cols.len() as isize;
-            let item = self.buffer.line_text(r.line);
-            if delta == 0 || leading(&item).is_none() {
-                continue;
-            }
-            // The text column: past the number, its `.` or `)`, and the
-            // spaces after it — or one space past the delimiter when the item
-            // is still empty.
-            let chars: Vec<char> = item.chars().collect();
-            let gap = chars.iter().skip(r.cols.end + 1).take_while(|c| **c == ' ').count();
-            let text_col = r.cols.end + 1 + if r.cols.end + 1 + gap < chars.len() { gap } else { 1 };
-            let Some((start, end)) = lists.item_bounds(r.line) else { continue };
-            for l in start + 1..=end {
-                if leading(&self.buffer.line_text(l)).is_some_and(|n| n >= text_col) {
-                    *shifts.entry(l).or_default() += delta;
-                }
-            }
-        }
+        let shifts = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width).realign(&edits);
         for r in &edits {
             let start = self.buffer.char_index(Cursor::new(r.line, r.cols.start));
             self.buffer.delete_chars(start, start + r.cols.len());
             self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
         }
+        // `realign` only shifts space-indented lines at or past a text
+        // column, so a left shift always has the spaces to take.
         for (line, delta) in shifts {
             if delta > 0 {
                 self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(delta as usize));
-            } else if delta < 0 {
-                let spaces = leading(&self.buffer.line_text(line)).unwrap_or(0);
-                let n = (delta.unsigned_abs()).min(spaces);
+            } else {
                 let at = self.buffer.rope.line_to_char(line);
-                self.buffer.delete_chars(at, at + n);
+                self.buffer.delete_chars(at, at + delta.unsigned_abs());
             }
         }
     }

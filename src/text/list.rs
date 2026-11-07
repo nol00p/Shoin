@@ -45,6 +45,20 @@ pub struct Renumber {
     pub number: String,
 }
 
+/// The number of spaces a line is indented by; `None` when its indent has a
+/// tab, whose width depends on where it sits.
+fn leading_spaces(text: &str) -> Option<usize> {
+    let mut n = 0;
+    for c in text.chars() {
+        match c {
+            ' ' => n += 1,
+            '\t' => return None,
+            _ => break,
+        }
+    }
+    Some(n)
+}
+
 /// Why lines touch no run of sibling items to move as one block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunError {
@@ -225,6 +239,90 @@ impl<'a> Lists<'a> {
         let ws = text.chars().take_while(|c| *c == ' ' || *c == '\t').count();
         let digits: String = text.chars().skip(ws).take_while(char::is_ascii_digit).collect();
         Some((digits.parse().ok()?, ws..ws + digits.len()))
+    }
+
+    /// The line shifts that keep each renumbered item's lines under its text
+    /// when `edits` change a number's width (`9.` → `10.` is +1). Worked out
+    /// on the text as it is, before any edit is made; nested items that both
+    /// change add up.
+    ///
+    /// An item's lines are taken a block at a time: a sub-item with
+    /// everything under it, a fenced block, a `$$` block, or a single line.
+    /// A block moves whole when its first line sits at or past the item's
+    /// old text column, so neither a sub-item nor a code block changes shape.
+    /// Left alone: blocks short of the text column (lazy text, a hand-placed
+    /// indent), blocks with a tab-indented line, whitespace-only lines, and
+    /// the whole item when its own line has a tab in its indent or after its
+    /// number, where columns cannot be counted in characters.
+    pub fn realign(&self, edits: &[Renumber]) -> Vec<(usize, isize)> {
+        let mut shifts: std::collections::BTreeMap<usize, isize> = std::collections::BTreeMap::new();
+        for r in edits {
+            let delta = r.number.chars().count() as isize - r.cols.len() as isize;
+            if delta == 0 {
+                continue;
+            }
+            let Some(text_col) = self.text_column(r) else { continue };
+            let Some((start, end)) = self.item_bounds(r.line) else { continue };
+            let mut l = start + 1;
+            let empty = |k: usize| self.buffer.line_text(k).trim().is_empty();
+            while l <= end {
+                if empty(l) {
+                    l += 1;
+                    continue;
+                }
+                let block = self.block_end(l, end);
+                let lines = l..=block;
+                let first = leading_spaces(&self.buffer.line_text(l));
+                let tabbed = lines.clone().any(|k| leading_spaces(&self.buffer.line_text(k)).is_none());
+                if !tabbed && first.is_some_and(|n| n >= text_col) {
+                    for k in lines {
+                        if !empty(k) {
+                            *shifts.entry(k).or_default() += delta;
+                        }
+                    }
+                }
+                l = block + 1;
+            }
+        }
+        shifts.into_iter().filter(|(_, d)| *d != 0).collect()
+    }
+
+    /// The column an ordered item's text starts at, from the edit that
+    /// renumbers it: past the number, its `.` or `)`, and the spaces after
+    /// it. One space past the delimiter when the item is empty, or when five
+    /// or more spaces follow (CommonMark then reads indented code, and the
+    /// text column is the one after the delimiter). `None` when a tab is in
+    /// the way.
+    fn text_column(&self, r: &Renumber) -> Option<usize> {
+        let chars: Vec<char> = self.buffer.line_text(r.line).chars().collect();
+        if chars[..r.cols.start].contains(&'\t') {
+            return None;
+        }
+        let after = r.cols.end + 1;
+        let gap = chars.iter().skip(after).take_while(|c| **c == ' ').count();
+        if chars.get(after + gap) == Some(&'\t') {
+            return None;
+        }
+        let empty = after + gap >= chars.len();
+        Some(if empty || gap >= 5 { after + 1 } else { after + gap })
+    }
+
+    /// The last line of the block starting at `line`, at most `end`: a
+    /// sub-item with its children, a fenced block to its closing fence, a
+    /// run of `$$` block lines, or the line alone.
+    fn block_end(&self, line: usize, end: usize) -> usize {
+        let last = match self.kind(line) {
+            Some(BlockKind::ListItem { .. }) => self.bounds(line).1,
+            Some(BlockKind::FenceOpen(_)) => (line + 1..=end)
+                .find(|&k| matches!(self.kind(k), Some(BlockKind::FenceClose)))
+                .unwrap_or(end),
+            Some(BlockKind::MathBlock) => (line..=end)
+                .take_while(|&k| matches!(self.kind(k), Some(BlockKind::MathBlock)))
+                .last()
+                .unwrap_or(line),
+            _ => line,
+        };
+        last.min(end)
     }
 
     /// The edits that number the ordered level containing `line` in sequence,
@@ -505,6 +603,60 @@ mod tests {
             assert_eq!(l.sibling_run(3, 3), Ok((3, 3)));
         });
         with("text\n- a\n", |l| assert_eq!(l.sibling_run(0, 1), Err(RunError::NotInList)));
+    }
+
+    /// `9.` → `10.` on line 0: what moves, block by block.
+    fn widened(text: &str) -> Vec<(usize, isize)> {
+        let edit = Renumber { line: 0, cols: 0..1, number: "10".into() };
+        with(text, |l| l.realign(&[edit]))
+    }
+
+    #[test]
+    fn realign_moves_blocks_at_the_text_column_whole() {
+        assert_eq!(widened("9. a\n   more\n"), vec![(1, 1)]);
+        // A sub-item at the text column moves with everything under it.
+        assert_eq!(widened("9. a\n   - x\n     more\n"), vec![(1, 1), (2, 1)]);
+        // A fence moves as one block, its code lines included, even one
+        // indented less than the fence.
+        assert_eq!(widened("9. a\n   ```\n  x = 1\n   ```\n"), vec![(1, 1), (2, 1), (3, 1)]);
+        // So does a `$$` block.
+        assert_eq!(widened("9. a\n   $$\n   x\n   $$\n"), vec![(1, 1), (2, 1), (3, 1)]);
+    }
+
+    #[test]
+    fn realign_leaves_blocks_short_of_the_text_column_whole() {
+        // A sub-item at column 2 stays, and so does everything under it,
+        // however deep: the sub-item keeps its shape.
+        assert_eq!(widened("9. a\n  1. x\n     more\n    - y\n"), vec![]);
+        // A fence at column 2 stays, code included.
+        assert_eq!(widened("9. a\n  ```py\n  def f():\n      return 1\n  ```\n"), vec![]);
+        // Lazy text at column 0 stays.
+        assert_eq!(widened("9. a\nlazy\n"), vec![]);
+    }
+
+    #[test]
+    fn realign_skips_whitespace_tabs_and_uncountable_columns() {
+        // A whitespace-only line gains no trailing spaces.
+        assert_eq!(widened("9. a\n   \n   para\n"), vec![(2, 1)]);
+        // A block with a tab-indented line stays.
+        assert_eq!(widened("9. a\n\tmore\n"), vec![]);
+        assert_eq!(widened("9. a\n   ```\n\tcode\n   ```\n"), vec![]);
+        // A tab after the number: the tab stop decides where the text is,
+        // so nothing is moved.
+        assert_eq!(widened("9.\ta\n    more\n"), vec![]);
+        // Five or more spaces after the number: CommonMark puts the text
+        // column one past the delimiter (the rest is indented code).
+        assert_eq!(widened("9.     code\n   more\n"), vec![(1, 1)]);
+        // An empty item: one past the delimiter too.
+        assert_eq!(widened("9.\n   more\n"), vec![(1, 1)]);
+    }
+
+    #[test]
+    fn realign_narrowing_keeps_shapes_too() {
+        let edit = Renumber { line: 0, cols: 0..2, number: "9".into() };
+        // x at column 3 is short of `10. a`'s text column 4: x and y stay.
+        with("10. a\n   1. x\n      - y\n", |l| assert_eq!(l.realign(std::slice::from_ref(&edit)), vec![]));
+        with("10. a\n    more\n", |l| assert_eq!(l.realign(&[edit]), vec![(1, -1)]));
     }
 
     #[test]
