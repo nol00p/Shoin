@@ -171,6 +171,24 @@ impl BlockCache {
     }
 }
 
+/// Whether a line of a display block ends it: it ends with a `$$` whose
+/// first `$` is not escaped (`x = \$$` is a dollar sign and a lone `$`).
+fn closes_math(trimmed: &str) -> bool {
+    let chars: Vec<char> = trimmed.chars().collect();
+    chars.len() >= 2
+        && chars.ends_with(&['$', '$'])
+        && !crate::render::markdown::inline::is_escaped(&chars, chars.len() - 2)
+}
+
+/// Byte offset of the first unescaped `$$` in `s`.
+fn find_math_close(s: &str) -> Option<usize> {
+    let chars: Vec<char> = s.chars().collect();
+    let at = (0..chars.len().saturating_sub(1)).find(|&k| {
+        chars[k] == '$' && chars[k + 1] == '$' && !crate::render::markdown::inline::is_escaped(&chars, k)
+    })?;
+    Some(chars[..at].iter().map(|c| c.len_utf8()).sum())
+}
+
 /// Classify one line given the carry state entering it.
 /// Returns its kind and the carry state leaving it.
 ///
@@ -219,7 +237,7 @@ pub fn classify(line: &str, carry: &Carry, is_file_head: bool, math: bool) -> (B
                 // does not turn the entire rest of the file into math.
                 return (BlockKind::Blank, Carry::None);
             }
-            if trimmed == "$$" || trimmed.ends_with("$$") {
+            if closes_math(trimmed) {
                 return (BlockKind::MathBlock, Carry::None);
             }
             return (BlockKind::MathBlock, Carry::InMath);
@@ -233,7 +251,7 @@ pub fn classify(line: &str, carry: &Carry, is_file_head: bool, math: bool) -> (B
 
     if math && indent < 4 {
         if let Some(after) = line.trim_start().strip_prefix("$$") {
-            match after.find("$$") {
+            match find_math_close(after) {
                 // `$$x$$` alone on its line is a one-line block.
                 Some(p) if after[p + 2..].trim().is_empty() => {
                     return (BlockKind::MathBlock, Carry::None);
@@ -305,7 +323,7 @@ pub fn classify(line: &str, carry: &Carry, is_file_head: bool, math: bool) -> (B
 
 /// Leading whitespace measured in columns (a tab counts as one column here — it
 /// only gates the 4-column indented-code threshold, where exactness is moot).
-fn leading_ws_cols(line: &str) -> usize {
+pub(crate) fn leading_ws_cols(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
@@ -769,6 +787,13 @@ mod tests {
         assert_eq!(k("$$E=mc^2$$ is famous"), (BlockKind::Paragraph, Carry::None));
         assert_eq!(k("$$a$$ and $$b$$"), (BlockKind::Paragraph, Carry::None));
         assert_eq!(k("$$ x"), (BlockKind::MathBlock, Carry::InMath));
+        // An escaped `$` before the last one: not a closing `$$`.
+        assert_eq!(k(r"$$a\$$"), (BlockKind::MathBlock, Carry::InMath));
+        assert_eq!(
+            classify(r"x = \$$", &Carry::InMath, false, true),
+            (BlockKind::MathBlock, Carry::InMath)
+        );
+        assert_eq!(classify(r"x = \\$$", &Carry::InMath, false, true), (BlockKind::MathBlock, Carry::None));
     }
 
     #[test]

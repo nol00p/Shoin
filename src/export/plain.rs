@@ -25,7 +25,7 @@ use crate::render::markdown::inline;
 /// or table row is never justified; stretching a quote's `> ` prefix or a
 /// table's `|` columns would break what they are.
 pub fn render(text: &str, measure: u16, justify: bool) -> String {
-    let md = MarkdownConfig::default();
+    let md = &MarkdownConfig::default();
     let mut out: Vec<String> = Vec::new();
     let mut carry = Carry::None;
     let mut in_fence = false;
@@ -51,6 +51,12 @@ pub fn render(text: &str, measure: u16, justify: bool) -> String {
             }
             // Front matter is metadata for tools, not text for readers.
             BlockKind::FrontMatter => continue,
+            // LaTeX is written out as it is: its `*`, `_` and `\\` are math,
+            // not Markdown, so nothing in it may be stripped.
+            BlockKind::MathBlock => {
+                out.push(line.to_string());
+                continue;
+            }
             _ => {}
         }
         if in_fence {
@@ -60,7 +66,7 @@ pub fn render(text: &str, measure: u16, justify: bool) -> String {
 
         match &kind {
             BlockKind::Heading(level) => {
-                let title = strip_inline(line.trim_start().trim_start_matches('#').trim(), &md);
+                let title = strip_inline(line.trim_start().trim_start_matches('#').trim(), md);
                 out.push(title.clone());
                 // Underline the top two ranks, the convention `setext` headings
                 // and every README have used forever. Deeper ranks would need
@@ -78,7 +84,7 @@ pub fn render(text: &str, measure: u16, justify: bool) -> String {
             BlockKind::Quote(depth) => {
                 let body = line.trim_start().trim_start_matches(['>', ' ']);
                 let prefix = "> ".repeat((*depth as usize).max(1));
-                out.push(format!("{prefix}{}", strip_inline(body, &md)));
+                out.push(format!("{prefix}{}", strip_inline(body, md)));
             }
             BlockKind::ListItem { marker, checked, depth } => {
                 let indent = " ".repeat(*depth as usize);
@@ -91,12 +97,12 @@ pub fn render(text: &str, measure: u16, justify: bool) -> String {
                     (Marker::Ordered, None) => format!("{} ", ordinal(line)),
                     (_, None) => "- ".to_string(),
                 };
-                out.push(format!("{indent}{bullet}{}", strip_inline(body, &md)));
+                out.push(format!("{indent}{bullet}{}", strip_inline(body, md)));
             }
             BlockKind::Paragraph if justify => {
-                push_justified(&mut out, &strip_inline(line, &md), measure)
+                push_justified(&mut out, &strip_inline(line, md), measure)
             }
-            _ => out.push(strip_inline(line, &md)),
+            _ => out.push(strip_inline(line, md)),
         }
     }
 
@@ -209,6 +215,13 @@ fn url_of(whole: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LaTeX is not Markdown: nothing in a display block is stripped.
+    #[test]
+    fn math_blocks_are_written_as_they_are() {
+        let src = "$$\na*b*c \\\\ d\n\\{x\\}\n$$\n";
+        assert_eq!(render(src, 72, false), src);
+    }
 
     #[test]
     fn headings_keep_their_rank_by_being_underlined() {

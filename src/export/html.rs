@@ -17,7 +17,7 @@
 //!     rather than a second, differently-opinionated highlighter.
 
 use crate::config::schema::MarkdownConfig;
-use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry, Marker};
+use crate::render::markdown::block::{classify, has_cell_separator, leading_ws_cols, BlockKind, Carry, Marker};
 use crate::render::markdown::code::{self, Class, Cont, Lang};
 use crate::render::markdown::inline::{self, Inline};
 use crate::render::theme::{Color, Theme};
@@ -140,14 +140,17 @@ impl<'a> Body<'a> {
         let mut carry = Carry::None;
         for (i, line) in text.lines().enumerate() {
             let (kind, next) = classify(line, &carry, i == 0, self.md.math);
+            // The classifier's word decides where a math block ends, so this
+            // walk cannot group lines differently from the editor.
+            let math_continues = next == Carry::InMath;
             carry = next;
-            self.line(line, &kind);
+            self.line(line, &kind, math_continues);
         }
         self.close_all();
         self.out
     }
 
-    fn line(&mut self, line: &str, kind: &BlockKind) {
+    fn line(&mut self, line: &str, kind: &BlockKind, math_continues: bool) {
         match kind {
             // Front matter is metadata for tools, not text for readers — the
             // same call plain text makes.
@@ -273,16 +276,27 @@ impl<'a> Body<'a> {
 
             // Only reached with `math` on: off, the classifier never opens one.
             BlockKind::MathBlock => {
-                self.flush_para();
-                self.flush_table();
-                self.close_quote();
-                self.close_lists();
-                let was_open = !self.math_block.is_empty();
-                let trimmed = line.trim();
-                let closes = trimmed.ends_with("$$");
+                if self.math_block.is_empty() {
+                    self.flush_para();
+                    self.flush_table();
+                    self.close_quote();
+                    // Directly after an item's text the block joins that
+                    // item. Anywhere else it stays only in the items it is
+                    // indented deeper than, and the rest close: the same call
+                    // `Lists::bounds` makes in the editor.
+                    if !self.lazy {
+                        let indent = leading_ws_cols(line);
+                        while self.lists.last().is_some_and(|l| usize::from(l.indent) >= indent) {
+                            self.pop_list();
+                        }
+                    }
+                }
                 self.math_block.push(line.to_string());
-                if (was_open && closes) || (trimmed.starts_with("$$") && trimmed.len() > 2 && trimmed[2..].contains("$$")) {
+                if !math_continues {
                     self.flush_math_block();
+                    // A paragraph line after the block starts afresh rather
+                    // than continuing the item, as in the editor.
+                    self.lazy = false;
                 }
             }
         }
@@ -966,6 +980,32 @@ mod tests {
         let b_off2 = Body::new(&md_off, std::path::Path::new(""));
         let got_off2 = b_off2.run("$$\n```\na *b*\n\nc\n```\n");
         assert!(got_off2.contains("a *b*\n\nc"), "a fence under $$ stays a fence: {got_off2}");
+
+        // A block inside a list item stays in it, so numbering carries on:
+        let b6 = Body::new(&md, std::path::Path::new(""));
+        let got_list = b6.run("1. step\n   $$x$$\n2. next\n");
+        assert_eq!(got_list.matches("<ol>").count(), 1, "{got_list}");
+        assert!(
+            got_list.contains("<li>step<div class=\"math display\">\\[x\\]</div>\n</li>"),
+            "{got_list}"
+        );
+        // Unindented after a blank line, it ends the list:
+        let b7 = Body::new(&md, std::path::Path::new(""));
+        let got_after = b7.run("- a\n\n$$x$$\n");
+        assert!(got_after.contains("</ul>\n<div class=\"math display\">"), "{got_after}");
+
+        // A paragraph after a block that joined an item starts afresh, as in
+        // the editor's list bounds:
+        let b8 = Body::new(&md, std::path::Path::new(""));
+        let got_more = b8.run("- a\n$$x$$\nmore\n");
+        assert!(got_more.contains("</ul>\n<p>more</p>"), "{got_more}");
+        // After a blank line, a block stays only in items it is deeper than:
+        let b9 = Body::new(&md, std::path::Path::new(""));
+        let got_nested = b9.run("- a\n  - b\n\n  $$x$$\n");
+        assert!(
+            got_nested.contains("<li>b</li>\n</ul>\n<div class=\"math display\">\\[x\\]</div>\n</li>"),
+            "{got_nested}"
+        );
 
         // `$$x$$ more text` is a paragraph holding display math, as in Pandoc:
         let b5 = Body::new(&md, std::path::Path::new(""));

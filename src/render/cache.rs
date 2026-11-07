@@ -469,12 +469,10 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
 
     // `[markdown] tables = false` opts out of table rendering; the classifier
     // stays as it is and the line simply renders as the prose it also is.
-    // `math = false` is handled by the classifier itself, which then never
-    // opens a math block; this only covers a frame drawn before the block
-    // cache has caught up with a config change.
+    // (`math = false` needs nothing here: the classifier never opens a math
+    // block then, and `App::refresh_blocks` rebuilds when the setting moves.)
     let block = match block {
         BlockKind::Table if !cfg.markdown.tables => BlockKind::Paragraph,
-        BlockKind::MathBlock if !cfg.markdown.math => BlockKind::Paragraph,
         other => other,
     };
 
@@ -551,7 +549,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     // wrap would break that layout onto several ragged rows instead of leaving
     // it aligned. Overflow past the measure is clipped at the pane edge, same
     // as any other unwrapped line.
-    let (wrap_raw, wrap_concealed) = if block == BlockKind::Table || block == BlockKind::MathBlock {
+    let (wrap_raw, wrap_concealed) = if block == BlockKind::Table {
         (no_wrap(&source), no_wrap(&concealed))
     } else {
         (
@@ -1003,6 +1001,19 @@ mod tests {
             0,
             "turning hanging_indent off must re-parse the line"
         );
+    }
+
+    /// Raw LaTeX runs long and the editor has no sideways scroll, so a math
+    /// line wraps like the paragraph it was before math existed.
+    #[test]
+    fn long_math_lines_wrap() {
+        let mut app = app_with(
+            "x\n$$\\frac{\\partial^2 u}{\\partial t^2} = c^2 \\nabla^2 u + f(x, t) + g(x, t)$$\n",
+        );
+        sync(&mut app);
+        let cache = app.cache.borrow();
+        assert_eq!(cache.entry(1).unwrap().block, BlockKind::MathBlock);
+        assert!(cache.total_rows() > 3, "the raw line should wrap at the measure");
     }
 
     #[test]

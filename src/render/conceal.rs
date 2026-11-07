@@ -373,22 +373,26 @@ fn render_latex(input: &str) -> String {
                         i += 1;
                         continue;
                     }
-                    '{' => {
-                        out.push('{');
+                    // An escaped special is that character, as written.
+                    c if SPECIALS.contains(c) => {
+                        out.push(c);
                         i += 1;
                         continue;
                     }
-                    '}' => {
-                        out.push('}');
+                    '|' => {
+                        out.push('‖');
                         i += 1;
                         continue;
                     }
                     _ => {}
                 }
             }
-            let mut name = String::new();
-            while i < chars.len() && (chars[i].is_ascii_alphabetic() || chars[i] == '*') {
-                name.push(chars[i]);
+            let end = name_end(&chars, i);
+            let name: String = chars[i..end].iter().collect();
+            i = end;
+            // `\operatorname*` only moves where limits go, which one line
+            // cannot show anyway.
+            if name == "operatorname" && chars.get(i) == Some(&'*') {
                 i += 1;
             }
             if matches!(name.as_str(), "frac" | "dfrac") {
@@ -425,40 +429,34 @@ fn render_latex(input: &str) -> String {
                 }
             }
             if matches!(name.as_str(), "vec" | "mathbf" | "bm" | "boldsymbol") {
-                if let Some((value, end)) = braced(&chars, i) {
-                    if name == "vec" {
-                        out.push_str(&to_vec(&value));
-                    } else {
-                        out.push_str(&value);
-                    }
+                if let Some((value, end)) = argument(&chars, i) {
+                    out.push_str(&if name == "vec" { accent(&value, '\u{20D7}') } else { value });
                     i = end;
-                    continue;
-                } else if i < chars.len() && chars[i].is_ascii_alphabetic() {
-                    let c = chars[i];
-                    i += 1;
-                    if name == "vec" {
-                        out.push_str(&to_vec(&c.to_string()));
-                    } else {
-                        out.push(c);
-                    }
                     continue;
                 }
             }
             if name == "hat" {
-                if let Some((value, end)) = braced(&chars, i) {
-                    out.push_str(&to_hat(&value));
+                if let Some((value, end)) = argument(&chars, i) {
+                    out.push_str(&match value.as_str() {
+                        // Precomposed, so the dot of i and j does not sit under the hat.
+                        "i" => "î".to_string(),
+                        "j" => "ĵ".to_string(),
+                        _ => accent(&value, '\u{0302}'),
+                    });
                     i = end;
-                    continue;
-                } else if i < chars.len() && chars[i].is_ascii_alphabetic() {
-                    let c = chars[i];
-                    i += 1;
-                    out.push_str(&to_hat(&c.to_string()));
                     continue;
                 }
             }
-            if matches!(name.as_str(), "text" | "mathrm" | "operatorname") {
+            if matches!(name.as_str(), "text" | "mathrm") {
                 if let Some((value, end)) = braced_raw(&chars, i) {
-                    out.push_str(&value);
+                    out.push_str(&text_of(&value));
+                    i = end;
+                    continue;
+                }
+            }
+            if name == "operatorname" {
+                if let Some((value, end)) = braced_raw(&chars, i) {
+                    push_operator(&mut out, &text_of(&value), &chars, end);
                     i = end;
                     continue;
                 }
@@ -466,47 +464,35 @@ fn render_latex(input: &str) -> String {
             if name == "begin" {
                 if let Some((env, end)) = braced_raw(&chars, i) {
                     let env = env.trim();
-                    let end_tag = format!("\\end{{{env}}}");
-                    let remaining: String = chars[end..].iter().collect();
-                    if let Some(byte_pos) = remaining.find(&end_tag) {
-                        let inner_content = &remaining[..byte_pos];
-                        let rendered_matrix = render_environment(env, inner_content);
-                        out.push_str(&rendered_matrix);
-                        let char_pos = inner_content.chars().count();
-                        i = end + char_pos + end_tag.chars().count();
-                        continue;
-                    } else {
-                        let open_delim = match env {
-                            "vmatrix" => "|",
-                            "Vmatrix" => "‖",
-                            "pmatrix" => "(",
-                            "bmatrix" => "[",
-                            "Bmatrix" => "{",
-                            _ => "",
-                        };
-                        out.push_str(open_delim);
-                        i = end;
-                        continue;
+                    let end_tag: Vec<char> = format!("\\end{{{env}}}").chars().collect();
+                    match chars[end..].windows(end_tag.len()).position(|w| w == end_tag) {
+                        Some(len) => {
+                            let inner: String = chars[end..end + len].iter().collect();
+                            out.push_str(&render_environment(env, &inner));
+                            i = end + len + end_tag.len();
+                        }
+                        // The `\end` is on a later line: open what this line can.
+                        None => {
+                            out.push_str(env_delims(env).0);
+                            i = end;
+                        }
                     }
+                    continue;
                 }
             }
             if name == "end" {
                 if let Some((env, end)) = braced_raw(&chars, i) {
-                    let env = env.trim();
-                    let close_delim = match env {
-                        "vmatrix" => "|",
-                        "Vmatrix" => "‖",
-                        "pmatrix" => ")",
-                        "bmatrix" => "]",
-                        "Bmatrix" => "}",
-                        _ => "",
-                    };
-                    out.push_str(close_delim);
+                    out.push_str(env_delims(env.trim()).1);
                     i = end;
                     continue;
                 }
             }
-            if matches!(name.as_str(), "left" | "right") {
+            // Sizing and limit placement: nothing a single line can show.
+            if SILENT.contains(&name.as_str()) {
+                continue;
+            }
+            if OPERATORS.contains(&name.as_str()) {
+                push_operator(&mut out, &name, &chars, i);
                 continue;
             }
             let replacement = match name.as_str() {
@@ -621,10 +607,19 @@ fn render_latex(input: &str) -> String {
             out.push_str("  ");
         } else if ch == '^' || ch == '_' {
             let superscript = ch == '^';
-            let is_braced = chars.get(i) == Some(&'{');
+            // Only a group that closes counts as braced: while `x^{2` is
+            // being typed, its `{` is just the next character.
+            let mut is_braced = false;
             let mut value = String::new();
             if let Some((group, end)) = braced(&chars, i) {
                 value = group;
+                i = end;
+                is_braced = true;
+            } else if chars.get(i) == Some(&'\\') {
+                // An unbraced command, with its own arguments, is the whole
+                // argument: `e^\pi` is e to the π, `a_\text{max}` is a sub max.
+                let end = command_span(&chars, i);
+                value = render_latex(&chars[i..end].iter().collect::<String>());
                 i = end;
             } else if i < chars.len() {
                 value.push(chars[i]);
@@ -657,61 +652,168 @@ fn render_latex(input: &str) -> String {
     out
 }
 
-fn to_vec(value: &str) -> String {
-    let mut out = String::new();
-    for (idx, c) in value.chars().enumerate() {
-        out.push(c);
-        if idx == 0 {
-            out.push('\u{20D7}');
-        }
-    }
-    if out.is_empty() {
-        value.to_string()
-    } else {
-        out
+/// Operator names, written upright as themselves (`\sin` → `sin`).
+const OPERATORS: &[&str] = &[
+    "sin", "cos", "tan", "cot", "sec", "csc", "arcsin", "arccos", "arctan", "sinh", "cosh",
+    "tanh", "coth", "log", "ln", "lg", "exp", "lim", "liminf", "limsup", "max", "min", "sup",
+    "inf", "det", "dim", "ker", "deg", "gcd", "arg", "hom", "Pr", "mod", "bmod",
+];
+
+/// `value` with a combining `mark` on its first character.
+fn accent(value: &str, mark: char) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => format!("{first}{mark}{}", chars.as_str()),
+        None => String::new(),
     }
 }
 
-fn to_hat(value: &str) -> String {
-    match value {
-        "i" => "î".to_string(),
-        "j" => "ĵ".to_string(),
-        "k" => "k̂".to_string(),
-        _ => {
-            let mut out = String::new();
-            for (idx, c) in value.chars().enumerate() {
-                out.push(c);
-                if idx == 0 {
-                    out.push('\u{0302}');
-                }
-            }
-            out
-        }
-    }
-}
-
-fn render_environment(env: &str, content: &str) -> String {
-    let (open, close) = match env {
+/// The delimiters a matrix environment is drawn between.
+fn env_delims(env: &str) -> (&'static str, &'static str) {
+    match env {
         "vmatrix" => ("|", "|"),
         "Vmatrix" => ("‖", "‖"),
         "pmatrix" => ("(", ")"),
         "bmatrix" => ("[", "]"),
         "Bmatrix" => ("{", "}"),
         _ => ("", ""),
+    }
+}
+
+/// The characters that `\` escapes into themselves, in math and in text.
+const SPECIALS: &str = "{}&%$#_";
+
+/// Commands that only size delimiters or place limits: dropped.
+const SILENT: &[&str] = &["left", "right", "limits", "nolimits"];
+
+/// Where a command name starting at `from` ends: its run of letters.
+fn name_end(chars: &[char], from: usize) -> usize {
+    from + chars[from..].iter().take_while(|c| c.is_ascii_alphabetic()).count()
+}
+
+/// Where the command at the backslash `start` ends, together with the
+/// `{…}` arguments it takes (`\frac{1}{2}`, `\text{max}`); a command that is
+/// not a run of letters is the one character after the backslash.
+fn command_span(chars: &[char], start: usize) -> usize {
+    let mut end = name_end(chars, start + 1);
+    if end == start + 1 {
+        return (start + 2).min(chars.len());
+    }
+    let arity = match chars[start + 1..end].iter().collect::<String>().as_str() {
+        "frac" | "dfrac" => 2,
+        "text" | "mathrm" | "operatorname" | "sqrt" | "vec" | "hat" | "mathbf" | "bm"
+        | "boldsymbol" => 1,
+        _ => 0,
     };
-    let rows: Vec<&str> = content.split(r"\\").collect();
-    let rendered_rows: Vec<String> = rows
-        .into_iter()
-        .filter_map(|row| {
-            let trimmed = row.trim();
-            if trimmed.is_empty() {
-                return None;
+    for _ in 0..arity {
+        match braced_raw(chars, end) {
+            Some((_, next)) => end = next,
+            None => break,
+        }
+    }
+    end
+}
+
+/// A command's one argument, rendered: a `{…}` group, a command, or a single
+/// character, after any spaces (`\vec v`, `\hat\theta`).
+fn argument(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let at = start + chars[start..].iter().take_while(|c| **c == ' ').count();
+    if let Some(group) = braced(chars, at) {
+        return Some(group);
+    }
+    match chars.get(at) {
+        Some('\\') if name_end(chars, at + 1) > at + 1 => {
+            let end = command_span(chars, at);
+            Some((render_latex(&chars[at..end].iter().collect::<String>()), end))
+        }
+        Some(c) if c.is_alphanumeric() => Some((c.to_string(), at + 1)),
+        _ => None,
+    }
+}
+
+/// Write an operator name upright, kept apart from the letters around it:
+/// `a\sin x` → `a sin x`, `\sin\theta` → `sin θ`, but `\sin(x)` and
+/// `\sin\left(x\right)` → `sin(x)`. `next` is where the source goes on.
+fn push_operator(out: &mut String, name: &str, chars: &[char], next: usize) {
+    if out.chars().last().is_some_and(|c| c.is_alphanumeric()) {
+        out.push(' ');
+    }
+    out.push_str(name);
+    let spaced = match chars.get(next) {
+        Some(c) if c.is_alphanumeric() => true,
+        Some('\\') => {
+            let end = name_end(chars, next + 1);
+            let follower: String = chars[next + 1..end].iter().collect();
+            end > next + 1 && !SILENT.contains(&follower.as_str())
+        }
+        _ => false,
+    };
+    if spaced {
+        out.push(' ');
+    }
+}
+
+/// The text of a `\text{…}`-style argument: escaped specials become
+/// themselves and the spacing commands become spaces.
+fn text_of(value: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value.chars().peekable();
+    while let Some(c) = rest.next() {
+        match (c, rest.peek().copied()) {
+            ('\\', Some(n)) if SPECIALS.contains(n) => {
+                out.push(n);
+                rest.next();
             }
-            let cols: Vec<String> = trimmed
-                .split('&')
-                .map(|col| render_latex(col.trim()))
-                .collect();
-            Some(cols.join("  "))
+            ('\\', Some(',' | ' ' | ';')) => {
+                out.push(' ');
+                rest.next();
+            }
+            ('\\', Some('!')) => {
+                rest.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A matrix body as rows of cells: split on `\\` and `&`, but not on an
+/// escaped `\&`, which stays in its cell for `render_latex` to write as `&`.
+fn cells(content: &str) -> Vec<Vec<String>> {
+    let chars: Vec<char> = content.chars().collect();
+    let mut rows = vec![vec![String::new()]];
+    let mut k = 0;
+    while k < chars.len() {
+        let row = rows.last_mut().expect("never empty");
+        match chars[k] {
+            '\\' if chars.get(k + 1) == Some(&'\\') => {
+                rows.push(vec![String::new()]);
+                k += 2;
+                continue;
+            }
+            '\\' => {
+                let cell = row.last_mut().expect("never empty");
+                cell.push('\\');
+                cell.extend(chars.get(k + 1));
+                k += 2;
+                continue;
+            }
+            '&' => row.push(String::new()),
+            c => row.last_mut().expect("never empty").push(c),
+        }
+        k += 1;
+    }
+    rows
+}
+
+fn render_environment(env: &str, content: &str) -> String {
+    let (open, close) = env_delims(env);
+    let rendered_rows: Vec<String> = cells(content)
+        .into_iter()
+        .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+        .map(|row| {
+            let cols: Vec<String> = row.iter().map(|cell| render_latex(cell.trim())).collect();
+            cols.join("  ")
         })
         .collect();
 
@@ -722,41 +824,28 @@ fn render_environment(env: &str, content: &str) -> String {
     }
 }
 
+/// A `{…}` group starting at `start`, rendered, and the index after it.
 fn braced(chars: &[char], start: usize) -> Option<(String, usize)> {
-    if chars.get(start) != Some(&'{') {
-        return None;
-    }
-    let mut depth = 0;
-    let mut out = String::new();
-    for (i, &ch) in chars.iter().enumerate().skip(start) {
-        match ch {
-            '{' => {
-                depth += 1;
-                if depth > 1 {
-                    out.push('{');
-                }
-            }
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((render_latex(&out), i + 1));
-                }
-                out.push('}');
-            }
-            c => out.push(c),
-        }
-    }
-    None
+    braced_raw(chars, start).map(|(inner, end)| (render_latex(&inner), end))
 }
 
+/// A `{…}` group starting at `start`, as written, and the index after it.
 fn braced_raw(chars: &[char], start: usize) -> Option<(String, usize)> {
     if chars.get(start) != Some(&'{') {
         return None;
     }
     let mut depth = 0;
     let mut out = String::new();
-    for (i, &ch) in chars.iter().enumerate().skip(start) {
-        match ch {
+    let mut i = start;
+    while i < chars.len() {
+        match chars[i] {
+            // An escaped brace is text, not nesting: `\text{a\}b}`.
+            '\\' => {
+                out.push('\\');
+                out.extend(chars.get(i + 1));
+                i += 2;
+                continue;
+            }
             '{' => {
                 depth += 1;
                 if depth > 1 {
@@ -772,6 +861,7 @@ fn braced_raw(chars: &[char], start: usize) -> Option<(String, usize)> {
             }
             c => out.push(c),
         }
+        i += 1;
     }
     None
 }
@@ -959,88 +1049,42 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
     }
 }
 
+/// One line of a display block: its `$$` delimiters hide and what is between
+/// them conceals the way inline math does.
 fn math_block_ops(chars: &[char], ops: &mut Vec<Conceal>) {
-    let len = chars.len();
-    if len == 0 {
+    let blank = |c: &&char| **c == ' ' || **c == '\t';
+    let start = chars.iter().take_while(blank).count();
+    let end = chars.len() - chars[start..].iter().rev().take_while(blank).count();
+    let body = &chars[start..end];
+    if body.is_empty() {
         return;
     }
-    let line: String = chars.iter().collect();
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if body == ['$', '$'] {
+        ops.push(Conceal::Hide(0..chars.len()));
         return;
     }
-    if trimmed == "$$" {
-        ops.push(Conceal::Hide(0..len));
-        return;
-    }
-
-    let indent = chars.iter().take_while(|c| **c == ' ' || **c == '\t').count();
-    let starts_with_dd = indent + 1 < len && chars[indent] == '$' && chars[indent + 1] == '$';
-
-    let mut k = len;
-    while k > 0 && (chars[k - 1] == ' ' || chars[k - 1] == '\t') {
-        k -= 1;
-    }
-    let trailing_dd = if k >= 2 && chars[k - 2] == '$' && chars[k - 1] == '$' {
-        Some((k - 2, len))
+    // The opening `$$` hides with the spaces after it, the closing one with
+    // the spaces before it; leading indentation stays on every line, so a
+    // block under a list item stays under it.
+    let opens = body.starts_with(&['$', '$']);
+    let from = if opens {
+        start + 2 + chars[start + 2..end].iter().take_while(blank).count()
     } else {
-        None
+        start
     };
-
-    if starts_with_dd {
-        let mut open_end = indent + 2;
-        while open_end < len && (chars[open_end] == ' ' || chars[open_end] == '\t') {
-            open_end += 1;
-        }
-
-        if let Some((close_start, close_end)) = trailing_dd {
-            if close_start >= open_end {
-                let mut content_end = close_start;
-                while content_end > open_end && (chars[content_end - 1] == ' ' || chars[content_end - 1] == '\t') {
-                    content_end -= 1;
-                }
-                ops.push(Conceal::Hide(indent..open_end));
-                ops.push(Conceal::Hide(close_start..close_end));
-                let inner: String = chars[open_end..content_end].iter().collect();
-                let text = render_latex(&inner);
-                ops.push(Conceal::Replace {
-                    range: open_end..close_start,
-                    text,
-                    style: None,
-                });
-                return;
-            }
-        }
-
-        ops.push(Conceal::Hide(indent..open_end));
-        let inner: String = chars[open_end..len].iter().collect();
-        let text = render_latex(&inner);
-        ops.push(Conceal::Replace {
-            range: open_end..len,
-            text,
-            style: None,
-        });
-    } else if let Some((close_start, close_end)) = trailing_dd {
-        let mut content_end = close_start;
-        while content_end > 0 && (chars[content_end - 1] == ' ' || chars[content_end - 1] == '\t') {
-            content_end -= 1;
-        }
-        ops.push(Conceal::Hide(close_start..close_end));
-        let inner: String = chars[0..content_end].iter().collect();
-        let text = render_latex(&inner);
-        ops.push(Conceal::Replace {
-            range: 0..close_start,
-            text,
-            style: None,
-        });
-    } else {
-        let inner: String = chars.iter().collect();
-        let text = render_latex(&inner);
-        ops.push(Conceal::Replace {
-            range: 0..len,
-            text,
-            style: None,
-        });
+    let closes = end - from >= 2
+        && chars[from..end].ends_with(&['$', '$'])
+        && !crate::render::markdown::inline::is_escaped(chars, end - 2);
+    let to = if closes { end - 2 } else { chars.len() };
+    if opens {
+        ops.push(Conceal::Hide(start..from));
+    }
+    if from < to {
+        let inner: String = chars[from..to].iter().collect();
+        ops.push(Conceal::Replace { range: from..to, text: render_latex(&inner), style: None });
+    }
+    if closes {
+        ops.push(Conceal::Hide(to..chars.len()));
     }
 }
 
@@ -1144,6 +1188,68 @@ mod tests {
         assert_eq!(shown("$e^{i\\pi}$"), "e^{iπ}");
         assert_eq!(shown("$\\left( x \\right)$"), "( x )");
         assert_eq!(shown("$\\phi \\neq \\varphi$"), "ϕ ≠ φ");
+    }
+
+    #[test]
+    fn operators_unbraced_scripts_and_escapes_render() {
+        // Operator names lose the backslash and keep apart from what follows.
+        assert_eq!(shown("$\\sin\\theta$"), "sin θ");
+        assert_eq!(shown("$\\log x$"), "log x");
+        assert_eq!(shown("$\\lim_{x \\to 0}$"), "lim_{x → 0}");
+        // An unbraced command is a script's whole argument.
+        assert_eq!(shown("$e^\\pi$"), "e^π");
+        assert_eq!(shown("$x_\\alpha$"), "x_α");
+        assert_eq!(shown("$\\sum_\\infty$"), "∑_∞");
+        // `*` is not part of a command name.
+        assert_eq!(shown("$\\sigma*\\tau$"), "σ*τ");
+        // Escaped specials are the character itself, in math and in text.
+        assert_eq!(shown("$a \\& b$"), "a & b");
+        assert_eq!(shown("$50\\%$"), "50%");
+        assert_eq!(shown("$\\text{R\\&D}$"), "R&D");
+        assert_eq!(shown("$\\|v\\|$"), "‖v‖");
+    }
+
+    #[test]
+    fn operators_keep_apart_from_their_neighbours() {
+        assert_eq!(shown(r"$a\sin x$"), "a sin x");
+        assert_eq!(shown(r"$\sin(x)$"), "sin(x)");
+        assert_eq!(shown(r"$\sin\left(x\right)$"), "sin(x)");
+        assert_eq!(shown(r"$\sin\,x$"), "sin x");
+        assert_eq!(shown(r"$\lim\limits_{x}$"), "limₓ");
+        assert_eq!(shown(r"$\operatorname{sgn}x$"), "sgn x");
+        assert_eq!(shown(r"$\operatorname*{arg\,max}_x$"), "arg maxₓ");
+    }
+
+    #[test]
+    fn a_command_argument_takes_the_command_and_its_own_arguments() {
+        assert_eq!(shown(r"$a_\text{max}$"), "aₘₐₓ");
+        assert_eq!(shown(r"$F_\text{grav}$"), "F_grav");
+        assert_eq!(shown(r"$e^\frac{1}{2}$"), "e^1⁄2");
+        assert_eq!(shown(r"$\hat\theta$"), "θ\u{0302}");
+        assert_eq!(shown(r"$\vec v$"), "v\u{20D7}");
+        assert_eq!(shown(r"$\mathbf\Omega$"), "Ω");
+    }
+
+    #[test]
+    fn half_typed_and_escaped_input_shows_what_is_there() {
+        // An unclosed group adds no brace of its own.
+        assert_eq!(shown(r"$x^{2$"), "x^{2");
+        // An escaped `&` in a matrix is a character, not a column.
+        assert_eq!(shown(r"$\begin{pmatrix} a \& b \end{pmatrix}$"), "( a & b )");
+        // An escaped `$` is inside the math, not its end.
+        assert_eq!(shown(r"$a\$b$"), "a$b");
+    }
+
+    #[test]
+    fn math_block_lines_keep_their_indentation() {
+        assert_eq!(shown_in(r"  \frac{a}{b}", &Carry::InMath), "  a⁄b");
+        assert_eq!(shown_in(r"  x = 1 $$", &Carry::InMath), "  x = 1");
+        assert_eq!(shown("  $$ x"), "  x");
+    }
+
+    #[test]
+    fn a_matrix_closed_on_a_later_line_still_opens_here() {
+        assert_eq!(shown("$$\\begin{pmatrix} a & b$$"), "( a    b");
     }
 
     #[test]

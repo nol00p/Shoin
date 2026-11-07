@@ -199,7 +199,8 @@ fn latex_at(chars: &[char], i: usize) -> Option<InlineSpan> {
 
     let mut j = i + 1;
     while j < chars.len() {
-        if chars[j] == '$' {
+        // `\$` is a dollar sign inside the math, not its end.
+        if chars[j] == '$' && !is_escaped(chars, j) {
             // Pandoc rule: closing $ must be preceded by a non-whitespace character
             // and must NOT be followed by an ASCII digit.
             let prev_char = chars[j - 1];
@@ -222,10 +223,16 @@ fn latex_at(chars: &[char], i: usize) -> Option<InlineSpan> {
     None
 }
 
+/// Whether the character at `i` is escaped: an odd run of backslashes sits
+/// right before it (`\$` is, `\\$` is not).
+pub(crate) fn is_escaped(chars: &[char], i: usize) -> bool {
+    chars[..i].iter().rev().take_while(|c| **c == '\\').count() % 2 == 1
+}
+
 fn latex_delimited_at(chars: &[char], i: usize) -> Option<InlineSpan> {
     let mut j = i + 2;
     while j < chars.len() {
-        if chars[j] == '$' && chars.get(j + 1) == Some(&'$') {
+        if chars[j] == '$' && chars.get(j + 1) == Some(&'$') && !is_escaped(chars, j) {
             return (j > i + 2).then_some(InlineSpan {
                 kind: Inline::Latex,
                 outer: i..j + 2,
