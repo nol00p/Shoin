@@ -45,4 +45,10 @@ instead: it prints the page as the editor shows it, styled, with pictures.
 - PDF export needs `pandoc` and a layout engine. If one is missing, the error
   names which.
 - `--stdout` works for the text formats only.
+- Export is clean by default: math as math, tables as tables, code
+  highlighted, whatever your `[markdown]` settings show in the editor. With
+  `export_follows_settings = true` under `[markdown]`, `txt` and `html`
+  follow those settings instead, so syntax switched off in the editor
+  exports as plain text; `math = false` then also reaches `pdf`, where `$`
+  stays a dollar sign.
 - An unresolved embed exports as a visible placeholder, never a silent gap.

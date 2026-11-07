@@ -38,11 +38,21 @@ pub struct Page {
     /// path (`export::plain`). Never applied to a fenced block or a table,
     /// whose columns are the author's own layout.
     pub justify: bool,
+    /// The syntax the page is written with: `MarkdownConfig::for_export`,
+    /// which is every syntax on unless `export_follows_settings` asks for the
+    /// editor's own settings.
+    pub md: MarkdownConfig,
 }
 
 impl Default for Page {
     fn default() -> Self {
-        Page { theme: Theme::default(), measure: 72, base: std::path::PathBuf::new(), justify: false }
+        Page {
+            theme: Theme::default(),
+            measure: 72,
+            base: std::path::PathBuf::new(),
+            justify: false,
+            md: MarkdownConfig::default(),
+        }
     }
 }
 
@@ -51,9 +61,9 @@ impl Default for Page {
 /// `fallback_title` names the page when the document has no `# Heading` of its
 /// own to be named after — normally the file's stem.
 pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
-    let md = MarkdownConfig::default();
-    let body = Body::new(&md, &page.base).run(text);
-    let title = first_heading(text, &md).unwrap_or_else(|| fallback_title.to_string());
+    let md = &page.md;
+    let body = Body::new(md, &page.base).run(text);
+    let title = first_heading(text, md).unwrap_or_else(|| fallback_title.to_string());
 
     let mut out = String::with_capacity(body.len() + 4096);
     out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
@@ -140,6 +150,12 @@ impl<'a> Body<'a> {
         let mut carry = Carry::None;
         for (i, line) in text.lines().enumerate() {
             let (kind, next) = classify(line, &carry, i == 0, self.md.math);
+            // `tables = false` turns a table back into the prose it also is,
+            // as the editor does.
+            let kind = match kind {
+                BlockKind::Table if !self.md.tables => BlockKind::Paragraph,
+                other => other,
+            };
             // The classifier's word decides where a math block ends, so this
             // walk cannot group lines differently from the editor.
             let math_continues = next == Carry::InMath;
@@ -158,7 +174,7 @@ impl<'a> Body<'a> {
 
             BlockKind::FenceOpen(info) => {
                 self.close_all();
-                let lang = Lang::from_info(info);
+                let lang = if self.md.code_syntax { Lang::from_info(info) } else { None };
                 // The `language-x` class is emitted for ANY info string, known
                 // or not: it is what a reader's own stylesheet, or a highlighter
                 // they run over the page later, looks for.
@@ -941,6 +957,56 @@ mod tests {
         assert!(got.contains("<code>code</code>"), "{got}");
         assert!(got.contains("<del>gone</del>"), "{got}");
         assert!(got.contains("<mark>marked</mark>"), "{got}");
+    }
+
+    /// By default export is clean whatever the editor shows; with
+    /// `export_follows_settings` it follows the editor.
+    #[test]
+    fn export_follows_the_settings_only_when_asked() {
+        let mut cfg = MarkdownConfig {
+            math: false,
+            tables: false,
+            ..MarkdownConfig::default()
+        };
+        assert_eq!(cfg.for_export(), MarkdownConfig::default());
+        let clean = render("$$x$$\n\n| a |\n|---|\n", "t", &Page { md: cfg.for_export(), ..Page::default() });
+        assert!(clean.contains("math display") && clean.contains("<table"), "{clean}");
+
+        cfg.export_follows_settings = true;
+        assert_eq!(cfg.for_export(), cfg);
+        let followed = render("$$x$$\n\n| a |\n|---|\n", "t", &Page { md: cfg.for_export(), ..Page::default() });
+        assert!(!followed.contains("math display") && !followed.contains("<table"), "{followed}");
+    }
+
+    /// `[markdown] math` reaches `:export` through the page.
+    #[test]
+    fn export_follows_the_math_setting() {
+        let on = render("$$\n# Heading\n", "t", &Page::default());
+        assert!(!on.contains("<h1"), "{on}");
+        let md_off = MarkdownConfig { math: false, ..MarkdownConfig::default() };
+        let off = render("$$\n# Heading\n", "t", &Page { md: md_off.clone(), ..Page::default() });
+        assert!(off.contains("<h1 id=\"heading\">Heading</h1>"), "{off}");
+        let plain_off = crate::export::plain::render("$$\n# Heading\n", 72, false, &md_off);
+        assert!(plain_off.contains("Heading\n======="), "{plain_off}");
+    }
+
+    /// The rest of `[markdown]` reaches export too: what is off in the
+    /// editor is plain text on the page.
+    #[test]
+    fn export_follows_the_markdown_settings() {
+        let off = MarkdownConfig {
+            tables: false,
+            code_syntax: false,
+            tags: false,
+            ..MarkdownConfig::default()
+        };
+        let page = Page { md: off, ..Page::default() };
+        let got = render("| a | b |\n|---|---|\n| 1 | 2 |\n\n```rust\nlet x = 1;\n```\n\n#tag\n", "t", &page);
+        assert!(!got.contains("<table"), "{got}");
+        assert!(got.contains("<pre><code class=\"language-rust\">let x = 1;"), "unhighlighted: {got}");
+        assert!(!got.contains("class=\"tag\""), "{got}");
+        let on = render("| a | b |\n|---|---|\n| 1 | 2 |\n\n#tag\n", "t", &Page::default());
+        assert!(on.contains("<table") && on.contains("class=\"tag\""), "{on}");
     }
 
     #[test]

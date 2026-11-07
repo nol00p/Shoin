@@ -262,6 +262,23 @@ pub struct MarkdownConfig {
     pub plain_text_extensions: Vec<String>,
     /// Recognize inline `$…$` and display `$$…$$` LaTeX math.
     pub math: bool,
+    /// Make `:export` follow the settings above. Off (the default), export
+    /// writes clean output whatever the editor shows: math as math, tables as
+    /// tables, code highlighted. On, a syntax switched off here exports as the
+    /// plain text the editor shows it as.
+    pub export_follows_settings: bool,
+}
+
+impl MarkdownConfig {
+    /// The settings an export uses: these, or with `export_follows_settings`
+    /// off, the defaults, which turn every syntax on.
+    pub fn for_export(&self) -> MarkdownConfig {
+        if self.export_follows_settings {
+            self.clone()
+        } else {
+            MarkdownConfig::default()
+        }
+    }
 }
 
 impl Default for MarkdownConfig {
@@ -274,6 +291,7 @@ impl Default for MarkdownConfig {
             code_syntax: true,
             plain_text_extensions: vec![".txt".into()],
             math: true,
+            export_follows_settings: false,
         }
     }
 }
