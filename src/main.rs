@@ -180,7 +180,7 @@ fn main() -> Result<()> {
                 }
                 None => transclude::compile::compile(src, &config.transclude)?,
             };
-            export::plain::render(&flat, config.layout.measure, false)
+            export::plain::render(&flat, config.layout.measure, false, config.markdown.math)
         };
         if !(paged(&text) && render::print::page(&text)) {
             print_out(&text)?;
@@ -201,6 +201,7 @@ fn main() -> Result<()> {
             measure: config.layout.measure,
             base: src.parent().unwrap_or(std::path::Path::new("")).to_path_buf(),
             justify: cli.justify,
+            math: config.markdown.math,
         };
         let title = src
             .file_stem()
@@ -212,7 +213,7 @@ fn main() -> Result<()> {
             }
             let flat = transclude::compile::compile(src, &config.transclude)?;
             match format {
-                export::Format::Text => print_out(&export::plain::render(&flat, page.measure, page.justify))?,
+                export::Format::Text => print_out(&export::plain::render(&flat, page.measure, page.justify, page.math))?,
                 export::Format::Html => print_out(&export::html::render(&flat, &title, &page))?,
                 _ => print_out(&flat)?,
             }

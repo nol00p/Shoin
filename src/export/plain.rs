@@ -24,8 +24,8 @@ use crate::render::markdown::inline;
 /// for display, so that is already the full text. A heading, quote, list item,
 /// or table row is never justified; stretching a quote's `> ` prefix or a
 /// table's `|` columns would break what they are.
-pub fn render(text: &str, measure: u16, justify: bool) -> String {
-    let md = MarkdownConfig::default();
+pub fn render(text: &str, measure: u16, justify: bool, math: bool) -> String {
+    let md = MarkdownConfig { math, ..MarkdownConfig::default() };
     let mut out: Vec<String> = Vec::new();
     let mut carry = Carry::None;
     let mut in_fence = false;
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn headings_keep_their_rank_by_being_underlined() {
-        let got = render("# Title\n\n## Section\n\n### Deeper\n", 72, false);
+        let got = render("# Title\n\n## Section\n\n### Deeper\n", 72, false, true);
         assert!(got.contains("Title\n====="), "an H1 is ruled with =");
         assert!(got.contains("Section\n-------"), "an H2 with -");
         assert!(got.contains("Deeper"), "deeper ranks stand alone");
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn inline_markers_go_and_their_text_stays() {
-        let got = render("a **bold** and *italic* and `code` and ==hi== here\n", 72, false);
+        let got = render("a **bold** and *italic* and `code` and ==hi== here\n", 72, false, true);
         assert_eq!(got.trim(), "a bold and italic and code and hi here");
     }
 
@@ -229,16 +229,16 @@ mod tests {
     /// way to carry it.
     #[test]
     fn a_link_keeps_its_address() {
-        let got = render("see [the docs](https://example.com/x) now\n", 72, false);
+        let got = render("see [the docs](https://example.com/x) now\n", 72, false, true);
         assert_eq!(got.trim(), "see the docs (https://example.com/x) now");
         // …unless the text already is the address.
-        let got = render("[https://example.com](https://example.com)\n", 72, false);
+        let got = render("[https://example.com](https://example.com)\n", 72, false, true);
         assert_eq!(got.trim(), "https://example.com");
     }
 
     #[test]
     fn lists_stay_lists_and_checkboxes_survive() {
-        let got = render("- one\n- two\n\n1. first\n2. second\n\n- [ ] todo\n- [x] done\n", 72, false);
+        let got = render("- one\n- two\n\n1. first\n2. second\n\n- [ ] todo\n- [x] done\n", 72, false, true);
         assert!(got.contains("- one"));
         assert!(got.contains("1. first"));
         assert!(got.contains("2. second"));
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn quotes_keep_their_mark_and_code_is_indented() {
-        let got = render("> quoted words\n\n```rust\nlet x = 1;\n```\n", 72, false);
+        let got = render("> quoted words\n\n```rust\nlet x = 1;\n```\n", 72, false, true);
         assert!(got.contains("> quoted words"));
         assert!(got.contains("    let x = 1;"), "verbatim text is indented");
         assert!(!got.contains("```"), "the fence itself goes");
@@ -258,14 +258,14 @@ mod tests {
     /// A `#` inside a fence is code, not a heading, and must not be underlined.
     #[test]
     fn a_hash_inside_a_fence_is_left_alone() {
-        let got = render("```sh\n# a comment\n```\n", 72, false);
+        let got = render("```sh\n# a comment\n```\n", 72, false, true);
         assert!(got.contains("    # a comment"));
         assert!(!got.contains("====="));
     }
 
     #[test]
     fn front_matter_is_metadata_and_goes() {
-        let got = render("---\ntitle: x\n---\nbody\n", 72, false);
+        let got = render("---\ntitle: x\n---\nbody\n", 72, false, true);
         assert!(got.contains("body"));
         assert!(!got.contains("title: x"));
     }
@@ -276,7 +276,7 @@ mod tests {
     /// since this reuses the very same `wrap_line`/`justify_gaps` math.
     #[test]
     fn justify_wraps_and_stretches_a_paragraph_but_its_last_row() {
-        let got = render("aaa bbb ccc ddd\n", 10, true);
+        let got = render("aaa bbb ccc ddd\n", 10, true, true);
         let lines: Vec<&str> = got.lines().collect();
         assert_eq!(lines, vec!["aaa    bbb", "ccc ddd"], "{got:?}");
     }
@@ -285,7 +285,7 @@ mod tests {
     /// row, so it is left exactly as `justify: false` would write it.
     #[test]
     fn justify_leaves_an_unwrapped_paragraph_ragged() {
-        let got = render("aaa bbb\n", 20, true);
+        let got = render("aaa bbb\n", 20, true, true);
         assert_eq!(got.trim_end(), "aaa bbb");
     }
 
@@ -300,6 +300,7 @@ mod tests {
              - a list item that likewise runs well past the measure\n\n\
              | a | b |\n|---|---|\n| longer than the measure | cell |\n",
             10,
+            true,
             true,
         );
         assert!(got.contains("A heading much longer than the measure itself"));

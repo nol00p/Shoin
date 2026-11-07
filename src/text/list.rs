@@ -268,6 +268,18 @@ impl<'a> Lists<'a> {
                         self.kind(i - 1),
                         Some(BlockKind::Paragraph | BlockKind::ListItem { .. })
                     ) => {}
+                // A display block keeps every line up to its close, as a fence
+                // does, and may follow the item's text the way a lazy
+                // paragraph line does.
+                BlockKind::MathBlock
+                    if matches!(
+                        self.kind(i - 1),
+                        Some(
+                            BlockKind::Paragraph
+                                | BlockKind::ListItem { .. }
+                                | BlockKind::MathBlock
+                        )
+                    ) => {}
                 _ => break,
             }
             end = i;
@@ -400,6 +412,16 @@ mod tests {
             assert_eq!(l.item_bounds(0), Some((0, 2)));
             // The cursor on the lazy line is in the innermost item.
             assert_eq!(l.item_bounds(2), Some((1, 2)));
+        });
+    }
+
+    #[test]
+    fn math_block_body_less_indented_than_the_item_stays_in_it() {
+        let t = "- a\n  $$\n\\frac{a}{b}\n  $$\n- b\n";
+        with(t, |l| {
+            assert_eq!(l.item_bounds(0), Some((0, 3)));
+            assert_eq!(l.item_bounds(2), Some((0, 3)));
+            assert_eq!(l.next_sibling_bounds(0), Some((4, 4)));
         });
     }
 
