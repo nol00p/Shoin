@@ -259,51 +259,64 @@ impl<'a> Lists<'a> {
     /// `edits` widen a number (`9.` → `10.`): worked out on the text as it
     /// is, before any edit is made; nested items that both widen add up.
     ///
-    /// Only what would otherwise fall out of the item moves. An item's lines
-    /// are taken a block at a time — a sub-item with everything under it, a
-    /// fenced block, a `$$` block, or a single line — and a block moves when
-    /// its first line sits between the old and the new text column, just far
-    /// enough to reach the new one. Anything already deep enough stays, so a
-    /// list nested by 4 keeps its 4-space steps. Inside a moving block, lines
-    /// indented less than its first line (lazy text, a short code line) and
-    /// tab-indented lines, whose tab stop has not moved, stay too.
+    /// An item's lines are taken a block at a time: a sub-item with
+    /// everything under it, a fenced block, a `$$` block, or a single line.
+    ///
+    /// - A sub-item moves only if it would fall out of the item: when its
+    ///   first line sits between the old and the new text column, just far
+    ///   enough to reach the new one, with its lines. One already deep enough
+    ///   stays, so a list nested by 4 keeps its 4-space steps.
+    /// - Other content at or past the old text column moves by the whole
+    ///   widening, so its indent relative to the text, which can mean
+    ///   something (four more columns is indented code), is kept. A block
+    ///   with a tab-indented line stays whole, so code is never changed.
+    /// - Lines short of where their block starts (lazy text, a short code
+    ///   line) stay, and so does whatever follows a fence left open.
     ///
     /// A narrower number moves nothing: every line is still inside the item.
     /// Left alone as well: whitespace-only lines, and an item with a tab
     /// before or after its marker, where columns depend on tab stops.
-    pub fn realign(&self, edits: &[Renumber]) -> Vec<(usize, isize)> {
-        let mut shifts: std::collections::BTreeMap<usize, isize> = std::collections::BTreeMap::new();
+    pub fn realign(&self, edits: &[Renumber]) -> Vec<(usize, usize)> {
+        let mut shifts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
         for r in edits {
-            let delta = r.number.chars().count() as isize - r.cols.len() as isize;
-            if delta <= 0 {
+            let widening = r.number.chars().count().saturating_sub(r.cols.len());
+            if widening == 0 {
                 continue;
             }
             let Some(old_col) = self.text_column(r) else { continue };
-            let new_col = old_col + delta as usize;
+            let new_col = old_col + widening;
             let Some((start, end)) = self.item_bounds(r.line) else { continue };
             let mut l = start + 1;
             while l <= end {
-                let block = self.block_end(l, end);
+                // A fence that never closes runs to the end of the file, as
+                // far as the item bounds know: nothing past it is the item's.
+                let Some(block) = self.block_end(l, end) else { break };
                 // Each non-blank line of the block, read once, with its indent
                 // (`None` when the indent has a tab).
-                let lines: Vec<(usize, String, Option<usize>)> = (l..=block)
+                let lines: Vec<(usize, Option<usize>)> = (l..=block)
                     .map(|k| (k, self.buffer.line_text(k)))
                     .filter(|(_, text)| !text.trim().is_empty())
-                    .map(|(k, text)| {
-                        let n = leading_spaces(&text);
-                        (k, text, n)
-                    })
+                    .map(|(k, text)| (k, leading_spaces(&text)))
                     .collect();
+                let item_line = self.is_item(l);
                 l = block + 1;
-                let Some((_, _, Some(first))) = lines.first() else { continue };
-                let first = *first;
-                if !(old_col..new_col).contains(&first) || lines.iter().any(|(_, t, _)| tab_after_marker(t)) {
-                    continue;
-                }
-                let by = (new_col - first) as isize;
-                for (k, _, n) in &lines {
-                    if n.is_some_and(|n| n >= first) {
-                        *shifts.entry(*k).or_default() += by;
+                let Some(&(first, Some(first_indent))) = lines.first() else { continue };
+                let (from, by) = if item_line {
+                    if tab_after_marker(&self.buffer.line_text(first))
+                        || !(old_col..new_col).contains(&first_indent)
+                    {
+                        continue;
+                    }
+                    (first_indent, new_col - first_indent)
+                } else {
+                    if first_indent < old_col || lines.iter().any(|(_, n)| n.is_none()) {
+                        continue;
+                    }
+                    (old_col, widening)
+                };
+                for &(k, n) in &lines {
+                    if n.is_some_and(|n| n >= from) {
+                        *shifts.entry(k).or_default() += by;
                     }
                 }
             }
@@ -333,20 +346,20 @@ impl<'a> Lists<'a> {
 
     /// The last line of the block starting at `line`, at most `end`: a
     /// sub-item with its children, a fenced block to its closing fence, a
-    /// run of `$$` block lines, or the line alone.
-    fn block_end(&self, line: usize, end: usize) -> usize {
+    /// run of `$$` block lines, or the line alone. `None` for a fence that
+    /// does not close by `end`.
+    fn block_end(&self, line: usize, end: usize) -> Option<usize> {
         let last = match self.kind(line) {
             Some(BlockKind::ListItem { .. }) => self.bounds(line).1,
             Some(BlockKind::FenceOpen(_)) => (line + 1..=end)
-                .find(|&k| matches!(self.kind(k), Some(BlockKind::FenceClose)))
-                .unwrap_or(end),
+                .find(|&k| matches!(self.kind(k), Some(BlockKind::FenceClose)))?,
             Some(BlockKind::MathBlock) => (line..=end)
                 .take_while(|&k| matches!(self.kind(k), Some(BlockKind::MathBlock)))
                 .last()
                 .unwrap_or(line),
             _ => line,
         };
-        last.min(end)
+        Some(last.min(end))
     }
 
     /// The edits that number the ordered level containing `line` in sequence,
@@ -630,7 +643,7 @@ mod tests {
     }
 
     /// `9.` → `10.` on line 0: what moves, block by block.
-    fn widened(text: &str) -> Vec<(usize, isize)> {
+    fn widened(text: &str) -> Vec<(usize, usize)> {
         let edit = Renumber { line: 0, cols: 0..1, number: "10".into() };
         with(text, |l| l.realign(&[edit]))
     }
@@ -645,6 +658,12 @@ mod tests {
         assert_eq!(widened("9. a\n   ```\n  x = 1\n   ```\n"), vec![(1, 1), (3, 1)]);
         // Already deep enough: a list nested by 4 keeps its steps.
         assert_eq!(widened("9. a\n    - x\n      more\n"), vec![]);
+        // Other content keeps its indent relative to the text: a deeper
+        // continuation line, and indented code four columns in.
+        assert_eq!(widened("9. a\n    more\n"), vec![(1, 1)]);
+        assert_eq!(widened("9. a\n\n       code\n"), vec![(2, 1)]);
+        // A fence left open: nothing after it is the item's to move.
+        assert_eq!(widened("9. a\n   more\n   ```\n   code\n\n- x\n   - y\n"), vec![(1, 1)]);
         // So does a `$$` block.
         assert_eq!(widened("9. a\n   $$\n   x\n   $$\n"), vec![(1, 1), (2, 1), (3, 1)]);
     }
@@ -666,9 +685,10 @@ mod tests {
         assert_eq!(widened("9. a\n   \n   para\n"), vec![(2, 1)]);
         // A block with a tab-indented line stays.
         assert_eq!(widened("9. a\n\tmore\n"), vec![]);
-        // A tab-indented line in a moving block stays: its tab stop has not
-        // moved.
-        assert_eq!(widened("9. a\n   ```\n\tcode\n   ```\n"), vec![(1, 1), (3, 1)]);
+        // A block of code with a tab-indented line stays whole, so the code
+        // is never changed, and so does a fenced diff of tabbed code.
+        assert_eq!(widened("9. a\n   ```\n\tcode\n   ```\n"), vec![]);
+        assert_eq!(widened("9. a\n   ```diff\n   -\treturn nil\n   ```\n"), vec![(1, 1), (2, 1), (3, 1)]);
         // Spaces then a tab after a sub-item's marker: its text is on a tab
         // stop, so it stays with its lines.
         assert_eq!(widened("9. a\n   - \tx\n        more\n"), vec![]);

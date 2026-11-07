@@ -4170,17 +4170,9 @@ impl App {
             self.buffer.delete_chars(start, start + r.cols.len());
             self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
         }
-        // `realign` only narrows lines with the spaces to give; taking no more
-        // than the leading spaces there are keeps any slip from eating text.
-        for (line, delta) in shifts {
-            if delta > 0 {
-                self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(delta as usize));
-            } else {
-                let spaces = self.buffer.line_text(line).chars().take_while(|c| *c == ' ').count();
-                let n = delta.unsigned_abs().min(spaces);
-                let at = self.buffer.rope.line_to_char(line);
-                self.buffer.delete_chars(at, at + n);
-            }
+        // `realign` only ever adds indent, so no text can be lost to it.
+        for (line, by) in shifts {
+            self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(by));
         }
     }
 
@@ -6369,7 +6361,8 @@ mod tests {
         let mut app = app_with("intro\n\n9. i\n    more\n10. j\n");
         feed(&mut app, "jj");
         alt(&mut app, 'j');
-        assert_eq!(text(&app), "intro\n\n9. j\n10. i\n    more\n");
+        // `more` was a column deeper than `9. i`'s text and stays so.
+        assert_eq!(text(&app), "intro\n\n9. j\n10. i\n     more\n");
         app.refresh_blocks();
         assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
 
@@ -7999,8 +7992,7 @@ mod tests {
         assert_eq!(text(&app), "10. j\n9. i\n   more\n");
     }
 
-    /// Narrowing never eats text: a sub-item's lazy lines stay, and a shift
-    /// of two takes two spaces, not a line break.
+    /// A narrower number moves nothing, so no line can lose text to it.
     #[test]
     fn a_narrower_number_never_cuts_text() {
         let mut app = app_with("9. h\n10. i\n    - x\nlazy\n");
@@ -8021,6 +8013,24 @@ mod tests {
         feed(&mut app, "jj");
         alt(&mut app, 'j');
         assert_eq!(text(&app), "8. h\n    - hh\n9. j\n    - jj\n10. i\n    - ii\n");
+    }
+
+    /// `<al` renumbers through `renumber_lists`, which can widen two levels
+    /// in one go; realign follows it there too, in one undo step.
+    #[test]
+    fn outdenting_into_tenth_place_realigns() {
+        let mut app = app_with("1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n   1. s\n      more\n");
+        feed(&mut app, "9j");
+        feed(&mut app, "<al");
+        assert_eq!(
+            text(&app),
+            "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. s\n    more\n"
+        );
+        feed(&mut app, "u");
+        assert_eq!(
+            text(&app),
+            "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n   1. s\n      more\n"
+        );
     }
 
     /// Nested numbers that both widen add up for the lines inside both.
