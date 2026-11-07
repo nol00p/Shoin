@@ -111,7 +111,8 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 - Moving swaps the item and the items it passes as two blocks of text; the
   blank lines between them stay where they were.
 - In Visual mode, a line touches its innermost item, even partly selected,
-  and blank lines touch nothing. When the selection reaches into sub-items
+  and blank lines touch nothing, unless one sits between the paragraphs of
+  one item, where it touches that item. When the selection reaches into sub-items
   and also touches a shallower item, those sub-items stand for their parent,
   so a parent always moves with its children. The items touched have to be
   siblings in one list: a selection across two lists, or across a paragraph,

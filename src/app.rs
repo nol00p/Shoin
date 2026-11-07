@@ -1899,11 +1899,18 @@ impl App {
             Action::NormalMode => self.leave_visual(),
             Action::Visual => self.enter_visual(Mode::Visual),
             Action::VisualLine => self.enter_visual(Mode::VisualLine),
-            Action::Command => self.mode = Mode::Command(String::new()),
+            // `:` and `/` from Visual come back to Normal, never to Visual,
+            // so the selection ends here.
+            Action::Command => {
+                self.anchor = None;
+                self.mode = Mode::Command(String::new());
+            }
             Action::SearchForward => {
+                self.anchor = None;
                 self.mode = Mode::Search { query: String::new(), reverse: false }
             }
             Action::SearchBackward => {
+                self.anchor = None;
                 self.mode = Mode::Search { query: String::new(), reverse: true }
             }
             Action::Undo => self.undo_or_warn(),
@@ -3445,8 +3452,7 @@ impl App {
     /// Toggle a symmetric inline marker (`**`, `*`, `==`, `` ` ``) around the
     /// word under the cursor, or the selection in Visual mode.
     fn writer_toggle(&mut self, marker: &str) {
-        let (start, end) = if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-            let anchor = self.anchor.unwrap_or(self.buffer.cursor);
+        let (start, end) = if let Some(anchor) = self.visual_anchor() {
             let cur = self.buffer.cursor;
             let (lo, hi) = if (anchor.line, anchor.col) <= (cur.line, cur.col) {
                 (anchor, cur)
@@ -3641,6 +3647,8 @@ impl App {
     }
 
     fn enter_insert(&mut self) {
+        // Visual `A`/`I` lead here: no selection survives into Insert.
+        self.anchor = None;
         self.mode = Mode::Insert;
         self.touch_status();
     }
@@ -3778,8 +3786,7 @@ impl App {
     /// `gl`: wrap the word (or selection) as `[text](url)` and drop the cursor
     /// into the empty URL slot in Insert mode.
     fn wrap_link(&mut self) {
-        let (start, end) = if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-            let anchor = self.anchor.unwrap_or(self.buffer.cursor);
+        let (start, end) = if let Some(anchor) = self.visual_anchor() {
             let cur = self.buffer.cursor;
             let (lo, hi) = if (anchor.line, anchor.col) <= (cur.line, cur.col) {
                 (anchor, cur)
@@ -4136,7 +4143,10 @@ impl App {
         let cur = self.buffer.cursor;
         let anchor = self.visual_anchor();
         let other = anchor.unwrap_or(cur);
-        let (top, bot) = (cur.line.min(other.line), cur.line.max(other.line));
+        // A mouse drag can leave the anchor on the empty line past the last
+        // newline, which is not a line to move.
+        let last = self.buffer.last_line();
+        let (top, bot) = (cur.line.min(other.line).min(last), cur.line.max(other.line).min(last));
         let room = if down { self.buffer.last_line() - bot } else { top };
         let n = count.min(room);
         if n == 0 {
@@ -4155,7 +4165,7 @@ impl App {
 
         let line = |l: usize| if down { l + n } else { l - n };
         self.buffer.cursor = Cursor::new(line(cur.line), cur.col);
-        self.anchor = anchor.map(|a| Cursor::new(line(a.line), a.col));
+        self.anchor = anchor.map(|a| Cursor::new(line(a.line.min(last)), a.col));
     }
 
     /// Rewrite the ordinals `edits` name. Each is on a line of its own and
@@ -4450,16 +4460,9 @@ impl App {
         self.touch_status();
     }
 
-    /// Leave Visual for whatever comes next: back into the insert session when
-    /// the selection was dragged out of one, Normal otherwise.
-    ///
-    /// Every Visual exit funnels through here — `Esc`, the operators, and the
-    /// writer verbs alike — so the resume is honoured once rather than
-    /// remembered at each of them.
-    /// The selection's other end, in Visual mode only. `self.anchor` can
-    /// outlive Visual: leaving it through `:`, `/` or `A` keeps it (a `:`
-    /// range may still want it), so anything that acts on "the selection"
-    /// asks the mode first.
+    /// The selection's other end, in Visual mode only. Every way out of Visual
+    /// clears `self.anchor`, but anything acting on "the selection" asks
+    /// through here, so a way out that forgets cannot move the wrong text.
     fn visual_anchor(&self) -> Option<Cursor> {
         match self.mode {
             Mode::Visual | Mode::VisualLine => self.anchor,
@@ -4467,6 +4470,12 @@ impl App {
         }
     }
 
+    /// Leave Visual for whatever comes next: back into the insert session when
+    /// the selection was dragged out of one, Normal otherwise.
+    ///
+    /// Every Visual exit funnels through here — `Esc`, the operators, and the
+    /// writer verbs alike — so the resume is honoured once rather than
+    /// remembered at each of them.
     fn end_visual(&mut self) {
         self.mode = if self.visual_resumes_insert {
             Mode::Insert
@@ -8018,15 +8027,32 @@ mod tests {
     /// cursor, not the old selection.
     #[test]
     fn alt_j_after_leaving_visual_moves_one_item() {
-        for leave in ["Vj:", "VjA"] {
+        for leave in ["Vj:", "Vj/", "Vj?", "VjA", "VjI"] {
             let mut app = app_with("- a\n- b\n- c\n- d\n");
             feed(&mut app, leave);
             esc(&mut app);
+            assert!(app.anchor.is_none(), "no selection survives {leave}");
             feed(&mut app, "j");
             assert_eq!(app.mode, Mode::Normal);
             alt(&mut app, 'j');
             assert_eq!(text(&app), "- a\n- b\n- d\n- c\n", "after {leave}");
         }
+    }
+
+    /// A drag can leave the anchor on the empty line past the last newline;
+    /// moving lines from there must not reach past the end.
+    #[test]
+    fn move_lines_with_the_anchor_past_the_last_line() {
+        let mut app = app_with("a\nb\n");
+        app.config.keys.visual.insert("J".into(), "move_lines_down".into());
+        app.config.keys.visual.insert("K".into(), "move_lines_up".into());
+        app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+        feed(&mut app, "V");
+        app.anchor = Some(Cursor::new(app.buffer.last_line() + 1, 0));
+        feed(&mut app, "J");
+        assert_eq!(text(&app), "a\nb\n");
+        feed(&mut app, "K");
+        assert_eq!(text(&app), "a\nb\n");
     }
 
     /// A selection only on a loose item's inner blank line is that item, as

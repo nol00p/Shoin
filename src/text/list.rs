@@ -128,7 +128,9 @@ impl<'a> Lists<'a> {
     /// The run of siblings that lines `top..=bot` touch, as the item lines
     /// of its first and last item — what Visual `Alt-j`/`Alt-k` moves.
     ///
-    /// Blank lines touch nothing. Each other line touches its innermost item,
+    /// A blank line touches an item only when it sits between that item's own
+    /// paragraphs; one before a sub-item or between items touches nothing.
+    /// Each other line touches its innermost item,
     /// and an item nested deeper than the shallowest one touched stands for
     /// its ancestor at that level, so a run never splits a parent from its
     /// children. Nesting is counted in levels, not columns: siblings may sit
@@ -138,18 +140,20 @@ impl<'a> Lists<'a> {
         // Each item once: a long item's lines all touch the same one.
         let mut touched: Vec<usize> = Vec::new();
         for l in top..=bot {
-            if !self.blank(l) {
-                let item = self.item_at(l).ok_or(RunError::NotInList)?;
-                if !touched.contains(&item) {
-                    touched.push(item);
+            let item = if self.blank(l) {
+                match self.own_bounds(l) {
+                    Some((start, end)) if l <= end => start,
+                    _ => continue,
                 }
+            } else {
+                self.item_at(l).ok_or(RunError::NotInList)?
+            };
+            if !touched.contains(&item) {
+                touched.push(item);
             }
         }
-        // Only blank lines: one inside an item (between a loose item's
-        // paragraphs) is that item, as it is for Normal-mode `Alt-j`.
         if touched.is_empty() {
-            let item = (top..=bot).find_map(|l| self.item_at(l)).ok_or(RunError::NotInList)?;
-            return Ok((item, item));
+            return Err(RunError::NotInList);
         }
         // Levels are counted once per item and shared with its children.
         let mut levels: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
@@ -519,8 +523,8 @@ mod tests {
             assert_eq!(l.sibling_run(2, 3), Ok((2, 2)));
             assert_eq!(l.sibling_run(3, 3), Err(RunError::NotInList));
             assert_eq!(l.sibling_run(1, 5), Ok((0, 4)));
-            // A blank line alone, between two items, is in neither.
-            assert_eq!(l.sibling_run(3, 3), Err(RunError::NotInList));
+            // The blank line between b and c touches neither: b and c move.
+            assert_eq!(l.sibling_run(2, 4), Ok((2, 4)));
         });
         // Siblings at uneven indents are one level.
         with("- a\n   - b\n  - c\n", |l| assert_eq!(l.sibling_run(1, 2), Ok((1, 2))));
@@ -532,6 +536,12 @@ mod tests {
         with("text\n- a\n", |l| assert_eq!(l.sibling_run(0, 1), Err(RunError::NotInList)));
         // A loose item's inner blank line alone is that item.
         with("- a\n\n  para\n- b\n", |l| assert_eq!(l.sibling_run(1, 1), Ok((0, 0))));
+        // A blank line before a sub-item touches nothing, alone or not, so a
+        // bigger selection never moves less.
+        with("- a\n\n  - a1\n- b\n", |l| {
+            assert_eq!(l.sibling_run(1, 1), Err(RunError::NotInList));
+            assert_eq!(l.sibling_run(1, 2), Ok((2, 2)));
+        });
         // Deeply nested lines share their levels; the run is still right.
         with("- a\n  - b\n    - c\n    - d\n  - e\n", |l| {
             assert_eq!(l.sibling_run(2, 3), Ok((2, 3)));
