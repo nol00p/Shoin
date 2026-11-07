@@ -75,6 +75,13 @@ pub struct Buffer {
     /// single rescan from there covers every change.
     pub dirty_line: Option<usize>,
 
+    /// Highest line touched since the same take, kept in step with later
+    /// edits that add or remove lines above it. An edit that keeps the line
+    /// count (swapping two blocks, indenting) can change lines well below
+    /// `dirty_line`, and a rescan that stopped as soon as its state matched
+    /// again would miss them; it may not stop before this line.
+    pub dirty_last: Option<usize>,
+
     /// The file changed on disk while this buffer had unsaved work.
     ///
     /// Only ever true for a MODIFIED buffer: a clean one is reloaded the moment
@@ -114,6 +121,7 @@ impl Buffer {
             saved_state: 0,
             revision: 0,
             dirty_line: None,
+            dirty_last: None,
             conflict: false,
             readonly_ranges: Vec::new(),
             read_only: false,
@@ -148,6 +156,7 @@ impl Buffer {
             saved_state: 0,
             revision: 0,
             dirty_line: None,
+            dirty_last: None,
             conflict: false,
             readonly_ranges: Vec::new(),
             read_only: false,
@@ -416,6 +425,21 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::cursor::Cursor;
+
+    /// `dirty_line` and `dirty_last` bracket every line a run of edits
+    /// touched, in the text as it now stands.
+    #[test]
+    fn dirty_lines_bracket_every_edit() {
+        let mut b = Buffer::unnamed(b"0\n1\n2\n3\n4\n5\n".to_vec()).unwrap();
+        b.insert_str(Cursor::new(4, 0), "x\ny\n"); // lines 4..=6
+        assert_eq!((b.dirty_line, b.dirty_last), (Some(4), Some(6)));
+        b.insert_str(Cursor::new(1, 0), "new\n"); // pushes the first edit down
+        assert_eq!((b.dirty_line, b.dirty_last), (Some(1), Some(7)));
+        let at = b.rope.line_to_char(2);
+        b.delete_chars(at, at + 2); // takes line 2's text and break: up one
+        assert_eq!((b.dirty_line, b.dirty_last), (Some(1), Some(6)));
+    }
 
     /// Piped text has no name and nothing unsaved, and keeps its line ending
     /// for the `:w` that names it.

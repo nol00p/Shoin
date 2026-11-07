@@ -586,6 +586,7 @@ mod tests {
         app.buffer.cursor = Cursor::new(0, 0);
         app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
         app.buffer.dirty_line = None;
+        app.buffer.dirty_last = None;
         app
     }
 
