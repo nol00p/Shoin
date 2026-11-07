@@ -144,9 +144,13 @@ impl<'a> Lists<'a> {
         let mut touched: Vec<usize> = Vec::new();
         for l in top..=bot {
             let item = if self.blank(l) {
+                // Between two lines of one item's own text, the blank line is
+                // that item's; after a sub-item, or before one, it is no one's.
+                let prev = (0..l).rev().find(|&k| !self.blank(k));
                 let next = (l + 1..=self.buffer.last_line()).find(|&k| !self.blank(k));
-                match (self.item_at(l), next) {
-                    (Some(x), Some(n)) if !self.is_item(n) && self.item_at(n) == Some(x) => x,
+                let own = |k: usize| self.item_at(k).filter(|&x| x == k || !self.is_item(k));
+                match (self.item_at(l), prev.and_then(own), next.and_then(own)) {
+                    (Some(x), Some(p), Some(n)) if p == x && n == x => x,
                     _ => continue,
                 }
             } else {
@@ -157,42 +161,27 @@ impl<'a> Lists<'a> {
             }
         }
         if touched.is_empty() {
-            return Err(RunError::NoItem);
+            // Blank lines alone: inside a list they touch no item, outside
+            // one they are simply not in a list, as Normal mode says.
+            let in_list = (top..=bot).any(|l| self.item_at(l).is_some());
+            return Err(if in_list { RunError::NoItem } else { RunError::NotInList });
         }
-        // Levels are counted once per item and shared with its children.
-        let mut levels: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-        let mut level = |item: usize| -> usize {
-            // Climb to an ancestor whose level is known, or to the top.
-            let mut chain = Vec::new();
-            let mut k = item;
-            let known = loop {
-                if let Some(&n) = levels.get(&k) {
-                    break Some(n);
+        // Each touched item with its ancestors, nearest first: its level is
+        // the number of ancestors, and lifting it to a level is a lookup.
+        let chains: Vec<Vec<usize>> = touched
+            .iter()
+            .map(|&item| {
+                let mut chain = vec![item];
+                while let Some(p) = chain.last().and_then(|&k| self.parent_of(k)) {
+                    chain.push(p);
                 }
-                chain.push(k);
-                match self.parent_of(k) {
-                    Some(p) => k = p,
-                    None => break None,
-                }
-            };
-            // Then number the climb back down: a top-level item is level 0.
-            let first = known.map_or(0, |n| n + 1);
-            for (n, &c) in (first..).zip(chain.iter().rev()) {
-                levels.insert(c, n);
-            }
-            levels[&item]
-        };
-        let item_levels: Vec<(usize, usize)> = touched.iter().map(|&i| (i, level(i))).collect();
-        let shallowest = item_levels.iter().map(|(_, n)| *n).min().unwrap_or(0);
-        let lift = |(item, n): (usize, usize)| {
-            let mut k = item;
-            for _ in shallowest..n {
-                k = self.parent_of(k).unwrap_or(k);
-            }
-            k
-        };
-        let first = lift(item_levels[0]);
-        let last = lift(item_levels[item_levels.len() - 1]);
+                chain
+            })
+            .collect();
+        let shallowest = chains.iter().map(|c| c.len()).min().unwrap_or(1);
+        let lift = |chain: &Vec<usize>| chain[chain.len() - shallowest];
+        let first = lift(&chains[0]);
+        let last = lift(&chains[chains.len() - 1]);
         // Siblings in one list are reached from the first by `next_sibling`;
         // anything else (another parent, another list) is passed over.
         let mut k = first;
@@ -525,7 +514,7 @@ mod tests {
             assert_eq!(l.sibling_run(1, 1), Ok((1, 1)));
             // The blank line touches nothing.
             assert_eq!(l.sibling_run(2, 3), Ok((2, 2)));
-            assert_eq!(l.sibling_run(3, 3), Err(RunError::NoItem));
+            assert_eq!(l.sibling_run(3, 3), Err(RunError::NotInList));
             assert_eq!(l.sibling_run(1, 5), Ok((0, 4)));
             // The blank line between b and c touches neither: b and c move.
             assert_eq!(l.sibling_run(2, 4), Ok((2, 4)));
@@ -550,6 +539,13 @@ mod tests {
         with("- a\n  - a1\n\n  more\n\n  even more\n- b\n", |l| {
             assert_eq!(l.sibling_run(4, 4), Ok((0, 0)));
         });
+        // After a sub-item it is no one's: running a selection one line past
+        // a2 moves a2, not its parent.
+        with("- a\n  - a1\n  - a2\n\n  more\n- b\n", |l| {
+            assert_eq!(l.sibling_run(2, 3), Ok((2, 2)));
+        });
+        // Blank lines outside any list are not in a list.
+        with("para\n\nmore\n", |l| assert_eq!(l.sibling_run(1, 1), Err(RunError::NotInList)));
         // Deeply nested lines share their levels; the run is still right.
         with("- a\n  - b\n    - c\n    - d\n  - e\n", |l| {
             assert_eq!(l.sibling_run(2, 3), Ok((2, 3)));

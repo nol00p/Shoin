@@ -277,6 +277,11 @@ pub struct App {
     /// `enter_visual` clears it and `end_visual` consumes it, so it cannot go
     /// stale and drop a later `v` into Insert.
     visual_resumes_insert: bool,
+    /// The pane and document a Visual selection was made in. A selection
+    /// belongs to them: once focus is anywhere else (another pane, another
+    /// document, the file tree), `sync_after_input` ends it, so `d` can never
+    /// act on text nobody selected.
+    visual_owner: Option<(PaneId, usize)>,
 
     /// Live config-file watcher; `None` when running on built-in defaults.
     watcher: Option<ConfigWatcher>,
@@ -658,6 +663,7 @@ impl App {
             anchor: None,
             drag_from: None,
             visual_resumes_insert: false,
+            visual_owner: None,
             watcher,
             focus: FocusMode::parse(&config_focus).unwrap_or(FocusMode::Off),
             focus_region: None,
@@ -1658,21 +1664,32 @@ impl App {
         if self.view {
             self.clamp_reading_cursor();
         }
-        // The selection exists in Visual only. Every way out — Esc, an
-        // operator, `:`, `/`, Insert, another pane — lands here, so this is
-        // where its state is dropped, rather than at each exit. In Visual the
-        // anchor is kept inside the text, as the cursor is: a drag that began
-        // on the empty line past the last newline would otherwise point at
-        // a line that is not there.
+        // The selection exists in Visual only, and only where it was made.
+        // Every way out — Esc, an operator, `:`, `/`, Insert, another pane or
+        // document, the file tree — lands here, so this is where its state is
+        // dropped, rather than at each exit. Moving focus away ends Visual in
+        // Normal: the insert session it may have come from belongs to the
+        // pane left behind.
+        let here = (self.focus_pane, self.current());
+        let tree = self.tree.as_ref().is_some_and(|t| t.focused);
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) && (tree || self.visual_owner != Some(here)) {
+            self.mode = Mode::Normal;
+            self.pending.reset();
+        }
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+            // The anchor stays inside the text, as the cursor does. A drag
+            // that began on the empty line past the last newline keeps that
+            // newline: the anchor goes to the end of the last line, past its
+            // last character, as the newline itself.
             let last = self.buffer.last_line();
-            let end = Cursor::new(last, self.buffer.line_len(last).saturating_sub(1));
+            let end = Cursor::new(last, self.buffer.line_len(last));
             if self.anchor.is_some_and(|a| a.line > last) {
                 self.anchor = Some(end);
             }
         } else {
             self.anchor = None;
             self.visual_resumes_insert = false;
+            self.visual_owner = None;
         }
         self.active = self.active_set(self.anchor);
         // The focused pane remembers where it is, so leaving and coming back
@@ -2846,12 +2863,8 @@ impl App {
         // which is what catches a saved position that edits elsewhere have run
         // off the end of.
         self.buffer.cursor = cursor;
-        // A selection belongs to the pane it was made in: leave Visual whole
-        // (and any insert session it came from), not just drop its anchor.
-        if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-            self.leave_visual();
-        }
-        self.anchor = None;
+        // A selection belongs to the pane it was made in: `sync_after_input`
+        // ends it here.
         self.sync_after_input();
         self.touch_status();
     }
@@ -4160,7 +4173,11 @@ impl App {
         let cur = self.buffer.cursor;
         let anchor = self.visual_anchor();
         let other = anchor.unwrap_or(cur);
-        let (top, bot) = (cur.line.min(other.line), cur.line.max(other.line));
+        // `sync_after_input` keeps the anchor inside the text between keys,
+        // but not between the keys of a `.` replay, where an edit can shorten
+        // the text under it.
+        let last = self.buffer.last_line();
+        let (top, bot) = (cur.line.min(other.line).min(last), cur.line.max(other.line).min(last));
         let room = if down { self.buffer.last_line() - bot } else { top };
         let n = count.min(room);
         if n == 0 {
@@ -4179,7 +4196,7 @@ impl App {
 
         let line = |l: usize| if down { l + n } else { l - n };
         self.buffer.cursor = Cursor::new(line(cur.line), cur.col);
-        self.anchor = anchor.map(|a| Cursor::new(line(a.line), a.col));
+        self.anchor = anchor.map(|a| Cursor::new(line(a.line.min(last)), a.col));
     }
 
     /// Rewrite the ordinals `edits` name. Each is on a line of its own and
@@ -4468,6 +4485,7 @@ impl App {
     fn enter_visual(&mut self, mode: Mode) {
         self.anchor = Some(self.buffer.cursor);
         self.mode = mode;
+        self.visual_owner = Some((self.focus_pane, self.current()));
         // A keyboard `v` always returns to Normal. Only the mouse sets this,
         // and it sets it straight after this call.
         self.visual_resumes_insert = false;
@@ -8093,25 +8111,46 @@ mod tests {
         feed(&mut app, "jv");
         app.anchor = Some(Cursor::new(app.buffer.last_line() + 1, 0));
         app.sync_after_input();
-        assert_eq!(app.anchor, Some(Cursor::new(2, 2)), "end of the last line");
+        assert_eq!(app.anchor, Some(Cursor::new(2, 3)), "the last line's newline");
         feed(&mut app, "K");
         assert_eq!(text(&app), "bbb\nccc\na\n");
-        assert_eq!(app.anchor, Some(Cursor::new(1, 2)));
+        assert_eq!(app.anchor, Some(Cursor::new(1, 3)));
         feed(&mut app, "d");
-        // Both moved lines were still selected, to the last character.
-        assert_eq!(text(&app), "\na\n");
+        // Both moved lines were still selected, with the newline the drag
+        // went across.
+        assert_eq!(text(&app), "a\n");
     }
 
-    /// Moving to another pane leaves Visual, rather than staying in it with
-    /// no selection.
+    /// A selection belongs to the pane it was made in. Focusing, splitting
+    /// or closing panes ends it in Normal, even one dragged out of Insert,
+    /// so `d` can never act on text nobody selected.
     #[test]
-    fn focusing_another_pane_leaves_visual() {
+    fn a_selection_ends_when_focus_leaves_its_pane() {
         let mut app = app_with("one two three\n");
         let first = app.focus_pane;
         app.split_pane(true);
         assert_ne!(app.focus_pane, first);
         feed(&mut app, "v");
+        app.visual_resumes_insert = true;
         app.focus_pane_id(first);
+        assert_eq!(app.mode, Mode::Normal, "not back into an insert session");
+        assert!(app.anchor.is_none());
+
+        // Splitting moves focus to the new pane.
+        let mut app = app_with("one two three\n");
+        feed(&mut app, "v");
+        app.split_pane(true);
+        app.sync_after_input();
+        assert_eq!(app.mode, Mode::Normal);
+
+        // Closing the pane hands focus to the other one.
+        let mut app = app_with("one two three\n");
+        app.split_pane(true);
+        feed(&mut app, "Vd");
+        assert_eq!(text(&app), "", "deleted in the pane it was selected in");
+        feed(&mut app, "u");
+        feed(&mut app, "V");
+        app.close_pane();
         app.sync_after_input();
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.anchor.is_none());
