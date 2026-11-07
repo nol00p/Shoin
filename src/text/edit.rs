@@ -15,6 +15,7 @@ impl Buffer {
         }
         let cursor_before = self.cursor;
         self.rope.insert(idx, text);
+        let inserted = breaks(text);
         let cursor_after = self.cursor_at(idx + text.chars().count());
         self.history.record(Change {
             start: idx,
@@ -23,7 +24,7 @@ impl Buffer {
             cursor_before,
             cursor_after,
         });
-        self.touch(idx);
+        self.touch(idx, 0, inserted);
         true
     }
 
@@ -48,7 +49,7 @@ impl Buffer {
             cursor_before,
             cursor_after: self.cursor_at(a),
         });
-        self.touch(a);
+        self.touch(a, breaks(&removed), 0);
         Some(removed)
     }
 
@@ -74,7 +75,7 @@ impl Buffer {
             let after_len = change.after.chars().count();
             self.rope.remove(change.start..change.start + after_len);
             self.rope.insert(change.start, &change.before);
-            self.mark_dirty(change.start);
+            self.mark_dirty(change.start, breaks(&change.after), breaks(&change.before));
         }
         // Prefer the anchor taken when the command began. `cursor_before` is
         // sampled inside the primitive, by which point a Visual selection has
@@ -103,7 +104,7 @@ impl Buffer {
             let before_len = change.before.chars().count();
             self.rope.remove(change.start..change.start + before_len);
             self.rope.insert(change.start, &change.after);
-            self.mark_dirty(change.start);
+            self.mark_dirty(change.start, breaks(&change.before), breaks(&change.after));
         }
         if let Some(last) = step.changes.last() {
             self.cursor = last.cursor_after;
@@ -116,20 +117,27 @@ impl Buffer {
     /// Bump revision, set modified, and remember the lowest line touched since
     /// a cache last cleared `dirty_line`. Called by every primitive above with
     /// the absolute char index the edit started at.
-    fn touch(&mut self, at: usize) {
+    fn touch(&mut self, at: usize, removed: usize, inserted: usize) {
         self.revision += 1;
         self.sync_modified();
-        self.mark_dirty(at);
+        self.mark_dirty(at, removed, inserted);
     }
 
-    /// Lower `dirty_line` to the line holding `at`. Taking the minimum is what
-    /// makes one rescan cover a command that made several edits.
-    fn mark_dirty(&mut self, at: usize) {
+    /// Record an edit at `at` that took out `removed` line breaks and put in
+    /// `inserted`. `dirty_line` drops to its line: taking the minimum is what
+    /// makes one rescan cover a command that made several edits. `dirty_last`
+    /// rises to the last line it wrote, after moving an earlier record below
+    /// it by the lines this edit added or took away.
+    fn mark_dirty(&mut self, at: usize, removed: usize, inserted: usize) {
+        // The line holding `at` is the same before and after the edit: only
+        // what follows it moved.
         let line = self.rope.char_to_line(at.min(self.rope.len_chars()));
-        self.dirty_line = Some(match self.dirty_line {
-            Some(prev) => prev.min(line),
-            None => line,
+        self.dirty_line = Some(self.dirty_line.map_or(line, |prev| prev.min(line)));
+        let earlier = self.dirty_last.map(|e| match e > line {
+            true => e.saturating_sub(removed).max(line) + inserted,
+            false => e,
         });
+        self.dirty_last = Some(earlier.map_or(line + inserted, |e| e.max(line + inserted)));
     }
 
     /// Every mutation checks this first. Always passes today — the vec is
@@ -143,4 +151,9 @@ impl Buffer {
             .iter()
             .any(|r| range.start < r.end && r.start < range.end)
     }
+}
+
+/// How many line breaks `text` holds.
+fn breaks(text: &str) -> usize {
+    text.chars().filter(|c| *c == '\n').count()
 }
