@@ -926,12 +926,15 @@ impl App {
             let doc = &mut self.docs[i];
             doc.blocks = BlockCache::build(&doc.buffer, math);
             doc.buffer.dirty_line = None;
+            doc.buffer.dirty_last = None;
             return;
         }
         if self.blocks.revision == self.buffer.revision {
             self.buffer.dirty_line = None;
+            self.buffer.dirty_last = None;
             return;
         }
+        let last = self.buffer.dirty_last.take();
         match self.buffer.dirty_line.take() {
             // `invalidate_from` takes the EDITED line — it resumes a line
             // earlier itself — and falls back to a full build when it has no
@@ -942,7 +945,7 @@ impl App {
                 // document, and the deref that reaches them takes all of `self`.
                 let i = self.current();
                 let doc = &mut self.docs[i];
-                doc.blocks.invalidate_from(&doc.buffer, line);
+                doc.blocks.invalidate_from(&doc.buffer, line, last.unwrap_or(line));
             }
             None => {
                 let i = self.current();
@@ -6355,6 +6358,34 @@ mod tests {
         // Undo puts it back; undo bypasses `touch`, so it must mark its own
         // dirty line or the cache silently keeps the post-delete carries.
         app.buffer.undo();
+        app.refresh_blocks();
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    }
+
+    /// An edit that keeps the line count can change lines well below the
+    /// first one it touched. Moving `9. i` past `10. j` below other text left
+    /// the cache calling `9. i` a paragraph, so the renumber skipped it and
+    /// wrote `9. j` / `9. i`.
+    #[test]
+    fn a_block_swap_below_the_top_refreshes_every_line_it_moved() {
+        let mut app = app_with("intro\n\n9. i\n    more\n10. j\n");
+        feed(&mut app, "jj");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "intro\n\n9. j\n10. i\n    more\n");
+        app.refresh_blocks();
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+
+        // The same through undo and redo, which edit the rope directly.
+        feed(&mut app, "u");
+        app.refresh_blocks();
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+        app.buffer.redo();
+        app.refresh_blocks();
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+
+        // And an indent of several lines, which keeps the count too.
+        let mut app = app_with("intro\n\n- a\n- b\n- c\n- d\n");
+        feed(&mut app, "3jVj>");
         app.refresh_blocks();
         assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
     }

@@ -105,7 +105,11 @@ impl BlockCache {
     /// count is unchanged, because an insertion/deletion shifts every cached
     /// carry entry and the index-wise comparison would be against the wrong
     /// source line; there we simply rescan to EOF, which is still correct.
-    pub fn invalidate_from(&mut self, buffer: &Buffer, edited: usize) -> usize {
+    ///
+    /// `edited_last` is the highest line the edits touched: the scan never stops
+    /// before it, since an edit that kept the line count may have changed
+    /// lines below a point where the carry happens to match again.
+    pub fn invalidate_from(&mut self, buffer: &Buffer, edited: usize, edited_last: usize) -> usize {
         let n = buffer.line_count();
         let edited = edited.min(n.saturating_sub(1));
         // Resume ONE LINE EARLIER than the edit: a table header is classified
@@ -156,7 +160,7 @@ impl BlockCache {
             let opens_table = i + 1 < n
                 && self.kinds[i + 1] == BlockKind::Table
                 && self.carry[i + 1] != Carry::InTable;
-            if can_early_stop && i >= edited && !opens_table {
+            if can_early_stop && i >= edited.max(edited_last) && !opens_table {
                 if let Some(old) = old_next {
                     if next == old {
                         break;
@@ -592,7 +596,7 @@ mod tests {
         assert_eq!(cache.kinds[2], BlockKind::Table);
 
         b.insert_str(Cursor::new(2, 3), "x");
-        cache.invalidate_from(&b, 2);
+        cache.invalidate_from(&b, 2, 2);
         assert_eq!(cache.kinds[2], BlockKind::Table, "header row stays a header");
         assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
     }
@@ -608,7 +612,7 @@ mod tests {
         let start = b.rope.line_to_char(1);
         let end = b.rope.line_to_char(2);
         b.delete_chars(start, end);
-        cache.invalidate_from(&b, 0);
+        cache.invalidate_from(&b, 0, 0);
         assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
         assert_eq!(cache.kinds[0], BlockKind::Paragraph, "no delimiter, no table");
     }
@@ -714,7 +718,7 @@ mod tests {
 
         // Edit line 2: turn prose into a heading.
         b.insert_str(Cursor::new(2, 0), "## ");
-        cache.invalidate_from(&b, 2);
+        cache.invalidate_from(&b, 2, 2);
 
         let fresh = BlockCache::build(&b, true);
         assert_eq!(cache.kinds, fresh.kinds);
@@ -734,7 +738,7 @@ mod tests {
         assert_eq!(cache.kinds[2], BlockKind::Paragraph);
 
         b.insert_str(Cursor::new(2, 0), "- ");
-        cache.invalidate_from(&b, 2);
+        cache.invalidate_from(&b, 2, 2);
 
         assert!(
             matches!(cache.kinds[2], BlockKind::ListItem { .. }),
@@ -753,7 +757,7 @@ mod tests {
 
         b.insert_str(Cursor::new(0, 0), "```\n");
         // Rescan from the edited first line.
-        cache.invalidate_from(&b, 0);
+        cache.invalidate_from(&b, 0, 0);
 
         let fresh = BlockCache::build(&b, true);
         assert_eq!(cache.kinds, fresh.kinds);
