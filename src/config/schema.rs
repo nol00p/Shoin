@@ -260,6 +260,8 @@ pub struct MarkdownConfig {
     /// language shoin knows. SPEC.md §5.3.
     pub code_syntax: bool,
     pub plain_text_extensions: Vec<String>,
+    /// Recognize inline `$…$` and display `$$…$$` LaTeX math.
+    pub math: bool,
 }
 
 impl Default for MarkdownConfig {
@@ -271,6 +273,7 @@ impl Default for MarkdownConfig {
             tables: true,
             code_syntax: true,
             plain_text_extensions: vec![".txt".into()],
+            math: true,
         }
     }
 }

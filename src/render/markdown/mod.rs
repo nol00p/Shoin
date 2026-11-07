@@ -62,6 +62,16 @@ pub fn style_line_with(
                 },
             )
         }
+        BlockKind::MathBlock => {
+            return whole(
+                len,
+                Style {
+                    fg: theme.code,
+                    bg: theme.code_bg,
+                    attrs: Attrs::default(),
+                },
+            )
+        }
         BlockKind::FrontMatter => return whole(len, marker_style(theme)),
         BlockKind::Rule => return whole(len, Style::fg(theme.rule)),
         // Cell separators recede so the CONTENT of a table reads as columns;

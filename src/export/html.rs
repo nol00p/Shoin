@@ -114,6 +114,8 @@ struct Body<'a> {
     quote: u8,
     /// Raw lines of the table being accumulated.
     table: Vec<String>,
+    /// Raw lines of the display math block being accumulated.
+    math_block: Vec<String>,
     fence: Option<(Option<Lang>, Cont)>,
 }
 
@@ -129,6 +131,7 @@ impl<'a> Body<'a> {
             lazy: false,
             quote: 0,
             table: Vec::new(),
+            math_block: Vec::new(),
             fence: None,
         }
     }
@@ -185,6 +188,7 @@ impl<'a> Body<'a> {
                 // closing here would split it into two.
                 self.flush_para();
                 self.flush_table();
+                self.flush_math_block();
                 self.close_quote();
                 self.lazy = false;
             }
@@ -209,6 +213,7 @@ impl<'a> Body<'a> {
             BlockKind::Quote(depth) => {
                 self.flush_para();
                 self.flush_table();
+                self.flush_math_block();
                 self.close_lists();
                 self.open_quote(*depth);
                 let body = line.trim_start().trim_start_matches(['>', ' ']);
@@ -218,6 +223,7 @@ impl<'a> Body<'a> {
             BlockKind::ListItem { depth, marker, checked } => {
                 self.flush_para();
                 self.flush_table();
+                self.flush_math_block();
                 self.close_quote();
                 self.adjust_lists(*depth, matches!(marker, Marker::Ordered));
                 let box_html = match checked {
@@ -246,6 +252,7 @@ impl<'a> Body<'a> {
                     self.para.pop();
                 }
                 self.flush_para();
+                self.flush_math_block();
                 self.close_quote();
                 self.close_lists();
                 self.table.extend(header);
@@ -257,10 +264,39 @@ impl<'a> Body<'a> {
             // or extends a paragraph.
             BlockKind::Paragraph => {
                 self.flush_table();
+                self.flush_math_block();
                 if !self.lazy && self.quote == 0 {
                     self.close_lists();
                 }
                 self.para.push(line.trim().to_string());
+            }
+
+            BlockKind::MathBlock => {
+                if !self.md.math {
+                    let (kind, _) = classify(line, &Carry::None, false);
+                    if kind == BlockKind::MathBlock {
+                        self.flush_table();
+                        self.flush_math_block();
+                        if !self.lazy && self.quote == 0 {
+                            self.close_lists();
+                        }
+                        self.para.push(line.trim().to_string());
+                    } else {
+                        self.line(line, &kind);
+                    }
+                } else {
+                    self.flush_para();
+                    self.flush_table();
+                    self.close_quote();
+                    self.close_lists();
+                    let was_open = !self.math_block.is_empty();
+                    let trimmed = line.trim();
+                    let closes = trimmed.ends_with("$$");
+                    self.math_block.push(line.to_string());
+                    if (was_open && closes) || (trimmed.starts_with("$$") && trimmed.len() > 2 && trimmed[2..].contains("$$")) {
+                        self.flush_math_block();
+                    }
+                }
             }
         }
     }
@@ -409,9 +445,25 @@ impl<'a> Body<'a> {
         self.table.clear();
     }
 
+    fn flush_math_block(&mut self) {
+        if self.math_block.is_empty() {
+            return;
+        }
+        let raw = self.math_block.join("\n");
+        self.math_block.clear();
+        let trimmed = raw.trim();
+        let without_open = trimmed.strip_prefix("$$").unwrap_or(trimmed);
+        let inner = without_open.strip_suffix("$$").unwrap_or(without_open).trim();
+        self.out.push_str(&format!(
+            "<div class=\"math display\">\\[{}\\]</div>\n",
+            escape(inner)
+        ));
+    }
+
     fn close_all(&mut self) {
         self.flush_para();
         self.flush_table();
+        self.flush_math_block();
         self.close_quote();
         self.close_lists();
         // A document may simply END inside a fence — an unterminated block is
@@ -483,6 +535,13 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
             }
             Inline::WikiLink => out.push_str(&wiki_link(&inner)),
             Inline::Tag => out.push_str(&format!("<span class=\"tag\">{}</span>", escape(&whole))),
+            Inline::Latex => {
+                if whole.starts_with("$$") && whole.ends_with("$$") {
+                    out.push_str(&format!("<span class=\"math display\">\\[{}\\]</span>", escape(&inner)));
+                } else {
+                    out.push_str(&format!("<span class=\"math inline\">\\({}\\)</span>", escape(&inner)));
+                }
+            }
             // The backslash was markup; what it protected is literal text.
             Inline::Escape => out.push_str(&body),
         }
@@ -881,6 +940,41 @@ mod tests {
         assert!(got.contains("<code>code</code>"), "{got}");
         assert!(got.contains("<del>gone</del>"), "{got}");
         assert!(got.contains("<mark>marked</mark>"), "{got}");
+    }
+
+    #[test]
+    fn latex_is_exported_as_pandoc_math() {
+        let md = MarkdownConfig { math: true, ..Default::default() };
+        let b = Body::new(&md, std::path::Path::new(""));
+        let got = b.run("Gradient: $\\frac{\\partial^2 f}{\\partial x^2}$\n\n$$\n\\nabla \\times \\vec{F}\n$$\n");
+        assert!(got.contains("<span class=\"math inline\">\\(\\frac{\\partial^2 f}{\\partial x^2}\\)</span>"), "{got}");
+        assert!(got.contains("<div class=\"math display\">\\[\\nabla \\times \\vec{F}\\]</div>"), "{got}");
+
+        // Mid-line $$...$$ exports as display math \[...\]:
+        let b_mid = Body::new(&md, std::path::Path::new(""));
+        let got_mid = b_mid.run("prose $$E=mc^2$$ more prose\n");
+        assert!(got_mid.contains("<span class=\"math display\">\\[E=mc^2\\]</span>"), "{got_mid}");
+
+        // Two one-line blocks in a row do not merge:
+        let b2 = Body::new(&md, std::path::Path::new(""));
+        let got_two = b2.run("$$a$$\n$$b$$\n");
+        assert!(got_two.contains("<div class=\"math display\">\\[a\\]</div>\n<div class=\"math display\">\\[b\\]</div>"), "{got_two}");
+
+        // Multi-line block followed directly by single-line block:
+        let b3 = Body::new(&md, std::path::Path::new(""));
+        let got_multi_single = b3.run("$$\nx\n$$\n$$b$$\n");
+        assert!(got_multi_single.contains("<div class=\"math display\">\\[x\\]</div>\n<div class=\"math display\">\\[b\\]</div>"), "{got_multi_single}");
+
+        // Multi-line block followed directly by another multi-line block:
+        let b4 = Body::new(&md, std::path::Path::new(""));
+        let got_multi_multi = b4.run("$$\nx\n$$\n$$\ny\n$$\n");
+        assert!(got_multi_multi.contains("<div class=\"math display\">\\[x\\]</div>\n<div class=\"math display\">\\[y\\]</div>"), "{got_multi_multi}");
+
+        // When math is off, blocks and inline math render as prose, and headings stay headings:
+        let md_off = MarkdownConfig { math: false, ..Default::default() };
+        let b_off = Body::new(&md_off, std::path::Path::new(""));
+        let got_off = b_off.run("$$\n# Heading\n");
+        assert!(got_off.contains("<h1 id=\"heading\">Heading</h1>"), "{got_off}");
     }
 
     #[test]

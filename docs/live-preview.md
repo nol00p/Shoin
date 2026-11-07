@@ -25,7 +25,9 @@ Headings, **bold**, *italic*, ~~strikethrough~~, `==highlight==`, `` `code` ``,
 links and `[[wiki links]]`, `#tags`, lists with bullets and task boxes, block
 quotes, tables, and fenced code. A fence that names its language is
 syntax-highlighted, in seventeen languages; `:set code_syntax off` turns that
-off. [`examples/formatting.md`](../examples/formatting.md) exercises all of it.
+off. Inline math `$…$` and math blocks `$$…$$` conceal common LaTeX commands
+into Unicode symbols (such as `\rightarrow` → `→`, `\alpha` → `α`, `x^2` → `x²`).
+[`examples/formatting.md`](../examples/formatting.md) exercises all of it.
 
 ## Details
 

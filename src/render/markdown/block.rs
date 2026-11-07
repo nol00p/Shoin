@@ -45,6 +45,8 @@ pub enum BlockKind {
     Rule,
     Blank,
     Paragraph,
+    /// A line inside or delimiting a display math block ($$).
+    MathBlock,
 }
 
 /// The only state that crosses a line boundary.
@@ -59,6 +61,7 @@ pub enum Carry {
     /// A table's delimiter row has been seen; the rows that follow belong to it
     /// until a line without a `|` ends it.
     InTable,
+    InMath,
 }
 
 /// Cached classification, parallel to the buffer's lines.
@@ -201,12 +204,35 @@ pub fn classify(line: &str, carry: &Carry, is_file_head: bool) -> (BlockKind, Ca
                 return (BlockKind::Table, Carry::InTable);
             }
         }
+        Carry::InMath => {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                // An unclosed $$ is bounded by a blank line so a stray $$
+                // does not turn the entire rest of the file into math.
+                return (BlockKind::Blank, Carry::None);
+            }
+            if trimmed == "$$" || trimmed.ends_with("$$") {
+                return (BlockKind::MathBlock, Carry::None);
+            }
+            return (BlockKind::MathBlock, Carry::InMath);
+        }
         Carry::None => {}
     }
 
     // Leading whitespace: 4+ columns is (CommonMark) indented code, which this
     // ruleset has no block kind for — such lines simply stay Paragraph.
     let indent = leading_ws_cols(line);
+
+    if indent < 4 {
+        let trimmed_start = line.trim_start();
+        if let Some(after) = trimmed_start.strip_prefix("$$") {
+            if after.contains("$$") {
+                return (BlockKind::MathBlock, Carry::None);
+            } else {
+                return (BlockKind::MathBlock, Carry::InMath);
+            }
+        }
+    }
 
     if let Some(fence) = fence_opener(line) {
         let info = line.trim_start()[fence.len()..].trim().to_string();
@@ -482,6 +508,9 @@ impl BlockKind {
                 // Concealing markers inside a cell would pull the pipes out of
                 // line, so table rows stay 1:1 like code does.
                 | BlockKind::Table
+                // A math block renders formulas; Markdown inline styling (*, _)
+                // must not interfere with mathematical subscripts or asterisks.
+                | BlockKind::MathBlock
         )
     }
 }
@@ -699,5 +728,23 @@ mod tests {
         assert_eq!(cache.kinds, fresh.kinds);
         assert_eq!(cache.kinds[0], BlockKind::FenceOpen(String::new()));
         assert!(matches!(cache.kinds[1], BlockKind::FenceBody { .. }));
+    }
+
+    #[test]
+    fn multiline_math_blocks_classify_across_lines() {
+        let b = buf("$$\n\\nabla \\times \\vec{F}\n$$\nprose\n");
+        let cache = BlockCache::build(&b);
+        assert_eq!(cache.kinds[0], BlockKind::MathBlock);
+        assert_eq!(cache.kinds[1], BlockKind::MathBlock);
+        assert_eq!(cache.kinds[2], BlockKind::MathBlock);
+        assert_eq!(cache.kinds[3], BlockKind::Paragraph);
+
+        // Blank line bounds unclosed $$:
+        let unclosed = buf("$$\n\\nabla \\times \\vec{F}\n\nnormal prose\n");
+        let cache_unclosed = BlockCache::build(&unclosed);
+        assert_eq!(cache_unclosed.kinds[0], BlockKind::MathBlock);
+        assert_eq!(cache_unclosed.kinds[1], BlockKind::MathBlock);
+        assert_eq!(cache_unclosed.kinds[2], BlockKind::Blank);
+        assert_eq!(cache_unclosed.kinds[3], BlockKind::Paragraph);
     }
 }

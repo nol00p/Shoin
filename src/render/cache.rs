@@ -449,6 +449,10 @@ fn spacer_rows(spacing: usize, doc: &BufferState, line: usize, n: usize) -> usiz
         // A fence is a slab and a table is a grid. Both are shapes the reader
         // measures by eye, and a row of air inside one breaks the shape.
         Some(BlockKind::FenceOpen(_) | BlockKind::FenceBody { .. } | BlockKind::FrontMatter) => 0,
+        Some(BlockKind::MathBlock) => match doc.blocks.kinds.get(line + 1) {
+            Some(BlockKind::MathBlock) => 0,
+            _ => spacing,
+        },
         Some(BlockKind::Table) => match doc.blocks.kinds.get(line + 1) {
             Some(BlockKind::Table) => 0,
             _ => spacing,
@@ -465,8 +469,13 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
 
     // `[markdown] tables = false` opts out of table rendering; the classifier
     // stays as it is and the line simply renders as the prose it also is.
+    // The same holds for `[markdown] math = false` and MathBlock: classify
+    // without the math block carry so headings or lists under a lone $$ keep their kind.
     let block = match block {
         BlockKind::Table if !cfg.markdown.tables => BlockKind::Paragraph,
+        BlockKind::MathBlock if !cfg.markdown.math => {
+            crate::render::markdown::block::classify(&source, &crate::render::markdown::block::Carry::None, false).0
+        }
         other => other,
     };
 
@@ -542,7 +551,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     // wrap would break that layout onto several ragged rows instead of leaving
     // it aligned. Overflow past the measure is clipped at the pane edge, same
     // as any other unwrapped line.
-    let (wrap_raw, wrap_concealed) = if block == BlockKind::Table {
+    let (wrap_raw, wrap_concealed) = if block == BlockKind::Table || block == BlockKind::MathBlock {
         (no_wrap(&source), no_wrap(&concealed))
     } else {
         (
@@ -993,6 +1002,19 @@ mod tests {
             app.cache.borrow().entry(0).unwrap().hang(false),
             0,
             "turning hanging_indent off must re-parse the line"
+        );
+    }
+
+    #[test]
+    fn lone_dollar_line_followed_by_heading_with_math_disabled() {
+        let mut app = app_with("$$\n# Heading\n");
+        app.config.markdown.math = false;
+        sync(&mut app);
+        let cache = app.cache.borrow();
+        assert_eq!(
+            cache.entry(1).unwrap().block,
+            BlockKind::Heading(1),
+            "heading under lone $$ must stay heading when math = false"
         );
     }
 
