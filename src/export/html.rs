@@ -17,7 +17,7 @@
 //!     rather than a second, differently-opinionated highlighter.
 
 use crate::config::schema::MarkdownConfig;
-use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry, Marker};
+use crate::render::markdown::block::{classify, has_cell_separator, leading_ws_cols, BlockKind, Carry, Marker};
 use crate::render::markdown::code::{self, Class, Cont, Lang};
 use crate::render::markdown::inline::{self, Inline};
 use crate::render::theme::{Color, Theme};
@@ -38,20 +38,11 @@ pub struct Page {
     /// path (`export::plain`). Never applied to a fenced block or a table,
     /// whose columns are the author's own layout.
     pub justify: bool,
-    /// `[markdown] math`: off, `$…$` and `$$` are exported as the text they
-    /// are, the same as the editor shows them.
-    pub math: bool,
 }
 
 impl Default for Page {
     fn default() -> Self {
-        Page {
-            theme: Theme::default(),
-            measure: 72,
-            base: std::path::PathBuf::new(),
-            justify: false,
-            math: true,
-        }
+        Page { theme: Theme::default(), measure: 72, base: std::path::PathBuf::new(), justify: false }
     }
 }
 
@@ -60,7 +51,7 @@ impl Default for Page {
 /// `fallback_title` names the page when the document has no `# Heading` of its
 /// own to be named after — normally the file's stem.
 pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
-    let md = MarkdownConfig { math: page.math, ..MarkdownConfig::default() };
+    let md = MarkdownConfig::default();
     let body = Body::new(&md, &page.base).run(text);
     let title = first_heading(text, &md).unwrap_or_else(|| fallback_title.to_string());
 
@@ -125,10 +116,6 @@ struct Body<'a> {
     table: Vec<String>,
     /// Raw lines of the display math block being accumulated.
     math_block: Vec<String>,
-    /// Whether the classifier left the line just handed over inside a math
-    /// block. Its word decides where a block ends, so this walk cannot group
-    /// lines differently from the editor.
-    math_continues: bool,
     fence: Option<(Option<Lang>, Cont)>,
 }
 
@@ -145,7 +132,6 @@ impl<'a> Body<'a> {
             quote: 0,
             table: Vec::new(),
             math_block: Vec::new(),
-            math_continues: false,
             fence: None,
         }
     }
@@ -154,15 +140,17 @@ impl<'a> Body<'a> {
         let mut carry = Carry::None;
         for (i, line) in text.lines().enumerate() {
             let (kind, next) = classify(line, &carry, i == 0, self.md.math);
-            self.math_continues = next == Carry::InMath;
+            // The classifier's word decides where a math block ends, so this
+            // walk cannot group lines differently from the editor.
+            let math_continues = next == Carry::InMath;
             carry = next;
-            self.line(line, &kind);
+            self.line(line, &kind, math_continues);
         }
         self.close_all();
         self.out
     }
 
-    fn line(&mut self, line: &str, kind: &BlockKind) {
+    fn line(&mut self, line: &str, kind: &BlockKind, math_continues: bool) {
         match kind {
             // Front matter is metadata for tools, not text for readers — the
             // same call plain text makes.
@@ -292,17 +280,23 @@ impl<'a> Body<'a> {
                     self.flush_para();
                     self.flush_table();
                     self.close_quote();
-                    // Indented under an open item, or directly after its text,
-                    // the block is part of that item, as a paragraph would be.
-                    let in_item =
-                        self.item_open && (self.lazy || line.starts_with([' ', '\t']));
-                    if !in_item {
-                        self.close_lists();
+                    // Directly after an item's text the block joins that
+                    // item. Anywhere else it stays only in the items it is
+                    // indented deeper than, and the rest close: the same call
+                    // `Lists::bounds` makes in the editor.
+                    if !self.lazy {
+                        let indent = leading_ws_cols(line);
+                        while self.lists.last().is_some_and(|l| usize::from(l.indent) >= indent) {
+                            self.pop_list();
+                        }
                     }
                 }
                 self.math_block.push(line.to_string());
-                if !self.math_continues {
+                if !math_continues {
                     self.flush_math_block();
+                    // A paragraph line after the block starts afresh rather
+                    // than continuing the item, as in the editor.
+                    self.lazy = false;
                 }
             }
         }
@@ -949,17 +943,6 @@ mod tests {
         assert!(got.contains("<mark>marked</mark>"), "{got}");
     }
 
-    /// `[markdown] math` reaches `:export` through the page.
-    #[test]
-    fn export_follows_the_math_setting() {
-        let on = render("$$\n# Heading\n", "t", &Page::default());
-        assert!(!on.contains("<h1"), "{on}");
-        let off = render("$$\n# Heading\n", "t", &Page { math: false, ..Page::default() });
-        assert!(off.contains("<h1 id=\"heading\">Heading</h1>"), "{off}");
-        let plain_off = crate::export::plain::render("$$\n# Heading\n", 72, false, false);
-        assert!(plain_off.contains("Heading\n======="), "{plain_off}");
-    }
-
     #[test]
     fn latex_is_exported_as_pandoc_math() {
         let md = MarkdownConfig { math: true, ..Default::default() };
@@ -1010,6 +993,19 @@ mod tests {
         let b7 = Body::new(&md, std::path::Path::new(""));
         let got_after = b7.run("- a\n\n$$x$$\n");
         assert!(got_after.contains("</ul>\n<div class=\"math display\">"), "{got_after}");
+
+        // A paragraph after a block that joined an item starts afresh, as in
+        // the editor's list bounds:
+        let b8 = Body::new(&md, std::path::Path::new(""));
+        let got_more = b8.run("- a\n$$x$$\nmore\n");
+        assert!(got_more.contains("</ul>\n<p>more</p>"), "{got_more}");
+        // After a blank line, a block stays only in items it is deeper than:
+        let b9 = Body::new(&md, std::path::Path::new(""));
+        let got_nested = b9.run("- a\n  - b\n\n  $$x$$\n");
+        assert!(
+            got_nested.contains("<li>b</li>\n</ul>\n<div class=\"math display\">\\[x\\]</div>\n</li>"),
+            "{got_nested}"
+        );
 
         // `$$x$$ more text` is a paragraph holding display math, as in Pandoc:
         let b5 = Body::new(&md, std::path::Path::new(""));

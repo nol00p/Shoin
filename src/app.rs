@@ -5018,7 +5018,6 @@ impl App {
                 .unwrap_or(std::path::Path::new(""))
                 .to_path_buf(),
             justify,
-            math: self.config.markdown.math,
         };
         match crate::export::write(source, &dest, format, &self.config.transclude, &page) {
             Err(e) => self.notify(format!("export: {e}"), FlashKind::Error),

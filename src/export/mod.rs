@@ -88,7 +88,7 @@ pub fn write(
     match format {
         Format::Markdown => std::fs::write(dest, flat).with_context(|| short(dest))?,
         Format::Text => {
-            std::fs::write(dest, plain::render(&flat, page.measure, page.justify, page.math))
+            std::fs::write(dest, plain::render(&flat, page.measure, page.justify))
                 .with_context(|| short(dest))?
         }
         Format::Html => {
