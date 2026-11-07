@@ -52,6 +52,8 @@ pub enum RunError {
     NotInList,
     /// The items touched are not siblings in one list.
     TwoLists,
+    /// Only blank lines that touch no item, such as one before a sub-item.
+    NoItem,
 }
 
 /// A view of one document's lists. Cheap to build; holds no state of its own.
@@ -129,7 +131,8 @@ impl<'a> Lists<'a> {
     /// of its first and last item — what Visual `Alt-j`/`Alt-k` moves.
     ///
     /// A blank line touches an item only when it sits between that item's own
-    /// paragraphs; one before a sub-item or between items touches nothing.
+    /// text, the next line being more of it; one before a sub-item or
+    /// between items touches nothing.
     /// Each other line touches its innermost item,
     /// and an item nested deeper than the shallowest one touched stands for
     /// its ancestor at that level, so a run never splits a parent from its
@@ -141,8 +144,9 @@ impl<'a> Lists<'a> {
         let mut touched: Vec<usize> = Vec::new();
         for l in top..=bot {
             let item = if self.blank(l) {
-                match self.own_bounds(l) {
-                    Some((start, end)) if l <= end => start,
+                let next = (l + 1..=self.buffer.last_line()).find(|&k| !self.blank(k));
+                match (self.item_at(l), next) {
+                    (Some(x), Some(n)) if !self.is_item(n) && self.item_at(n) == Some(x) => x,
                     _ => continue,
                 }
             } else {
@@ -153,7 +157,7 @@ impl<'a> Lists<'a> {
             }
         }
         if touched.is_empty() {
-            return Err(RunError::NotInList);
+            return Err(RunError::NoItem);
         }
         // Levels are counted once per item and shared with its children.
         let mut levels: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
@@ -521,7 +525,7 @@ mod tests {
             assert_eq!(l.sibling_run(1, 1), Ok((1, 1)));
             // The blank line touches nothing.
             assert_eq!(l.sibling_run(2, 3), Ok((2, 2)));
-            assert_eq!(l.sibling_run(3, 3), Err(RunError::NotInList));
+            assert_eq!(l.sibling_run(3, 3), Err(RunError::NoItem));
             assert_eq!(l.sibling_run(1, 5), Ok((0, 4)));
             // The blank line between b and c touches neither: b and c move.
             assert_eq!(l.sibling_run(2, 4), Ok((2, 4)));
@@ -539,8 +543,12 @@ mod tests {
         // A blank line before a sub-item touches nothing, alone or not, so a
         // bigger selection never moves less.
         with("- a\n\n  - a1\n- b\n", |l| {
-            assert_eq!(l.sibling_run(1, 1), Err(RunError::NotInList));
+            assert_eq!(l.sibling_run(1, 1), Err(RunError::NoItem));
             assert_eq!(l.sibling_run(1, 2), Ok((2, 2)));
+        });
+        // Between a parent's own paragraphs after its sub-items, too.
+        with("- a\n  - a1\n\n  more\n\n  even more\n- b\n", |l| {
+            assert_eq!(l.sibling_run(4, 4), Ok((0, 0)));
         });
         // Deeply nested lines share their levels; the run is still right.
         with("- a\n  - b\n    - c\n    - d\n  - e\n", |l| {
