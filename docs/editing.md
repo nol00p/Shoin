@@ -49,7 +49,9 @@ nested level at once.
 `Alt-j` and `Alt-k` move the item under the cursor past the next or previous
 item, its sub-items travelling with it; `3 Alt-j` moves it past three. An
 item never leaves its list this way: at the first or last item the move is
-refused, and `<al` is how it moves out.
+refused, and `<al` is how it moves out. In Visual mode, `Alt-j` and `Alt-k`
+move every item the selection touches as one block, and the selection stays
+on it for the next press.
 
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
@@ -107,6 +109,12 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   `list_indent` and `list_outdent` under `[keys.insert]`.
 - Moving swaps the item and the items it passes as two blocks of text; the
   blank lines between them stay where they were.
+- In Visual mode, a line touches its innermost item, even partly selected,
+  and blank lines touch nothing. When the selection reaches into sub-items
+  and also touches a shallower item, those sub-items stand for their parent,
+  so a parent always moves with its children. The items touched have to be
+  siblings in one list: a selection across two lists, or across a paragraph,
+  is refused.
 - Renumbering keeps the number a list starts at, so a list starting at `3.`
   still starts at `3.` after its first item moves away. A sub-list the edit
   creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists

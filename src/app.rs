@@ -45,7 +45,7 @@ use crate::export::Format;
 use crate::text::buffer::Buffer;
 use crate::text::cursor::Cursor;
 use crate::text::motion::{self, Motion};
-use crate::text::list::{self, Lists};
+use crate::text::list::{self, Lists, RunError};
 use crate::text::object;
 use crate::text::table::{self, TableAlign};
 use crate::transclude::{compile, link};
@@ -4033,35 +4033,54 @@ impl App {
     /// than failing when the count is larger. It never leaves its list: that
     /// is what `<al` is for.
     ///
-    /// The item and the siblings it passes swap places as two blocks of text,
-    /// and the blank lines between them stay where they were. The cursor
-    /// follows the item, on the same character.
+    /// In Visual mode it moves the run of siblings the selection touches
+    /// (`Lists::sibling_run`) as one block, and the selection stays on it.
+    ///
+    /// The block and the siblings it passes swap places as two blocks of
+    /// text, and the blank lines between them stay where they were. The
+    /// cursor, and in Visual the anchor, follow the block on the same
+    /// character.
     fn move_list_item(&mut self, down: bool, count: usize) {
         self.refresh_blocks();
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
         let at = self.buffer.cursor;
-        let Some(item) = lists.item_bounds(at.line) else {
+        let anchor = self.anchor;
+        // The item lines of the first and last item that move.
+        let run = match anchor {
+            None => lists.item_bounds(at.line).map(|b| (b.0, b.0)).ok_or(RunError::NotInList),
+            Some(a) => lists.sibling_run(a.line.min(at.line), a.line.max(at.line)),
+        };
+        let run = match run {
+            Ok(run) => run,
+            Err(RunError::NotInList) => return self.notify("not in a list", FlashKind::Error),
+            Err(RunError::TwoLists) => {
+                return self.notify("selection spans two lists", FlashKind::Error);
+            }
+        };
+        let Some(item) = lists.item_bounds(run.1).map(|b| (run.0, b.1)) else {
             return self.notify("not in a list", FlashKind::Error);
         };
         // The far end of the siblings passed over.
-        let step = |b: (usize, usize)| match down {
-            true => lists.next_sibling_bounds(b.0),
-            false => lists.prev_sibling_bounds(b.0),
+        let step = |line: usize| match down {
+            true => lists.next_sibling_bounds(line),
+            false => lists.prev_sibling_bounds(line),
         };
-        let Some(near) = step(item) else {
+        let Some(near) = step(if down { run.1 } else { run.0 }) else {
             let why = if down { "last item" } else { "first item" };
             return self.notify(why, FlashKind::Error);
         };
         let mut far = near;
         for _ in 1..count {
-            match step(far) {
+            match step(far.0) {
                 Some(b) => far = b,
                 None => break,
             }
         }
         let past = if down { (near.0, far.1) } else { (far.0, near.1) };
         let start = list_starts(&lists, &[item.0]).first().map(|(_, n)| *n);
-        let before = self.buffer.line_len(at.line) as isize;
+        // Each end's line length, to follow a renumber that widens it.
+        let width = |c: Cursor| self.buffer.line_len(c.line) as isize;
+        let (cursor_was, anchor_was) = (width(at), anchor.map(width));
 
         // `first`, the gap, then `second` become `second`, the gap, `first`.
         let (first, second) = if down { (item, past) } else { (past, item) };
@@ -4075,18 +4094,33 @@ impl App {
         self.buffer.insert_str(Cursor::new(first.0, 0), &swapped);
 
         let new_start = if down { first.0 + (second.1 - second.0 + 1) + gap.len() } else { first.0 };
-        let line = new_start + (at.line - item.0);
+        let new_end = new_start + (item.1 - item.0);
         // Its own list, counting from where it started — the other lists the
         // two blocks hold moved whole, so their numbers are still in order.
         if self.config.editor.list_renumber && start.is_some() {
             self.refresh_blocks();
             let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
-            let edits = lists.renumber(line, start);
+            let edits = lists.renumber(new_start, start);
             self.apply_renumber(edits);
         }
-        // The line's text only changed if its number did.
-        let moved = self.buffer.line_len(line) as isize - before;
-        self.buffer.cursor = Cursor::new(line, (at.col as isize + moved).max(0) as usize);
+        // An end inside the block moves with its line, and its column with the
+        // line's text, which only changed if its number did. An end on a
+        // blank line outside it lands on the block's edge.
+        let follow = |buffer: &Buffer, c: Cursor, was: isize| {
+            if c.line < item.0 {
+                Cursor::new(new_start, 0)
+            } else if c.line > item.1 {
+                Cursor::new(new_end, buffer.line_len(new_end).saturating_sub(1))
+            } else {
+                let line = new_start + (c.line - item.0);
+                let moved = buffer.line_len(line) as isize - was;
+                Cursor::new(line, (c.col as isize + moved).max(0) as usize)
+            }
+        };
+        self.buffer.cursor = follow(&self.buffer, at, cursor_was);
+        if let (Some(a), Some(was)) = (anchor, anchor_was) {
+            self.anchor = Some(follow(&self.buffer, a, was));
+        }
     }
 
     /// `move_lines_down` / `move_lines_up`: the selected lines (the cursor's
@@ -7889,15 +7923,84 @@ mod tests {
         assert_eq!(text(&app), "- a\n- b");
     }
 
-    /// Moving is Normal-mode only: in Visual, `Alt-j` is still `j`.
+    /// In Visual, `Alt-j`/`Alt-k` move the items the selection touches, and
+    /// the selection rides along for the next press.
     #[test]
-    fn alt_j_in_visual_mode_is_j() {
-        let mut app = app_with("- a\n- b\n");
-        feed(&mut app, "v");
+    fn visual_alt_j_moves_the_selected_items_as_one_block() {
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        feed(&mut app, "jVj"); // b and c
         alt(&mut app, 'j');
-        assert_eq!(text(&app), "- a\n- b\n");
+        assert_eq!(text(&app), "- a\n- d\n- b\n- c\n");
+        assert_eq!(app.mode, Mode::VisualLine, "still selecting");
+        assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (2, 3));
+
+        alt(&mut app, 'k');
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "- b\n- c\n- a\n- d\n");
+        assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (0, 1));
+        alt(&mut app, 'k'); // nothing left to pass
+        assert_eq!(text(&app), "- b\n- c\n- a\n- d\n");
+        assert_eq!(flash_text(&app), "first item");
+
+        esc(&mut app);
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- a\n- b\n- c\n- d\n", "one press, one undo step");
+    }
+
+    /// A line in a sub-item stands for its parent when the selection also
+    /// touches a shallower item, so a parent never leaves its children.
+    #[test]
+    fn visual_alt_j_lifts_a_deeper_line_to_its_parent() {
+        let mut app = app_with("- a\n  - a1\n- b\n- c\n");
+        feed(&mut app, "jllvj"); // from inside a1 to b
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- c\n- a\n  - a1\n- b\n");
         assert_eq!(app.mode, Mode::Visual);
-        assert_eq!(app.buffer.cursor.line, 1);
+        assert_eq!(app.anchor.unwrap(), Cursor::new(2, 2), "the anchor stays on its character");
+        assert_eq!(app.buffer.cursor.line, 3);
+    }
+
+    #[test]
+    fn visual_alt_j_within_sub_items_stays_under_the_parent() {
+        let mut app = app_with("- a\n  - x\n  - y\n  - z\n- b\n");
+        feed(&mut app, "jVj");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- a\n  - z\n  - x\n  - y\n- b\n");
+        alt(&mut app, 'j');
+        assert_eq!(flash_text(&app), "last item");
+        assert_eq!(text(&app), "- a\n  - z\n  - x\n  - y\n- b\n");
+    }
+
+    #[test]
+    fn visual_alt_j_renumbers_and_keeps_the_gap_of_a_loose_list() {
+        let mut app = app_with("1. a\n2. b\n3. c\n");
+        feed(&mut app, "Vj");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "1. c\n2. a\n3. b\n");
+        assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (1, 2));
+
+        // A blank line touches nothing: here only b moves, and the end that
+        // was on the blank line lands on it.
+        let mut app = app_with("- a\n\n- b\n\n- c\n");
+        feed(&mut app, "jVj");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- a\n\n- c\n\n- b\n");
+        assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (4, 4));
+    }
+
+    #[test]
+    fn visual_alt_j_refuses_what_is_not_one_list() {
+        let mut app = app_with("- a\n- b\n1. c\n2. d\n");
+        feed(&mut app, "jVj"); // b and c: two lists
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- a\n- b\n1. c\n2. d\n");
+        assert_eq!(flash_text(&app), "selection spans two lists");
+
+        let mut app = app_with("text\n- a\n- b\n");
+        feed(&mut app, "Vj");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "text\n- a\n- b\n");
+        assert_eq!(flash_text(&app), "not in a list");
     }
 
     /// The move is an action like any other, so `keys.conf` can rebind it.

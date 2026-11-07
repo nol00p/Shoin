@@ -45,6 +45,15 @@ pub struct Renumber {
     pub number: String,
 }
 
+/// Why lines touch no run of sibling items to move as one block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunError {
+    /// A touched line, blank lines aside, is in no list item.
+    NotInList,
+    /// The items touched are not siblings in one list.
+    TwoLists,
+}
+
 /// A view of one document's lists. Cheap to build; holds no state of its own.
 /// `kinds` must be the block cache for `buffer`'s current text.
 pub struct Lists<'a> {
@@ -114,6 +123,54 @@ impl<'a> Lists<'a> {
     pub fn level_bounds(&self, line: usize) -> Option<(usize, usize)> {
         let items = self.level_items(line);
         Some((*items.first()?, self.bounds(*items.last()?).1))
+    }
+
+    /// The run of siblings that lines `top..=bot` touch, as the item lines
+    /// of its first and last item — what Visual `Alt-j`/`Alt-k` moves.
+    ///
+    /// Blank lines touch nothing. Each other line touches its innermost item,
+    /// and an item nested deeper than the shallowest one touched stands for
+    /// its ancestor at that level, so a run never splits a parent from its
+    /// children. Nesting is counted in levels, not columns: siblings may sit
+    /// at different indents.
+    pub fn sibling_run(&self, top: usize, bot: usize) -> Result<(usize, usize), RunError> {
+        let mut touched = Vec::new();
+        for l in top..=bot.min(self.buffer.last_line()) {
+            if !self.blank(l) {
+                touched.push(self.item_at(l).ok_or(RunError::NotInList)?);
+            }
+        }
+        let level = |item: usize| {
+            let (mut k, mut n) = (item, 0);
+            while let Some(p) = self.parent_of(k) {
+                k = p;
+                n += 1;
+            }
+            n
+        };
+        let shallowest = touched.iter().map(|&i| level(i)).min().ok_or(RunError::NotInList)?;
+        let lift = |item: usize| {
+            let mut k = item;
+            for _ in shallowest..level(item) {
+                k = self.parent_of(k).unwrap_or(k);
+            }
+            k
+        };
+        let (Some(&first), Some(&last)) = (touched.first(), touched.last()) else {
+            return Err(RunError::NotInList);
+        };
+        let (first, last) = (lift(first), lift(last));
+        // Siblings in one list are reached from the first by `next_sibling`;
+        // anything else (another parent, another list) is passed over.
+        let mut k = first;
+        while k < last {
+            k = self.next_sibling(k).ok_or(RunError::TwoLists)?;
+        }
+        if k == last {
+            Ok((first, last))
+        } else {
+            Err(RunError::TwoLists)
+        }
     }
 
     /// The item lines of every sibling of the item containing `line`, in
@@ -423,6 +480,31 @@ mod tests {
             assert_eq!(l.item_bounds(2), Some((0, 3)));
             assert_eq!(l.next_sibling_bounds(0), Some((4, 4)));
         });
+    }
+
+    #[test]
+    fn a_sibling_run_takes_the_shallowest_items_touched() {
+        let t = "- a\n  - a1\n- b\n\n- c\n  - c1\n";
+        with(t, |l| {
+            assert_eq!(l.sibling_run(0, 0), Ok((0, 0)));
+            // a1 stands for a once b, a level up, is touched too.
+            assert_eq!(l.sibling_run(1, 2), Ok((0, 2)));
+            assert_eq!(l.sibling_run(1, 1), Ok((1, 1)));
+            // The blank line touches nothing.
+            assert_eq!(l.sibling_run(2, 3), Ok((2, 2)));
+            assert_eq!(l.sibling_run(3, 3), Err(RunError::NotInList));
+            assert_eq!(l.sibling_run(1, 5), Ok((0, 4)));
+            // a1 and c1 have different parents.
+            assert_eq!(l.sibling_run(1, 1).and(l.sibling_run(5, 5)), Ok((5, 5)));
+        });
+        // Siblings at uneven indents are one level.
+        with("- a\n   - b\n  - c\n", |l| assert_eq!(l.sibling_run(1, 2), Ok((1, 2))));
+        with("- a\n1. b\n", |l| assert_eq!(l.sibling_run(0, 1), Err(RunError::TwoLists)));
+        with("- a\n  - x\n- b\n  - y\n", |l| {
+            assert_eq!(l.sibling_run(1, 1), Ok((1, 1)));
+            assert_eq!(l.sibling_run(3, 3), Ok((3, 3)));
+        });
+        with("text\n- a\n", |l| assert_eq!(l.sibling_run(0, 1), Err(RunError::NotInList)));
     }
 
     #[test]
