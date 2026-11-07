@@ -75,12 +75,15 @@ pub struct Buffer {
     /// single rescan from there covers every change.
     pub dirty_line: Option<usize>,
 
-    /// Highest line touched since the same take, kept in step with later
-    /// edits that add or remove lines above it. An edit that keeps the line
-    /// count (swapping two blocks, indenting) can change lines well below
-    /// `dirty_line`, and a rescan that stopped as soon as its state matched
-    /// again would miss them; it may not stop before this line.
-    pub dirty_last: Option<usize>,
+    /// How far below the lowest line touched since the same take the file
+    /// goes on, in lines. An edit that keeps the line count (swapping two
+    /// blocks, indenting) can change lines well below `dirty_line`, and a
+    /// rescan that stopped as soon as its state matched again would miss
+    /// them. Counted from the END because an edit above a line does not move
+    /// it relative to the end, so later edits need no bookkeeping, and the
+    /// rope's own line metric (which also breaks on `\r` and U+2028) is the
+    /// only one used. Read through `take_dirty`.
+    pub(crate) dirty_tail: Option<usize>,
 
     /// The file changed on disk while this buffer had unsaved work.
     ///
@@ -121,7 +124,7 @@ impl Buffer {
             saved_state: 0,
             revision: 0,
             dirty_line: None,
-            dirty_last: None,
+            dirty_tail: None,
             conflict: false,
             readonly_ranges: Vec::new(),
             read_only: false,
@@ -156,7 +159,7 @@ impl Buffer {
             saved_state: 0,
             revision: 0,
             dirty_line: None,
-            dirty_last: None,
+            dirty_tail: None,
             conflict: false,
             readonly_ranges: Vec::new(),
             read_only: false,
@@ -427,18 +430,32 @@ mod tests {
     use super::*;
     use crate::text::cursor::Cursor;
 
-    /// `dirty_line` and `dirty_last` bracket every line a run of edits
-    /// touched, in the text as it now stands.
+    /// `take_dirty` brackets every line a run of edits touched, in the text
+    /// as it now stands, by the rope's own line breaks.
     #[test]
     fn dirty_lines_bracket_every_edit() {
-        let mut b = Buffer::unnamed(b"0\n1\n2\n3\n4\n5\n".to_vec()).unwrap();
+        let text = b"0\n1\n2\n3\n4\n5\n".to_vec();
+        let mut b = Buffer::unnamed(text.clone()).unwrap();
         b.insert_str(Cursor::new(4, 0), "x\ny\n"); // lines 4..=6
-        assert_eq!((b.dirty_line, b.dirty_last), (Some(4), Some(6)));
-        b.insert_str(Cursor::new(1, 0), "new\n"); // pushes the first edit down
-        assert_eq!((b.dirty_line, b.dirty_last), (Some(1), Some(7)));
+        assert_eq!(b.take_dirty(), Some((4, 6)));
+        assert_eq!(b.take_dirty(), None, "taken");
+
+        // An edit above an earlier one moves it down; the range follows.
+        b.insert_str(Cursor::new(4, 0), "x\ny\n");
+        b.insert_str(Cursor::new(1, 0), "new\n");
+        assert_eq!(b.take_dirty(), Some((1, 7)));
+
+        // A delete above it moves it up.
+        let mut b = Buffer::unnamed(text.clone()).unwrap();
+        b.insert_str(Cursor::new(4, 0), "x\ny\n");
         let at = b.rope.line_to_char(2);
-        b.delete_chars(at, at + 2); // takes line 2's text and break: up one
-        assert_eq!((b.dirty_line, b.dirty_last), (Some(1), Some(6)));
+        b.delete_chars(at, at + 2);
+        assert_eq!(b.take_dirty(), Some((2, 5)));
+
+        // A break the rope counts that is not `\n`: U+2028.
+        let mut b = Buffer::unnamed(text).unwrap();
+        b.insert_str(Cursor::new(1, 0), "p\u{2028}q");
+        assert_eq!(b.take_dirty(), Some((1, 2)));
     }
 
     /// Piped text has no name and nothing unsaved, and keeps its line ending
