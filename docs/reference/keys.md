@@ -89,11 +89,12 @@ selection. Each is one undo step.
 
 ## Lists
 
-In Normal mode. See [Editing](../editing.md#lists).
+In Normal mode, and `Alt-j` `Alt-k` in Visual too. See
+[Editing](../editing.md#lists).
 
 | Key | Does |
 |---|---|
-| `Alt-j` `Alt-k` | move the list item past the next / previous one, with its sub-items (a count moves it past that many) |
+| `Alt-j` `Alt-k` | move the list item past the next / previous one, with its sub-items (a count moves it past that many); in Visual, the items the selection touches |
 | `>al` `<al` | indent / outdent the item with its sub-items |
 | `>aL` `<aL` | indent / outdent every item at that level |
 | `Tab` `Shift-Tab` | in Insert mode, the same as `>al` `<al` |
@@ -298,7 +299,7 @@ gives `ss`, `siw` and `2s3w`.
 | `move_lines_up` | `move_line_up` | | the same, up |
 | `undo` `redo` | | `u` `Ctrl-r` | undo / redo |
 | `repeat` | | `.` | repeat the last change |
-| `list_item_down` `list_item_up` | | `Alt-j` `Alt-k` | move the list item past the next / previous one |
+| `list_item_down` `list_item_up` | | `Alt-j` `Alt-k` | move the list item, or in Visual the selected items, past the next / previous one |
 | `list_indent` `list_outdent` | | `Tab` `Shift-Tab` (Insert) | indent / outdent the list item |
 
 ### Writer verbs

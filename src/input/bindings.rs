@@ -119,7 +119,15 @@ pub fn normal(key: Key) -> Option<Verb> {
 /// fires at once instead of waiting for a range, `i`/`a` open an object with no
 /// operator pending, and `u`/`U` are the case operators rather than undo.
 pub fn visual(key: Key) -> Option<Verb> {
-    // Moving list items is Normal-mode only, so Alt stays meaningless here.
+    // `Alt-j`/`Alt-k` move the list items the selection touches; any other
+    // Alt chord does what the bare key does.
+    if key.alt && !key.ctrl {
+        match key.code {
+            KeyCode::Char('j') => return Some(Verb::Act(Action::ListItemMove { down: true })),
+            KeyCode::Char('k') => return Some(Verb::Act(Action::ListItemMove { down: false })),
+            _ => return visual(Key { alt: false, ..key }),
+        }
+    }
     if key.alt {
         return visual(Key { alt: false, ..key });
     }

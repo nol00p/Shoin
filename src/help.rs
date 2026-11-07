@@ -629,7 +629,7 @@ i{obj} a{obj} :: select a text object: viw, vap
 move_lines_down move_lines_up :: move the selected lines down · up and keep them selected; a count moves further. Not on a key: bind them under [keys.visual], as \"J\" = \"move_lines_down\"
 
 ## Lists
-Alt-j Alt-k :: move the item past the next · previous one, with its sub-items; a count moves it further. 1. 2. 3. lists are renumbered
+Alt-j Alt-k :: move the item past the next · previous one, with its sub-items; a count moves it further. 1. 2. 3. lists are renumbered. In Visual, moves the items the selection touches
 >al <al :: indent · outdent the item with its sub-items
 >aL <aL :: every item at that level
 Tab Shift-Tab :: the same as >al <al, in Insert on the item's line
