@@ -903,9 +903,9 @@ impl App {
 
     /// Keep the block cache in step with the buffer.
     ///
-    /// Incremental: edits record the lowest line they touched in
-    /// `Buffer::dirty_line`, so the rescan resumes from that line's cached
-    /// carry state and stops as soon as the carry re-converges. Only when no
+    /// Incremental: edits record the lines they touched (`Buffer::take_dirty`),
+    /// so the rescan resumes from the first one's cached carry state and stops
+    /// once past the last one the carry re-converges. Only when no
     /// line was reported (a wholesale buffer swap, or a cache that never
     /// matched the document's length) does it fall back to a full rebuild.
     pub(crate) fn refresh_blocks(&mut self) {
@@ -925,27 +925,24 @@ impl App {
             let i = self.current();
             let doc = &mut self.docs[i];
             doc.blocks = BlockCache::build(&doc.buffer, math);
-            doc.buffer.dirty_line = None;
-            doc.buffer.dirty_last = None;
+            doc.buffer.clear_dirty();
             return;
         }
         if self.blocks.revision == self.buffer.revision {
-            self.buffer.dirty_line = None;
-            self.buffer.dirty_last = None;
+            self.buffer.clear_dirty();
             return;
         }
-        let last = self.buffer.dirty_last.take();
-        match self.buffer.dirty_line.take() {
-            // `invalidate_from` takes the EDITED line — it resumes a line
+        match self.buffer.take_dirty() {
+            // `invalidate_from` takes the EDITED lines — it resumes a line
             // earlier itself — and falls back to a full build when it has no
             // valid carry state to resume from (the head of the file, or a
             // shorter cache).
-            Some(line) => {
+            Some((line, last)) => {
                 // Split the borrow: `blocks` and `buffer` are two fields of one
                 // document, and the deref that reaches them takes all of `self`.
                 let i = self.current();
                 let doc = &mut self.docs[i];
-                doc.blocks.invalidate_from(&doc.buffer, line, last.unwrap_or(line));
+                doc.blocks.invalidate_from(&doc.buffer, line, last);
             }
             None => {
                 let i = self.current();
@@ -6384,8 +6381,11 @@ mod tests {
         app.refresh_blocks();
         assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
 
-        // And an indent of several lines, which keeps the count too.
+        // And an indent of several lines, which keeps the count too. The
+        // setup's own edit is forgotten first, or the rescan would start at
+        // line 0 and rebuild everything.
         let mut app = app_with("intro\n\n- a\n- b\n- c\n- d\n");
+        app.refresh_blocks();
         feed(&mut app, "3jVj>");
         app.refresh_blocks();
         assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);

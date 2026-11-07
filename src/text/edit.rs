@@ -14,9 +14,10 @@ impl Buffer {
             return false;
         }
         let cursor_before = self.cursor;
+        let line = self.rope.char_to_line(idx);
         self.rope.insert(idx, text);
-        let inserted = breaks(text);
-        let cursor_after = self.cursor_at(idx + text.chars().count());
+        let end = idx + text.chars().count();
+        let cursor_after = self.cursor_at(end);
         self.history.record(Change {
             start: idx,
             before: String::new(),
@@ -24,7 +25,7 @@ impl Buffer {
             cursor_before,
             cursor_after,
         });
-        self.touch(idx, 0, inserted);
+        self.touch(line, idx, end);
         true
     }
 
@@ -41,6 +42,7 @@ impl Buffer {
         }
         let removed = self.rope.slice(a..b).to_string();
         let cursor_before = self.cursor;
+        let line = self.rope.char_to_line(a);
         self.rope.remove(a..b);
         self.history.record(Change {
             start: a,
@@ -49,7 +51,7 @@ impl Buffer {
             cursor_before,
             cursor_after: self.cursor_at(a),
         });
-        self.touch(a, breaks(&removed), 0);
+        self.touch(line, a, a);
         Some(removed)
     }
 
@@ -73,9 +75,10 @@ impl Buffer {
         };
         for change in step.changes.iter().rev() {
             let after_len = change.after.chars().count();
+            let line = self.rope.char_to_line(change.start);
             self.rope.remove(change.start..change.start + after_len);
             self.rope.insert(change.start, &change.before);
-            self.mark_dirty(change.start, breaks(&change.after), breaks(&change.before));
+            self.mark_dirty(line, change.start, change.start + change.before.chars().count());
         }
         // Prefer the anchor taken when the command began. `cursor_before` is
         // sampled inside the primitive, by which point a Visual selection has
@@ -102,9 +105,10 @@ impl Buffer {
         };
         for change in step.changes.iter() {
             let before_len = change.before.chars().count();
+            let line = self.rope.char_to_line(change.start);
             self.rope.remove(change.start..change.start + before_len);
             self.rope.insert(change.start, &change.after);
-            self.mark_dirty(change.start, breaks(&change.before), breaks(&change.after));
+            self.mark_dirty(line, change.start, change.start + change.after.chars().count());
         }
         if let Some(last) = step.changes.last() {
             self.cursor = last.cursor_after;
@@ -114,30 +118,43 @@ impl Buffer {
         true
     }
 
-    /// Bump revision, set modified, and remember the lowest line touched since
-    /// a cache last cleared `dirty_line`. Called by every primitive above with
-    /// the absolute char index the edit started at.
-    fn touch(&mut self, at: usize, removed: usize, inserted: usize) {
+    /// Bump revision, set modified, and record the lines an edit touched:
+    /// `line` is where it started (read before the edit), `at` the same
+    /// spot as a char index after it, and `end` where its new text ends.
+    fn touch(&mut self, line: usize, at: usize, end: usize) {
         self.revision += 1;
         self.sync_modified();
-        self.mark_dirty(at, removed, inserted);
+        self.mark_dirty(line, at, end);
     }
 
-    /// Record an edit at `at` that took out `removed` line breaks and put in
-    /// `inserted`. `dirty_line` drops to its line: taking the minimum is what
-    /// makes one rescan cover a command that made several edits. `dirty_last`
-    /// rises to the last line it wrote, after moving an earlier record below
-    /// it by the lines this edit added or took away.
-    fn mark_dirty(&mut self, at: usize, removed: usize, inserted: usize) {
-        // The line holding `at` is the same before and after the edit: only
-        // what follows it moved.
-        let line = self.rope.char_to_line(at.min(self.rope.len_chars()));
-        self.dirty_line = Some(self.dirty_line.map_or(line, |prev| prev.min(line)));
-        let earlier = self.dirty_last.map(|e| match e > line {
-            true => e.saturating_sub(removed).max(line) + inserted,
-            false => e,
-        });
-        self.dirty_last = Some(earlier.map_or(line + inserted, |e| e.max(line + inserted)));
+    /// Lower `dirty_line` to the first line the edit touched — taking the
+    /// minimum is what makes one rescan cover a command that made several
+    /// edits — and `dirty_tail` to the distance from its last line to the
+    /// end of the file. Both are read off the rope, so they use its line
+    /// metric. `line` is taken before the edit, and the line of `at` after
+    /// it, since a deleted `\n` after a `\r` can move it.
+    fn mark_dirty(&mut self, line: usize, at: usize, end: usize) {
+        let len = self.rope.len_chars();
+        let first = line.min(self.rope.char_to_line(at.min(len)));
+        let last = self.rope.char_to_line(end.min(len));
+        let tail = (self.rope.len_lines() - 1).saturating_sub(last);
+        self.dirty_line = Some(self.dirty_line.map_or(first, |prev| prev.min(first)));
+        self.dirty_tail = Some(self.dirty_tail.map_or(tail, |prev| prev.min(tail)));
+    }
+
+    /// The lines touched since the last take, first to last, and forget
+    /// them. Lines past the last are known to be as they were.
+    pub fn take_dirty(&mut self) -> Option<(usize, usize)> {
+        let first = self.dirty_line.take();
+        let tail = self.dirty_tail.take();
+        let last_line = self.rope.len_lines() - 1;
+        first.map(|f| (f, last_line.saturating_sub(tail.unwrap_or(0)).max(f)))
+    }
+
+    /// Forget the lines touched, when a cache has been rebuilt whole.
+    pub fn clear_dirty(&mut self) {
+        self.dirty_line = None;
+        self.dirty_tail = None;
     }
 
     /// Every mutation checks this first. Always passes today — the vec is
@@ -153,7 +170,3 @@ impl Buffer {
     }
 }
 
-/// How many line breaks `text` holds.
-fn breaks(text: &str) -> usize {
-    text.chars().filter(|c| *c == '\n').count()
-}
