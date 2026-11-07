@@ -88,7 +88,7 @@ pub fn write(
     match format {
         Format::Markdown => std::fs::write(dest, flat).with_context(|| short(dest))?,
         Format::Text => {
-            std::fs::write(dest, plain::render(&flat, page.measure, page.justify))
+            std::fs::write(dest, plain::render(&flat, page.measure, page.justify, &page.md))
                 .with_context(|| short(dest))?
         }
         Format::Html => {
@@ -98,7 +98,7 @@ pub fn write(
                 .unwrap_or_else(|| "document".into());
             std::fs::write(dest, html::render(&flat, &title, page)).with_context(|| short(dest))?
         }
-        Format::Pdf => write_pdf(&flat, dest)?,
+        Format::Pdf => write_pdf(&flat, dest, page.md.math)?,
     }
     Ok(())
 }
@@ -118,7 +118,7 @@ fn short(p: &Path) -> String {
 /// fonts inside a terminal text editor, for output worse than what the tools
 /// people already have produce. `pandoc` was named as the pipeline in SPEC
 /// §14.4 before any of this existed; this just runs it for you.
-fn write_pdf(markdown: &str, dest: &Path) -> Result<()> {
+fn write_pdf(markdown: &str, dest: &Path, math: bool) -> Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -137,7 +137,9 @@ fn write_pdf(markdown: &str, dest: &Path) -> Result<()> {
     };
 
     let mut child = Command::new(tool)
-        .arg("--from=markdown")
+        // pandoc reads `$…$` as math by default; with `math = false` followed
+        // into export, it is the text the editor shows.
+        .arg(if math { "--from=markdown" } else { "--from=markdown-tex_math_dollars" })
         .arg(format!("--pdf-engine={engine}"))
         .args(engine_args(engine))
         .arg("--output")
