@@ -101,7 +101,8 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 - Shoin turns on the kitty keyboard protocol, so in kitty, Ghostty, WezTerm,
   foot and Alacritty `Alt-j` always arrives as one key, even over SSH. Other
   terminals need to send Alt as a modifier. In tmux, a quick
-  `Esc` then `j` can arrive as `Alt-j` when `escape-time` is long (the
+  `Esc` then `j`, including leaving Visual mode, can arrive as `Alt-j` and
+  move list items when `escape-time` is long (the
   default was 500 ms before tmux 3.5): `set -sg escape-time 10` fixes it, and
   it is the usual advice for Vim in tmux. On macOS, Terminal.app needs "Use
   Option as Meta key" and iTerm2 needs Option set to "Esc+". Or rebind

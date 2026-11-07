@@ -37,16 +37,24 @@ pub enum Verb {
     Act(Action),
 }
 
+/// `Alt-j` / `Alt-k`: the list move, the same in Normal and Visual.
+fn list_move(key: Key) -> Option<Verb> {
+    if !key.alt || key.ctrl {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('j') => Some(Verb::Act(Action::ListItemMove { down: true })),
+        KeyCode::Char('k') => Some(Verb::Act(Action::ListItemMove { down: false })),
+        _ => None,
+    }
+}
+
 /// Normal mode, first key.
 pub fn normal(key: Key) -> Option<Verb> {
     // Alt matters for these two keys only. Everywhere else the table matches
     // `(code, ctrl)`, so an Alt chord does what the bare key does.
-    if key.alt && !key.ctrl {
-        match key.code {
-            KeyCode::Char('j') => return Some(Verb::Act(Action::ListItemMove { down: true })),
-            KeyCode::Char('k') => return Some(Verb::Act(Action::ListItemMove { down: false })),
-            _ => {}
-        }
+    if let Some(verb) = list_move(key) {
+        return Some(verb);
     }
     if let Some(m) = motion(key) {
         return Some(Verb::Motion(m));
@@ -119,14 +127,10 @@ pub fn normal(key: Key) -> Option<Verb> {
 /// fires at once instead of waiting for a range, `i`/`a` open an object with no
 /// operator pending, and `u`/`U` are the case operators rather than undo.
 pub fn visual(key: Key) -> Option<Verb> {
-    // `Alt-j`/`Alt-k` move the list items the selection touches; any other
-    // Alt chord does what the bare key does.
-    if key.alt && !key.ctrl {
-        match key.code {
-            KeyCode::Char('j') => return Some(Verb::Act(Action::ListItemMove { down: true })),
-            KeyCode::Char('k') => return Some(Verb::Act(Action::ListItemMove { down: false })),
-            _ => return visual(Key { alt: false, ..key }),
-        }
+    // `Alt-j`/`Alt-k` move the list items the selection touches, as in
+    // Normal; any other Alt chord does what the bare key does.
+    if let Some(verb) = list_move(key) {
+        return Some(verb);
     }
     if key.alt {
         return visual(Key { alt: false, ..key });

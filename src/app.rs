@@ -4044,21 +4044,24 @@ impl App {
         self.refresh_blocks();
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
         let at = self.buffer.cursor;
-        let anchor = self.anchor;
-        // The item lines of the first and last item that move.
-        let run = match anchor {
-            None => lists.item_bounds(at.line).map(|b| (b.0, b.0)).ok_or(RunError::NotInList),
-            Some(a) => lists.sibling_run(a.line.min(at.line), a.line.max(at.line)),
+        let anchor = self.visual_anchor();
+        // `run`: the item lines of the first and last item that move;
+        // `item`: the lines they span, children included.
+        let found = match anchor {
+            None => lists.item_bounds(at.line).map(|b| ((b.0, b.0), b)).ok_or(RunError::NotInList),
+            Some(a) => lists
+                .sibling_run(a.line.min(at.line), a.line.max(at.line))
+                .and_then(|run| {
+                    let end = lists.item_bounds(run.1).ok_or(RunError::NotInList)?.1;
+                    Ok((run, (run.0, end)))
+                }),
         };
-        let run = match run {
-            Ok(run) => run,
+        let (run, item) = match found {
+            Ok(found) => found,
             Err(RunError::NotInList) => return self.notify("not in a list", FlashKind::Error),
             Err(RunError::TwoLists) => {
                 return self.notify("selection spans two lists", FlashKind::Error);
             }
-        };
-        let Some(item) = lists.item_bounds(run.1).map(|b| (run.0, b.1)) else {
-            return self.notify("not in a list", FlashKind::Error);
         };
         // The far end of the siblings passed over.
         let step = |line: usize| match down {
@@ -4131,7 +4134,7 @@ impl App {
     /// buffer's end goes as far as it can; none to go at all is refused.
     fn move_lines(&mut self, down: bool, count: usize) {
         let cur = self.buffer.cursor;
-        let anchor = self.anchor;
+        let anchor = self.visual_anchor();
         let other = anchor.unwrap_or(cur);
         let (top, bot) = (cur.line.min(other.line), cur.line.max(other.line));
         let room = if down { self.buffer.last_line() - bot } else { top };
@@ -4453,6 +4456,17 @@ impl App {
     /// Every Visual exit funnels through here — `Esc`, the operators, and the
     /// writer verbs alike — so the resume is honoured once rather than
     /// remembered at each of them.
+    /// The selection's other end, in Visual mode only. `self.anchor` can
+    /// outlive Visual: leaving it through `:`, `/` or `A` keeps it (a `:`
+    /// range may still want it), so anything that acts on "the selection"
+    /// asks the mode first.
+    fn visual_anchor(&self) -> Option<Cursor> {
+        match self.mode {
+            Mode::Visual | Mode::VisualLine => self.anchor,
+            _ => None,
+        }
+    }
+
     fn end_visual(&mut self) {
         self.mode = if self.visual_resumes_insert {
             Mode::Insert
@@ -7941,10 +7955,6 @@ mod tests {
         alt(&mut app, 'k'); // nothing left to pass
         assert_eq!(text(&app), "- b\n- c\n- a\n- d\n");
         assert_eq!(flash_text(&app), "first item");
-
-        esc(&mut app);
-        feed(&mut app, "u");
-        assert_eq!(text(&app), "- a\n- b\n- c\n- d\n", "one press, one undo step");
     }
 
     /// A line in a sub-item stands for its parent when the selection also
@@ -7986,6 +7996,66 @@ mod tests {
         alt(&mut app, 'j');
         assert_eq!(text(&app), "- a\n\n- c\n\n- b\n");
         assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (4, 4));
+    }
+
+    /// Each press is its own undo step: two presses, two undos.
+    #[test]
+    fn visual_alt_j_undoes_one_press_at_a_time() {
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- c\n- a\n- d\n");
+        esc(&mut app);
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- b\n- a\n- c\n- d\n");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- a\n- b\n- c\n- d\n");
+    }
+
+    /// Leaving Visual through `:`, or into Insert, keeps the anchor for a
+    /// `:` range; Normal-mode `Alt-j` must still move only the item under the
+    /// cursor, not the old selection.
+    #[test]
+    fn alt_j_after_leaving_visual_moves_one_item() {
+        for leave in ["Vj:", "VjA"] {
+            let mut app = app_with("- a\n- b\n- c\n- d\n");
+            feed(&mut app, leave);
+            esc(&mut app);
+            feed(&mut app, "j");
+            assert_eq!(app.mode, Mode::Normal);
+            alt(&mut app, 'j');
+            assert_eq!(text(&app), "- a\n- b\n- d\n- c\n", "after {leave}");
+        }
+    }
+
+    /// A selection only on a loose item's inner blank line is that item, as
+    /// the line is for Normal-mode `Alt-j`.
+    #[test]
+    fn visual_alt_j_on_a_blank_line_inside_an_item() {
+        let mut app = app_with("- a\n\n  para\n- b\n");
+        feed(&mut app, "jV");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- a\n\n  para\n");
+    }
+
+    /// Other Alt chords in Visual do what the bare key does, and the Visual
+    /// move can be turned off in `[keys.visual]`.
+    #[test]
+    fn visual_alt_chords_and_rebinding() {
+        let mut app = app_with("one two three\n");
+        feed(&mut app, "v");
+        app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
+        app.sync_after_input();
+        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(app.buffer.cursor.col, 4, "Alt-w is w");
+
+        let mut app = app_with("- a\n- b\n");
+        app.config.keys.visual.insert("<M-j>".into(), "nop".into());
+        app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- a\n- b\n");
     }
 
     #[test]
