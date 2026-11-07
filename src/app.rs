@@ -4157,11 +4157,56 @@ impl App {
 
     /// Rewrite the ordinals `edits` name. Each is on a line of its own and
     /// leaves the line count alone, so the order they go in does not matter.
+    ///
+    /// A number that changes width (`9.` → `10.`) moves the item's text, so
+    /// every line of the item indented at least to its old text column, sub-
+    /// items included, moves by the same amount: the item keeps its shape,
+    /// and a CommonMark reader still finds the sub-items inside it. Lines
+    /// indented less (lazy text, a hand-placed indent) and lines indented
+    /// with tabs stay where they are. The shifts are worked out on the text
+    /// before any edit, and nested items that both widen add up.
     fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
-        for r in edits {
+        let edits: Vec<list::Renumber> = edits.into_iter().collect();
+        self.refresh_blocks();
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+        let leading = |text: &str| -> Option<usize> {
+            let ws: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            (!ws.contains('\t')).then_some(ws.len())
+        };
+        let mut shifts: std::collections::BTreeMap<usize, isize> = std::collections::BTreeMap::new();
+        for r in &edits {
+            let delta = r.number.chars().count() as isize - r.cols.len() as isize;
+            let item = self.buffer.line_text(r.line);
+            if delta == 0 || leading(&item).is_none() {
+                continue;
+            }
+            // The text column: past the number, its `.` or `)`, and the
+            // spaces after it — or one space past the delimiter when the item
+            // is still empty.
+            let chars: Vec<char> = item.chars().collect();
+            let gap = chars.iter().skip(r.cols.end + 1).take_while(|c| **c == ' ').count();
+            let text_col = r.cols.end + 1 + if r.cols.end + 1 + gap < chars.len() { gap } else { 1 };
+            let Some((start, end)) = lists.item_bounds(r.line) else { continue };
+            for l in start + 1..=end {
+                if leading(&self.buffer.line_text(l)).is_some_and(|n| n >= text_col) {
+                    *shifts.entry(l).or_default() += delta;
+                }
+            }
+        }
+        for r in &edits {
             let start = self.buffer.char_index(Cursor::new(r.line, r.cols.start));
             self.buffer.delete_chars(start, start + r.cols.len());
             self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
+        }
+        for (line, delta) in shifts {
+            if delta > 0 {
+                self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(delta as usize));
+            } else if delta < 0 {
+                let spaces = leading(&self.buffer.line_text(line)).unwrap_or(0);
+                let n = (delta.unsigned_abs()).min(spaces);
+                let at = self.buffer.rope.line_to_char(line);
+                self.buffer.delete_chars(at, at + n);
+            }
         }
     }
 
@@ -7902,6 +7947,61 @@ mod tests {
         let mut app = app_with("3. a\n4. b\n");
         alt(&mut app, 'j');
         assert_eq!(text(&app), "3. b\n4. a\n");
+    }
+
+    /// A number that changes width carries the item's lines with its text.
+    #[test]
+    fn a_wider_number_moves_the_item_lines_with_it() {
+        let mut app = app_with("8. h\n9. i\n   more\n10. j\n");
+        feed(&mut app, "j");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "8. h\n9. j\n10. i\n    more\n");
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "8. h\n9. i\n   more\n10. j\n", "and back when it narrows");
+
+        esc(&mut app);
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "8. h\n9. j\n10. i\n    more\n", "renumber and shift: one undo step");
+    }
+
+    /// Sub-items and a code block keep their shape, so a CommonMark reader
+    /// still finds them inside the item.
+    #[test]
+    fn a_wider_number_moves_sub_items_and_code_together() {
+        let mut app = app_with("9. i\n   - x\n     ```\n     code\n     ```\n10. j\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "9. j\n10. i\n    - x\n      ```\n      code\n      ```\n");
+    }
+
+    /// Lines short of the text column, and tab-indented ones, were placed by
+    /// hand: they stay.
+    #[test]
+    fn lines_short_of_the_text_column_or_tabbed_stay() {
+        let mut app = app_with("9. i\nlazy text\n  - y\n10. j\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "9. j\n10. i\nlazy text\n  - y\n");
+
+        let mut app = app_with("9. i\n\tmore\n10. j\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "9. j\n10. i\n\tmore\n");
+
+        // With renumbering off nothing is renumbered, so nothing moves.
+        let mut app = app_with("9. i\n   more\n10. j\n");
+        app.config.editor.list_renumber = false;
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "10. j\n9. i\n   more\n");
+    }
+
+    /// Nested numbers that both widen add up for the lines inside both.
+    #[test]
+    fn nested_widenings_add_up() {
+        let mut app = app_with("9. a\n   9. x\n      deep\n   10. y\n10. b\n");
+        feed(&mut app, "j");
+        alt(&mut app, 'j'); // x past y: x becomes 10
+        assert_eq!(text(&app), "9. a\n   9. y\n   10. x\n       deep\n10. b\n");
+        feed(&mut app, "gg");
+        alt(&mut app, 'j'); // a past b: a becomes 10, and everything in it moves
+        assert_eq!(text(&app), "9. b\n10. a\n    9. y\n    10. x\n        deep\n");
     }
 
     #[test]
