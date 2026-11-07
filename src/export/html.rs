@@ -73,7 +73,7 @@ pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
 fn first_heading(text: &str, md: &MarkdownConfig) -> Option<String> {
     let mut carry = Carry::None;
     for (i, line) in text.lines().enumerate() {
-        let (kind, next) = classify(line, &carry, i == 0);
+        let (kind, next) = classify(line, &carry, i == 0, md.math);
         carry = next;
         if let BlockKind::Heading(_) = kind {
             let body = line.trim_start().trim_start_matches('#').trim();
@@ -139,7 +139,7 @@ impl<'a> Body<'a> {
     fn run(mut self, text: &str) -> String {
         let mut carry = Carry::None;
         for (i, line) in text.lines().enumerate() {
-            let (kind, next) = classify(line, &carry, i == 0);
+            let (kind, next) = classify(line, &carry, i == 0, self.md.math);
             carry = next;
             self.line(line, &kind);
         }
@@ -271,31 +271,18 @@ impl<'a> Body<'a> {
                 self.para.push(line.trim().to_string());
             }
 
+            // Only reached with `math` on: off, the classifier never opens one.
             BlockKind::MathBlock => {
-                if !self.md.math {
-                    let (kind, _) = classify(line, &Carry::None, false);
-                    if kind == BlockKind::MathBlock {
-                        self.flush_table();
-                        self.flush_math_block();
-                        if !self.lazy && self.quote == 0 {
-                            self.close_lists();
-                        }
-                        self.para.push(line.trim().to_string());
-                    } else {
-                        self.line(line, &kind);
-                    }
-                } else {
-                    self.flush_para();
-                    self.flush_table();
-                    self.close_quote();
-                    self.close_lists();
-                    let was_open = !self.math_block.is_empty();
-                    let trimmed = line.trim();
-                    let closes = trimmed.ends_with("$$");
-                    self.math_block.push(line.to_string());
-                    if (was_open && closes) || (trimmed.starts_with("$$") && trimmed.len() > 2 && trimmed[2..].contains("$$")) {
-                        self.flush_math_block();
-                    }
+                self.flush_para();
+                self.flush_table();
+                self.close_quote();
+                self.close_lists();
+                let was_open = !self.math_block.is_empty();
+                let trimmed = line.trim();
+                let closes = trimmed.ends_with("$$");
+                self.math_block.push(line.to_string());
+                if (was_open && closes) || (trimmed.starts_with("$$") && trimmed.len() > 2 && trimmed[2..].contains("$$")) {
+                    self.flush_math_block();
                 }
             }
         }
@@ -975,6 +962,18 @@ mod tests {
         let b_off = Body::new(&md_off, std::path::Path::new(""));
         let got_off = b_off.run("$$\n# Heading\n");
         assert!(got_off.contains("<h1 id=\"heading\">Heading</h1>"), "{got_off}");
+        assert!(got_off.contains("<p>$$</p>"), "{got_off}");
+        let b_off2 = Body::new(&md_off, std::path::Path::new(""));
+        let got_off2 = b_off2.run("$$\n```\na *b*\n\nc\n```\n");
+        assert!(got_off2.contains("a *b*\n\nc"), "a fence under $$ stays a fence: {got_off2}");
+
+        // `$$x$$ more text` is a paragraph holding display math, as in Pandoc:
+        let b5 = Body::new(&md, std::path::Path::new(""));
+        let got_text = b5.run("$$E=mc^2$$ is famous\n");
+        assert!(
+            got_text.contains("<p><span class=\"math display\">\\[E=mc^2\\]</span> is famous</p>"),
+            "{got_text}"
+        );
     }
 
     #[test]

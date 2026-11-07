@@ -259,7 +259,7 @@ mod tests {
         let mut app = App::new(Config::default(), None, None).unwrap();
         app.theme = crate::render::theme::Theme::authored(&app.config.theme).unwrap();
         app.buffer.insert_str(Cursor::new(0, 0), text);
-        app.blocks = BlockCache::build(&app.buffer);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
         app
     }
 

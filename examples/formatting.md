@@ -32,8 +32,8 @@ a #project tag, a bare https://example.com/path, and an escaped \*star\*.
 ## Math
 
 Inline formulas like $x^2 + y^2 = r^2$, $\alpha \rightarrow \beta$, and
-$\frac{a+b}{c}$ conceal to Unicode symbols. Display blocks render multi-line
-equations:
+$\frac{a+b}{c}$ conceal to Unicode symbols. A display block between `$$`
+lines conceals the same way, one line at a time:
 
 $$
 \oint \vec{E} \cdot d\vec{A} = \frac{Q}{\varepsilon_0}

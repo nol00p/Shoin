@@ -469,13 +469,12 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
 
     // `[markdown] tables = false` opts out of table rendering; the classifier
     // stays as it is and the line simply renders as the prose it also is.
-    // The same holds for `[markdown] math = false` and MathBlock: classify
-    // without the math block carry so headings or lists under a lone $$ keep their kind.
+    // `math = false` is handled by the classifier itself, which then never
+    // opens a math block; this only covers a frame drawn before the block
+    // cache has caught up with a config change.
     let block = match block {
         BlockKind::Table if !cfg.markdown.tables => BlockKind::Paragraph,
-        BlockKind::MathBlock if !cfg.markdown.math => {
-            crate::render::markdown::block::classify(&source, &crate::render::markdown::block::Carry::None, false).0
-        }
+        BlockKind::MathBlock if !cfg.markdown.math => BlockKind::Paragraph,
         other => other,
     };
 
@@ -541,6 +540,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
                 &app.config.transclude,
                 measure,
                 app.embed_mode,
+                app.config.markdown.math,
             )
         })
     } else {
@@ -586,7 +586,7 @@ mod tests {
         let mut app = App::new(Config::default(), None, None).unwrap();
         app.buffer.insert_str(Cursor::new(0, 0), text);
         app.buffer.cursor = Cursor::new(0, 0);
-        app.blocks = BlockCache::build(&app.buffer);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
         app.buffer.dirty_line = None;
         app
     }
@@ -1007,15 +1007,19 @@ mod tests {
 
     #[test]
     fn lone_dollar_line_followed_by_heading_with_math_disabled() {
-        let mut app = app_with("$$\n# Heading\n");
+        let mut app = app_with("$$\n# Heading\n$$\\alpha$$\n");
         app.config.markdown.math = false;
         sync(&mut app);
-        let cache = app.cache.borrow();
+        // The block cache follows the setting, not only the render cache:
+        // list editing and table motions read these kinds too.
         assert_eq!(
-            cache.entry(1).unwrap().block,
-            BlockKind::Heading(1),
-            "heading under lone $$ must stay heading when math = false"
+            app.blocks.kinds[..3],
+            [BlockKind::Paragraph, BlockKind::Heading(1), BlockKind::Paragraph]
         );
+        let cache = app.cache.borrow();
+        assert_eq!(cache.entry(0).unwrap().block, BlockKind::Paragraph);
+        assert_eq!(cache.entry(1).unwrap().block, BlockKind::Heading(1));
+        assert_eq!(cache.entry(2).unwrap().block, BlockKind::Paragraph);
     }
 
 }

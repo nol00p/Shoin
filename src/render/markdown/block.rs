@@ -70,10 +70,13 @@ pub struct BlockCache {
     /// Carry state ENTERING each line. `carry[i]` is the state before line i.
     pub carry: Vec<Carry>,
     pub revision: u64,
+    /// `[markdown] math` as it was when the cache was built. The setting
+    /// changes what a `$$` line opens, so flipping it means a rebuild.
+    pub math: bool,
 }
 
 impl BlockCache {
-    pub fn build(buffer: &Buffer) -> Self {
+    pub fn build(buffer: &Buffer, math: bool) -> Self {
         let n = buffer.line_count();
         let mut kinds = Vec::with_capacity(n);
         let mut carry = Vec::with_capacity(n);
@@ -81,7 +84,7 @@ impl BlockCache {
         for i in 0..n {
             carry.push(cur.clone());
             let line = buffer.line_text(i);
-            let (kind, next) = classify(&line, &cur, i == 0);
+            let (kind, next) = classify(&line, &cur, i == 0, math);
             kinds.push(kind);
             promote_table_header(&mut kinds, buffer, i, &cur);
             cur = next;
@@ -90,6 +93,7 @@ impl BlockCache {
             kinds,
             carry,
             revision: buffer.revision,
+            math,
         }
     }
 
@@ -111,7 +115,7 @@ impl BlockCache {
 
         // No valid entering state to resume from — rebuild wholesale.
         if start == 0 || start >= self.carry.len() {
-            *self = Self::build(buffer);
+            *self = Self::build(buffer, self.math);
             return n.saturating_sub(1);
         }
 
@@ -131,7 +135,7 @@ impl BlockCache {
             };
             self.carry[i] = cur.clone();
             let line = buffer.line_text(i);
-            let (kind, next) = classify(&line, &cur, i == 0);
+            let (kind, next) = classify(&line, &cur, i == 0, self.math);
             self.kinds[i] = kind;
             promote_table_header(&mut self.kinds, buffer, i, &cur);
             last = i;
@@ -169,7 +173,11 @@ impl BlockCache {
 
 /// Classify one line given the carry state entering it.
 /// Returns its kind and the carry state leaving it.
-pub fn classify(line: &str, carry: &Carry, is_file_head: bool) -> (BlockKind, Carry) {
+///
+/// `math` is `[markdown] math`. Off, a `$$` line is the prose it was before
+/// math existed: it never opens a block, so the lines under it classify
+/// exactly as they would without the feature.
+pub fn classify(line: &str, carry: &Carry, is_file_head: bool, math: bool) -> (BlockKind, Carry) {
     // Multi-line constructs win over anything their body might resemble.
     match carry {
         Carry::InFrontMatter => {
@@ -223,13 +231,18 @@ pub fn classify(line: &str, carry: &Carry, is_file_head: bool) -> (BlockKind, Ca
     // ruleset has no block kind for — such lines simply stay Paragraph.
     let indent = leading_ws_cols(line);
 
-    if indent < 4 {
-        let trimmed_start = line.trim_start();
-        if let Some(after) = trimmed_start.strip_prefix("$$") {
-            if after.contains("$$") {
-                return (BlockKind::MathBlock, Carry::None);
-            } else {
-                return (BlockKind::MathBlock, Carry::InMath);
+    if math && indent < 4 {
+        if let Some(after) = line.trim_start().strip_prefix("$$") {
+            match after.find("$$") {
+                // `$$x$$` alone on its line is a one-line block.
+                Some(p) if after[p + 2..].trim().is_empty() => {
+                    return (BlockKind::MathBlock, Carry::None);
+                }
+                // `$$x$$ more text` is a paragraph that holds display math,
+                // as in Pandoc; the inline scanner picks out the `$$…$$`.
+                Some(_) => {}
+                // No closing `$$` yet: the block runs on below.
+                None => return (BlockKind::MathBlock, Carry::InMath),
             }
         }
     }
@@ -522,7 +535,7 @@ mod tests {
 
     /// Classify a standalone line with no carry, not at file head.
     fn kind(line: &str) -> BlockKind {
-        classify(line, &Carry::None, false).0
+        classify(line, &Carry::None, false, true).0
     }
 
     fn buf(text: &str) -> Buffer {
@@ -536,7 +549,7 @@ mod tests {
     #[test]
     fn tables_classify_header_delimiter_and_body() {
         let b = buf("intro\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n");
-        let cache = BlockCache::build(&b);
+        let cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[0], BlockKind::Paragraph, "prose above is untouched");
         assert_eq!(cache.kinds[1], BlockKind::Table, "header row promoted");
         assert_eq!(cache.kinds[2], BlockKind::Table, "delimiter row");
@@ -557,13 +570,13 @@ mod tests {
     #[test]
     fn editing_the_header_row_keeps_it_a_header() {
         let mut b = buf("intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
-        let mut cache = BlockCache::build(&b);
+        let mut cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[2], BlockKind::Table);
 
         b.insert_str(Cursor::new(2, 3), "x");
         cache.invalidate_from(&b, 2);
         assert_eq!(cache.kinds[2], BlockKind::Table, "header row stays a header");
-        assert_eq!(cache.kinds, BlockCache::build(&b).kinds);
+        assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
     }
 
     /// Removing the delimiter row must demote the header again. This is why
@@ -571,14 +584,14 @@ mod tests {
     #[test]
     fn deleting_the_delimiter_row_demotes_the_header() {
         let mut b = buf("| a | b |\n|---|---|\n| 1 | 2 |\n");
-        let mut cache = BlockCache::build(&b);
+        let mut cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[0], BlockKind::Table);
 
         let start = b.rope.line_to_char(1);
         let end = b.rope.line_to_char(2);
         b.delete_chars(start, end);
         cache.invalidate_from(&b, 0);
-        assert_eq!(cache.kinds, BlockCache::build(&b).kinds);
+        assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
         assert_eq!(cache.kinds[0], BlockKind::Paragraph, "no delimiter, no table");
     }
 
@@ -655,21 +668,21 @@ mod tests {
     #[test]
     fn fenced_code_spans_lines() {
         let b = buf("```rust\nlet x = 1;\n```\nafter\n");
-        let cache = BlockCache::build(&b);
+        let cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[0], BlockKind::FenceOpen("rust".into()));
         assert!(matches!(cache.kinds[1], BlockKind::FenceBody { .. }));
         assert_eq!(cache.kinds[2], BlockKind::FenceClose);
         assert_eq!(cache.kinds[3], BlockKind::Paragraph);
         // A `#` inside the fence is body, not a heading.
         let b2 = buf("```\n# not a heading\n```\n");
-        let c2 = BlockCache::build(&b2);
+        let c2 = BlockCache::build(&b2, true);
         assert!(matches!(c2.kinds[1], BlockKind::FenceBody { .. }));
     }
 
     #[test]
     fn front_matter_only_at_head() {
         let b = buf("---\ntitle: x\n---\n# Real heading\n");
-        let cache = BlockCache::build(&b);
+        let cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[0], BlockKind::FrontMatter);
         assert_eq!(cache.kinds[1], BlockKind::FrontMatter);
         assert_eq!(cache.kinds[2], BlockKind::FrontMatter);
@@ -679,13 +692,13 @@ mod tests {
     #[test]
     fn incremental_invalidation_matches_full_rebuild() {
         let mut b = buf("# Title\n\nsome prose\n- a list\n> a quote\n");
-        let mut cache = BlockCache::build(&b);
+        let mut cache = BlockCache::build(&b, true);
 
         // Edit line 2: turn prose into a heading.
         b.insert_str(Cursor::new(2, 0), "## ");
         cache.invalidate_from(&b, 2);
 
-        let fresh = BlockCache::build(&b);
+        let fresh = BlockCache::build(&b, true);
         assert_eq!(cache.kinds, fresh.kinds);
         assert_eq!(cache.carry, fresh.carry);
         assert_eq!(cache.kinds[2], BlockKind::Heading(2));
@@ -699,7 +712,7 @@ mod tests {
     #[test]
     fn an_edit_is_reclassified_even_when_the_line_above_is_unchanged() {
         let mut b = buf("intro\n\nplain para\n\ntail\n");
-        let mut cache = BlockCache::build(&b);
+        let mut cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[2], BlockKind::Paragraph);
 
         b.insert_str(Cursor::new(2, 0), "- ");
@@ -710,21 +723,21 @@ mod tests {
             "typing `- ` makes the line a list item: {:?}",
             cache.kinds[2]
         );
-        assert_eq!(cache.kinds, BlockCache::build(&b).kinds);
+        assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
     }
 
     #[test]
     fn incremental_invalidation_across_a_fence_edit() {
         // Opening a fence must reclassify the lines below it.
         let mut b = buf("prose\ncode line\nmore\n");
-        let mut cache = BlockCache::build(&b);
+        let mut cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[1], BlockKind::Paragraph);
 
         b.insert_str(Cursor::new(0, 0), "```\n");
         // Rescan from the edited first line.
         cache.invalidate_from(&b, 0);
 
-        let fresh = BlockCache::build(&b);
+        let fresh = BlockCache::build(&b, true);
         assert_eq!(cache.kinds, fresh.kinds);
         assert_eq!(cache.kinds[0], BlockKind::FenceOpen(String::new()));
         assert!(matches!(cache.kinds[1], BlockKind::FenceBody { .. }));
@@ -733,7 +746,7 @@ mod tests {
     #[test]
     fn multiline_math_blocks_classify_across_lines() {
         let b = buf("$$\n\\nabla \\times \\vec{F}\n$$\nprose\n");
-        let cache = BlockCache::build(&b);
+        let cache = BlockCache::build(&b, true);
         assert_eq!(cache.kinds[0], BlockKind::MathBlock);
         assert_eq!(cache.kinds[1], BlockKind::MathBlock);
         assert_eq!(cache.kinds[2], BlockKind::MathBlock);
@@ -741,10 +754,34 @@ mod tests {
 
         // Blank line bounds unclosed $$:
         let unclosed = buf("$$\n\\nabla \\times \\vec{F}\n\nnormal prose\n");
-        let cache_unclosed = BlockCache::build(&unclosed);
+        let cache_unclosed = BlockCache::build(&unclosed, true);
         assert_eq!(cache_unclosed.kinds[0], BlockKind::MathBlock);
         assert_eq!(cache_unclosed.kinds[1], BlockKind::MathBlock);
         assert_eq!(cache_unclosed.kinds[2], BlockKind::Blank);
         assert_eq!(cache_unclosed.kinds[3], BlockKind::Paragraph);
+    }
+
+    #[test]
+    fn text_after_a_closed_one_line_block_makes_it_a_paragraph() {
+        let k = |l: &str| classify(l, &Carry::None, false, true);
+        assert_eq!(k("$$x$$"), (BlockKind::MathBlock, Carry::None));
+        assert_eq!(k("  $$x$$  "), (BlockKind::MathBlock, Carry::None));
+        assert_eq!(k("$$E=mc^2$$ is famous"), (BlockKind::Paragraph, Carry::None));
+        assert_eq!(k("$$a$$ and $$b$$"), (BlockKind::Paragraph, Carry::None));
+        assert_eq!(k("$$ x"), (BlockKind::MathBlock, Carry::InMath));
+    }
+
+    #[test]
+    fn math_off_classifies_dollar_lines_as_without_math() {
+        let b = buf("$$\n# Heading\n- item\n$$x$$\n```\n$$\n```\n");
+        let cache = BlockCache::build(&b, false);
+        assert_eq!(cache.kinds[0], BlockKind::Paragraph);
+        assert_eq!(cache.kinds[1], BlockKind::Heading(1));
+        assert!(matches!(cache.kinds[2], BlockKind::ListItem { .. }));
+        assert_eq!(cache.kinds[3], BlockKind::Paragraph);
+        assert_eq!(cache.kinds[4], BlockKind::FenceOpen(String::new()));
+        assert!(matches!(cache.kinds[5], BlockKind::FenceBody { .. }));
+        assert_eq!(cache.kinds[6], BlockKind::FenceClose);
+        assert!(!cache.carry.contains(&Carry::InMath));
     }
 }

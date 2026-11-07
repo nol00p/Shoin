@@ -155,9 +155,9 @@ impl BufferState {
         self.render_dirty.take()
     }
 
-    fn new(buffer: Buffer) -> BufferState {
+    fn new(buffer: Buffer, math: bool) -> BufferState {
         BufferState {
-            blocks: BlockCache::build(&buffer),
+            blocks: BlockCache::build(&buffer, math),
             buffer,
             cache: RefCell::new(RenderCache::default()),
             render_dirty: Cell::new(None),
@@ -629,7 +629,7 @@ impl App {
                 end: buffer.cursor.line,
             },
             theme: Theme::from_config(&config.theme).unwrap_or_default(),
-            docs: vec![BufferState::new(buffer)],
+            docs: vec![BufferState::new(buffer, config.markdown.math)],
             alternate: None,
             layout: Node::leaf(1, 0),
             focus_pane: 1,
@@ -918,6 +918,16 @@ impl App {
             };
             self.render_dirty.set(Some(merged));
         }
+        // `[markdown] math` decides what a `$$` line opens; a cache built
+        // under the other value is wrong everywhere, not just at an edit.
+        if self.blocks.math != self.config.markdown.math {
+            let math = self.config.markdown.math;
+            let i = self.current();
+            let doc = &mut self.docs[i];
+            doc.blocks = BlockCache::build(&doc.buffer, math);
+            doc.buffer.dirty_line = None;
+            return;
+        }
         if self.blocks.revision == self.buffer.revision {
             self.buffer.dirty_line = None;
             return;
@@ -937,7 +947,7 @@ impl App {
             None => {
                 let i = self.current();
                 let doc = &mut self.docs[i];
-                doc.blocks = BlockCache::build(&doc.buffer);
+                doc.blocks = BlockCache::build(&doc.buffer, self.config.markdown.math);
             }
         }
     }
@@ -981,7 +991,16 @@ impl App {
                 self.theme = Theme::from_config(&new.theme).unwrap_or_default();
                 self.keymap = keymap;
                 let was_mouse = self.config.input.mouse;
+                let was_math = self.config.markdown.math;
                 self.config = new;
+                // Every open document, not only the current one: a split pane
+                // shows another document's block kinds too.
+                if self.config.markdown.math != was_math {
+                    let math = self.config.markdown.math;
+                    for doc in &mut self.docs {
+                        doc.blocks = BlockCache::build(&doc.buffer, math);
+                    }
+                }
                 self.clipboard.set_background(self.config.editor.clipboard_background);
                 // A reload re-reads the file, which knows nothing about `--zen`
                 // or a `:zen` toggle — put those back on top of it.
@@ -2508,7 +2527,7 @@ impl App {
         match Buffer::open(path.clone(), &self.config.markdown.plain_text_extensions) {
             Ok(mut buffer) => {
                 buffer.read_only = self.view;
-                self.docs.push(BufferState::new(buffer));
+                self.docs.push(BufferState::new(buffer, self.config.markdown.math));
                 self.switch_to(self.docs.len() - 1);
                 self.notify(format!("opened {}", path.display()), FlashKind::Info);
                 true
@@ -3231,7 +3250,7 @@ impl App {
         self.buffer = buffer;
         // Built here, not by `refresh_blocks`: both buffers are at revision 0,
         // which it would take to mean nothing changed.
-        self.blocks = BlockCache::build(&self.buffer);
+        self.blocks = BlockCache::build(&self.buffer, self.config.markdown.math);
     }
 
     /// Turn zen mode on or off, remembering what it hid so leaving it restores
@@ -5593,7 +5612,7 @@ mod tests {
         let mut app = App::new(Config::default(), None, None).unwrap();
         app.buffer.insert_str(Cursor::new(0, 0), text);
         app.buffer.cursor = Cursor::new(0, 0);
-        app.blocks = BlockCache::build(&app.buffer);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
         app
     }
 
@@ -6272,19 +6291,19 @@ mod tests {
         feed(&mut app, "jjI## ");
         esc(&mut app);
         app.refresh_blocks();
-        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer).kinds);
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
 
         // Delete the fence opener — every following line's carry shifts.
         feed(&mut app, "jjdd");
         app.refresh_blocks();
-        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer).kinds);
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
         assert_eq!(app.blocks.revision, app.buffer.revision);
 
         // Undo puts it back; undo bypasses `touch`, so it must mark its own
         // dirty line or the cache silently keeps the post-delete carries.
         app.buffer.undo();
         app.refresh_blocks();
-        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer).kinds);
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
     }
 
     /// `--zen` and `:zen` live on `App`, so a config reload cannot forget them,
@@ -8184,7 +8203,7 @@ mod tests {
             std::fs::write(&path, on_disk).unwrap();
             let mut app = App::new(Config::default(), None, None).unwrap();
             app.buffer = Buffer::open(path.clone(), &[]).unwrap();
-            app.blocks = BlockCache::build(&app.buffer);
+            app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
 
             feed(&mut app, "G");
             assert_eq!(app.buffer.cursor.line, 1, "{on_disk:?}: `G` is on `two`");
@@ -8833,7 +8852,7 @@ mod tests {
         let mut app = App::new(cfg, None, None).unwrap();
         app.buffer.insert_str(Cursor::new(0, 0), text);
         app.buffer.cursor = Cursor::new(0, 0);
-        app.blocks = BlockCache::build(&app.buffer);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
         app
     }
 

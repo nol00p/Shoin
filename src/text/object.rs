@@ -348,7 +348,7 @@ mod tests {
 
     /// `resolve` with the buffer's own list view, tab width 4.
     fn obj(b: &Buffer, key: char, around: bool) -> Option<ObjectRange> {
-        let cache = BlockCache::build(b);
+        let cache = BlockCache::build(b, true);
         resolve(b, &Lists::new(b, &cache.kinds, 4), key, around)
     }
 

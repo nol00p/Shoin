@@ -1070,7 +1070,7 @@ mod tests {
     /// then derive the map. `carry` sets the state entering the line, which is
     /// what tells a fence delimiter from a paragraph of backticks.
     fn map_in(line: &str, carry: &Carry) -> ConcealMap {
-        let (block, _) = classify(line, carry, false);
+        let (block, _) = classify(line, carry, false, true);
         let cfg = MarkdownConfig { math: true, ..Default::default() };
         let spans = if block.allows_inline() {
             inline::scan(line, &cfg)
