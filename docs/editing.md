@@ -56,7 +56,7 @@ on it for the next press.
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
 the same undo step. When a number gets wider or narrower (`9.` → `10.`), the
-lines of its item move with its text, sub-items and code blocks included. Bullet lists are never changed. Turn this off with `list_renumber = false`
+lines of its item move with its text, sub-items and code blocks included. Bullet lists are never renumbered. Turn this off with `list_renumber = false`
 in `[editor]`.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
@@ -121,7 +121,9 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   `$$` block, or a single line. A block that starts at or past the item's
   text column moves whole, so it keeps its shape and other Markdown tools
   still read it as part of the item. A block that starts short of it, such
-  as lazy text or a sub-item indented by 2 under `9.`, stays whole. Blocks
+  as lazy text or a sub-item indented by 2 under `9.`, stays whole, and a
+  moved sub-item's own lazy lines stay too. Narrowing only ever takes
+  spaces, never text. Blocks
   with a tab-indented line stay, and so does an item with a tab before or
   right after its number, where columns depend on tab stops.
 - Shoin itself does not yet read a fence or `$$` block indented 4 or more

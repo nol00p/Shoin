@@ -4169,14 +4169,16 @@ impl App {
             self.buffer.delete_chars(start, start + r.cols.len());
             self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
         }
-        // `realign` only shifts space-indented lines at or past a text
-        // column, so a left shift always has the spaces to take.
+        // `realign` only narrows lines with the spaces to give; taking no more
+        // than the leading spaces there are keeps any slip from eating text.
         for (line, delta) in shifts {
             if delta > 0 {
                 self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(delta as usize));
             } else {
+                let spaces = self.buffer.line_text(line).chars().take_while(|c| *c == ' ').count();
+                let n = delta.unsigned_abs().min(spaces);
                 let at = self.buffer.rope.line_to_char(line);
-                self.buffer.delete_chars(at, at + delta.unsigned_abs());
+                self.buffer.delete_chars(at, at + n);
             }
         }
     }
@@ -7961,6 +7963,21 @@ mod tests {
         app.config.editor.list_renumber = false;
         alt(&mut app, 'j');
         assert_eq!(text(&app), "10. j\n9. i\n   more\n");
+    }
+
+    /// Narrowing never eats text: a sub-item's lazy lines stay, and a shift
+    /// of two takes two spaces, not a line break.
+    #[test]
+    fn a_narrower_number_never_cuts_text() {
+        let mut app = app_with("9. h\n10. i\n    - x\nlazy\n");
+        feed(&mut app, "j");
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "9. i\n   - x\nlazy\n10. h\n");
+
+        let mut app = app_with("8. a\n100. b\n     - x\nz\nw\nqq\n");
+        feed(&mut app, "j");
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "8. b\n   - x\nz\nw\nqq\n9. a\n");
     }
 
     /// Nested numbers that both widen add up for the lines inside both.
