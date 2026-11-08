@@ -312,6 +312,10 @@ pub struct App {
     dot: Vec<Replay>,
     /// Input of the command currently in flight.
     recording: Vec<Replay>,
+    /// True while `on_key` runs. A key that takes focus away from a Visual
+    /// selection is dealt with by `on_key` itself, after the key; only when
+    /// no key is under way (a mouse click) does `sync_after_input` end it.
+    in_key: bool,
     /// Buffer revision when the in-flight command began, to tell if it edited.
     dot_rev: u64,
     /// True while replaying `dot`, so the replay is not itself recorded.
@@ -673,6 +677,7 @@ impl App {
             search: None,
             dot: Vec::new(),
             recording: Vec::new(),
+            in_key: false,
             dot_rev: 0,
             replaying: false,
             keymap,
@@ -1672,9 +1677,15 @@ impl App {
         // pane left behind.
         let here = (self.focus_pane, self.current());
         let tree = self.tree.as_ref().is_some_and(|t| t.focused);
-        if matches!(self.mode, Mode::Visual | Mode::VisualLine) && (tree || self.visual_owner != Some(here)) {
+        let away = tree || self.visual_owner != Some(here);
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) && away && !self.in_key {
+            // A mouse click: no key will see it end, so it ends here, and
+            // its keys are not a change `.` repeats.
             self.mode = Mode::Normal;
             self.pending.reset();
+            if !self.replaying {
+                self.recording.clear();
+            }
         }
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
             // The anchor stays inside the text, as the cursor does. A drag
@@ -2020,6 +2031,14 @@ impl App {
     }
 
     pub(crate) fn on_key(&mut self, key: KeyEvent) {
+        // Saved and put back rather than cleared: `.` replays keys through
+        // here from inside a key.
+        let outer = std::mem::replace(&mut self.in_key, true);
+        self.handle_key(key);
+        self.in_key = outer;
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
         // The help overlay owns all input while it is open.
         if self.help.is_some() {
             self.on_key_help(key);
@@ -2069,6 +2088,12 @@ impl App {
         }
 
         let mode = self.mode.clone();
+        // The pane and document a selection under way belongs to, to see
+        // after the key whether the key took focus away from it.
+        let selection = match mode {
+            Mode::Visual | Mode::VisualLine => self.visual_owner,
+            _ => None,
+        };
 
         // Open one undo step per Normal/Visual command. An Insert session
         // continues the group its entering command opened, so the whole
@@ -2089,6 +2114,22 @@ impl App {
             Mode::Command(buf) => self.on_key_command(key, buf),
             Mode::Search { query, reverse } => self.on_key_search(key, query, reverse),
             Mode::Prompt(p) => self.on_key_prompt(key, p),
+        }
+
+        // A key that took focus away from a selection (`<C-w>q`, `<C-w>v`,
+        // `<C-^>`, the tree) ends it. Such a session is not a change `.`
+        // repeats: its keys, the pane key among them, are dropped, and `.`
+        // keeps the change before it. Moving again is `Alt-j` again.
+        let tree = self.tree.as_ref().is_some_and(|t| t.focused);
+        if selection.is_some_and(|owner| tree || owner != (self.focus_pane, self.current())) {
+            if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+                self.mode = Mode::Normal;
+            }
+            self.pending.reset();
+            if !self.replaying {
+                self.recording.clear();
+                self.dot_rev = self.buffer.revision;
+            }
         }
 
         // Seal the step unless we are still inserting.
@@ -3159,7 +3200,9 @@ impl App {
     }
 
     fn repeat_dot(&mut self) {
-        if self.dot.is_empty() {
+        // A `.` that ended up inside `dot` (typed after a count, or in
+        // Visual) must not replay itself forever.
+        if self.dot.is_empty() || self.replaying {
             return;
         }
         self.replaying = true;
@@ -8119,6 +8162,92 @@ mod tests {
         // Both moved lines were still selected, with the newline the drag
         // went across.
         assert_eq!(text(&app), "a\n");
+    }
+
+    /// A Visual session that a pane key ends is not a change `.` repeats:
+    /// `.` keeps the change before it, and the pane key is never replayed.
+    #[test]
+    fn a_visual_session_ended_by_a_pane_key_leaves_dot_alone() {
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        app.split_pane(true);
+        app.split_pane(true);
+        feed(&mut app, "x");
+        let after_x = text(&app);
+        feed(&mut app, "u");
+        feed(&mut app, "jV");
+        alt(&mut app, 'j');
+        ctrl(&mut app, 'w');
+        feed(&mut app, "q");
+        assert_eq!(app.layout.ids().len(), 2);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending.is_clean(), "no half-typed pane key left");
+        assert_eq!(text(&app), "- a\n- c\n- b\n- d\n");
+        // `.` is still the `u`: it undoes the move, closes no pane.
+        feed(&mut app, ".");
+        assert_eq!(app.layout.ids().len(), 2);
+        assert_ne!(text(&app), after_x);
+        assert_eq!(app.mode, Mode::Normal);
+
+        // The same for `<C-w>v`.
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        ctrl(&mut app, 'w');
+        feed(&mut app, "v");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.dot.is_empty(), "nothing filed for `.`");
+    }
+
+    /// `.` that ends up in its own recording (`x`, then `2.`) runs once, it
+    /// does not replay itself until the stack runs out.
+    #[test]
+    fn a_counted_dot_does_not_recurse() {
+        let mut app = app_with("abcdefghij\n");
+        feed(&mut app, "x2.");
+        feed(&mut app, ".");
+        assert!(text(&app).len() < "abcdefghij\n".len());
+    }
+
+    /// Moving to the file tree ends a selection too.
+    #[test]
+    fn moving_to_the_tree_ends_a_selection() {
+        let mut app = app_with("- a\n- b\n");
+        app.tree = Some(FileTree::open(std::env::current_dir().unwrap()));
+        ctrl(&mut app, 'w');
+        feed(&mut app, "l");
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        ctrl(&mut app, 'w');
+        feed(&mut app, "h");
+        assert!(app.tree.as_ref().unwrap().focused);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.anchor.is_none());
+        assert!(app.dot.is_empty());
+    }
+
+    /// Blank lines inside a list that touch no item get their own message.
+    #[test]
+    fn a_selection_of_blank_lines_says_it_touches_no_item() {
+        let mut app = app_with("- a\n\n  - a1\n- b\n");
+        feed(&mut app, "jV");
+        alt(&mut app, 'j');
+        assert_eq!(flash_text(&app), "selection touches no item");
+        assert_eq!(text(&app), "- a\n\n  - a1\n- b\n");
+    }
+
+    /// In a `.` replay the text can shrink under the anchor between keys,
+    /// before `sync_after_input` would keep it inside: `move_lines` clamps.
+    #[test]
+    fn move_lines_in_a_replay_with_the_anchor_past_the_end() {
+        let mut app = app_with("a\nb\nc\nd\n");
+        app.config.keys.visual.insert("J".into(), "join_lines".into());
+        app.config.keys.visual.insert("K".into(), "move_lines_up".into());
+        app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+        feed(&mut app, "GVkJK");
+        esc(&mut app);
+        feed(&mut app, "G.");
+        assert!(text(&app).ends_with('\n'), "no newline lost: {:?}", text(&app));
+        assert!(!text(&app).contains("\n\n"), "no line made up: {:?}", text(&app));
     }
 
     /// A selection belongs to the pane it was made in. Focusing, splitting
