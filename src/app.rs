@@ -4248,13 +4248,32 @@ impl App {
     /// A number that changes width (`9.` → `10.`) moves its item's text
     /// column, so the item's lines move with it when other Markdown tools
     /// would otherwise read them differently (`realign`), in the same step.
-    /// Every change is to the start of a line: indent and number.
+    /// Every change is to the start of a line, and only what differs there
+    /// is rewritten.
     fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
         let edits: Vec<list::Renumber> = edits.into_iter().collect();
-        for e in realign::line_edits(&self.buffer.rope, &edits) {
-            let start = self.buffer.char_index(Cursor::new(e.line, 0));
-            self.buffer.delete_chars(start, start + e.cut);
-            self.buffer.insert_str(Cursor::new(e.line, 0), &e.with);
+        let math = self.config.markdown.math;
+        let kinds = |text: &str| {
+            let mut buffer = Buffer::empty();
+            buffer.rope = ropey::Rope::from_str(text);
+            BlockCache::build(&buffer, math).kinds
+        };
+        self.refresh_blocks();
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+        let item_end = |line: usize| lists.item_bounds(line).map(|(_, end)| end);
+        let shoin = realign::Shoin { kinds: &kinds, item_end: &item_end };
+        for e in realign::line_edits(&self.buffer.rope, &edits, &shoin) {
+            let was: Vec<char> = self.buffer.line_text(e.line).chars().take(e.cut).collect();
+            let same = was.iter().zip(e.with.chars()).take_while(|(a, b)| **a == *b).count();
+            let at = Cursor::new(e.line, same);
+            if e.cut > same {
+                let start = self.buffer.char_index(at);
+                self.buffer.delete_chars(start, start + (e.cut - same));
+            }
+            let new: String = e.with.chars().skip(same).collect();
+            if !new.is_empty() {
+                self.buffer.insert_str(at, &new);
+            }
         }
     }
 
@@ -8077,18 +8096,21 @@ mod tests {
         }
     }
 
-    /// Code moves with its item, so what it holds stays exactly the same,
-    /// both ways: a narrower number takes back the space code would gain.
+    /// Code keeps reading the same: a narrower number takes the change in
+    /// the gap after it. A fence keeps its place, since Shoin stops seeing
+    /// one 4 columns in.
     #[test]
-    fn code_in_an_item_follows_its_number() {
-        let mut app = app_with("9. i\n   ```\n   code\n   ```\n10. j\n");
-        alt(&mut app, 'j');
-        assert_eq!(text(&app), "9. j\n10. i\n    ```\n    code\n    ```\n");
-
+    fn code_in_an_item_keeps_reading_as_code() {
         let mut app = app_with("9. h\n10. i\n\n        code\n");
         app.buffer.cursor = Cursor::new(1, 0);
         alt(&mut app, 'k');
-        assert_eq!(text(&app), "9. i\n\n       code\n10. h\n");
+        assert_eq!(text(&app), "9.  i\n\n        code\n10. h\n");
+
+        let mut app = app_with("9. i\n   ```\n   code\n   ```\n10. j\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "9. j\n10. i\n   ```\n   code\n   ```\n");
+        app.refresh_blocks();
+        assert!(matches!(app.blocks.kinds[3], BlockKind::FenceBody { .. }));
     }
 
     /// `<al` renumbers through `renumber_lists`, which realigns too, in the
@@ -8115,11 +8137,12 @@ mod tests {
         alt(&mut app, 'k');
         assert_eq!(text(&app), "8. h\n9. b\n    - y\n10. a\n    - x\n");
 
-        // b's code has a tab no shift can fix; a still moves in.
+        // b's tab-indented code would take a space at `9.`; the gap after
+        // its number takes the change instead, while a's lines move in.
         let mut app = app_with("8. h\n9. a\n   - x\n10. b\n\n    \tcode\n");
         app.buffer.cursor = Cursor::new(3, 0);
         alt(&mut app, 'k');
-        assert_eq!(text(&app), "8. h\n9. b\n\n    \tcode\n10. a\n    - x\n");
+        assert_eq!(text(&app), "8. h\n9.  b\n\n    \tcode\n10. a\n    - x\n");
 
         let list = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n   1. s\n   2. t\n";
         let mut app = app_with(list);

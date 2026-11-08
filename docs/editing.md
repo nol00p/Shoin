@@ -56,8 +56,8 @@ on it for the next press.
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
 the same undo step. When a number gets wider or narrower (`9.` → `10.`),
-the lines under it move with its text where other Markdown tools would
-otherwise read them differently. Bullet lists are never changed. Turn both
+the item is kept reading the same to other Markdown tools, by the spaces
+after the number or by moving its lines. Bullet lists are never changed. Turn both
 off with `list_renumber = false` in `[editor]`.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
@@ -128,17 +128,21 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   if their numbers are out of order.
 - Going from `9.` to `10.` pushes that item's text one column right, and
   CommonMark tools such as GitHub read everything in an item from its text
-  column: a sub-item, fence or table left at the old column would fall out
-  of the item, and indented code would gain a space. Pandoc's Markdown,
-  which export uses, follows the same column rule in the common cases, but
-  only the CommonMark reading is checked: each item whose number changes
-  width is parsed before and after. If it reads as before with only the number changed, it is left
-  as written: a list nested by 4, say, or plain continuation text. If not,
-  every line of the item at or past the old column, its text included,
-  moves by the same amount, which leaves the item reading exactly as
-  before; narrowing (`10.` → `9.`) takes the space back the same way. Lazy
-  lines stay. When moving would not help either, as can happen with tabs,
-  only the number changes.
+  column: a sub-item or table left at the old column would fall out of the
+  item, and indented code would gain a space. So each item whose number
+  changes width gets the smallest change that keeps it reading as before:
+  the number alone if nothing depends on the column (a list nested by 4,
+  say, or plain continuation text); else the spaces after the number taking
+  up the difference, so the text column stays (`10. a` becomes `9.  a`, and
+  `9.  a` becomes `10. a`); else every line of the item at or past the old
+  column, its text included, moving by the same amount. Lazy lines stay.
+  Shoin parses the item before and after to check this, both as CommonMark
+  and as its own editor and HTML export read it. Shoin does not yet see a
+  fence, `$$` block or heading as one when it is indented 4 or more
+  columns, even inside a list item, so an item holding one keeps its lines
+  where they are; other tools then read that block outside the item, as
+  they did before. When nothing works, as can happen with tabs, only the
+  number changes.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.
