@@ -55,8 +55,8 @@ on it for the next press.
 
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
-the same undo step. When a number gets wider (`9.` → `10.`), the lines of
-its item move so they stay inside it. Bullet lists are
+the same undo step. When a number gets wider (`9.` → `10.`), the text and
+sub-items under it move so they stay inside it. Bullet lists are
 never renumbered. Turn both off with `list_renumber = false` in `[editor]`.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
@@ -118,24 +118,15 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   is refused.
 - When a number widens, its item's text column moves right (`9. ` is 3
   columns, `10. ` is 4), and a line left at the old column would no longer
-  belong to the item in other Markdown tools. The item's lines are taken a
-  block at a time: a sub-item with everything under it, a fenced or `$$`
-  block, or a single line.
-  - A sub-item moves only if it would fall out, just far enough to reach the
-    new column. One already deep enough stays, so a list nested by 4 keeps
-    its 4-space steps.
-  - Other text at or past the old column moves by the whole difference, so
-    its indent relative to the text is kept: indented code stays code. A
-    block with a tab-indented line stays as it is, so code never changes.
-  - Lazy text and other lines short of their block stay, and so does
-    everything after a fence that is never closed.
-  - An item with a tab before or after its marker is left alone, since tab
-    stops decide its columns. When a number narrows nothing moves: every
-    line is still inside the item.
-- Shoin itself does not yet read a fence, `$$` block, heading or rule
-  indented 4 or more columns, even inside a list item, so one moved from
-  column 3 to 4 under a `10.` shows as plain text in the editor. Other
-  Markdown tools read it correctly.
+  belong to the item in other Markdown tools. So an item that holds only
+  text and sub-items has its lines moved in. A sub-item moves only if it
+  would fall out, just far enough to reach the new column, so a list nested
+  by 4 keeps its 4-space steps; other text at or past the old column moves
+  by the whole difference. Lazy text stays. An item holding anything that
+  might be code (a fence, a `$$` block, a table, a heading, a quote, a tab,
+  or a line indented four or more past its text) is left exactly as it is,
+  so code never changes. When a number narrows nothing moves: every line is
+  still inside the item.
 - Renumbering keeps the number a list starts at, so a list starting at `3.`
   still starts at `3.` after its first item moves away. A sub-list the edit
   creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists

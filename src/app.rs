@@ -7964,13 +7964,17 @@ mod tests {
         assert_eq!(text(&app), "8. h\n9. i\n   more\n10. j\n", "renumber and shift: one undo step");
     }
 
-    /// Sub-items and a code block keep their shape, so a CommonMark reader
-    /// still finds them inside the item.
+    /// A sub-item moves with the lines under it; an item holding code is
+    /// left exactly as it is, so the code can never change.
     #[test]
-    fn a_wider_number_moves_sub_items_and_code_together() {
+    fn a_wider_number_moves_sub_items_but_never_code() {
+        let mut app = app_with("9. i\n   - x\n     more\n10. j\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "9. j\n10. i\n    - x\n      more\n");
+
         let mut app = app_with("9. i\n   - x\n     ```\n     code\n     ```\n10. j\n");
         alt(&mut app, 'j');
-        assert_eq!(text(&app), "9. j\n10. i\n    - x\n      ```\n      code\n      ```\n");
+        assert_eq!(text(&app), "9. j\n10. i\n   - x\n     ```\n     code\n     ```\n");
     }
 
     /// Lines short of the text column, and tab-indented ones, were placed by

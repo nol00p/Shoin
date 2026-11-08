@@ -59,20 +59,6 @@ fn leading_spaces(text: &str) -> Option<usize> {
     Some(n)
 }
 
-/// Whether a line is a list item whose marker (`-`, `*`, `+`, or a number
-/// with `.` or `)`) is followed by a tab, after any spaces: where its text
-/// starts depends on the tab stop.
-fn tab_after_marker(text: &str) -> bool {
-    let body = text.trim_start_matches([' ', '\t']);
-    let digits = body.chars().take_while(char::is_ascii_digit).count();
-    let marker = match body.chars().next() {
-        Some('-' | '*' | '+') => 1,
-        _ if digits > 0 && body[digits..].starts_with(['.', ')']) => digits + 1,
-        _ => return false,
-    };
-    body[marker..].trim_start_matches(' ').starts_with('\t')
-}
-
 /// Why lines touch no run of sibling items to move as one block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunError {
@@ -259,23 +245,14 @@ impl<'a> Lists<'a> {
     /// `edits` widen a number (`9.` → `10.`): worked out on the text as it
     /// is, before any edit is made; nested items that both widen add up.
     ///
-    /// An item's lines are taken a block at a time: a sub-item with
-    /// everything under it, a fenced block, a `$$` block, or a single line.
-    ///
-    /// - A sub-item moves only if it would fall out of the item: when its
-    ///   first line sits between the old and the new text column, just far
-    ///   enough to reach the new one, with its lines. One already deep enough
-    ///   stays, so a list nested by 4 keeps its 4-space steps.
-    /// - Other content at or past the old text column moves by the whole
-    ///   widening, so its indent relative to the text, which can mean
-    ///   something (four more columns is indented code), is kept. A block
-    ///   with a tab-indented line stays whole, so code is never changed.
-    /// - Lines short of where their block starts (lazy text, a short code
-    ///   line) stay, and so does whatever follows a fence left open.
+    /// Only a plain item is touched (`plain_item`): text and sub-items, no
+    /// code of any kind. There, a sub-item moves only if it would fall out
+    /// of the item, just far enough to reach the new text column, with its
+    /// lines (so a list nested by 4 keeps its steps), and a text line at or
+    /// past the old column moves by the whole widening, keeping its indent
+    /// relative to the text. Lazy lines, short of the old column, stay.
     ///
     /// A narrower number moves nothing: every line is still inside the item.
-    /// Left alone as well: whitespace-only lines, and an item with a tab
-    /// before or after its marker, where columns depend on tab stops.
     pub fn realign(&self, edits: &[Renumber]) -> Vec<(usize, usize)> {
         let mut shifts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
         for r in edits {
@@ -283,83 +260,100 @@ impl<'a> Lists<'a> {
             if widening == 0 {
                 continue;
             }
-            let Some(old_col) = self.text_column(r) else { continue };
+            let Some(old_col) = self.text_column_of(r.line) else { continue };
             let new_col = old_col + widening;
             let Some((start, end)) = self.item_bounds(r.line) else { continue };
+            if !self.plain_item(start, end, old_col) {
+                continue;
+            }
+            let indent = |k: usize| leading_spaces(&self.buffer.line_text(k)).unwrap_or(0);
             let mut l = start + 1;
             while l <= end {
-                // A fence that never closes runs to the end of the file, as
-                // far as the item bounds know: nothing past it is the item's.
-                let Some(block) = self.block_end(l, end) else { break };
-                // Each non-blank line of the block, read once, with its indent
-                // (`None` when the indent has a tab).
-                let lines: Vec<(usize, Option<usize>)> = (l..=block)
-                    .map(|k| (k, self.buffer.line_text(k)))
-                    .filter(|(_, text)| !text.trim().is_empty())
-                    .map(|(k, text)| (k, leading_spaces(&text)))
-                    .collect();
-                let item_line = self.is_item(l);
-                l = block + 1;
-                let Some(&(first, Some(first_indent))) = lines.first() else { continue };
-                let (from, by) = if item_line {
-                    if tab_after_marker(&self.buffer.line_text(first))
-                        || !(old_col..new_col).contains(&first_indent)
-                    {
-                        continue;
+                if self.blank(l) {
+                    l += 1;
+                    continue;
+                }
+                let n = indent(l);
+                if self.is_item(l) {
+                    let sub_end = self.bounds(l).1.min(end);
+                    if (old_col..new_col).contains(&n) {
+                        for k in l..=sub_end {
+                            if !self.blank(k) && indent(k) >= n {
+                                *shifts.entry(k).or_default() += new_col - n;
+                            }
+                        }
                     }
-                    (first_indent, new_col - first_indent)
+                    l = sub_end + 1;
                 } else {
-                    if first_indent < old_col || lines.iter().any(|(_, n)| n.is_none()) {
-                        continue;
+                    if n >= old_col {
+                        *shifts.entry(l).or_default() += widening;
                     }
-                    (old_col, widening)
-                };
-                for &(k, n) in &lines {
-                    if n.is_some_and(|n| n >= from) {
-                        *shifts.entry(k).or_default() += by;
-                    }
+                    l += 1;
                 }
             }
         }
         shifts.into_iter().collect()
     }
 
-    /// The column an ordered item's text starts at, from the edit that
-    /// renumbers it: past the number, its `.` or `)`, and the spaces after
-    /// it. One space past the delimiter when the item is empty, or when five
-    /// or more spaces follow (CommonMark then reads indented code, and the
-    /// text column is the one after the delimiter). `None` when a tab is in
-    /// the way.
-    fn text_column(&self, r: &Renumber) -> Option<usize> {
-        let chars: Vec<char> = self.buffer.line_text(r.line).chars().collect();
-        if chars[..r.cols.start].contains(&'\t') {
-            return None;
-        }
-        let after = r.cols.end + 1;
-        let gap = chars.iter().skip(after).take_while(|c| **c == ' ').count();
-        if chars.get(after + gap) == Some(&'\t') {
-            return None;
-        }
-        let empty = after + gap >= chars.len();
-        Some(if empty || gap >= 5 { after + 1 } else { after + gap })
+    /// Whether the item on `start..=end`, with its text at `old_col`, holds
+    /// only text and sub-items: no fence, `$$` block, table, heading, quote
+    /// or rule, no tab in any indent or after any marker, and no line four
+    /// or more columns past the text of the item it belongs to, which
+    /// CommonMark reads as indented code. Anything else might be code whose
+    /// indentation is its meaning, so realign leaves the item as it is.
+    fn plain_item(&self, start: usize, end: usize, old_col: usize) -> bool {
+        (start + 1..=end).all(|l| {
+            if self.blank(l) {
+                return true;
+            }
+            let text = self.buffer.line_text(l);
+            let Some(indent) = leading_spaces(&text) else { return false };
+            // A fence or `$$` delimiter by its text: indented 4 or more,
+            // Shoin's own classifier does not see it as one.
+            let body = text.trim_start();
+            if body.starts_with("```") || body.starts_with("~~~") || body.starts_with("$$") {
+                return false;
+            }
+            let item = self.is_item(l);
+            if !item && !matches!(self.kind(l), Some(BlockKind::Paragraph)) {
+                return false;
+            }
+            if item && self.text_column_of(l).is_none() {
+                return false;
+            }
+            // The item this line belongs to: its parent for an item line,
+            // the innermost item around it for a text line.
+            let owner = if item { self.parent_of(l) } else { self.item_at(l) };
+            let owner_col = match owner {
+                Some(o) if o == start => Some(old_col),
+                Some(o) => self.text_column_of(o),
+                None => None,
+            };
+            owner_col.is_some_and(|c| indent < c + 4)
+        })
     }
 
-    /// The last line of the block starting at `line`, at most `end`: a
-    /// sub-item with its children, a fenced block to its closing fence, a
-    /// run of `$$` block lines, or the line alone. `None` for a fence that
-    /// does not close by `end`.
-    fn block_end(&self, line: usize, end: usize) -> Option<usize> {
-        let last = match self.kind(line) {
-            Some(BlockKind::ListItem { .. }) => self.bounds(line).1,
-            Some(BlockKind::FenceOpen(_)) => (line + 1..=end)
-                .find(|&k| matches!(self.kind(k), Some(BlockKind::FenceClose)))?,
-            Some(BlockKind::MathBlock) => (line..=end)
-                .take_while(|&k| matches!(self.kind(k), Some(BlockKind::MathBlock)))
-                .last()
-                .unwrap_or(line),
-            _ => line,
+    /// The column an item's text starts at: past its indent, its marker
+    /// (`-`, `*`, `+`, or a number with `.` or `)`), and the spaces after it.
+    /// One space past the marker when the item is empty, or when five or more
+    /// spaces follow (CommonMark then reads indented code, and the text
+    /// column is the one after the marker). `None` when a tab is in the way.
+    fn text_column_of(&self, line: usize) -> Option<usize> {
+        let text = self.buffer.line_text(line);
+        let indent = leading_spaces(&text)?;
+        let body: Vec<char> = text.chars().skip(indent).collect();
+        let digits = body.iter().take_while(|c| c.is_ascii_digit()).count();
+        let marker = match body.first() {
+            Some('-' | '*' | '+') => 1,
+            _ if digits > 0 && matches!(body.get(digits), Some('.' | ')')) => digits + 1,
+            _ => return None,
         };
-        Some(last.min(end))
+        let gap = body.iter().skip(marker).take_while(|c| **c == ' ').count();
+        if body.get(marker + gap) == Some(&'\t') {
+            return None;
+        }
+        let empty = marker + gap >= body.len();
+        Some(indent + marker + if empty || gap >= 5 { 1 } else { gap })
     }
 
     /// The edits that number the ordered level containing `line` in sequence,
@@ -649,63 +643,45 @@ mod tests {
     }
 
     #[test]
-    fn realign_moves_blocks_at_the_text_column_whole() {
+    fn realign_moves_text_and_sub_items_of_a_plain_item() {
         assert_eq!(widened("9. a\n   more\n"), vec![(1, 1)]);
         // A sub-item at the text column moves with everything under it.
         assert_eq!(widened("9. a\n   - x\n     more\n"), vec![(1, 1), (2, 1)]);
-        // A fence moves as one block; a code line indented less than the
-        // fence stays, which CommonMark reads the same either way.
-        assert_eq!(widened("9. a\n   ```\n  x = 1\n   ```\n"), vec![(1, 1), (3, 1)]);
         // Already deep enough: a list nested by 4 keeps its steps.
         assert_eq!(widened("9. a\n    - x\n      more\n"), vec![]);
-        // Other content keeps its indent relative to the text: a deeper
-        // continuation line, and indented code four columns in.
+        // A deeper text line keeps its indent relative to the text.
         assert_eq!(widened("9. a\n    more\n"), vec![(1, 1)]);
-        assert_eq!(widened("9. a\n\n       code\n"), vec![(2, 1)]);
-        // A fence left open: nothing after it is the item's to move.
-        assert_eq!(widened("9. a\n   more\n   ```\n   code\n\n- x\n   - y\n"), vec![(1, 1)]);
-        // So does a `$$` block.
-        assert_eq!(widened("9. a\n   $$\n   x\n   $$\n"), vec![(1, 1), (2, 1), (3, 1)]);
-    }
-
-    #[test]
-    fn realign_leaves_blocks_short_of_the_text_column_whole() {
-        // A sub-item at column 2 stays, and so does everything under it,
-        // however deep: the sub-item keeps its shape.
-        assert_eq!(widened("9. a\n  1. x\n     more\n    - y\n"), vec![]);
-        // A fence at column 2 stays, code included.
-        assert_eq!(widened("9. a\n  ```py\n  def f():\n      return 1\n  ```\n"), vec![]);
-        // Lazy text at column 0 stays.
-        assert_eq!(widened("9. a\nlazy\n"), vec![]);
-    }
-
-    #[test]
-    fn realign_skips_whitespace_tabs_and_uncountable_columns() {
         // A whitespace-only line gains no trailing spaces.
         assert_eq!(widened("9. a\n   \n   para\n"), vec![(2, 1)]);
-        // A block with a tab-indented line stays.
-        assert_eq!(widened("9. a\n\tmore\n"), vec![]);
-        // A block of code with a tab-indented line stays whole, so the code
-        // is never changed, and so does a fenced diff of tabbed code.
-        assert_eq!(widened("9. a\n   ```\n\tcode\n   ```\n"), vec![]);
-        assert_eq!(widened("9. a\n   ```diff\n   -\treturn nil\n   ```\n"), vec![(1, 1), (2, 1), (3, 1)]);
-        // Spaces then a tab after a sub-item's marker: its text is on a tab
-        // stop, so it stays with its lines.
-        assert_eq!(widened("9. a\n   - \tx\n        more\n"), vec![]);
-        // A tab after the number: the tab stop decides where the text is,
-        // so nothing is moved.
-        assert_eq!(widened("9.\ta\n    more\n"), vec![]);
-        // Five or more spaces after the number: CommonMark puts the text
-        // column one past the delimiter (the rest is indented code).
-        assert_eq!(widened("9.     code\n   more\n"), vec![(1, 1)]);
-        // An empty item: one past the delimiter too.
-        assert_eq!(widened("9.\n   more\n"), vec![(1, 1)]);
-        // A blank line holding a tab does not stop its block moving.
+        // A blank line holding a tab is still blank.
         assert_eq!(widened("9. a\n   - x\n\t\n     para\n"), vec![(1, 1), (3, 1)]);
-        // A sub-item with a tab after its marker stays, with its lines.
-        assert_eq!(widened("9. a\n   9.\tx\n        more\n"), vec![]);
-        // A sub-item's lazy line stays when the sub-item moves.
+        // Lazy text stays, at the item and under a sub-item that moves.
+        assert_eq!(widened("9. a\nlazy\n"), vec![]);
         assert_eq!(widened("9. a\n   - x\nlazy\n"), vec![(1, 1)]);
+        // A sub-item short of the old column stays, with its lines.
+        assert_eq!(widened("9. a\n  1. x\n     more\n    - y\n"), vec![]);
+        // Five or more spaces after the number, or none: the text column is
+        // one past the delimiter.
+        assert_eq!(widened("9.     code\n   more\n"), vec![(1, 1)]);
+        assert_eq!(widened("9.\n   more\n"), vec![(1, 1)]);
+    }
+
+    /// Anything that might be code leaves the whole item as it is.
+    #[test]
+    fn realign_leaves_an_item_with_code_alone() {
+        // Fences and `$$` blocks, wherever they are, recognised or not.
+        assert_eq!(widened("9. a\n   more\n   ```\n   x = 1\n   ```\n"), vec![]);
+        assert_eq!(widened("9. a\n   $$\n   x\n   $$\n"), vec![]);
+        assert_eq!(widened("9. a\n   - x\n     ```\n     code\n     ```\n"), vec![]);
+        assert_eq!(widened("9. a\n    ```md\n    - a\n      - b\n    ```\n"), vec![]);
+        // Indented code: four columns past the text it belongs to, even when
+        // a line of it looks like a list item.
+        assert_eq!(widened("9. a\n\n       code\n"), vec![]);
+        assert_eq!(widened("9. a\n\n       - removed\n       + added\n"), vec![]);
+        // Tabs, in an indent or after a marker.
+        assert_eq!(widened("9. a\n\tmore\n"), vec![]);
+        assert_eq!(widened("9. a\n   - \tx\n        more\n"), vec![]);
+        assert_eq!(widened("9.\ta\n    more\n"), vec![]);
     }
 
     #[test]
