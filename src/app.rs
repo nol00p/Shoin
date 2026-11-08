@@ -1683,9 +1683,8 @@ impl App {
             // its keys are not a change `.` repeats.
             self.mode = Mode::Normal;
             self.pending.reset();
-            if !self.replaying {
-                self.recording.clear();
-            }
+            self.recording.clear();
+            self.dot_rev = self.buffer.revision;
         }
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
             // The anchor stays inside the text, as the cursor does. A drag
@@ -8185,6 +8184,7 @@ mod tests {
         // `.` is still the `u`: it undoes the move, closes no pane.
         feed(&mut app, ".");
         assert_eq!(app.layout.ids().len(), 2);
+        assert_eq!(text(&app), "- a\n- b\n- c\n- d\n");
         assert_ne!(text(&app), after_x);
         assert_eq!(app.mode, Mode::Normal);
 
