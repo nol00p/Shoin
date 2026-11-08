@@ -295,41 +295,33 @@ impl<'a> Lists<'a> {
         shifts.into_iter().collect()
     }
 
-    /// Whether the item on `start..=end`, with its text at `old_col`, holds
-    /// only text and sub-items: no fence, `$$` block, table, heading, quote
-    /// or rule, no tab in any indent or after any marker, and no line four
-    /// or more columns past the text of the item it belongs to, which
-    /// CommonMark reads as indented code. Anything else might be code whose
-    /// indentation is its meaning, so realign leaves the item as it is.
+    /// Whether the item on `start..=end` is tight and plain: no blank line
+    /// anywhere in it, and nothing but text lines and sub-items. No fence or
+    /// `$$` line (by its text, even on the item's own line), no table,
+    /// heading, quote or rule, and no tab in any indent or after any marker.
+    ///
+    /// Tight, because a blank line is where Shoin's nesting (deeper than the
+    /// parent) and CommonMark's (past the parent's text column) part ways,
+    /// and where indented code can begin; with none, a line is either more
+    /// of a paragraph or a sub-item, whatever its exact indent. Anything else
+    /// might be code, or might belong elsewhere for other tools, so realign
+    /// leaves the item exactly as it is. One pass, no lookups per line.
     fn plain_item(&self, start: usize, end: usize, old_col: usize) -> bool {
+        let fence = |t: &str| t.starts_with("```") || t.starts_with("~~~") || t.starts_with("$$");
+        let own: String = self.buffer.line_text(start).chars().skip(old_col).collect();
+        if fence(own.trim_start()) {
+            return false;
+        }
         (start + 1..=end).all(|l| {
-            if self.blank(l) {
-                return true;
-            }
             let text = self.buffer.line_text(l);
-            let Some(indent) = leading_spaces(&text) else { return false };
-            // A fence or `$$` delimiter by its text: indented 4 or more,
-            // Shoin's own classifier does not see it as one.
-            let body = text.trim_start();
-            if body.starts_with("```") || body.starts_with("~~~") || body.starts_with("$$") {
+            if text.trim().is_empty() || leading_spaces(&text).is_none() || fence(text.trim_start()) {
                 return false;
             }
-            let item = self.is_item(l);
-            if !item && !matches!(self.kind(l), Some(BlockKind::Paragraph)) {
-                return false;
+            match self.kind(l) {
+                Some(BlockKind::Paragraph) => true,
+                Some(BlockKind::ListItem { .. }) => self.text_column_of(l).is_some(),
+                _ => false,
             }
-            if item && self.text_column_of(l).is_none() {
-                return false;
-            }
-            // The item this line belongs to: its parent for an item line,
-            // the innermost item around it for a text line.
-            let owner = if item { self.parent_of(l) } else { self.item_at(l) };
-            let owner_col = match owner {
-                Some(o) if o == start => Some(old_col),
-                Some(o) => self.text_column_of(o),
-                None => None,
-            };
-            owner_col.is_some_and(|c| indent < c + 4)
         })
     }
 
@@ -651,10 +643,6 @@ mod tests {
         assert_eq!(widened("9. a\n    - x\n      more\n"), vec![]);
         // A deeper text line keeps its indent relative to the text.
         assert_eq!(widened("9. a\n    more\n"), vec![(1, 1)]);
-        // A whitespace-only line gains no trailing spaces.
-        assert_eq!(widened("9. a\n   \n   para\n"), vec![(2, 1)]);
-        // A blank line holding a tab is still blank.
-        assert_eq!(widened("9. a\n   - x\n\t\n     para\n"), vec![(1, 1), (3, 1)]);
         // Lazy text stays, at the item and under a sub-item that moves.
         assert_eq!(widened("9. a\nlazy\n"), vec![]);
         assert_eq!(widened("9. a\n   - x\nlazy\n"), vec![(1, 1)]);
@@ -666,21 +654,33 @@ mod tests {
         assert_eq!(widened("9.\n   more\n"), vec![(1, 1)]);
     }
 
-    /// Anything that might be code leaves the whole item as it is.
+    /// Anything that might be code, or that other tools might read as
+    /// outside the item, leaves the whole item as it is.
     #[test]
-    fn realign_leaves_an_item_with_code_alone() {
-        // Fences and `$$` blocks, wherever they are, recognised or not.
+    fn realign_leaves_all_but_tight_plain_items_alone() {
+        // A blank line anywhere: a loose item, an empty item then a blank,
+        // lines CommonMark gives to another block, indented code.
+        assert_eq!(widened("9. a\n   \n   para\n"), vec![]);
+        assert_eq!(widened("9. a\n\n  para\n\n   - x\n"), vec![]);
+        assert_eq!(widened("9.\n\n   more\n"), vec![]);
+        assert_eq!(widened("9. a\n    -   x\n\n       code\n"), vec![]);
+        assert_eq!(widened("9. a\n\n       - removed\n       + added\n"), vec![]);
+        // Fences and `$$` blocks, wherever they are, recognised or not, and
+        // one opened on the item's own line.
         assert_eq!(widened("9. a\n   more\n   ```\n   x = 1\n   ```\n"), vec![]);
         assert_eq!(widened("9. a\n   $$\n   x\n   $$\n"), vec![]);
+        assert_eq!(widened("9. a\n   ~~~\n   x\n   ~~~\n"), vec![]);
         assert_eq!(widened("9. a\n   - x\n     ```\n     code\n     ```\n"), vec![]);
         assert_eq!(widened("9. a\n    ```md\n    - a\n      - b\n    ```\n"), vec![]);
-        // Indented code: four columns past the text it belongs to, even when
-        // a line of it looks like a list item.
-        assert_eq!(widened("9. a\n\n       code\n"), vec![]);
-        assert_eq!(widened("9. a\n\n       - removed\n       + added\n"), vec![]);
+        assert_eq!(widened("9. ```\n   x\n    - y\n```\n"), vec![]);
+        // Headings, quotes and rules.
+        assert_eq!(widened("9. a\n   # h\n"), vec![]);
+        assert_eq!(widened("9. a\n   > q\n"), vec![]);
+        assert_eq!(widened("9. a\n   ***\n"), vec![]);
         // Tabs, in an indent or after a marker.
         assert_eq!(widened("9. a\n\tmore\n"), vec![]);
         assert_eq!(widened("9. a\n   - \tx\n        more\n"), vec![]);
+        assert_eq!(widened("9. a\n   9.\tx\n        more\n"), vec![]);
         assert_eq!(widened("9.\ta\n    more\n"), vec![]);
     }
 

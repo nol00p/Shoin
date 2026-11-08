@@ -118,15 +118,15 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   is refused.
 - When a number widens, its item's text column moves right (`9. ` is 3
   columns, `10. ` is 4), and a line left at the old column would no longer
-  belong to the item in other Markdown tools. So an item that holds only
-  text and sub-items has its lines moved in. A sub-item moves only if it
-  would fall out, just far enough to reach the new column, so a list nested
-  by 4 keeps its 4-space steps; other text at or past the old column moves
-  by the whole difference. Lazy text stays. An item holding anything that
-  might be code (a fence, a `$$` block, a table, a heading, a quote, a tab,
-  or a line indented four or more past its text) is left exactly as it is,
-  so code never changes. When a number narrows nothing moves: every line is
-  still inside the item.
+  belong to the item in other Markdown tools. So a tight item, one with no
+  blank line in it, that holds only text and sub-items has its lines moved
+  in. A sub-item moves only if it would fall out, just far enough to reach
+  the new column, so a list nested by 4 keeps its 4-space steps; other text
+  at or past the old column moves by the whole difference; lazy text stays.
+  Any other item is left exactly as it is: one with a blank line in it, or
+  with a fence, a `$$` block, a table, a heading, a quote, a rule or a tab,
+  since its lines might be code or might belong to another block. When a
+  number narrows nothing moves: every line is still inside the item.
 - Renumbering keeps the number a list starts at, so a list starting at `3.`
   still starts at `3.` after its first item moves away. A sub-list the edit
   creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists
