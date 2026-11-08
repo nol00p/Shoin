@@ -47,6 +47,7 @@ use crate::text::cursor::Cursor;
 use crate::text::motion::{self, Motion};
 use crate::text::list::{self, Lists, RunError};
 use crate::text::object;
+use crate::text::realign;
 use crate::text::table::{self, TableAlign};
 use crate::transclude::{compile, link};
 
@@ -4243,11 +4244,32 @@ impl App {
 
     /// Rewrite the ordinals `edits` name. Each is on a line of its own and
     /// leaves the line count alone, so the order they go in does not matter.
+    ///
+    /// A number that changes width (`9.` → `10.`) moves its item's text
+    /// column, so the item's lines move with it when other Markdown tools
+    /// would otherwise read them differently (`realign::shifts`), in the same
+    /// step. Shifts only touch leading spaces, after the numbers are in.
     fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
-        for r in edits {
+        let edits: Vec<list::Renumber> = edits.into_iter().collect();
+        let shifts = if edits.iter().any(realign::changes_width) {
+            let lines: Vec<String> = self.buffer.rope.lines().map(String::from).collect();
+            realign::shifts(&lines, &edits)
+        } else {
+            Vec::new()
+        };
+        for r in &edits {
             let start = self.buffer.char_index(Cursor::new(r.line, r.cols.start));
             self.buffer.delete_chars(start, start + r.cols.len());
             self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
+        }
+        for (line, by) in shifts {
+            let at = Cursor::new(line, 0);
+            if by > 0 {
+                self.buffer.insert_str(at, &" ".repeat(by as usize));
+            } else {
+                let start = self.buffer.char_index(at);
+                self.buffer.delete_chars(start, start + by.unsigned_abs());
+            }
         }
     }
 
@@ -8030,6 +8052,72 @@ mod tests {
         let mut app = app_with("3. a\n4. b\n");
         alt(&mut app, 'j');
         assert_eq!(text(&app), "3. b\n4. a\n");
+    }
+
+    /// A number that widens takes along the lines that would fall out of
+    /// its item, in the same undo step, and the cursor stays on its text.
+    #[test]
+    fn a_wider_number_moves_what_would_fall_out_of_the_item() {
+        let mut app = app_with("8. h\n9. i\n   - x\n10. j\n");
+        app.buffer.cursor = Cursor::new(1, 3);
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "8. h\n9. j\n10. i\n    - x\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(2, 4));
+        // Back at `9.`, the sub-item is deeper than it has to be but still
+        // in, so it stays.
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "8. h\n9. i\n    - x\n10. j\n");
+        feed(&mut app, "uu");
+        assert_eq!(text(&app), "8. h\n9. i\n   - x\n10. j\n");
+
+        // With renumbering off nothing is renumbered, so nothing moves.
+        let mut app = app_with("9. i\n   - x\n10. j\n");
+        app.config.editor.list_renumber = false;
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "10. j\n9. i\n   - x\n");
+    }
+
+    /// Lines other tools still read as part of the item are left as written:
+    /// continuation text, a list nested by 4 as `>al` makes it, a tab.
+    #[test]
+    fn lines_that_still_belong_to_a_wider_item_stay() {
+        for (before, after) in [
+            ("9. i\n   more\n10. j\n", "9. j\n10. i\n   more\n"),
+            ("9. i\n    - ii\n10. j\n", "9. j\n10. i\n    - ii\n"),
+            ("9. i\n\t- x\n10. j\n", "9. j\n10. i\n\t- x\n"),
+        ] {
+            let mut app = app_with(before);
+            alt(&mut app, 'j');
+            assert_eq!(text(&app), after);
+        }
+    }
+
+    /// Code moves with its item, so what it holds stays exactly the same,
+    /// both ways: a narrower number takes back the space code would gain.
+    #[test]
+    fn code_in_an_item_follows_its_number() {
+        let mut app = app_with("9. i\n   ```\n   code\n   ```\n10. j\n");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "9. j\n10. i\n    ```\n    code\n    ```\n");
+
+        let mut app = app_with("9. h\n10. i\n\n        code\n");
+        app.buffer.cursor = Cursor::new(1, 0);
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "9. i\n\n       code\n10. h\n");
+    }
+
+    /// `<al` renumbers through `renumber_lists`, which realigns too, in the
+    /// same undo step.
+    #[test]
+    fn outdenting_into_tenth_place_takes_the_sub_items_along() {
+        let list = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n   1. s\n      - t\n";
+        let mut app = app_with(list);
+        app.buffer.cursor = Cursor::new(9, 6); // on `s`
+        feed(&mut app, "<al");
+        assert_eq!(text(&app), "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. s\n    - t\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(9, 4));
+        feed(&mut app, "u");
+        assert_eq!(text(&app), list);
     }
 
     #[test]

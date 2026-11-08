@@ -150,8 +150,10 @@ pub struct EditorConfig {
     pub clipboard_background: bool,
     pub undo_coalesce_ms: u64,
     pub scroll_off: u16,
-    /// Renumber an ordered list after an item is indented or outdented into
-    /// or out of it. Off for people who write `1.` on every line on purpose.
+    /// Renumber an ordered list after an item moves, or is indented or
+    /// outdented into or out of it, and move an item's lines with its text
+    /// when its number changes width (`9.` → `10.`). Off for people who write
+    /// `1.` on every line on purpose.
     pub list_renumber: bool,
     /// Insert-mode Tab / Shift-Tab on a list item indents / outdents the
     /// item, as `>al` / `<al` do. Off, Tab inserts a tab there as anywhere.

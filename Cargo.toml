@@ -37,6 +37,9 @@ notify = "8.2"
 
 # Text handling
 unicode-width = "0.2"
+# Only to check that a renumber leaves a list reading the same to CommonMark
+# tools (text/realign.rs); Shoin renders Markdown with its own parser.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 # CLI + errors
 clap = { version = "4.6", features = ["derive"] }

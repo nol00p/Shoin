@@ -55,8 +55,10 @@ on it for the next press.
 
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
-the same undo step. Bullet lists are never changed. Turn this off with `list_renumber = false`
-in `[editor]`.
+the same undo step. When a number gets wider or narrower (`9.` → `10.`),
+the lines under it move with its text where other Markdown tools would
+otherwise read them differently. Bullet lists are never changed. Turn both
+off with `list_renumber = false` in `[editor]`.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
 line, so Enter, Tab, and typing starts a sub-item.
@@ -123,8 +125,19 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   still starts at `3.` after its first item moves away. A sub-list the edit
   creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists
   the edit touched are renumbered; others in the file stay as written, even
-  if their numbers are out of order. Going from `9.` to `10.` pushes that
-  item's text one column right; the lines under it are not re-aligned.
+  if their numbers are out of order.
+- Going from `9.` to `10.` pushes that item's text one column right, and
+  GitHub, pandoc (so export too) and other CommonMark tools read everything
+  in an item from its text column: a sub-item, fence or table left at the
+  old column would fall out of the item, and indented code would gain a
+  space. So when the renumber alone would change how the file reads to
+  them, every line of the item at or past the old column moves by the same
+  amount, which leaves the item reading exactly as before; narrowing
+  (`10.` → `9.`) takes the space back the same way. Lines that still belong,
+  such as a list nested by 4 or plain continuation text, stay as written,
+  and so do lazy lines. Shoin checks the result with a CommonMark parser and
+  leaves the lines alone when moving them would not help, as can happen
+  with tabs.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.
