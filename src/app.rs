@@ -4252,17 +4252,8 @@ impl App {
     /// is rewritten.
     fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
         let edits: Vec<list::Renumber> = edits.into_iter().collect();
-        let math = self.config.markdown.math;
-        let kinds = |text: &str| {
-            let mut buffer = Buffer::empty();
-            buffer.rope = ropey::Rope::from_str(text);
-            BlockCache::build(&buffer, math).kinds
-        };
-        self.refresh_blocks();
-        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
-        let item_end = |line: usize| lists.item_bounds(line).map(|(_, end)| end);
-        let shoin = realign::Shoin { kinds: &kinds, item_end: &item_end };
-        for e in realign::line_edits(&self.buffer.rope, &edits, &shoin) {
+        let (math, tab_width) = (self.config.markdown.math, self.config.editor.tab_width);
+        for e in realign::line_edits(&self.buffer.rope, &edits, math, tab_width) {
             let was: Vec<char> = self.buffer.line_text(e.line).chars().take(e.cut).collect();
             let same = was.iter().zip(e.with.chars()).take_while(|(a, b)| **a == *b).count();
             let at = Cursor::new(e.line, same);
