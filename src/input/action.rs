@@ -106,7 +106,9 @@ pub enum Action {
     JoinLines,
     ToggleCase,
     /// `Alt-j` / `Alt-k` — move the list item under the cursor, children and
-    /// all, past its next / previous sibling (past `count` of them).
+    /// all, past its next / previous sibling (past `count` of them). In
+    /// Visual, the run of sibling items the selection touches moves as one
+    /// block, and Visual stays on.
     ListItemMove { down: bool },
     /// `move_lines_down` / `move_lines_up` — the lines of the Visual selection
     /// (the cursor's line outside Visual) past the next / previous `count`

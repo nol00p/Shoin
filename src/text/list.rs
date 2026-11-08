@@ -52,6 +52,8 @@ pub enum RunError {
     NotInList,
     /// The items touched are not siblings in one list.
     TwoLists,
+    /// Only blank lines that touch no item, such as one before a sub-item.
+    NoItem,
 }
 
 /// A view of one document's lists. Cheap to build; holds no state of its own.
@@ -128,38 +130,58 @@ impl<'a> Lists<'a> {
     /// The run of siblings that lines `top..=bot` touch, as the item lines
     /// of its first and last item — what Visual `Alt-j`/`Alt-k` moves.
     ///
-    /// Blank lines touch nothing. Each other line touches its innermost item,
+    /// A blank line touches an item only when it sits between that item's own
+    /// text, the next line being more of it; one before a sub-item or
+    /// between items touches nothing.
+    /// Each other line touches its innermost item,
     /// and an item nested deeper than the shallowest one touched stands for
     /// its ancestor at that level, so a run never splits a parent from its
     /// children. Nesting is counted in levels, not columns: siblings may sit
     /// at different indents.
     pub fn sibling_run(&self, top: usize, bot: usize) -> Result<(usize, usize), RunError> {
-        let mut touched = Vec::new();
-        for l in top..=bot.min(self.buffer.last_line()) {
-            if !self.blank(l) {
-                touched.push(self.item_at(l).ok_or(RunError::NotInList)?);
+        let bot = bot.min(self.buffer.last_line());
+        // Each item once: a long item's lines all touch the same one.
+        let mut touched: Vec<usize> = Vec::new();
+        for l in top..=bot {
+            let item = if self.blank(l) {
+                // Between two lines of one item's own text, the blank line is
+                // that item's; after a sub-item, or before one, it is no one's.
+                let prev = (0..l).rev().find(|&k| !self.blank(k));
+                let next = (l + 1..=self.buffer.last_line()).find(|&k| !self.blank(k));
+                let own = |k: usize| self.item_at(k).filter(|&x| x == k || !self.is_item(k));
+                match (self.item_at(l), prev.and_then(own), next.and_then(own)) {
+                    (Some(x), Some(p), Some(n)) if p == x && n == x => x,
+                    _ => continue,
+                }
+            } else {
+                self.item_at(l).ok_or(RunError::NotInList)?
+            };
+            if !touched.contains(&item) {
+                touched.push(item);
             }
         }
-        let level = |item: usize| {
-            let (mut k, mut n) = (item, 0);
-            while let Some(p) = self.parent_of(k) {
-                k = p;
-                n += 1;
-            }
-            n
-        };
-        let shallowest = touched.iter().map(|&i| level(i)).min().ok_or(RunError::NotInList)?;
-        let lift = |item: usize| {
-            let mut k = item;
-            for _ in shallowest..level(item) {
-                k = self.parent_of(k).unwrap_or(k);
-            }
-            k
-        };
-        let (Some(&first), Some(&last)) = (touched.first(), touched.last()) else {
-            return Err(RunError::NotInList);
-        };
-        let (first, last) = (lift(first), lift(last));
+        if touched.is_empty() {
+            // Blank lines alone: inside a list they touch no item, outside
+            // one they are simply not in a list, as Normal mode says.
+            let in_list = (top..=bot).any(|l| self.item_at(l).is_some());
+            return Err(if in_list { RunError::NoItem } else { RunError::NotInList });
+        }
+        // Each touched item with its ancestors, nearest first: its level is
+        // the number of ancestors, and lifting it to a level is a lookup.
+        let chains: Vec<Vec<usize>> = touched
+            .iter()
+            .map(|&item| {
+                let mut chain = vec![item];
+                while let Some(p) = chain.last().and_then(|&k| self.parent_of(k)) {
+                    chain.push(p);
+                }
+                chain
+            })
+            .collect();
+        let shallowest = chains.iter().map(|c| c.len()).min().unwrap_or(1);
+        let lift = |chain: &Vec<usize>| chain[chain.len() - shallowest];
+        let first = lift(&chains[0]);
+        let last = lift(&chains[chains.len() - 1]);
         // Siblings in one list are reached from the first by `next_sibling`;
         // anything else (another parent, another list) is passed over.
         let mut k = first;
@@ -494,8 +516,8 @@ mod tests {
             assert_eq!(l.sibling_run(2, 3), Ok((2, 2)));
             assert_eq!(l.sibling_run(3, 3), Err(RunError::NotInList));
             assert_eq!(l.sibling_run(1, 5), Ok((0, 4)));
-            // a1 and c1 have different parents.
-            assert_eq!(l.sibling_run(1, 1).and(l.sibling_run(5, 5)), Ok((5, 5)));
+            // The blank line between b and c touches neither: b and c move.
+            assert_eq!(l.sibling_run(2, 4), Ok((2, 4)));
         });
         // Siblings at uneven indents are one level.
         with("- a\n   - b\n  - c\n", |l| assert_eq!(l.sibling_run(1, 2), Ok((1, 2))));
@@ -505,6 +527,30 @@ mod tests {
             assert_eq!(l.sibling_run(3, 3), Ok((3, 3)));
         });
         with("text\n- a\n", |l| assert_eq!(l.sibling_run(0, 1), Err(RunError::NotInList)));
+        // A loose item's inner blank line alone is that item.
+        with("- a\n\n  para\n- b\n", |l| assert_eq!(l.sibling_run(1, 1), Ok((0, 0))));
+        // A blank line before a sub-item touches nothing, alone or not, so a
+        // bigger selection never moves less.
+        with("- a\n\n  - a1\n- b\n", |l| {
+            assert_eq!(l.sibling_run(1, 1), Err(RunError::NoItem));
+            assert_eq!(l.sibling_run(1, 2), Ok((2, 2)));
+        });
+        // Between a parent's own paragraphs after its sub-items, too.
+        with("- a\n  - a1\n\n  more\n\n  even more\n- b\n", |l| {
+            assert_eq!(l.sibling_run(4, 4), Ok((0, 0)));
+        });
+        // After a sub-item it is no one's: running a selection one line past
+        // a2 moves a2, not its parent.
+        with("- a\n  - a1\n  - a2\n\n  more\n- b\n", |l| {
+            assert_eq!(l.sibling_run(2, 3), Ok((2, 2)));
+        });
+        // Blank lines outside any list are not in a list.
+        with("para\n\nmore\n", |l| assert_eq!(l.sibling_run(1, 1), Err(RunError::NotInList)));
+        // Deeply nested lines share their levels; the run is still right.
+        with("- a\n  - b\n    - c\n    - d\n  - e\n", |l| {
+            assert_eq!(l.sibling_run(2, 3), Ok((2, 3)));
+            assert_eq!(l.sibling_run(3, 4), Ok((1, 4)));
+        })
     }
 
     #[test]

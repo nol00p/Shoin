@@ -101,7 +101,8 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 - Shoin turns on the kitty keyboard protocol, so in kitty, Ghostty, WezTerm,
   foot and Alacritty `Alt-j` always arrives as one key, even over SSH. Other
   terminals need to send Alt as a modifier. In tmux, a quick
-  `Esc` then `j` can arrive as `Alt-j` when `escape-time` is long (the
+  `Esc` then `j`, including leaving Visual mode, can arrive as `Alt-j` and
+  move list items when `escape-time` is long (the
   default was 500 ms before tmux 3.5): `set -sg escape-time 10` fixes it, and
   it is the usual advice for Vim in tmux. On macOS, Terminal.app needs "Use
   Option as Meta key" and iTerm2 needs Option set to "Esc+". Or rebind
@@ -110,7 +111,10 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 - Moving swaps the item and the items it passes as two blocks of text; the
   blank lines between them stay where they were.
 - In Visual mode, a line touches its innermost item, even partly selected,
-  and blank lines touch nothing. When the selection reaches into sub-items
+  and blank lines touch nothing, unless one sits between two lines of one
+  item's own text, where it touches that item. A selection belongs to the
+  pane it was made in: moving to another pane, document or the file tree
+  ends it. When the selection reaches into sub-items
   and also touches a shallower item, those sub-items stand for their parent,
   so a parent always moves with its children. The items touched have to be
   siblings in one list: a selection across two lists, or across a paragraph,

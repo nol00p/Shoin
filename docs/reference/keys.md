@@ -99,7 +99,8 @@ In Normal mode, and `Alt-j` `Alt-k` in Visual too. See
 | `>aL` `<aL` | indent / outdent every item at that level |
 | `Tab` `Shift-Tab` | in Insert mode, the same as `>al` `<al` |
 
-To rebind them, the actions are `list_item_down` and `list_item_up` (Normal)
+To rebind them, the actions are `list_item_down` and `list_item_up` (Normal
+and Visual: set them under `[keys.normal]` and `[keys.visual]`)
 and `list_indent` and `list_outdent` (Insert) — see
 [Configuration](../configuration.md#key-bindings).
 

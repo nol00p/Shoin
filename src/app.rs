@@ -277,6 +277,11 @@ pub struct App {
     /// `enter_visual` clears it and `end_visual` consumes it, so it cannot go
     /// stale and drop a later `v` into Insert.
     visual_resumes_insert: bool,
+    /// The pane and document a Visual selection was made in. A selection
+    /// belongs to them: once focus is anywhere else (another pane, another
+    /// document, the file tree), `sync_after_input` ends it, so `d` can never
+    /// act on text nobody selected.
+    visual_owner: Option<(PaneId, usize)>,
 
     /// Live config-file watcher; `None` when running on built-in defaults.
     watcher: Option<ConfigWatcher>,
@@ -307,6 +312,10 @@ pub struct App {
     dot: Vec<Replay>,
     /// Input of the command currently in flight.
     recording: Vec<Replay>,
+    /// True while `on_key` runs. A key that takes focus away from a Visual
+    /// selection is dealt with by `on_key` itself, after the key; only when
+    /// no key is under way (a mouse click) does `sync_after_input` end it.
+    in_key: bool,
     /// Buffer revision when the in-flight command began, to tell if it edited.
     dot_rev: u64,
     /// True while replaying `dot`, so the replay is not itself recorded.
@@ -658,6 +667,7 @@ impl App {
             anchor: None,
             drag_from: None,
             visual_resumes_insert: false,
+            visual_owner: None,
             watcher,
             focus: FocusMode::parse(&config_focus).unwrap_or(FocusMode::Off),
             focus_region: None,
@@ -667,6 +677,7 @@ impl App {
             search: None,
             dot: Vec::new(),
             recording: Vec::new(),
+            in_key: false,
             dot_rev: 0,
             replaying: false,
             keymap,
@@ -1658,6 +1669,38 @@ impl App {
         if self.view {
             self.clamp_reading_cursor();
         }
+        // The selection exists in Visual only, and only where it was made.
+        // Every way out — Esc, an operator, `:`, `/`, Insert, another pane or
+        // document, the file tree — lands here, so this is where its state is
+        // dropped, rather than at each exit. Moving focus away ends Visual in
+        // Normal: the insert session it may have come from belongs to the
+        // pane left behind.
+        let here = (self.focus_pane, self.current());
+        let tree = self.tree.as_ref().is_some_and(|t| t.focused);
+        let away = tree || self.visual_owner != Some(here);
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) && away && !self.in_key {
+            // A mouse click: no key will see it end, so it ends here, and
+            // its keys are not a change `.` repeats.
+            self.mode = Mode::Normal;
+            self.pending.reset();
+            self.recording.clear();
+            self.dot_rev = self.buffer.revision;
+        }
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+            // The anchor stays inside the text, as the cursor does. A drag
+            // that began on the empty line past the last newline keeps that
+            // newline: the anchor goes to the end of the last line, past its
+            // last character, as the newline itself.
+            let last = self.buffer.last_line();
+            let end = Cursor::new(last, self.buffer.line_len(last));
+            if self.anchor.is_some_and(|a| a.line > last) {
+                self.anchor = Some(end);
+            }
+        } else {
+            self.anchor = None;
+            self.visual_resumes_insert = false;
+            self.visual_owner = None;
+        }
         self.active = self.active_set(self.anchor);
         // The focused pane remembers where it is, so leaving and coming back
         // lands in the same place even if another pane moved the document's
@@ -1987,6 +2030,14 @@ impl App {
     }
 
     pub(crate) fn on_key(&mut self, key: KeyEvent) {
+        // Saved and put back rather than cleared: `.` replays keys through
+        // here from inside a key.
+        let outer = std::mem::replace(&mut self.in_key, true);
+        self.handle_key(key);
+        self.in_key = outer;
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
         // The help overlay owns all input while it is open.
         if self.help.is_some() {
             self.on_key_help(key);
@@ -2036,6 +2087,12 @@ impl App {
         }
 
         let mode = self.mode.clone();
+        // The pane and document a selection under way belongs to, to see
+        // after the key whether the key took focus away from it.
+        let selection = match mode {
+            Mode::Visual | Mode::VisualLine => self.visual_owner,
+            _ => None,
+        };
 
         // Open one undo step per Normal/Visual command. An Insert session
         // continues the group its entering command opened, so the whole
@@ -2056,6 +2113,22 @@ impl App {
             Mode::Command(buf) => self.on_key_command(key, buf),
             Mode::Search { query, reverse } => self.on_key_search(key, query, reverse),
             Mode::Prompt(p) => self.on_key_prompt(key, p),
+        }
+
+        // A key that took focus away from a selection (`<C-w>q`, `<C-w>v`,
+        // `<C-^>`, the tree) ends it. Such a session is not a change `.`
+        // repeats: its keys, the pane key among them, are dropped, and `.`
+        // keeps the change before it. Moving again is `Alt-j` again.
+        let tree = self.tree.as_ref().is_some_and(|t| t.focused);
+        if selection.is_some_and(|owner| tree || owner != (self.focus_pane, self.current())) {
+            if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+                self.mode = Mode::Normal;
+            }
+            self.pending.reset();
+            if !self.replaying {
+                self.recording.clear();
+                self.dot_rev = self.buffer.revision;
+            }
         }
 
         // Seal the step unless we are still inserting.
@@ -2830,7 +2903,8 @@ impl App {
         // which is what catches a saved position that edits elsewhere have run
         // off the end of.
         self.buffer.cursor = cursor;
-        self.anchor = None;
+        // A selection belongs to the pane it was made in: `sync_after_input`
+        // ends it here.
         self.sync_after_input();
         self.touch_status();
     }
@@ -3125,7 +3199,9 @@ impl App {
     }
 
     fn repeat_dot(&mut self) {
-        if self.dot.is_empty() {
+        // A `.` that ended up inside `dot` (typed after a count, or in
+        // Visual) must not replay itself forever.
+        if self.dot.is_empty() || self.replaying {
             return;
         }
         self.replaying = true;
@@ -4044,21 +4120,27 @@ impl App {
         self.refresh_blocks();
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
         let at = self.buffer.cursor;
-        let anchor = self.anchor;
-        // The item lines of the first and last item that move.
-        let run = match anchor {
-            None => lists.item_bounds(at.line).map(|b| (b.0, b.0)).ok_or(RunError::NotInList),
-            Some(a) => lists.sibling_run(a.line.min(at.line), a.line.max(at.line)),
+        let anchor = self.visual_anchor();
+        // `run`: the item lines of the first and last item that move;
+        // `item`: the lines they span, children included.
+        let found = match anchor {
+            None => lists.item_bounds(at.line).map(|b| ((b.0, b.0), b)).ok_or(RunError::NotInList),
+            Some(a) => lists
+                .sibling_run(a.line.min(at.line), a.line.max(at.line))
+                .and_then(|run| {
+                    let end = lists.item_bounds(run.1).ok_or(RunError::NotInList)?.1;
+                    Ok((run, (run.0, end)))
+                }),
         };
-        let run = match run {
-            Ok(run) => run,
+        let (run, item) = match found {
+            Ok(found) => found,
             Err(RunError::NotInList) => return self.notify("not in a list", FlashKind::Error),
+            Err(RunError::NoItem) => {
+                return self.notify("selection touches no item", FlashKind::Error);
+            }
             Err(RunError::TwoLists) => {
                 return self.notify("selection spans two lists", FlashKind::Error);
             }
-        };
-        let Some(item) = lists.item_bounds(run.1).map(|b| (run.0, b.1)) else {
-            return self.notify("not in a list", FlashKind::Error);
         };
         // The far end of the siblings passed over.
         let step = |line: usize| match down {
@@ -4131,9 +4213,13 @@ impl App {
     /// buffer's end goes as far as it can; none to go at all is refused.
     fn move_lines(&mut self, down: bool, count: usize) {
         let cur = self.buffer.cursor;
-        let anchor = self.anchor;
+        let anchor = self.visual_anchor();
         let other = anchor.unwrap_or(cur);
-        let (top, bot) = (cur.line.min(other.line), cur.line.max(other.line));
+        // `sync_after_input` keeps the anchor inside the text between keys,
+        // but not between the keys of a `.` replay, where an edit can shorten
+        // the text under it.
+        let last = self.buffer.last_line();
+        let (top, bot) = (cur.line.min(other.line).min(last), cur.line.max(other.line).min(last));
         let room = if down { self.buffer.last_line() - bot } else { top };
         let n = count.min(room);
         if n == 0 {
@@ -4152,7 +4238,7 @@ impl App {
 
         let line = |l: usize| if down { l + n } else { l - n };
         self.buffer.cursor = Cursor::new(line(cur.line), cur.col);
-        self.anchor = anchor.map(|a| Cursor::new(line(a.line), a.col));
+        self.anchor = anchor.map(|a| Cursor::new(line(a.line.min(last)), a.col));
     }
 
     /// Rewrite the ordinals `edits` name. Each is on a line of its own and
@@ -4441,10 +4527,21 @@ impl App {
     fn enter_visual(&mut self, mode: Mode) {
         self.anchor = Some(self.buffer.cursor);
         self.mode = mode;
+        self.visual_owner = Some((self.focus_pane, self.current()));
         // A keyboard `v` always returns to Normal. Only the mouse sets this,
         // and it sets it straight after this call.
         self.visual_resumes_insert = false;
         self.touch_status();
+    }
+
+    /// The selection's other end, in Visual mode only. `sync_after_input`
+    /// drops the anchor outside Visual after each input; this covers the rest
+    /// of the input that left Visual, before that runs.
+    fn visual_anchor(&self) -> Option<Cursor> {
+        match self.mode {
+            Mode::Visual | Mode::VisualLine => self.anchor,
+            _ => None,
+        }
     }
 
     /// Leave Visual for whatever comes next: back into the insert session when
@@ -7972,10 +8069,6 @@ mod tests {
         alt(&mut app, 'k'); // nothing left to pass
         assert_eq!(text(&app), "- b\n- c\n- a\n- d\n");
         assert_eq!(flash_text(&app), "first item");
-
-        esc(&mut app);
-        feed(&mut app, "u");
-        assert_eq!(text(&app), "- a\n- b\n- c\n- d\n", "one press, one undo step");
     }
 
     /// A line in a sub-item stands for its parent when the selection also
@@ -8017,6 +8110,222 @@ mod tests {
         alt(&mut app, 'j');
         assert_eq!(text(&app), "- a\n\n- c\n\n- b\n");
         assert_eq!((app.anchor.unwrap().line, app.buffer.cursor.line), (4, 4));
+    }
+
+    /// Each press is its own undo step: two presses, two undos.
+    #[test]
+    fn visual_alt_j_undoes_one_press_at_a_time() {
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- c\n- a\n- d\n");
+        esc(&mut app);
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- b\n- a\n- c\n- d\n");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "- a\n- b\n- c\n- d\n");
+    }
+
+    /// However Visual is left, no selection survives it, and Normal-mode
+    /// `Alt-j` moves only the item under the cursor.
+    #[test]
+    fn alt_j_after_leaving_visual_moves_one_item() {
+        for leave in ["Vj:", "Vj/", "Vj?", "VjA", "VjI"] {
+            let mut app = app_with("- a\n- b\n- c\n- d\n");
+            feed(&mut app, leave);
+            esc(&mut app);
+            assert!(app.anchor.is_none(), "no selection survives {leave}");
+            feed(&mut app, "j");
+            assert_eq!(app.mode, Mode::Normal);
+            alt(&mut app, 'j');
+            assert_eq!(text(&app), "- a\n- b\n- d\n- c\n", "after {leave}");
+        }
+    }
+
+    /// A drag can leave the anchor on the empty line past the last newline;
+    /// it is kept inside the text, and a move takes the real last line.
+    #[test]
+    fn an_anchor_past_the_last_line_is_kept_inside_the_text() {
+        let mut app = app_with("a\nbbb\nccc\n");
+        app.config.keys.visual.insert("K".into(), "move_lines_up".into());
+        app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+        feed(&mut app, "jv");
+        app.anchor = Some(Cursor::new(app.buffer.last_line() + 1, 0));
+        app.sync_after_input();
+        assert_eq!(app.anchor, Some(Cursor::new(2, 3)), "the last line's newline");
+        feed(&mut app, "K");
+        assert_eq!(text(&app), "bbb\nccc\na\n");
+        assert_eq!(app.anchor, Some(Cursor::new(1, 3)));
+        feed(&mut app, "d");
+        // Both moved lines were still selected, with the newline the drag
+        // went across.
+        assert_eq!(text(&app), "a\n");
+    }
+
+    /// A Visual session that a pane key ends is not a change `.` repeats:
+    /// `.` keeps the change before it, and the pane key is never replayed.
+    #[test]
+    fn a_visual_session_ended_by_a_pane_key_leaves_dot_alone() {
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        app.split_pane(true);
+        app.split_pane(true);
+        feed(&mut app, "x");
+        let after_x = text(&app);
+        feed(&mut app, "u");
+        feed(&mut app, "jV");
+        alt(&mut app, 'j');
+        ctrl(&mut app, 'w');
+        feed(&mut app, "q");
+        assert_eq!(app.layout.ids().len(), 2);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending.is_clean(), "no half-typed pane key left");
+        assert_eq!(text(&app), "- a\n- c\n- b\n- d\n");
+        // `.` is still the `u`: it undoes the move, closes no pane.
+        feed(&mut app, ".");
+        assert_eq!(app.layout.ids().len(), 2);
+        assert_eq!(text(&app), "- a\n- b\n- c\n- d\n");
+        assert_ne!(text(&app), after_x);
+        assert_eq!(app.mode, Mode::Normal);
+
+        // The same for `<C-w>v`.
+        let mut app = app_with("- a\n- b\n- c\n- d\n");
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        ctrl(&mut app, 'w');
+        feed(&mut app, "v");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.dot.is_empty(), "nothing filed for `.`");
+    }
+
+    /// `.` that ends up in its own recording (`x`, then `2.`) runs once, it
+    /// does not replay itself until the stack runs out.
+    #[test]
+    fn a_counted_dot_does_not_recurse() {
+        let mut app = app_with("abcdefghij\n");
+        feed(&mut app, "x2.");
+        feed(&mut app, ".");
+        assert!(text(&app).len() < "abcdefghij\n".len());
+    }
+
+    /// Moving to the file tree ends a selection too.
+    #[test]
+    fn moving_to_the_tree_ends_a_selection() {
+        let mut app = app_with("- a\n- b\n");
+        app.tree = Some(FileTree::open(std::env::current_dir().unwrap()));
+        ctrl(&mut app, 'w');
+        feed(&mut app, "l");
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        ctrl(&mut app, 'w');
+        feed(&mut app, "h");
+        assert!(app.tree.as_ref().unwrap().focused);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.anchor.is_none());
+        assert!(app.dot.is_empty());
+    }
+
+    /// Blank lines inside a list that touch no item get their own message.
+    #[test]
+    fn a_selection_of_blank_lines_says_it_touches_no_item() {
+        let mut app = app_with("- a\n\n  - a1\n- b\n");
+        feed(&mut app, "jV");
+        alt(&mut app, 'j');
+        assert_eq!(flash_text(&app), "selection touches no item");
+        assert_eq!(text(&app), "- a\n\n  - a1\n- b\n");
+    }
+
+    /// In a `.` replay the text can shrink under the anchor between keys,
+    /// before `sync_after_input` would keep it inside: `move_lines` clamps.
+    #[test]
+    fn move_lines_in_a_replay_with_the_anchor_past_the_end() {
+        let mut app = app_with("a\nb\nc\nd\n");
+        app.config.keys.visual.insert("J".into(), "join_lines".into());
+        app.config.keys.visual.insert("K".into(), "move_lines_up".into());
+        app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+        feed(&mut app, "GVkJK");
+        esc(&mut app);
+        feed(&mut app, "G.");
+        assert!(text(&app).ends_with('\n'), "no newline lost: {:?}", text(&app));
+        assert!(!text(&app).contains("\n\n"), "no line made up: {:?}", text(&app));
+    }
+
+    /// A selection belongs to the pane it was made in. Focusing, splitting
+    /// or closing panes ends it in Normal, even one dragged out of Insert,
+    /// so `d` can never act on text nobody selected.
+    #[test]
+    fn a_selection_ends_when_focus_leaves_its_pane() {
+        let mut app = app_with("one two three\n");
+        let first = app.focus_pane;
+        app.split_pane(true);
+        assert_ne!(app.focus_pane, first);
+        feed(&mut app, "v");
+        app.visual_resumes_insert = true;
+        app.focus_pane_id(first);
+        assert_eq!(app.mode, Mode::Normal, "not back into an insert session");
+        assert!(app.anchor.is_none());
+
+        // Splitting moves focus to the new pane.
+        let mut app = app_with("one two three\n");
+        feed(&mut app, "v");
+        app.split_pane(true);
+        app.sync_after_input();
+        assert_eq!(app.mode, Mode::Normal);
+
+        // Closing the pane hands focus to the other one.
+        let mut app = app_with("one two three\n");
+        app.split_pane(true);
+        feed(&mut app, "Vd");
+        assert_eq!(text(&app), "", "deleted in the pane it was selected in");
+        feed(&mut app, "u");
+        feed(&mut app, "V");
+        app.close_pane();
+        app.sync_after_input();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.anchor.is_none());
+    }
+
+    /// Leaving Visual from a drag out of Insert drops the resume too, so the
+    /// tinted caret does not linger.
+    #[test]
+    fn leaving_visual_any_way_drops_the_insert_resume() {
+        for leave in [":", "/", "A"] {
+            let mut app = app_with("one two\n");
+            feed(&mut app, "v");
+            app.visual_resumes_insert = true;
+            feed(&mut app, leave);
+            esc(&mut app);
+            assert!(!app.visual_resumes_insert, "after {leave}");
+        }
+    }
+
+    /// A selection only on a loose item's inner blank line is that item, as
+    /// the line is for Normal-mode `Alt-j`.
+    #[test]
+    fn visual_alt_j_on_a_blank_line_inside_an_item() {
+        let mut app = app_with("- a\n\n  para\n- b\n");
+        feed(&mut app, "jV");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- b\n- a\n\n  para\n");
+    }
+
+    /// Other Alt chords in Visual do what the bare key does, and the Visual
+    /// move can be turned off in `[keys.visual]`.
+    #[test]
+    fn visual_alt_chords_and_rebinding() {
+        let mut app = app_with("one two three\n");
+        feed(&mut app, "v");
+        app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
+        app.sync_after_input();
+        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(app.buffer.cursor.col, 4, "Alt-w is w");
+
+        let mut app = app_with("- a\n- b\n");
+        app.config.keys.visual.insert("<M-j>".into(), "nop".into());
+        app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+        feed(&mut app, "V");
+        alt(&mut app, 'j');
+        assert_eq!(text(&app), "- a\n- b\n");
     }
 
     #[test]

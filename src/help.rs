@@ -633,7 +633,7 @@ Alt-j Alt-k :: move the item past the next · previous one, with its sub-items; 
 >al <al :: indent · outdent the item with its sub-items
 >aL <aL :: every item at that level
 Tab Shift-Tab :: the same as >al <al, in Insert on the item's line
-> Refused when it would break the list: indenting a first item, outdenting a top-level one, a top-level list four columns in. In tmux a quick Esc j can arrive as Alt-j: set escape-time to 10 or less. On macOS the terminal must send Option as Meta (Esc+).
+> Refused when it would break the list: indenting a first item, outdenting a top-level one, a top-level list four columns in. In tmux a quick Esc j, in Normal or out of Visual, can arrive as Alt-j: set escape-time to 10 or less. On macOS the terminal must send Option as Meta (Esc+).
 
 ## Registers
 \"a{cmd} :: use register a: \"ayy \"ap \"add
