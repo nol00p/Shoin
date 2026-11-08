@@ -585,7 +585,7 @@ mod tests {
         app.buffer.insert_str(Cursor::new(0, 0), text);
         app.buffer.cursor = Cursor::new(0, 0);
         app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
-        app.buffer.dirty_line = None;
+        app.buffer.clear_dirty();
         app
     }
 

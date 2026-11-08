@@ -3,9 +3,10 @@
 //!
 //! Only two constructs carry state across lines: fenced code blocks and front
 //! matter. Both are captured by `Carry`. Because carry state is one small enum,
-//! incremental invalidation is cheap: after an edit at line L, rescan forward
-//! and STOP as soon as the recomputed carry matches the cached carry. A typical
-//! paragraph edit terminates after one line.
+//! incremental invalidation is cheap: after edits touching lines L..=M, rescan
+//! forward from L and STOP at the first line past M where the recomputed carry
+//! matches the cached carry. A typical paragraph edit terminates after one
+//! line.
 
 use super::code::{self, Cont, Lang};
 use crate::text::buffer::Buffer;
@@ -105,7 +106,11 @@ impl BlockCache {
     /// count is unchanged, because an insertion/deletion shifts every cached
     /// carry entry and the index-wise comparison would be against the wrong
     /// source line; there we simply rescan to EOF, which is still correct.
-    pub fn invalidate_from(&mut self, buffer: &Buffer, edited: usize) -> usize {
+    ///
+    /// `edited_last` is the highest line the edits touched: the scan never stops
+    /// before it, since an edit that kept the line count may have changed
+    /// lines below a point where the carry happens to match again.
+    pub fn invalidate_from(&mut self, buffer: &Buffer, edited: usize, edited_last: usize) -> usize {
         let n = buffer.line_count();
         let edited = edited.min(n.saturating_sub(1));
         // Resume ONE LINE EARLIER than the edit: a table header is classified
@@ -143,7 +148,11 @@ impl BlockCache {
             // Past the edit and the state leaving this line matches what the
             // next line already expected: everything below is unaffected.
             //
-            // `i >= edited`, never the resumed line before it: that line was
+            // Not before the last edited line either: an edit that kept the
+            // line count (a swap of two blocks, an indent) changed lines below
+            // a point where the carry can happen to match again.
+            //
+            // And `i >= edited`, never the resumed line before it: that line was
             // NOT edited, so its carry is unchanged by construction and the
             // scan would stop before it ever reclassified the edit. Typing
             // `- ` in front of a paragraph left the line a paragraph until the
@@ -156,7 +165,7 @@ impl BlockCache {
             let opens_table = i + 1 < n
                 && self.kinds[i + 1] == BlockKind::Table
                 && self.carry[i + 1] != Carry::InTable;
-            if can_early_stop && i >= edited && !opens_table {
+            if can_early_stop && i >= edited.max(edited_last) && !opens_table {
                 if let Some(old) = old_next {
                     if next == old {
                         break;
@@ -592,9 +601,27 @@ mod tests {
         assert_eq!(cache.kinds[2], BlockKind::Table);
 
         b.insert_str(Cursor::new(2, 3), "x");
-        cache.invalidate_from(&b, 2);
+        cache.invalidate_from(&b, 2, 2);
         assert_eq!(cache.kinds[2], BlockKind::Table, "header row stays a header");
         assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
+    }
+
+    /// Two lines swapped, same line count: the carry matches again right
+    /// after the first, so only the edited range keeps the scan going to the
+    /// second.
+    #[test]
+    fn a_swap_rescans_to_its_last_line() {
+        let mut b = buf("intro\n\n- a\n    more\n- b\n");
+        let mut cache = BlockCache::build(&b, true);
+        let from = b.rope.line_to_char(3);
+        let to = b.rope.line_to_char(5);
+        b.delete_chars(from, to);
+        b.insert_str(Cursor::new(3, 0), "- b\n    more\n");
+        let mut stale = BlockCache::build(&buf("intro\n\n- a\n    more\n- b\n"), true);
+        stale.invalidate_from(&b, 3, 3);
+        cache.invalidate_from(&b, 3, 4);
+        assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
+        assert_ne!(stale.kinds, cache.kinds, "stopping at the first line misses the second");
     }
 
     /// Removing the delimiter row must demote the header again. This is why
@@ -608,7 +635,7 @@ mod tests {
         let start = b.rope.line_to_char(1);
         let end = b.rope.line_to_char(2);
         b.delete_chars(start, end);
-        cache.invalidate_from(&b, 0);
+        cache.invalidate_from(&b, 0, 0);
         assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
         assert_eq!(cache.kinds[0], BlockKind::Paragraph, "no delimiter, no table");
     }
@@ -714,7 +741,7 @@ mod tests {
 
         // Edit line 2: turn prose into a heading.
         b.insert_str(Cursor::new(2, 0), "## ");
-        cache.invalidate_from(&b, 2);
+        cache.invalidate_from(&b, 2, 2);
 
         let fresh = BlockCache::build(&b, true);
         assert_eq!(cache.kinds, fresh.kinds);
@@ -734,7 +761,7 @@ mod tests {
         assert_eq!(cache.kinds[2], BlockKind::Paragraph);
 
         b.insert_str(Cursor::new(2, 0), "- ");
-        cache.invalidate_from(&b, 2);
+        cache.invalidate_from(&b, 2, 2);
 
         assert!(
             matches!(cache.kinds[2], BlockKind::ListItem { .. }),
@@ -753,7 +780,7 @@ mod tests {
 
         b.insert_str(Cursor::new(0, 0), "```\n");
         // Rescan from the edited first line.
-        cache.invalidate_from(&b, 0);
+        cache.invalidate_from(&b, 0, 0);
 
         let fresh = BlockCache::build(&b, true);
         assert_eq!(cache.kinds, fresh.kinds);
