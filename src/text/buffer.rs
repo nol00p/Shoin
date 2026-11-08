@@ -75,8 +75,8 @@ pub struct Buffer {
     /// single rescan from there covers every change.
     pub dirty_line: Option<usize>,
 
-    /// How far below the lowest line touched since the same take the file
-    /// goes on, in lines. An edit that keeps the line count (swapping two
+    /// How far the file goes on below the LAST line touched since the same
+    /// take (the highest-numbered one), in lines. An edit that keeps the line count (swapping two
     /// blocks, indenting) can change lines well below `dirty_line`, and a
     /// rescan that stopped as soon as its state matched again would miss
     /// them. Counted from the END because an edit above a line does not move
@@ -453,9 +453,54 @@ mod tests {
         assert_eq!(b.take_dirty(), Some((2, 5)));
 
         // A break the rope counts that is not `\n`: U+2028.
-        let mut b = Buffer::unnamed(text).unwrap();
+        let mut b = Buffer::unnamed(text.clone()).unwrap();
         b.insert_str(Cursor::new(1, 0), "p\u{2028}q");
         assert_eq!(b.take_dirty(), Some((1, 2)));
+
+        // Two edits far apart that keep the line count between them: every
+        // line from the first to the second is in the range.
+        let ten = b"0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n".to_vec();
+        let mut b = Buffer::unnamed(ten).unwrap();
+        b.insert_str(Cursor::new(3, 0), "new\n");
+        let at = b.rope.line_to_char(8);
+        b.delete_chars(at, at + 2);
+        assert_eq!(b.take_dirty(), Some((3, 8)));
+    }
+
+    /// Undo and redo write the rope directly; they record the whole span of
+    /// what they put back, not just where it starts.
+    #[test]
+    fn undo_and_redo_record_what_they_put_back() {
+        let mut b = Buffer::unnamed(b"0\n1\n2\n3\n4\n5\n".to_vec()).unwrap();
+        b.history.begin_group(None);
+        let at = b.rope.line_to_char(2);
+        b.delete_chars(at, at + 4); // lines "2" and "3"
+        b.history.end_group();
+        b.take_dirty();
+        b.undo();
+        assert_eq!(b.take_dirty(), Some((2, 4)), "undo put two lines back");
+
+        let mut b = Buffer::unnamed(b"0\n1\n2\n".to_vec()).unwrap();
+        b.history.begin_group(None);
+        b.insert_str(Cursor::new(1, 0), "x\ny\n");
+        b.history.end_group();
+        b.undo();
+        b.take_dirty();
+        b.redo();
+        assert_eq!(b.take_dirty(), Some((1, 3)), "redo put two lines back");
+    }
+
+    /// Deleting the `\n` of a `\r\n` leaves a lone `\r`, still a break to
+    /// the rope: the first line touched is the one before it either way.
+    #[test]
+    fn a_lone_carriage_return_keeps_the_first_line() {
+        let mut b = Buffer::empty();
+        b.rope = ropey::Rope::from_str("a\r\nb\nc\n");
+        assert_eq!(b.rope.len_lines(), 4);
+        b.delete_chars(2, 3);
+        assert_eq!(b.rope.to_string(), "a\rb\nc\n");
+        assert_eq!(b.rope.len_lines(), 4, "the lone \\r still breaks the line");
+        assert_eq!(b.take_dirty().map(|(first, _)| first), Some(0));
     }
 
     /// Piped text has no name and nothing unsaved, and keeps its line ending
