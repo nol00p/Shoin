@@ -4247,29 +4247,14 @@ impl App {
     ///
     /// A number that changes width (`9.` → `10.`) moves its item's text
     /// column, so the item's lines move with it when other Markdown tools
-    /// would otherwise read them differently (`realign::shifts`), in the same
-    /// step. Shifts only touch leading spaces, after the numbers are in.
+    /// would otherwise read them differently (`realign`), in the same step.
+    /// Every change is to the start of a line: indent and number.
     fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
         let edits: Vec<list::Renumber> = edits.into_iter().collect();
-        let shifts = if edits.iter().any(realign::changes_width) {
-            let lines: Vec<String> = self.buffer.rope.lines().map(String::from).collect();
-            realign::shifts(&lines, &edits)
-        } else {
-            Vec::new()
-        };
-        for r in &edits {
-            let start = self.buffer.char_index(Cursor::new(r.line, r.cols.start));
-            self.buffer.delete_chars(start, start + r.cols.len());
-            self.buffer.insert_str(Cursor::new(r.line, r.cols.start), &r.number);
-        }
-        for (line, by) in shifts {
-            let at = Cursor::new(line, 0);
-            if by > 0 {
-                self.buffer.insert_str(at, &" ".repeat(by as usize));
-            } else {
-                let start = self.buffer.char_index(at);
-                self.buffer.delete_chars(start, start + by.unsigned_abs());
-            }
+        for e in realign::line_edits(&self.buffer.rope, &edits) {
+            let start = self.buffer.char_index(Cursor::new(e.line, 0));
+            self.buffer.delete_chars(start, start + e.cut);
+            self.buffer.insert_str(Cursor::new(e.line, 0), &e.with);
         }
     }
 
@@ -8118,6 +8103,29 @@ mod tests {
         assert_eq!(app.buffer.cursor, Cursor::new(9, 4));
         feed(&mut app, "u");
         assert_eq!(text(&app), list);
+    }
+
+    /// Review of #86: an item that already reads the same keeps its
+    /// indents, an item that cannot be realigned does not stop another, and
+    /// a renumbered `1.` counts as one when deciding what reads the same.
+    #[test]
+    fn each_renumbered_item_is_realigned_on_its_own() {
+        let mut app = app_with("8. h\n9. a\n   - x\n10. b\n    - y\n");
+        app.buffer.cursor = Cursor::new(3, 0);
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "8. h\n9. b\n    - y\n10. a\n    - x\n");
+
+        // b's code has a tab no shift can fix; a still moves in.
+        let mut app = app_with("8. h\n9. a\n   - x\n10. b\n\n    \tcode\n");
+        app.buffer.cursor = Cursor::new(3, 0);
+        alt(&mut app, 'k');
+        assert_eq!(text(&app), "8. h\n9. b\n\n    \tcode\n10. a\n    - x\n");
+
+        let list = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n   1. s\n   2. t\n";
+        let mut app = app_with(list);
+        app.buffer.cursor = Cursor::new(9, 6);
+        feed(&mut app, "<al");
+        assert_eq!(text(&app), "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. s\n    1. t\n");
     }
 
     #[test]

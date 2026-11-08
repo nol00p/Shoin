@@ -127,17 +127,18 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   the edit touched are renumbered; others in the file stay as written, even
   if their numbers are out of order.
 - Going from `9.` to `10.` pushes that item's text one column right, and
-  GitHub, pandoc (so export too) and other CommonMark tools read everything
-  in an item from its text column: a sub-item, fence or table left at the
-  old column would fall out of the item, and indented code would gain a
-  space. So when the renumber alone would change how the file reads to
-  them, every line of the item at or past the old column moves by the same
-  amount, which leaves the item reading exactly as before; narrowing
-  (`10.` → `9.`) takes the space back the same way. Lines that still belong,
-  such as a list nested by 4 or plain continuation text, stay as written,
-  and so do lazy lines. Shoin checks the result with a CommonMark parser and
-  leaves the lines alone when moving them would not help, as can happen
-  with tabs.
+  CommonMark tools such as GitHub read everything in an item from its text
+  column: a sub-item, fence or table left at the old column would fall out
+  of the item, and indented code would gain a space. Pandoc's Markdown,
+  which export uses, follows the same column rule in the common cases, but
+  only the CommonMark reading is checked: each item whose number changes
+  width is parsed before and after. If it reads as before with only the number changed, it is left
+  as written: a list nested by 4, say, or plain continuation text. If not,
+  every line of the item at or past the old column, its text included,
+  moves by the same amount, which leaves the item reading exactly as
+  before; narrowing (`10.` → `9.`) takes the space back the same way. Lazy
+  lines stay. When moving would not help either, as can happen with tabs,
+  only the number changes.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.
