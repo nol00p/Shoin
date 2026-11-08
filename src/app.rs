@@ -4253,7 +4253,9 @@ impl App {
     fn apply_renumber(&mut self, edits: impl IntoIterator<Item = list::Renumber>) {
         let edits: Vec<list::Renumber> = edits.into_iter().collect();
         let (math, tab_width) = (self.config.markdown.math, self.config.editor.tab_width);
-        for e in realign::line_edits(&self.buffer.rope, &edits, math, tab_width) {
+        self.refresh_blocks();
+        let line_edits = realign::line_edits(&self.buffer, &self.blocks.kinds, &edits, math, tab_width);
+        for e in line_edits {
             let was: Vec<char> = self.buffer.line_text(e.line).chars().take(e.cut).collect();
             let same = was.iter().zip(e.with.chars()).take_while(|(a, b)| **a == *b).count();
             let at = Cursor::new(e.line, same);

@@ -26,9 +26,10 @@
 //! a task's box, which item each is in) has to stay the same, since the
 //! editor and HTML export read with that. When nothing works, as with a
 //! fence, `$$` block, heading or rule that moving would put 4 columns in
-//! (where Shoin's parser stops seeing one), the number goes in alone. Lines
-//! indented with tabs never move. Each item is decided on its own, so one
-//! that cannot be helped does not stop another.
+//! (where Shoin's parser stops seeing one), the number goes in alone. An
+//! item with a line indented with a tab keeps all its lines where they are.
+//! Each item is decided on its own, so one that cannot be helped does not
+//! stop another.
 //!
 //! "As it did" is the text before the renumber, with each changed number
 //! replaced by a stand-in of its old width that is `1` exactly when the new
@@ -38,13 +39,12 @@
 //! of the comparison, since a renumbered line can read as text.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ops::RangeInclusive;
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ropey::Rope;
 
 use super::buffer::Buffer;
-use super::list::{Lists, Renumber};
+use super::list::{indent_cols, Lists, Renumber};
 use crate::render::markdown::block::{BlockCache, BlockKind};
 
 /// One line's new start: its first `cut` chars become `with`. Renumbering
@@ -57,18 +57,27 @@ pub struct LineEdit {
     pub with: String,
 }
 
-/// The line edits that make `edits` in `rope`: each number rewritten, and
+/// The line edits that make `edits` in `buffer`: each number rewritten, and
 /// where a number changes width, its item kept reading as it did when one
-/// of the ways in the module docs does that. `math` and `tab_width` are what
-/// Shoin reads the text with.
-pub fn line_edits(rope: &Rope, edits: &[Renumber], math: bool, tab_width: usize) -> Vec<LineEdit> {
-    if edits.iter().all(|r| width_change(r) == 0) {
+/// of the ways in the module docs does that. `kinds` is the buffer's block
+/// cache, and `math` and `tab_width` are what Shoin reads text with.
+pub fn line_edits(
+    buffer: &Buffer,
+    kinds: &[BlockKind],
+    edits: &[Renumber],
+    math: bool,
+    tab_width: usize,
+) -> Vec<LineEdit> {
+    let rope = &buffer.rope;
+    // A block cache that is not the buffer's, line for line, cannot say how
+    // Shoin reads it: then the numbers go in alone.
+    if edits.iter().all(|r| width_change(r) == 0) || kinds.len() != rope.len_lines() {
         return edits.iter().map(|r| plain_edit(&rope.line(r.line).to_string(), r)).collect();
     }
     let text = rope.to_string();
     let lines: Vec<&str> =
         (0..rope.len_lines()).map(|l| &text[rope.line_to_byte(l)..rope.line_to_byte(l + 1)]).collect();
-    realign(&text, &lines, edits, |text, range| shoin_reading(text, range, math, tab_width))
+    realign(&lines, edits, &Shoin { buffer, kinds, math, tab_width })
 }
 
 /// How many columns `r` widens its number by (negative: narrows).
@@ -77,35 +86,66 @@ fn width_change(r: &Renumber) -> isize {
 }
 
 /// How Shoin reads a line: its block kind, with an item's depth left out,
-/// and the item it is in. Depth alone may change; nesting may not.
+/// and, unless it is blank, the nearest item line above it indented less,
+/// which is what `Lists` nests it under. Depth alone may change; nesting
+/// may not.
 type ShoinLine = (BlockKind, Option<usize>);
 
-/// How Shoin reads lines `range` of `text`, and where the item on each of
-/// them ends (for lines that start no item, `None`).
-fn shoin_reading(
-    text: &str,
-    range: RangeInclusive<usize>,
+/// Shoin's reading of the buffer, and of text made from it.
+struct Shoin<'a> {
+    buffer: &'a Buffer,
+    kinds: &'a [BlockKind],
     math: bool,
     tab_width: usize,
-) -> (Vec<ShoinLine>, Vec<Option<usize>>) {
-    let mut buffer = Buffer::empty();
-    buffer.rope = Rope::from_str(text);
-    let kinds = BlockCache::build(&buffer, math).kinds;
-    let lists = Lists::new(&buffer, &kinds, tab_width);
-    let read = range
-        .clone()
-        .map(|l| {
-            let kind = match &kinds[l] {
-                BlockKind::ListItem { marker, checked, .. } => {
-                    BlockKind::ListItem { depth: 0, marker: *marker, checked: *checked }
+}
+
+impl Shoin<'_> {
+    /// The buffer's lines as Shoin reads them.
+    fn before(&self, lines: &[&str]) -> Vec<ShoinLine> {
+        self.lines(lines, self.kinds)
+    }
+
+    /// `lines` (of another text) as Shoin reads them.
+    fn after(&self, text: &str, lines: &[&str]) -> Vec<ShoinLine> {
+        let mut buffer = Buffer::empty();
+        buffer.rope = Rope::from_str(text);
+        self.lines(lines, &BlockCache::build(&buffer, self.math).kinds)
+    }
+
+    /// The last line of the item on `line` in the buffer, as Shoin sees it.
+    fn item_end(&self, line: usize) -> Option<usize> {
+        let lists = Lists::new(self.buffer, self.kinds, self.tab_width);
+        lists.item_bounds(line).filter(|(start, _)| *start == line).map(|(_, end)| end)
+    }
+
+    /// One pass, keeping the item lines that could still be the nearest
+    /// shallower one, by indent (a later item at most as deep hides them).
+    fn lines(&self, lines: &[&str], kinds: &[BlockKind]) -> Vec<ShoinLine> {
+        let mut open: Vec<(usize, usize)> = Vec::new();
+        lines
+            .iter()
+            .zip(kinds)
+            .enumerate()
+            .map(|(l, (line, kind))| {
+                let kind = match kind {
+                    BlockKind::ListItem { marker, checked, .. } => {
+                        BlockKind::ListItem { depth: 0, marker: *marker, checked: *checked }
+                    }
+                    kind => kind.clone(),
+                };
+                if matches!(kind, BlockKind::Blank) {
+                    return (kind, None);
                 }
-                kind => kind.clone(),
-            };
-            (kind, lists.parent(l))
-        })
-        .collect();
-    let ends = range.map(|l| lists.item_bounds(l).filter(|(start, _)| *start == l).map(|(_, end)| end)).collect();
-    (read, ends)
+                let depth = indent_cols(line, self.tab_width);
+                let under = open[..open.partition_point(|&(d, _)| d < depth)].last().map(|&(_, l)| l);
+                if matches!(kind, BlockKind::ListItem { .. }) {
+                    open.truncate(open.partition_point(|&(d, _)| d < depth));
+                    open.push((depth, l));
+                }
+                (kind, under)
+            })
+            .collect()
+    }
 }
 
 /// What can keep an item reading as it did; see the module docs.
@@ -153,12 +193,7 @@ struct State {
     good: Vec<bool>,
 }
 
-fn realign(
-    text: &str,
-    lines: &[&str],
-    edits: &[Renumber],
-    shoin: impl Fn(&str, RangeInclusive<usize>) -> (Vec<ShoinLine>, Vec<Option<usize>>),
-) -> Vec<LineEdit> {
+fn realign(lines: &[&str], edits: &[Renumber], shoin: &Shoin) -> Vec<LineEdit> {
     let numbers: BTreeMap<usize, &Renumber> = edits.iter().map(|r| (r.line, r)).collect();
     let stand_ins: Vec<LineEdit> = edits
         .iter()
@@ -175,16 +210,15 @@ fn realign(
             // `layout` checked the indent is spaces, so chars are bytes.
             let reading = before.reading(before.item_at(edit.line, edit.cols.start)?);
             let last_text = (edit.line..=reading.last).rev().find(|&k| !lines[k].trim().is_empty())?;
-            let tabbed = lines[edit.line + 1..=last_text].iter().any(|l| l.trim_start_matches([' ', '\t']).len() < l.trim_start_matches(' ').len());
+            let tabbed = lines[edit.line + 1..=last_text].iter().any(|l| {
+                !l.trim().is_empty() && l.trim_start_matches([' ', '\t']).len() < l.trim_start_matches(' ').len()
+            });
             Some(Item { edit, col, gap, last_text, tabbed, reading })
         })
         .collect();
-    // The lines any fix could change, and Shoin's reading of them before,
-    // worked out only once a fix is tried.
-    let first = items.iter().flatten().map(|i| i.edit.line).min().unwrap_or(0);
-    let last = items.iter().flatten().map(|i| i.reading.last).max().unwrap_or(0);
+    // Shoin's reading before, worked out only once a fix is tried.
     let shoin_before = std::cell::OnceCell::new();
-    let shoin_before = || shoin_before.get_or_init(|| shoin(text, first..=last));
+    let shoin_before = || shoin_before.get_or_init(|| shoin.before(lines));
 
     // The line edits for `edits` with each item fixed by its `fixes`.
     let build = |fixes: &[Fix]| -> Option<Vec<LineEdit>> {
@@ -220,15 +254,24 @@ fn realign(
     // what Shoin reads, so without one that is not checked.
     let check = |edits: &[LineEdit], fixed: bool| -> Vec<bool> {
         let (text, starts) = apply(lines, edits);
+        let shoin_after = fixed.then(|| {
+            let ends = starts.iter().skip(1).copied().chain([text.len()]);
+            let after_lines: Vec<&str> = starts.iter().zip(ends).map(|(&a, b)| &text[a..b]).collect();
+            shoin.after(&text, &after_lines)
+        });
         let after = Parsed::new(&text, starts);
-        let shoin_after = fixed.then(|| shoin(&text, first..=last).0);
         let numbered: HashMap<usize, &LineEdit> = edits.iter().map(|e| (e.line, e)).collect();
-        let same_for_shoin = |range: RangeInclusive<usize>| {
-            shoin_after.as_ref().is_none_or(|now| {
-                let was = &shoin_before().0;
-                range.into_iter().all(|l| now[l - first] == was[l - first])
-            })
+        // Shoin's reading may change only inside items, and is then checked
+        // item by item.
+        let inside: Vec<bool> = {
+            let mut inside = vec![false; lines.len()];
+            for item in items.iter().flatten() {
+                inside[item.edit.line..=item.reading.last].fill(true);
+            }
+            inside
         };
+        let shoin_kept = |l: usize| shoin_after.as_ref().is_none_or(|now| now[l] == shoin_before()[l]);
+        let outside_kept = (0..lines.len()).filter(|&l| !inside[l]).all(shoin_kept);
         items
             .iter()
             .map(|item| {
@@ -236,8 +279,9 @@ fn realign(
                     let line = item.edit.line;
                     // The number follows the spaces its edit starts with.
                     let marker = numbered[&line].with.chars().take_while(|&c| c == ' ').count();
-                    after.item_at(line, marker).is_some_and(|s| after.reading(s) == item.reading)
-                        && same_for_shoin(line..=item.reading.last)
+                    outside_kept
+                        && after.item_at(line, marker).is_some_and(|s| after.reading(s) == item.reading)
+                        && (line..=item.reading.last).all(shoin_kept)
                 })
             })
             .collect()
@@ -246,6 +290,9 @@ fn realign(
     // `fix`, and keep it if they all then read as they did and no other item
     // stops.
     let attempt = |state: &mut State, set: &[usize], fix: Fix| {
+        if set.iter().all(|&i| state.good[i]) {
+            return;
+        }
         let mut fixes = state.fixes.clone();
         for &i in set.iter().filter(|&&i| !state.good[i]) {
             fixes[i] = fix;
@@ -269,9 +316,7 @@ fn realign(
         let trying: Vec<usize> = (0..items.len())
             .filter(|&i| {
                 items[i].as_ref().is_some_and(|item| {
-                    !state.good[i]
-                        && item.allows(fix)
-                        && shoin_before().1[item.edit.line - first] == Some(item.last_text)
+                    !state.good[i] && item.allows(fix) && shoin.item_end(item.edit.line) == Some(item.last_text)
                 })
             })
             .collect();
@@ -281,12 +326,14 @@ fn realign(
         // All at once usually does it. If not, an item with the items inside
         // it, which have to move together; then one at a time.
         attempt(&mut state, &trying, fix);
-        for group in nested_groups(&trying, &items) {
-            if group.len() > 1 {
-                attempt(&mut state, &group, fix);
-            }
-            for &i in &group {
-                attempt(&mut state, &[i], fix);
+        if trying.len() > 1 {
+            for group in nested_groups(&trying, &items) {
+                if group.len() > 1 {
+                    attempt(&mut state, &group, fix);
+                }
+                for &i in &group {
+                    attempt(&mut state, &[i], fix);
+                }
             }
         }
     }
@@ -499,8 +546,10 @@ mod tests {
 
     /// `text` with `edits` made through `line_edits`, as the buffer gets them.
     fn edited(text: &str, edits: &[Renumber]) -> String {
+        let b = buffer(text);
+        let kinds = BlockCache::build(&b, true).kinds;
         let lines: Vec<&str> = text.split_inclusive('\n').collect();
-        apply(&lines, &line_edits(&Rope::from_str(text), edits, true, 4)).0
+        apply(&lines, &line_edits(&b, &kinds, edits, true, 4)).0
     }
 
     /// Whether CommonMark and Shoin end `edit`'s item on the same line.
@@ -657,6 +706,12 @@ mod tests {
             edited(text, &[to(text, 0, 10), to(text, 7, 10)]),
             "10. b\n   ```\n   c\n   ```\n\n- sep\n\n10. a\n    - x\n"
         );
+    }
+
+    /// Review 4 of #86: a tab on a blank line is no tab-indented line.
+    #[test]
+    fn a_tab_on_a_blank_line_stops_nothing() {
+        assert_eq!(renumbered("9. a\n   - x\n\t\n   - y\n", 0, 10), "10. a\n    - x\n\t\n    - y\n");
     }
 
     /// Review 3 of #86: what Shoin reads has to stay the same in full, not

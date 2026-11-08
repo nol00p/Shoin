@@ -141,7 +141,8 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   fence, `$$` block, heading or rule (`***`) as one when it is indented 4
   or more columns, even inside a list item, so an item holding one keeps
   its lines where they are; other tools then read that block outside the
-  item, as they did before. Lines indented with tabs never move either.
+  item, as they did before. An item with any line indented with a tab
+  keeps all its lines where they are too.
   When nothing works, only the number changes.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
