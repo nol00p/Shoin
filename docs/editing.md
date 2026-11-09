@@ -56,7 +56,9 @@ on it for the next press.
 Numbered lists stay in sequence: when an item moves, or moves into or out of
 a `1.` `2.` `3.` list, the numbers of each list it touched are rewritten, in
 the same undo step. Bullet lists are never changed. Turn this off with `list_renumber = false`
-in `[editor]`.
+in `[editor]`. Renumbering never re-indents the lines under an item, which
+matters once a list reaches `10.`: see Details for how to write long
+numbered lists so other tools read them as Shoin shows them.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
 line, so Enter, Tab, and typing starts a sub-item.
@@ -123,8 +125,22 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   still starts at `3.` after its first item moves away. A sub-list the edit
   creates starts at `1.`. Each item keeps its own `.` or `)`. Only the lists
   the edit touched are renumbered; others in the file stay as written, even
-  if their numbers are out of order. Going from `9.` to `10.` pushes that
-  item's text one column right; the lines under it are not re-aligned.
+  if their numbers are out of order.
+- Going from `9.` to `10.` pushes that item's text one column right, and
+  the lines under it stay where they were. GitHub, pandoc and other
+  CommonMark tools count a line as part of a numbered item only if it is
+  indented at least as far as the item's text, so a sub-list or code block
+  that sat at column 3 under `9.` falls out of the item at `10.`. Shoin still
+  shows it nested, so this only shows on GitHub or in PDF export. To write
+  numbered lists that survive it:
+  - Nest sub-lists and continuation text by 4 spaces. That is deep enough
+    for every item up to `99.`, and in a file that nests by 4, `>al` keeps
+    doing so.
+  - For a list whose items hold code blocks or `$$` blocks, write `1.` on
+    every item and set `list_renumber = false`. The numbers never change
+    width, and GitHub and export number the items for you. (A code block
+    indented 4 or more columns is not yet shown as code by Shoin, even
+    inside a list item, so moving one to column 4 is not an option there.)
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.
