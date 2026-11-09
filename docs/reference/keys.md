@@ -302,6 +302,7 @@ gives `ss`, `siw` and `2s3w`.
 | `repeat` | | `.` | repeat the last change |
 | `list_item_down` `list_item_up` | | `Alt-j` `Alt-k` | move the list item, or in Visual the selected items, past the next / previous one |
 | `list_indent` `list_outdent` | | `Tab` `Shift-Tab` (Insert) | indent / outdent the list item |
+| `fix_list` | `fixlist` | | re-indent the list under the cursor, like `:fixlist` |
 
 ### Writer verbs
 

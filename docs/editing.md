@@ -60,6 +60,12 @@ in `[editor]`. Renumbering never re-indents the lines under an item, which
 matters once a list reaches `10.`: see Details for how to write long
 numbered lists so other tools read them as Shoin shows them.
 
+`:fixlist` re-indents the list under the cursor so that GitHub, pandoc and
+export read it the way Shoin shows it: whatever sits under an item moves to
+the column where the item's text starts, taking its own sub-items along. It
+only runs when you ask, on the whole list around the cursor, as one undo
+step. To put it on a key, bind `fix_list` under `[keys.normal]`.
+
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
 line, so Enter, Tab, and typing starts a sub-item.
 
@@ -131,8 +137,8 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   CommonMark tools count a line as part of a numbered item only if it is
   indented at least as far as the item's text, so a sub-list or code block
   that sat at column 3 under `9.` falls out of the item at `10.`. Shoin still
-  shows it nested, so this only shows on GitHub or in PDF export. To write
-  numbered lists that survive it:
+  shows it nested, so this only shows on GitHub or in PDF export.
+  `:fixlist` repairs it afterwards. To write numbered lists that survive it:
   - Nest sub-lists and continuation text by 4 spaces. That is deep enough
     for every item up to `99.`, and in a file that nests by 4, `>al` keeps
     doing so.
@@ -141,6 +147,17 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
     width, and GitHub and export number the items for you. (A code block
     indented 4 or more columns is not yet shown as code by Shoin, even
     inside a list item, so moving one to column 4 is not an option there.)
+- `:fixlist` moves a sub-item, paragraph, code block, `$$` block or table
+  only if it starts left of its item's text, or 4 or more columns past it;
+  anything already in between stays, so a list nested by 4 stays nested by
+  4 and a second `:fixlist` changes nothing. Top-level items, blank lines
+  and unindented "lazy" lines never move. Moved lines are indented with
+  spaces, and so is a line whose tabs GitHub would count to another column
+  than Shoin does (it puts tab stops every 4 columns, whatever `tab_width`
+  says). An item whose move would change how Shoin shows the list (a code
+  block or `$$` block pushed to 4 columns, which Shoin does not yet show as
+  code there) is left as written with its sub-items, and the message gives
+  its line.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.

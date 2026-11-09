@@ -19,10 +19,13 @@
 //! Every function is pure over the buffer text and the kinds, and every range
 //! is a pair of line numbers, END INCLUSIVE, like `object::paragraph_bounds`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
+use ropey::Rope;
+
 use super::buffer::Buffer;
-use crate::render::markdown::block::{BlockKind, Marker};
+use crate::render::markdown::block::{leading_ws_cols, BlockCache, BlockKind, Marker};
 
 /// Leading whitespace in columns, a tab counting as `tab_width`. Matches how
 /// the renderer lays out a tabbed list (`render::layout::content_column`).
@@ -43,6 +46,32 @@ pub struct Renumber {
     pub line: usize,
     pub cols: Range<usize>,
     pub number: String,
+}
+
+/// Replace the leading spaces and tabs of `line` with `cols` spaces: how
+/// a `Realign` line is applied.
+pub fn reindent(rope: &mut Rope, line: usize, cols: usize) {
+    let start = rope.line_to_char(line);
+    let ws = leading_ws_cols(&rope.line(line).to_string());
+    rope.remove(start..start + ws);
+    rope.insert(start, &" ".repeat(cols));
+}
+
+/// Leading whitespace in columns as CommonMark counts it: tab stops every 4,
+/// whatever `tab_width` says.
+fn commonmark_cols(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .fold(0, |col, c| if c == '\t' { col + 4 - col % 4 } else { col + 1 })
+}
+
+/// What `Lists::realign` would change: the new indent, in columns, of each
+/// line that moves, and the item lines it leaves as written because moving
+/// them would change how Shoin shows the list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Realign {
+    pub lines: Vec<(usize, usize)>,
+    pub skipped: Vec<usize>,
 }
 
 /// Why lines touch no run of sibling items to move as one block.
@@ -69,7 +98,7 @@ impl<'a> Lists<'a> {
         Lists {
             buffer,
             kinds,
-            tab_width,
+            tab_width: tab_width.max(1),
         }
     }
 
@@ -280,6 +309,72 @@ impl<'a> Lists<'a> {
             .collect()
     }
 
+    /// The fix-list command: re-indent the whole list around `line` so that
+    /// CommonMark tools (GitHub, pandoc, export) read it the way Shoin shows
+    /// it. `None` outside a list; a blank line between two items of one list
+    /// is inside it. `math` is the `[markdown] math` the kinds were built
+    /// with.
+    ///
+    /// Shoin's structure decides what belongs to what; nothing here guesses
+    /// at CommonMark beyond its one rule for items: what sits under an item
+    /// belongs to it when it starts at the item's text column T, or up to 3
+    /// columns past it. A sub-item or block that already does stays where it
+    /// is; one that doesn't moves to T, and takes everything under it along
+    /// by the same amount. Top-level items, lazy lines and blank lines never
+    /// move. A line whose tabs CommonMark counts differently from Shoin is
+    /// rewritten with spaces at the column Shoin shows it at.
+    ///
+    /// The result is checked by classifying the new text: an item whose move
+    /// would change any line's kind, or any item's extent or parent (a fence
+    /// at 4+ columns reads as prose here), is left as written with its
+    /// subtree, and so is one whose move would push code left of column 0.
+    /// The rest is tried again.
+    pub fn realign(&self, line: usize, math: bool) -> Option<Realign> {
+        let mut top = self.item_at(line).or_else(|| self.blank_inside(line))?;
+        while let Some(p) = self.parent_of(top) {
+            top = p;
+        }
+        let items = self.level_items(top);
+        let first = *items.first()?;
+        let end = self.bounds(*items.last()?).1;
+        let mut skip: BTreeSet<usize> = BTreeSet::new();
+        loop {
+            let mut moves = BTreeMap::new();
+            let mut blamed = BTreeSet::new();
+            for &item in &items {
+                self.place(item, 0, &skip, &mut moves, &mut blamed);
+            }
+            moves.retain(|&l, cols| *cols != self.indent(l) || self.tabs_differ(l));
+            if blamed.is_empty() {
+                blamed = self.changes(first, end, &moves, math);
+            }
+            if blamed.is_empty() {
+                let skipped = skip
+                    .iter()
+                    .copied()
+                    .filter(|&s| !self.ancestors(s).any(|a| skip.contains(&a)))
+                    .collect();
+                return Some(Realign {
+                    lines: moves.into_iter().collect(),
+                    skipped,
+                });
+            }
+            // Each blamed item, or its nearest ancestor that still moves.
+            let fresh: Vec<usize> = blamed
+                .into_iter()
+                .filter_map(|k| std::iter::once(k).chain(self.ancestors(k)).find(|a| !skip.contains(a)))
+                .collect();
+            if fresh.is_empty() {
+                // Every item up to the top already stays: nothing is safe.
+                return Some(Realign {
+                    lines: Vec::new(),
+                    skipped: items,
+                });
+            }
+            skip.extend(fresh);
+        }
+    }
+
     fn kind(&self, line: usize) -> Option<&BlockKind> {
         self.kinds.get(line)
     }
@@ -306,6 +401,208 @@ impl<'a> Lists<'a> {
 
     fn indent(&self, line: usize) -> usize {
         indent_cols(&self.buffer.line_text(line), self.tab_width)
+    }
+
+    /// Where `item` and its subtree go when its parent moved by `delta`
+    /// columns: each line's new indent into `moves`. An item in `skip` stays
+    /// as written, subtree and all; one whose move would push a code line
+    /// left of column 0 goes into `blamed`.
+    fn place(
+        &self,
+        item: usize,
+        delta: isize,
+        skip: &BTreeSet<usize>,
+        moves: &mut BTreeMap<usize, usize>,
+        blamed: &mut BTreeSet<usize>,
+    ) {
+        if skip.contains(&item) {
+            return;
+        }
+        let shift = |l: usize, by: isize| self.indent(l) as isize + by;
+        moves.insert(item, shift(item, delta).max(0) as usize);
+        let t = self.text_col(item) as isize + delta;
+        // Where a child's first line goes: kept within T..=T+3, else to T.
+        let fit = |l: usize| {
+            let at = shift(l, delta);
+            if (t..=t + 3).contains(&at) {
+                delta
+            } else {
+                delta + t - at
+            }
+        };
+        let own = self.indent(item);
+        let (_, end) = self.bounds(item);
+        // The shift of the block the next line would continue, if any (the
+        // item's own text first), and whether that block is paragraph text,
+        // which a paragraph or `$$` line right after it continues.
+        let mut follow = Some(delta);
+        let mut para = true;
+        let mut i = item + 1;
+        while i <= end {
+            let Some(kind) = self.kind(i) else { break };
+            if self.buffer.line_text(i).trim().is_empty() {
+                // Nothing to indent. An empty line in a fence keeps it open.
+                if !matches!(kind, BlockKind::FenceBody { .. }) {
+                    follow = None;
+                    para = false;
+                }
+                i += 1;
+                continue;
+            }
+            if self.is_item(i) {
+                // A direct child: deeper ones are inside its own bounds.
+                self.place(i, fit(i), skip, moves, blamed);
+                i = self.bounds(i).1 + 1;
+                follow = None;
+                para = false;
+                continue;
+            }
+            let prev = self.kind(i - 1);
+            let code = matches!(kind, BlockKind::FenceBody { .. } | BlockKind::FenceClose);
+            let continues = match kind {
+                _ if code => true,
+                // `$$` is paragraph text to CommonMark.
+                BlockKind::Paragraph | BlockKind::MathBlock => para,
+                BlockKind::Table => matches!(prev, Some(BlockKind::Table)),
+                BlockKind::Quote(_) => matches!(prev, Some(BlockKind::Quote(_))),
+                _ => false,
+            };
+            let lazy = matches!(kind, BlockKind::Paragraph | BlockKind::MathBlock) && self.indent(i) <= own;
+            match follow.filter(|_| continues) {
+                // A lazy line is read as part of the paragraph wherever it
+                // starts, by Shoin and CommonMark alike: leave it.
+                Some(_) if lazy => {}
+                Some(by) => {
+                    let to = shift(i, by);
+                    if code && to < 0 {
+                        blamed.insert(item);
+                    }
+                    moves.insert(i, to.max(0) as usize);
+                }
+                None => {
+                    let by = fit(i);
+                    moves.insert(i, shift(i, by).max(0) as usize);
+                    follow = Some(by);
+                }
+            }
+            para = matches!(kind, BlockKind::Paragraph | BlockKind::MathBlock);
+            i += 1;
+        }
+    }
+
+    /// The column an item's text starts at, CommonMark's way: past the marker
+    /// and the 1 to 4 spaces after it. With none (an empty item) or 5 or
+    /// more, one column past the marker. Columns are counted as `indent`
+    /// counts them, so T and the lines under the item compare.
+    fn text_col(&self, item: usize) -> usize {
+        let text = self.buffer.line_text(item);
+        let ws = |c: char| match c {
+            ' ' => Some(1),
+            '\t' => Some(self.tab_width),
+            _ => None,
+        };
+        let mut chars = text.chars().peekable();
+        let mut col = 0;
+        while let Some(w) = chars.peek().copied().and_then(ws) {
+            col += w;
+            chars.next();
+        }
+        while chars.next_if(char::is_ascii_digit).is_some() {
+            col += 1;
+        }
+        // The bullet, or the ordinal's `.` / `)`.
+        chars.next();
+        col += 1;
+        let marker_end = col;
+        while let Some(w) = chars.peek().copied().and_then(ws) {
+            col += w;
+            chars.next();
+        }
+        let gap = col - marker_end;
+        if chars.peek().is_none() || gap == 0 || gap > 4 {
+            marker_end + 1
+        } else {
+            col
+        }
+    }
+
+    /// Whether `line`'s indent has a tab that CommonMark, with its tab stops
+    /// every 4, counts to another column than Shoin does. Code keeps its
+    /// tabs: there they are text.
+    fn tabs_differ(&self, line: usize) -> bool {
+        let text = self.buffer.line_text(line);
+        !matches!(self.kind(line), Some(BlockKind::FenceBody { .. } | BlockKind::FenceClose))
+            && text.chars().take_while(|c| c.is_whitespace()).any(|c| c == '\t')
+            && commonmark_cols(&text) != self.indent(line)
+    }
+
+    /// A blank `line` between two items of one list: the item above it.
+    fn blank_inside(&self, line: usize) -> Option<usize> {
+        if !self.blank(line) {
+            return None;
+        }
+        let above = (0..line).rev().find(|&l| !self.blank(l))?;
+        let below = (line + 1..=self.buffer.last_line()).find(|&l| !self.blank(l))?;
+        let top = |l: usize| {
+            let item = self.item_at(l)?;
+            Some(self.ancestors(item).last().unwrap_or(item))
+        };
+        let (a, b) = (top(above)?, top(below)?);
+        self.level_items(a).contains(&b).then(|| self.item_at(above)).flatten()
+    }
+
+    fn ancestors(&self, item: usize) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(self.parent_of(item), move |&p| self.parent_of(p))
+    }
+
+    /// The items whose moves make Shoin show the list `first..=end`
+    /// differently: the item around a line that changes kind, and any item
+    /// whose extent or parent changes. Empty when it would look the same.
+    ///
+    /// Only the list and two lines past it are classified again, from a copy
+    /// of the rope (so its lines are numbered exactly as the buffer's). A
+    /// list starts at an item line, which no carried state can be open
+    /// across.
+    fn changes(&self, first: usize, end: usize, moves: &BTreeMap<usize, usize>, math: bool) -> BTreeSet<usize> {
+        let mut blamed = BTreeSet::new();
+        if moves.is_empty() {
+            return blamed;
+        }
+        let rope = &self.buffer.rope;
+        let hi = (end + 2).min(self.buffer.last_line());
+        let to = if hi + 1 < rope.len_lines() { rope.line_to_char(hi + 1) } else { rope.len_chars() };
+        let mut copy = Rope::from(rope.slice(rope.line_to_char(first)..to));
+        for (&l, &cols) in moves.iter().rev() {
+            reindent(&mut copy, l - first, cols);
+        }
+        let mut buffer = Buffer::empty();
+        buffer.rope = copy;
+        let cache = BlockCache::build(&buffer, math);
+        let after = Lists::new(&buffer, &cache.kinds, self.tab_width);
+        let same = |a: Option<&BlockKind>, b: Option<&BlockKind>| match (a, b) {
+            (Some(BlockKind::ListItem { marker: m, .. }), Some(BlockKind::ListItem { marker: n, .. })) => m == n,
+            (Some(a), Some(b)) => std::mem::discriminant(a) == std::mem::discriminant(b),
+            (a, b) => a.is_none() == b.is_none(),
+        };
+        // The innermost item of this list around `l`.
+        let around = |l: usize| {
+            (first..=l.min(end))
+                .rev()
+                .find_map(|k| self.item_at(k))
+                .unwrap_or(first)
+        };
+        for l in first..=hi {
+            let n = l - first;
+            if !same(self.kind(l), after.kind(n)) {
+                blamed.insert(around(l));
+            } else if self.is_item(l)
+                && (self.bounds(l).1 != after.bounds(n).1 + first
+                    || self.parent_of(l) != after.parent_of(n).map(|p| p + first))
+            {
+                blamed.insert(l);
+            }
+        }
+        blamed
     }
 
     /// The extent of the item whose item line is `start`.
@@ -795,6 +1092,210 @@ mod tests {
         with(t, |l| {
             assert_eq!(l.next_sibling_bounds(0), None);
             assert_eq!(l.prev_sibling_bounds(4), None);
+        });
+    }
+
+    /// The text after `realign` at `line`, and the item lines it skipped.
+    fn realigned(text: &str, line: usize) -> (String, Vec<usize>) {
+        realigned_tw(text, line, 4)
+    }
+
+    const NINE: &str = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n";
+
+    #[test]
+    fn realign_moves_a_sub_list_to_the_wider_text_column() {
+        let t = format!("{NINE}9. i\n   - x\n10. j\n   - y\n     - z\n");
+        let (out, skipped) = realigned(&t, 0);
+        assert_eq!(out, format!("{NINE}9. i\n   - x\n10. j\n    - y\n      - z\n"));
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn realign_keeps_what_is_already_inside_the_item() {
+        // Nested by 4 is within T..=T+3 for `9.` and `10.` alike.
+        let t = format!("{NINE}9. i\n    - x\n10. j\n    - y\n");
+        assert_eq!(realigned(&t, 9).0, t);
+        let t = "- a\n  - b\n    - c\n- d\n   - e\n";
+        assert_eq!(realigned(t, 0).0, t);
+    }
+
+    #[test]
+    fn realign_is_idempotent() {
+        let t = format!("{NINE}9. i\n   - x\n10. j\n   - y\n\n   more\n   text\n");
+        let (once, _) = realigned(&t, 0);
+        assert_eq!(once, format!("{NINE}9. i\n   - x\n10. j\n    - y\n\n    more\n    text\n"));
+        assert_eq!(realigned(&once, 0).0, once);
+    }
+
+    #[test]
+    fn realign_pulls_in_a_block_past_the_text_column() {
+        let t = "- a\n\n       para\n- b\n";
+        assert_eq!(realigned(t, 3).0, "- a\n\n  para\n- b\n");
+    }
+
+    #[test]
+    fn realign_moves_a_fence_whole() {
+        let t = "- a\n\n ```\n code\n   more\n ```\n";
+        assert_eq!(realigned(t, 0).0, "- a\n\n  ```\n  code\n    more\n  ```\n");
+    }
+
+    #[test]
+    fn realign_skips_a_fence_it_would_put_4_columns_in() {
+        let t = format!("{NINE}9. i\n10. j\n\n   ```\n   x\n   ```\n   - y\n11. k\n   - z\n");
+        let (out, skipped) = realigned(&t, 0);
+        assert_eq!(skipped, vec![9]);
+        assert_eq!(out, format!("{NINE}9. i\n10. j\n\n   ```\n   x\n   ```\n   - y\n11. k\n    - z\n"));
+    }
+
+    #[test]
+    fn realign_skips_display_math_it_would_put_4_columns_in() {
+        let t = format!("{NINE}9. i\n10. j\n\n   $$\n   x\n   $$\n");
+        let (out, skipped) = realigned(&t, 0);
+        assert_eq!((out, skipped), (t.clone(), vec![9]));
+    }
+
+    #[test]
+    fn realign_leaves_lazy_lines_and_blank_lines() {
+        let t = format!("{NINE}9. i\n10. j\nlazy\n   - y\n\n\n11. k\n");
+        assert_eq!(realigned(&t, 0).0, format!("{NINE}9. i\n10. j\nlazy\n    - y\n\n\n11. k\n"));
+    }
+
+    #[test]
+    fn realign_works_from_a_nested_line_and_covers_the_whole_list() {
+        let t = format!("{NINE}9. i\n   - x\n10. j\n   - y\n");
+        assert_eq!(realigned(&t, 11).0, realigned(&t, 0).0);
+    }
+
+    #[test]
+    fn realign_reads_a_tab_as_tab_width() {
+        let t = format!("{NINE}9. i\n10. j\n\t- y\n");
+        assert_eq!(realigned(&t, 0).0, t);
+    }
+
+    #[test]
+    fn realign_moves_a_table_whole() {
+        let t = format!("{NINE}9. i\n10. j\n\n   | a | b |\n   |---|---|\n   | 1 | 2 |\n");
+        let want = format!("{NINE}9. i\n10. j\n\n    | a | b |\n    |---|---|\n    | 1 | 2 |\n");
+        assert_eq!(realigned(&t, 0).0, want);
+    }
+
+    #[test]
+    fn realign_takes_a_tab_indented_child_along() {
+        // `- y` (a tab past 2 columns) is `- x`'s child, and moves with it
+        // rather than becoming its sibling. A moved line gets spaces.
+        let t = format!("{NINE}9. i\n10. j\n   - x\n  \t- y\n");
+        let (out, skipped) = realigned(&t, 0);
+        assert_eq!(out, format!("{NINE}9. i\n10. j\n    - x\n       - y\n"));
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn realign_pulls_a_sub_item_shoin_shows_back_into_reach() {
+        // 4+ past `9.`'s text column CommonMark reads `- x` as more of `i`;
+        // Shoin shows a sub-item, and after the move both do.
+        let t = format!("{NINE}9. i\n       - x\n");
+        assert_eq!(realigned(&t, 0).0, format!("{NINE}9. i\n   - x\n"));
+        // An item whose text opens a list, and a task box: already in reach.
+        let t = "9. - x\n     - y\n10. [x] done\n       - z\n";
+        assert_eq!(realigned(t, 0).0, t);
+    }
+
+    #[test]
+    fn realign_steps_over_whitespace_only_lines() {
+        let t = format!("{NINE}9. i\n10. j\n   - x\n\t\n   - y\n");
+        assert_eq!(realigned(&t, 0).0, format!("{NINE}9. i\n10. j\n    - x\n\t\n    - y\n"));
+    }
+
+    /// `realigned` with another tab width.
+    fn realigned_tw(text: &str, line: usize, tab_width: usize) -> (String, Vec<usize>) {
+        let b = buf(text);
+        let cache = BlockCache::build(&b, true);
+        let r = Lists::new(&b, &cache.kinds, tab_width).realign(line, true).expect("in a list");
+        let mut rope = b.rope.clone();
+        for &(l, cols) in r.lines.iter().rev() {
+            reindent(&mut rope, l, cols);
+        }
+        (rope.to_string(), r.skipped)
+    }
+
+    // Review findings, each reproduced before it was fixed.
+
+    #[test]
+    fn realign_starts_a_new_block_after_a_fence_heading_or_rule() {
+        let t = "- a\n\n ```\n x\n ```\n     para\n";
+        assert_eq!(realigned(t, 0).0, "- a\n\n  ```\n  x\n  ```\n     para\n");
+        let t = "- a\n\n # H\n     para\n";
+        assert_eq!(realigned(t, 0).0, "- a\n\n  # H\n     para\n");
+    }
+
+    #[test]
+    fn realign_survives_a_tab_width_of_0() {
+        realigned_tw("- a\n\t- b\n", 0, 0);
+    }
+
+    #[test]
+    fn realign_never_flattens_code_it_would_pull_left() {
+        let t = "- a\n\n\t\t```\n    y\n  z\nw\n\t\t```\n";
+        let (out, skipped) = realigned_tw(t, 0, 4);
+        assert_eq!((out, skipped), (t.to_string(), vec![0]));
+    }
+
+    #[test]
+    fn realign_measures_an_item_and_its_children_alike() {
+        let t = "- a\n  \t- b\n          - c\n";
+        let (once, _) = realigned_tw(t, 0, 4);
+        assert_eq!(realigned_tw(&once, 0, 4).0, once);
+    }
+
+    #[test]
+    fn realign_rewrites_a_tab_other_tools_count_differently() {
+        // Shoin counts 6 columns at tab_width 2; CommonMark, 12.
+        let (out, _) = realigned_tw("10. j\n\t\t\t- y\n", 0, 2);
+        assert_eq!(out, "10. j\n      - y\n");
+    }
+
+    #[test]
+    fn realign_adds_nothing_to_an_empty_line_in_a_fence() {
+        let t = "- a\n\n ```\n x\n\n y\n ```\n";
+        assert_eq!(realigned(t, 0).0, "- a\n\n  ```\n  x\n\n  y\n  ```\n");
+    }
+
+    #[test]
+    fn realign_blames_the_item_that_moved() {
+        // Pulling `x` to 4 would swallow `para`: `x` stays, `w` is fixed.
+        let t = "10. a\n         - x\n\n      para\n   - w\n";
+        let (out, skipped) = realigned(t, 0);
+        assert_eq!(skipped, vec![1]);
+        assert_eq!(out, "10. a\n         - x\n\n      para\n    - w\n");
+    }
+
+    #[test]
+    fn realign_reads_lines_ropey_splits_on_its_own() {
+        let t = "x\u{2028}y\n\n- a\n\n       para\n- b\n\n       more\n";
+        let (out, skipped) = realigned_tw(t, 3, 4);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(out, "x\u{2028}y\n\n- a\n\n  para\n- b\n\n  more\n");
+    }
+
+    #[test]
+    fn realign_works_from_a_blank_line_inside_a_list() {
+        assert!(with("- a\n\n- b\n", |l| l.realign(1, true)).is_some());
+        assert!(with("- a\n\npara\n", |l| l.realign(1, true)).is_none());
+    }
+
+    #[test]
+    fn realign_finds_no_list_outside_one() {
+        assert_eq!(with("para\n\n- a\n", |l| l.realign(0, true)), None);
+    }
+
+    #[test]
+    fn text_col_follows_commonmark() {
+        with("- a\n10. b\n-\n1.      code\n  *  c\n", |l| {
+            assert_eq!(l.text_col(0), 2);
+            assert_eq!(l.text_col(1), 4);
+            assert_eq!(l.text_col(2), 2);
+            assert_eq!(l.text_col(3), 3);
+            assert_eq!(l.text_col(4), 5);
         });
     }
 }

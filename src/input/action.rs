@@ -117,6 +117,9 @@ pub enum Action {
     /// Insert-mode `Tab` / `Shift-Tab` on a list item: `>al` / `<al` without
     /// leaving Insert.
     ListShift { outdent: bool },
+    /// `:fixlist` — re-indent the list under the cursor so CommonMark tools
+    /// read it as Shoin shows it (`Lists::realign`).
+    FixList,
     Undo,
     Redo,
     Repeat,
@@ -219,6 +222,7 @@ impl Action {
             | Action::ListItemMove { .. }
             | Action::MoveLines { .. }
             | Action::ListShift { .. }
+            | Action::FixList
             | Action::Undo
             | Action::Redo
             | Action::Repeat
@@ -271,6 +275,7 @@ impl Action {
             "move_lines_up" | "move_line_up" => Action::MoveLines { down: false },
             "list_indent" => Action::ListShift { outdent: false },
             "list_outdent" => Action::ListShift { outdent: true },
+            "fix_list" | "fixlist" => Action::FixList,
             "toggle_bold" | "bold" => Action::ToggleBold,
             "toggle_italic" | "italic" => Action::ToggleItalic,
             "toggle_highlight" | "highlight" => Action::ToggleHighlight,
