@@ -19,7 +19,8 @@
 //! Every function is pure over the buffer text and the kinds, and every range
 //! is a pair of line numbers, END INCLUSIVE, like `object::paragraph_bounds`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{OnceCell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
 use ropey::Rope;
@@ -85,12 +86,22 @@ pub enum RunError {
     NoItem,
 }
 
-/// A view of one document's lists. Cheap to build; holds no state of its own.
-/// `kinds` must be the block cache for `buffer`'s current text.
+/// A view of one document's lists. Cheap to build. `kinds` must be the block
+/// cache for `buffer`'s current text.
+///
+/// It remembers the indents, extents and parents it has worked out: a
+/// command asks for the same ones many times (every sibling of a long list
+/// asks for the same parent and its extent), and the text cannot change
+/// while a `Lists` borrows it. Build a new one after an edit.
 pub struct Lists<'a> {
     buffer: &'a Buffer,
     kinds: &'a [BlockKind],
     tab_width: usize,
+    indents: RefCell<HashMap<usize, usize>>,
+    extents: RefCell<HashMap<usize, (usize, usize)>>,
+    parents: RefCell<HashMap<usize, Option<usize>>>,
+    /// `shallower_above` of every item line, in one pass on first use.
+    shallower: OnceCell<HashMap<usize, usize>>,
 }
 
 impl<'a> Lists<'a> {
@@ -99,6 +110,10 @@ impl<'a> Lists<'a> {
             buffer,
             kinds,
             tab_width: tab_width.max(1),
+            indents: RefCell::default(),
+            extents: RefCell::default(),
+            parents: RefCell::default(),
+            shallower: OnceCell::new(),
         }
     }
 
@@ -400,7 +415,12 @@ impl<'a> Lists<'a> {
     }
 
     fn indent(&self, line: usize) -> usize {
-        indent_cols(&self.buffer.line_text(line), self.tab_width)
+        if let Some(&d) = self.indents.borrow().get(&line) {
+            return d;
+        }
+        let d = indent_cols(&self.buffer.line_text(line), self.tab_width);
+        self.indents.borrow_mut().insert(line, d);
+        d
     }
 
     /// Where `item` and its subtree go when its parent moved by `delta`
@@ -607,6 +627,16 @@ impl<'a> Lists<'a> {
 
     /// The extent of the item whose item line is `start`.
     fn bounds(&self, start: usize) -> (usize, usize) {
+        if let Some(&b) = self.extents.borrow().get(&start) {
+            return b;
+        }
+        let b = self.measure(start);
+        self.extents.borrow_mut().insert(start, b);
+        b
+    }
+
+    /// `bounds`, worked out.
+    fn measure(&self, start: usize) -> (usize, usize) {
         let last = self.buffer.last_line();
         let d = self.indent(start);
         let mut end = start;
@@ -675,19 +705,50 @@ impl<'a> Lists<'a> {
         Some(k)
     }
 
-    /// The nearest item line above `line` with a smaller indent than it.
-    fn shallower_above(&self, line: usize) -> Option<usize> {
-        let d = self.indent(line);
-        if d == 0 {
+    /// The nearest item line above `item` (an item line) with a smaller
+    /// indent than it.
+    ///
+    /// Worked out for every item at once, top to bottom, with a stack of the
+    /// items that could still be the answer for one further down: each with
+    /// a smaller indent than the one above it. An item pops those at least
+    /// as deep as itself; what is left on top is its answer. Asking each item
+    /// in turn would scan back over the whole list every time.
+    fn shallower_above(&self, item: usize) -> Option<usize> {
+        debug_assert!(self.is_item(item), "shallower_above({item}) on a line that is no item");
+        // A top-level item has nothing shallower: no need for the pass.
+        if self.indent(item) == 0 {
             return None;
         }
-        (0..line)
-            .rev()
-            .find(|&l| self.is_item(l) && self.indent(l) < d)
+        let found = self.shallower.get_or_init(|| {
+            let mut found = HashMap::new();
+            let mut stack: Vec<(usize, usize)> = Vec::new();
+            for l in (0..self.kinds.len()).filter(|&l| self.is_item(l)) {
+                let d = self.indent(l);
+                while stack.last().is_some_and(|&(_, e)| e >= d) {
+                    stack.pop();
+                }
+                if let Some(&(k, _)) = stack.last() {
+                    found.insert(l, k);
+                }
+                stack.push((l, d));
+            }
+            found
+        });
+        found.get(&item).copied()
     }
 
     /// Nearest shallower item above `item` whose bounds contain it.
     fn parent_of(&self, item: usize) -> Option<usize> {
+        if let Some(&p) = self.parents.borrow().get(&item) {
+            return p;
+        }
+        let p = self.find_parent(item);
+        self.parents.borrow_mut().insert(item, p);
+        p
+    }
+
+    /// `parent_of`, worked out.
+    fn find_parent(&self, item: usize) -> Option<usize> {
         let mut k = self.shallower_above(item)?;
         while self.bounds(k).1 < item {
             k = self.shallower_above(k)?;
@@ -1297,5 +1358,58 @@ mod tests {
             assert_eq!(l.text_col(3), 3);
             assert_eq!(l.text_col(4), 5);
         });
+    }
+
+    /// Random lists, mixing what makes structure hard: tabs, blank and
+    /// whitespace-only lines, fences, lazy text, both kinds of marker.
+    fn random_lists(seed: u64, lines: usize) -> String {
+        let mut x = seed;
+        let mut next = move |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n) as usize
+        };
+        let pads = ["", " ", "  ", "   ", "    ", "\t", "  \t", "      "];
+        let bodies = ["- a", "* b", "1. c", "10. d", "text", "", "\t", "```", "$$", "# h", "- [x] t"];
+        (0..lines)
+            .map(|_| format!("{}{}\n", pads[next(pads.len() as u64)], bodies[next(bodies.len() as u64)]))
+            .collect()
+    }
+
+    /// The caches change nothing: the one-pass `shallower_above` matches a
+    /// scan back, and every answer is the same whatever order a `Lists` is
+    /// asked in, and from one asked nothing before.
+    #[test]
+    fn cached_structure_matches_a_fresh_scan() {
+        for seed in 1..200 {
+            let text = random_lists(seed * 7919, 40);
+            let b = buf(&text);
+            let cache = BlockCache::build(&b, true);
+            let (fwd, rev) = (Lists::new(&b, &cache.kinds, 4), Lists::new(&b, &cache.kinds, 4));
+            let n = b.last_line();
+            for l in (0..=n).filter(|&l| fwd.is_item(l)) {
+                let d = fwd.indent(l);
+                let scan = (0..l).rev().find(|&k| fwd.is_item(k) && fwd.indent(k) < d);
+                assert_eq!(fwd.shallower_above(l), scan.filter(|_| d > 0), "seed {seed} line {l}:\n{text}");
+            }
+            let ask = |lists: &Lists, l: usize| {
+                (
+                    lists.item_bounds(l),
+                    lists.parent(l),
+                    lists.prev_sibling_bounds(l),
+                    lists.next_sibling_bounds(l),
+                    lists.level_items(l),
+                    lists.first_child(l),
+                )
+            };
+            let forward: Vec<_> = (0..=n).map(|l| ask(&fwd, l)).collect();
+            let mut backward: Vec<_> = (0..=n).rev().map(|l| ask(&rev, l)).collect();
+            backward.reverse();
+            // Each answer also from a `Lists` asked nothing before it.
+            let fresh: Vec<_> = (0..=n).map(|l| ask(&Lists::new(&b, &cache.kinds, 4), l)).collect();
+            assert_eq!(forward, backward, "seed {seed}:\n{text}");
+            assert_eq!(forward, fresh, "seed {seed}:\n{text}");
+        }
     }
 }
