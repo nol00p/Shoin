@@ -37,7 +37,7 @@ use crate::render::focus::{FocusMode, FocusRegion};
 use crate::render::numbers::NumberMode;
 use crate::render::pane::{Dir, Node, Pane, PaneId};
 use crate::render::frame;
-use crate::render::markdown::block::{BlockCache, BlockKind, Marker};
+use crate::render::markdown::block::{leading_ws_cols, BlockCache, BlockKind, Marker};
 use crate::render::markdown::inline::{self, Inline};
 use crate::render::theme::Theme;
 use crate::fs::ops;
@@ -1937,6 +1937,7 @@ impl App {
                 self.enter_insert();
             }
             Action::ListShift { outdent } => self.shift_list_item(outdent),
+            Action::FixList => self.fix_list(),
             Action::OpenBelow => self.open_line(false),
             Action::OpenAbove => self.open_line(true),
             Action::NormalMode => self.leave_visual(),
@@ -4262,6 +4263,65 @@ impl App {
         }
     }
 
+    /// `:fixlist` / `fix_list`: re-indent the list under the cursor so that
+    /// CommonMark tools read it the way Shoin shows it (`Lists::realign`).
+    /// One undo step; the cursor stays on the same character of text.
+    fn fix_list(&mut self) {
+        self.refresh_blocks();
+        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
+        let Some(plan) = lists.realign(self.buffer.cursor.line, self.blocks.math) else {
+            return self.notify("not in a list", FlashKind::Error);
+        };
+        let skipped = match plan.skipped.as_slice() {
+            [] => String::new(),
+            lines => {
+                let at: Vec<String> = lines.iter().map(|l| (l + 1).to_string()).collect();
+                let (items, them) = if lines.len() == 1 { ("item", "it") } else { ("items", "them") };
+                format!(
+                    "left {} {items} as written (line{} {}): moving {them} would change how Shoin shows the list",
+                    lines.len(),
+                    if lines.len() == 1 { "" } else { "s" },
+                    at.join(", ")
+                )
+            }
+        };
+        if plan.lines.is_empty() {
+            return match skipped.is_empty() {
+                true => self.notify("list already lined up", FlashKind::Info),
+                false => self.notify(skipped, FlashKind::Info),
+            };
+        }
+        let at = self.buffer.cursor;
+        let before = self.buffer.line_len(at.line) as isize;
+        // One undo step. Bound in Insert, it is a step of its own inside the
+        // session, as a paste is, and leaves the session's grouping alone.
+        let inserting = matches!(self.mode, Mode::Insert);
+        if inserting {
+            self.coalesce_insert(true);
+        } else {
+            self.buffer.history.begin_group(Some(at));
+        }
+        for &(line, cols) in &plan.lines {
+            let start = self.buffer.rope.line_to_char(line);
+            let ws = leading_ws_cols(&self.buffer.line_text(line));
+            self.buffer.delete_chars(start, start + ws);
+            self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(cols));
+        }
+        if inserting {
+            self.buffer.history.split();
+        } else {
+            self.buffer.history.end_group();
+        }
+        let moved = self.buffer.line_len(at.line) as isize - before;
+        self.buffer.cursor = Cursor::new(at.line, (at.col as isize + moved).max(0) as usize);
+        let n = plan.lines.len();
+        let mut msg = format!("re-indented {n} line{}", if n == 1 { "" } else { "s" });
+        if !skipped.is_empty() {
+            msg = format!("{msg}; {skipped}");
+        }
+        self.notify(msg, FlashKind::Info);
+    }
+
     /// Whether Insert-mode Tab acts on a list item: `editor.list_tab` is on
     /// and the cursor is on an item's own line. A continuation line, or any
     /// other, keeps the plain Tab.
@@ -5373,6 +5433,8 @@ impl App {
             "embed" => self.set_embed_mode(arg),
             "set" => self.set_option(arg),
             "zen" => self.apply_action(Action::ToggleZen),
+            // Through `run`, so read-only mode refuses it like any edit.
+            "fixlist" => self.run(Command::bare(Action::FixList)),
             "" => {}
             other => self.notify(format!("not a command: {other}"), FlashKind::Error),
         }
@@ -7911,6 +7973,75 @@ mod tests {
         assert_eq!(text(&app), "- p\n    - a\n      - a1\n    - b\n- q\n");
         feed(&mut app, "<aL");
         assert_eq!(text(&app), "- p\n  - a\n    - a1\n  - b\n- q\n");
+    }
+
+    const NINE_ITEMS: &str = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n";
+
+    #[test]
+    fn fixlist_re_indents_in_one_undo_step() {
+        let t = format!("{NINE_ITEMS}10. j\n   - y\n     - z\n");
+        let mut app = app_with(&t);
+        app.buffer.cursor = Cursor::new(10, 5);
+        ex(&mut app, "fixlist");
+        assert_eq!(text(&app), format!("{NINE_ITEMS}10. j\n    - y\n      - z\n"));
+        assert!(flash_text(&app).contains("re-indented 2 lines"), "{}", flash_text(&app));
+        // The cursor stays on the same character.
+        assert_eq!(app.buffer.cursor, Cursor::new(10, 6));
+        feed(&mut app, "u");
+        assert_eq!(text(&app), t);
+        ex(&mut app, "redo");
+        ex(&mut app, "fixlist");
+        assert_eq!(flash_text(&app), "list already lined up");
+    }
+
+    #[test]
+    fn fixlist_says_what_it_left_and_why() {
+        let t = format!("{NINE_ITEMS}10. j\n\n   ```\n   x\n   ```\n");
+        let mut app = app_with(&t);
+        ex(&mut app, "fixlist");
+        assert_eq!(text(&app), t);
+        assert!(flash_text(&app).contains("left 1 item as written (line 10)"), "{}", flash_text(&app));
+        let mut app = app_with("para\n");
+        ex(&mut app, "fixlist");
+        assert_eq!(flash_text(&app), "not in a list");
+    }
+
+    #[test]
+    fn fixlist_in_insert_is_one_step_and_keeps_the_session_grouped() {
+        let t = format!("{NINE_ITEMS}10. j\n   - y\n");
+        let mut cfg = Config::default();
+        cfg.keys.insert.insert("<C-l>".into(), "fix_list".into());
+        let mut app = App::new(cfg, None, None).unwrap();
+        app.buffer.insert_str(Cursor::new(0, 0), &t);
+        app.buffer.cursor = Cursor::new(9, 0);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+        feed(&mut app, "Axy");
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        app.sync_after_input();
+        feed(&mut app, "pqr");
+        esc(&mut app);
+        let fixed = format!("{NINE_ITEMS}10. jxy\n    - y\n");
+        assert_eq!(text(&app), fixed.replace("jxy", "jxypqr"));
+        feed(&mut app, "u");
+        assert_eq!(text(&app), fixed, "pqr is one step");
+        feed(&mut app, "u");
+        assert_eq!(text(&app), format!("{NINE_ITEMS}10. jxy\n   - y\n"));
+    }
+
+    #[test]
+    fn fixlist_is_refused_read_only_and_works_on_a_key() {
+        let t = format!("{NINE_ITEMS}10. j\n   - y\n");
+        let mut app = app_with(&t);
+        app.set_view(true);
+        ex(&mut app, "fixlist");
+        assert_eq!(text(&app), t);
+        assert!(flash_text(&app).contains("read-only"), "{}", flash_text(&app));
+        let mut app = app_with_keys(&t, &[("<C-l>", "fix_list")]);
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        app.sync_after_input();
+        assert_eq!(text(&app), format!("{NINE_ITEMS}10. j\n    - y\n"));
+        feed(&mut app, "u");
+        assert_eq!(text(&app), t);
     }
 
     /// An item nested into a sub-list of its own starts it at 1, and the list

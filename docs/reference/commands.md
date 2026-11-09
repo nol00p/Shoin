@@ -23,6 +23,7 @@ Type `:` and the command, then `Enter`.
 |---|---|
 | `:u` `:un` `:und` `:undo` | undo, like `u` |
 | `:red` `:redo` | redo, like `Ctrl-r` |
+| `:fixlist` | re-indent the list under the cursor so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
 
 ## Buffers and panes
 
