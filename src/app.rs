@@ -502,20 +502,45 @@ const PASTE_LIMIT: usize = 16 << 20;
 /// place would answer a question nobody asked.
 const CREATABLE: &[&str] = &["md", "markdown", "txt"];
 
+/// The extension a dead link's target names, lowercased, or `None` when its
+/// last dot is part of the NAME.
+///
+/// A linkable extension (a note's or a picture's, as `link::resolve` reads
+/// them) always counts. Any other suffix counts only when it looks like a file
+/// type: no spaces and not all digits. So `paper.pdf` names a PDF, while
+/// `2024.01.16 meeting`, `2024.01.16` and `Mr. Smith` are names of notes.
+fn named_ext(path: &Path) -> Option<String> {
+    let e = path.extension()?.to_string_lossy().to_lowercase();
+    let linkable = CREATABLE.contains(&e.as_str())
+        || crate::image::IMAGE_EXTENSIONS.contains(&e.as_str());
+    let looks_like_a_type = !e.is_empty()
+        && !e.chars().any(char::is_whitespace)
+        && !e.chars().all(|c| c.is_ascii_digit());
+    (linkable || looks_like_a_type).then_some(e)
+}
+
 /// A link target with no extension means a note — the same default
 /// `link::candidates` resolves with, so what `gf` creates is what the link
-/// finds next time.
+/// finds next time. `.md` goes on the WHOLE name: `2024.01.16 meeting` is
+/// `2024.01.16 meeting.md`, not `2024.01.md`.
 fn with_default_ext(path: PathBuf) -> PathBuf {
-    match path.extension() {
-        Some(_) => path,
-        None => path.with_extension("md"),
+    if named_ext(&path).is_some() {
+        return path;
+    }
+    match path.file_name() {
+        Some(name) => {
+            let mut name = name.to_os_string();
+            name.push(".md");
+            path.with_file_name(name)
+        }
+        None => path,
     }
 }
 
 fn creatable(path: &Path) -> bool {
-    match path.extension() {
+    match named_ext(path) {
         None => true,
-        Some(e) => CREATABLE.contains(&e.to_string_lossy().to_lowercase().as_str()),
+        Some(e) => CREATABLE.contains(&e.as_str()),
     }
 }
 
@@ -6290,6 +6315,30 @@ mod tests {
         assert_eq!(shown(&app), "note.md", "the buffer did not change");
         let flash = flash_text(&app);
         assert!(flash.contains("gx"), "the message points at gx — got {flash:?}");
+    }
+
+    /// A dot in a note's NAME is not an extension: a dead dated link creates
+    /// the note the link resolves to next time, `.md` appended to the whole
+    /// name rather than replacing its last part.
+    #[test]
+    fn gf_creates_a_dated_note() {
+        for (name, file) in [
+            ("2024.01.16 meeting", "2024.01.16 meeting.md"),
+            ("2024.01.16", "2024.01.16.md"),
+            ("Mr. Smith", "Mr. Smith.md"),
+        ] {
+            let (d, mut app) = vault(&format!("see [[{name}]]\n"), &[]);
+            cursor_on(&mut app, 0, name);
+            feed(&mut app, "gf");
+            assert!(d.join(file).is_file(), "{name}: created {file}, got {}", flash_text(&app));
+            assert_eq!(shown(&app), file, "{name}: and open");
+            let l = link::Link::parse(name).unwrap();
+            assert_eq!(
+                link::resolve(&l, &app.link_from(), &app.link_root()).ok(),
+                Some(d.join(file)),
+                "{name}: the link finds what gf made"
+            );
+        }
     }
 
     /// A dead link to something that is not text does NOT get an empty file
