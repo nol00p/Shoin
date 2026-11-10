@@ -2783,6 +2783,11 @@ impl App {
             self.notify("refusing a target that starts with '-'", FlashKind::Error);
             return;
         }
+        // No test may ever open a browser or a file manager.
+        if cfg!(test) {
+            self.notify(format!("opened {arg}"), FlashKind::Info);
+            return;
+        }
         let cmd = if cfg!(target_os = "macos") {
             "open"
         } else if cfg!(target_os = "windows") {
@@ -11002,3 +11007,7 @@ mod tests {
         assert_eq!(text(&app), "ab\n");
     }
 }
+
+#[cfg(test)]
+#[path = "app_fuzz.rs"]
+mod fuzz;
