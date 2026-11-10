@@ -115,7 +115,9 @@ struct Body<'a> {
     out: String,
     /// Lines of the paragraph being accumulated, or of the current list item's
     /// lazy continuation.
-    para: Vec<String>,
+    para: Vec<ParaLine>,
+    /// Heading ids given so far, so a repeated heading gets `-1`, `-2`.
+    ids: std::collections::HashSet<String>,
     lists: Vec<Level>,
     /// Whether an `<li>` element is open and still awaiting its `</li>`.
     item_open: bool,
@@ -136,6 +138,30 @@ struct Body<'a> {
     fence: Option<(Option<Lang>, Cont, usize)>,
 }
 
+/// One line of a paragraph: its text with trailing whitespace gone, and the
+/// text to use when it ends in a hard line break (two spaces, or a
+/// backslash, which then goes).
+struct ParaLine {
+    text: String,
+    brk: Option<String>,
+}
+
+impl ParaLine {
+    fn new(line: &str) -> Self {
+        let text = line.trim_end();
+        let spaces = line.len() - line.trim_end_matches(' ').len();
+        let slashes = text.len() - text.trim_end_matches('\\').len();
+        let brk = if spaces >= 2 {
+            Some(text.to_string())
+        } else if spaces == 0 && slashes % 2 == 1 {
+            Some(text[..text.len() - 1].to_string())
+        } else {
+            None
+        };
+        ParaLine { text: text.to_string(), brk }
+    }
+}
+
 impl<'a> Body<'a> {
     fn new(md: &'a MarkdownConfig, base: &'a std::path::Path) -> Self {
         Body {
@@ -143,6 +169,7 @@ impl<'a> Body<'a> {
             base,
             out: String::new(),
             para: Vec::new(),
+            ids: std::collections::HashSet::new(),
             lists: Vec::new(),
             item_open: false,
             item_filled: false,
@@ -229,7 +256,7 @@ impl<'a> Body<'a> {
             BlockKind::Heading(level) => {
                 self.open_block(leading_ws_cols(line));
                 let body = line.trim_start().trim_start_matches('#').trim();
-                let id = slug(&plain_text(body, self.md));
+                let id = self.unique_id(slug(&plain_text(body, self.md)));
                 let n = (*level).clamp(1, 6);
                 self.out.push_str(&format!(
                     "<h{n} id=\"{}\">{}</h{n}>\n",
@@ -250,7 +277,10 @@ impl<'a> Body<'a> {
                 self.close_lists();
                 self.open_quote(*depth);
                 let body = line.trim_start().trim_start_matches(['>', ' ']);
-                self.para.push(body.to_string());
+                // A bare `>` only separates the quote's paragraphs.
+                if !body.trim().is_empty() {
+                    self.para.push(ParaLine::new(body));
+                }
             }
 
             BlockKind::ListItem { depth, marker, checked } => {
@@ -269,7 +299,7 @@ impl<'a> Body<'a> {
                 self.item_open = true;
                 self.item_filled = false;
                 self.lazy = true;
-                self.para.push(super::item_body(line).to_string());
+                self.para.push(ParaLine::new(super::item_body(line)));
             }
 
             BlockKind::Table => {
@@ -279,7 +309,7 @@ impl<'a> Body<'a> {
                 // promotes it in the editor by looking back one line; this walk
                 // does the same, from the paragraph it is still holding.
                 let header = match self.table.is_empty() {
-                    true => self.para.last().filter(|l| has_cell_separator(l)).cloned(),
+                    true => self.para.last().map(|l| l.text.clone()).filter(|l| has_cell_separator(l)),
                     false => None,
                 };
                 if header.is_some() {
@@ -303,7 +333,7 @@ impl<'a> Body<'a> {
                 if !self.lazy && self.quote == 0 {
                     self.close_lists_from(leading_ws_cols(line));
                 }
-                self.para.push(line.trim().to_string());
+                self.para.push(ParaLine::new(line.trim_start()));
             }
 
             // Only reached with `math` on: off, the classifier never opens one.
@@ -331,14 +361,41 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// `id`, or `id-1`, `id-2`… if a heading already has it (GitHub's rule).
+    fn unique_id(&mut self, id: String) -> String {
+        let mut out = id.clone();
+        let mut n = 0;
+        while self.ids.contains(&out) {
+            n += 1;
+            out = format!("{id}-{n}");
+        }
+        self.ids.insert(out.clone());
+        out
+    }
+
     /// Emit whatever text has accumulated, as the thing it belongs to.
     fn flush_para(&mut self) {
         if self.para.is_empty() {
             return;
         }
-        let joined = self.para.join(" ");
-        self.para.clear();
-        let html = inline_html(joined.trim(), self.md, self.base);
+        // A hard line break splits the text into runs, each rendered on its
+        // own: a span does not cross a `<br>`.
+        let lines = std::mem::take(&mut self.para);
+        let last = lines.len() - 1;
+        let mut runs: Vec<String> = Vec::new();
+        let mut run: Vec<&str> = Vec::new();
+        for (i, l) in lines.iter().enumerate() {
+            match &l.brk {
+                Some(text) if i < last => {
+                    run.push(text);
+                    runs.push(inline_html(run.join(" ").trim(), self.md, self.base));
+                    run.clear();
+                }
+                _ => run.push(&l.text),
+            }
+        }
+        runs.push(inline_html(run.join(" ").trim(), self.md, self.base));
+        let html = runs.join("<br>\n");
         // Inside an item the text IS the item; everywhere else — including
         // inside a blockquote — it is a paragraph of its own.
         if self.item_open && !self.item_filled {
@@ -540,9 +597,19 @@ impl<'a> Body<'a> {
 // Inline
 // ---------------------------------------------------------------------------
 
-/// One line's inline markup as HTML. Spans never overlap (`inline::scan`
-/// guarantees it), so this is a single pass with no nesting to track.
+/// One line's inline markup as HTML.
 fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> String {
+    inline_in(line, md, base, false)
+}
+
+/// `inline_html`, with `in_link` set inside a link's text.
+///
+/// `inline::scan` returns flat spans, so markup INSIDE a span — a link in
+/// bold, bold in a link — is reached by scanning that span's body again. Only
+/// prose bodies are: code, math, tags and an image's alt text are what they
+/// say. In a link's text a nested link is its text, since HTML forbids an
+/// anchor inside an anchor.
+fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: bool) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
     if spans.is_empty() {
@@ -557,28 +624,34 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
         out.push_str(&escape_chars(&chars[i..sp.outer.start]));
         let inner: String = chars[sp.inner.clone()].iter().collect();
         let whole: String = chars[sp.outer.clone()].iter().collect();
-        let body = escape(&inner);
+        let prose = || inline_in(&inner, md, base, in_link);
         match sp.kind {
-            Inline::Bold => out.push_str(&format!("<strong>{body}</strong>")),
-            Inline::Italic => out.push_str(&format!("<em>{body}</em>")),
-            Inline::BoldItalic => out.push_str(&format!("<strong><em>{body}</em></strong>")),
-            Inline::Strikethrough => out.push_str(&format!("<del>{body}</del>")),
-            Inline::Highlight => out.push_str(&format!("<mark>{body}</mark>")),
-            Inline::Code => out.push_str(&format!("<code>{body}</code>")),
+            Inline::Bold => out.push_str(&format!("<strong>{}</strong>", prose())),
+            Inline::Italic => out.push_str(&format!("<em>{}</em>", prose())),
+            Inline::BoldItalic => out.push_str(&format!("<strong><em>{}</em></strong>", prose())),
+            Inline::Strikethrough => out.push_str(&format!("<del>{}</del>", prose())),
+            Inline::Highlight => out.push_str(&format!("<mark>{}</mark>", prose())),
+            Inline::Code => out.push_str(&format!("<code>{}</code>", escape(&inner))),
+            Inline::Link if in_link => out.push_str(&prose()),
             Inline::Link => {
-                let url = url_of(&whole).unwrap_or(&inner);
-                out.push_str(&format!("<a href=\"{}\">{body}</a>", safe_href(url)));
+                let (url, title) = inline::destination(sp, line).unwrap_or_else(|| (inner.clone(), None));
+                let text = inline_in(&inner, md, base, true);
+                out.push_str(&format!("<a href=\"{}\"{}>{text}</a>", safe_href(&url), title_attr(title)));
             }
+            Inline::Autolink if in_link => out.push_str(&escape(&inner)),
             Inline::Autolink => {
-                out.push_str(&format!("<a href=\"{}\">{body}</a>", safe_href(&inner)));
+                out.push_str(&format!("<a href=\"{}\">{}</a>", safe_href(&inner), escape(&inner)));
             }
             Inline::Image => {
-                let url = url_of(&whole).unwrap_or("");
+                let (url, title) = inline::destination(sp, line).unwrap_or_default();
                 out.push_str(&format!(
-                    "<img src=\"{}\" alt=\"{body}\">",
-                    safe_src(&inline_src(url, base))
+                    "<img src=\"{}\" alt=\"{}\"{}>",
+                    safe_src(&inline_src(&url, base)),
+                    escape(&inner),
+                    title_attr(title)
                 ));
             }
+            Inline::WikiLink if in_link => out.push_str(&escape(wiki_parts(&inner).2)),
             Inline::WikiLink => out.push_str(&wiki_link(&inner)),
             Inline::Tag => out.push_str(&format!("<span class=\"tag\">{}</span>", escape(&whole))),
             Inline::Latex => {
@@ -589,12 +662,25 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
                 }
             }
             // The backslash was markup; what it protected is literal text.
-            Inline::Escape => out.push_str(&body),
+            Inline::Escape => out.push_str(&escape(&inner)),
         }
         i = sp.outer.end;
     }
     out.push_str(&escape_chars(&chars[i.min(chars.len())..]));
     out
+}
+
+/// A wiki link's `(note, heading, label)`: `|` renames it, `#` names a
+/// heading, as in the editor.
+fn wiki_parts(inner: &str) -> (&str, Option<&str>, &str) {
+    let (target, label) = match inner.split_once('|') {
+        Some((t, l)) => (t.trim(), l.trim()),
+        None => (inner.trim(), inner.trim()),
+    };
+    match target.split_once('#') {
+        Some((f, s)) => (f.trim(), Some(s.trim()), label),
+        None => (target, None, label),
+    }
 }
 
 /// A `[[wiki link]]` as an anchor.
@@ -607,17 +693,11 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
 /// A target with a scheme in it (`[[javascript:…]]`, `[[https://…]]`) is not a
 /// note name, so it is not a link either: the label is kept as plain text. A
 /// `:` counts as a scheme's when it comes before the first `/`, which is how a
-/// browser would read it; `[[a/b:c]]` is a path and stays a link.
+/// browser would read it; `[[a/b:c]]` is a path and stays a link. Nor is
+/// `[[//host/x]]`, which a browser reads as an address on another host.
 fn wiki_link(inner: &str) -> String {
-    let (target, label) = match inner.split_once('|') {
-        Some((t, l)) => (t.trim(), l.trim()),
-        None => (inner.trim(), inner.trim()),
-    };
-    let (file, section) = match target.split_once('#') {
-        Some((f, s)) => (f.trim(), Some(s.trim())),
-        None => (target, None),
-    };
-    if file.split('/').next().is_some_and(|head| head.contains(':')) {
+    let (file, section, label) = wiki_parts(inner);
+    if file.split('/').next().is_some_and(|head| head.contains(':')) || off_host(file) {
         return escape(label);
     }
     let mut href = String::new();
@@ -631,8 +711,20 @@ fn wiki_link(inner: &str) -> String {
     format!("<a class=\"wiki\" href=\"{}\">{}</a>", safe_href(&href), escape(label))
 }
 
+/// Whether a browser reads `file` as `//host/…`, an address on another host:
+/// it skips leading controls and spaces, drops tabs and newlines, and takes
+/// `\\` for `/`.
+fn off_host(file: &str) -> bool {
+    let mut seps = file
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'));
+    matches!((seps.next(), seps.next()), (Some('/' | '\\'), Some('/' | '\\')))
+}
+
 /// Inline markup removed rather than translated — for a `<title>` and for the
-/// heading ids, neither of which can hold tags.
+/// heading ids, neither of which can hold tags. Prose bodies are stripped
+/// again, as `inline_in` renders them again.
 fn plain_text(line: &str, md: &MarkdownConfig) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
@@ -646,18 +738,26 @@ fn plain_text(line: &str, md: &MarkdownConfig) -> String {
             continue;
         }
         out.extend(&chars[i..sp.outer.start]);
-        out.extend(&chars[sp.inner.clone()]);
+        let inner: String = chars[sp.inner.clone()].iter().collect();
+        match sp.kind {
+            Inline::Bold
+            | Inline::Italic
+            | Inline::BoldItalic
+            | Inline::Strikethrough
+            | Inline::Highlight
+            | Inline::Link => out.push_str(&plain_text(&inner, md)),
+            Inline::WikiLink => out.push_str(wiki_parts(&inner).2),
+            _ => out.push_str(&inner),
+        }
         i = sp.outer.end;
     }
     out.extend(&chars[i.min(chars.len())..]);
     out
 }
 
-/// The `url` from `[text](url)`.
-fn url_of(whole: &str) -> Option<&str> {
-    let open = whole.rfind("](")?;
-    let close = whole.rfind(')')?;
-    (close > open + 2).then(|| whole[open + 2..close].trim())
+/// ` title="…"` for a link or picture that has one.
+fn title_attr(title: Option<String>) -> String {
+    title.map(|t| format!(" title=\"{}\"", escape_attr(&t))).unwrap_or_default()
 }
 
 /// A heading's anchor: lowercase, words joined by hyphens. The GitHub form,
@@ -1039,6 +1139,43 @@ mod tests {
         assert!(got.contains("<h3 id=\"a-deeper-one\">A Deeper One</h3>"), "{got}");
     }
 
+    /// Two headings with the same text get distinct ids, GitHub's way.
+    #[test]
+    fn repeated_headings_get_distinct_ids() {
+        let got = body("# Same\n\n## Same\n\n### Same\n\n# Same 1\n");
+        assert!(got.contains("<h1 id=\"same\">"), "{got}");
+        assert!(got.contains("<h2 id=\"same-1\">"), "{got}");
+        assert!(got.contains("<h3 id=\"same-2\">"), "{got}");
+        // `Same 1` would be `same-1`, which is taken.
+        assert!(got.contains("<h1 id=\"same-1-1\">"), "{got}");
+    }
+
+    /// A bare `>` separates paragraphs in a quote; it is not one itself.
+    #[test]
+    fn an_empty_quote_line_is_not_a_paragraph() {
+        let got = body("> one\n>\n> two\n");
+        assert!(!got.contains("<p></p>"), "{got}");
+        assert!(got.contains("<blockquote>\n<p>one</p>\n<p>two</p>\n</blockquote>"), "{got}");
+        let got = body(">\n> one\n>\n");
+        assert!(!got.contains("<p></p>"), "{got}");
+        well_formed(&got).unwrap();
+    }
+
+    /// Two trailing spaces or a backslash end a line with `<br>`.
+    #[test]
+    fn a_hard_line_break_is_kept() {
+        assert!(body("one  \ntwo\n").contains("<p>one<br>\ntwo</p>"), "{}", body("one  \ntwo\n"));
+        assert!(body("one\\\ntwo\n").contains("<p>one<br>\ntwo</p>"), "{}", body("one\\\ntwo\n"));
+        // An escaped backslash is a backslash, and one space is a space.
+        assert!(body("one\\\\\ntwo\n").contains("<p>one\\ two</p>"), "{}", body("one\\\\\ntwo\n"));
+        assert!(body("one \ntwo\n").contains("<p>one two</p>"));
+        // Not at the end of a paragraph.
+        assert!(body("one  \n\ntwo\n").contains("<p>one</p>"));
+        assert!(body("one\\\n").contains("<p>one\\</p>"), "{}", body("one\\\n"));
+        // In an item's lazy continuation too.
+        assert!(body("- a  \n  b\n").contains("<li>a<br>\nb</li>"), "{}", body("- a  \n  b\n"));
+    }
+
     /// Consecutive lines are one paragraph; a blank line starts the next.
     #[test]
     fn paragraphs_group_and_split_on_blank_lines() {
@@ -1191,6 +1328,50 @@ mod tests {
         assert!(got.contains("href=\"note.html#a-part\""), "{got}");
         assert!(got.contains(">the part</a>"), "{got}");
         assert!(got.contains("<span class=\"tag\">#tag</span>"), "{got}");
+    }
+
+    /// Markup inside bold, italic or a link's text is markup, not literal
+    /// characters.
+    #[test]
+    fn markup_nests_inside_emphasis_and_link_text() {
+        let got = body("**bold with `code` and [a link](https://x.y)**\n");
+        assert!(
+            got.contains("<strong>bold with <code>code</code> and <a href=\"https://x.y\">a link</a></strong>"),
+            "{got}"
+        );
+        let got = body("[**bold link**](https://x.y)\n");
+        assert!(got.contains("<a href=\"https://x.y\"><strong>bold link</strong></a>"), "{got}");
+        let got = body("*it ~~gone~~ ==hi==* and ~~a *b*~~\n");
+        assert!(got.contains("<em>it <del>gone</del> <mark>hi</mark></em>"), "{got}");
+        assert!(got.contains("<del>a <em>b</em></del>"), "{got}");
+        // Code stays code: its stars are text.
+        let got = body("`**not bold**`\n");
+        assert!(got.contains("<code>**not bold**</code>"), "{got}");
+        // Prose inside the markup is still escaped.
+        let got = body("**a < b & [c > d](https://x.y)**\n");
+        assert!(got.contains("<strong>a &lt; b &amp; <a href=\"https://x.y\">c &gt; d</a></strong>"), "{got}");
+        well_formed(&got).unwrap();
+    }
+
+    /// HTML forbids an anchor inside an anchor: a link in a link's text is
+    /// its text.
+    #[test]
+    fn a_link_inside_link_text_is_text() {
+        // (`inline::scan` does not read brackets inside a link's text, so an
+        // autolink is the one link that can sit there today.)
+        let got = body("[see <https://a.b> **x**](https://x.y)\n");
+        assert_eq!(got.matches("<a ").count(), 1, "{got}");
+        assert!(got.contains("<a href=\"https://x.y\">see https://a.b <strong>x</strong></a>"), "{got}");
+        well_formed(&got).unwrap();
+    }
+
+    /// Titles and heading ids drop nested markup too.
+    #[test]
+    fn titles_and_ids_drop_nested_markup() {
+        let md = MarkdownConfig::default();
+        assert_eq!(plain_text("**a [b](u) `c`**", &md), "a b c");
+        let got = body("# **Big [deal](u)**\n");
+        assert!(got.contains("<h1 id=\"big-deal\">"), "{got}");
     }
 
     /// The one thing an exporter must never get wrong: prose that contains
@@ -1508,6 +1689,34 @@ mod tests {
         assert!(got.contains("<a class=\"wiki\" href=\"a/b:c.html\">a/b:c</a>"), "{got}");
     }
 
+    /// A title is a title, not part of the address; `<…>` is unwrapped.
+    #[test]
+    fn link_and_image_titles_become_attributes() {
+        let got = body("![alt](pic.png \"the \\\"title\\\"\") [x](<a b.md> \"it's\") [y](u (paren))\n");
+        assert!(got.contains("<img src=\"pic.png\" alt=\"alt\" title=\"the &quot;title&quot;\">"), "{got}");
+        assert!(got.contains("<a href=\"a b.md\" title=\"it&#39;s\">x</a>"), "{got}");
+        assert!(got.contains("<a href=\"u\" title=\"paren\">y</a>"), "{got}");
+        let got = body("[z](https://x.y/a_(b))\n");
+        assert!(got.contains("<a href=\"https://x.y/a_(b)\">z</a>"), "{got}");
+        // No title, no attribute.
+        let got = body("[w](https://x.y)\n");
+        assert!(got.contains("<a href=\"https://x.y\">w</a>"), "{got}");
+    }
+
+    /// `//host/x` is an address on another host, not a note.
+    #[test]
+    fn a_wiki_link_cannot_be_protocol_relative() {
+        for src in ["[[//evil.example/x|w]]", "[[\\\\evil.example/x|w]]", "[[/\\evil.example|w]]", "[[\u{1}//evil.example|w]]"] {
+            let got = body(&format!("{src}\n"));
+            assert!(!got.contains("evil"), "{src:?}: {got}");
+            assert!(!got.contains("class=\"wiki\""), "{src:?}: {got}");
+            assert!(got.contains(">w<") || got.contains("<p>w</p>"), "{src:?} keeps its label: {got}");
+        }
+        // A rooted path is still a note.
+        let got = body("[[/notes/a]]\n");
+        assert!(got.contains("href=\"/notes/a.html\""), "{got}");
+    }
+
     /// Every `href` and `src` value in `html`.
     fn addresses(html: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -1554,10 +1763,12 @@ mod tests {
             "livescript:x",
             "javascript://%0aalert(1)",
             "a/b:c",
+            "//evil.example/x",
         ];
         for t in targets {
             let md = format!(
                 "[a]({t}) <{t}> ![i]({t}) [[{t}]] [[{t}|w]] [[{t}#h|w]] **b** _i_ ~~s~~ ==m== `c` #tag $x$ \\*\n\n\
+                 [a](<{t}>) [a]({t} \"x\") ![i](<{t}> 'x') **[b]({t}) ![b]({t}) [[{t}|b]]** *[[//{t}]]*\n\n\
                  - [l]({t}) [[{t}]]\n\n> [q]({t}) ![q]({t})\n\n| [c]({t}) | [[{t}]] |\n|---|---|\n| ![x]({t}) | y |\n"
             );
             let html = render(&md, "t", &Page::default());

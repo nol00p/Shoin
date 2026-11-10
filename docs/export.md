@@ -10,8 +10,10 @@ shell without opening the editor.
   :export [md|txt|html|pdf] [justify]
 ```
 
-It opens a save dialog with a suggested name you can change. The default
-format is `md`.
+It opens a save dialog with a suggested name you can change: the document's
+name with the format's extension, beside it. The default format is `md`, and
+since `notes.md` is the document itself, its Markdown export is named
+`notes-export.md`.
 
 ## From the shell
 
@@ -21,7 +23,8 @@ shoin --export notes.md --format txt --stdout | pandoc …
 shoin --export notes.md --format html --justify --out notes.html
 ```
 
-No terminal is acquired, so it composes into pipelines and build scripts. The
+Without `--out`, the file is written beside the document under the name
+`:export` suggests. No terminal is acquired, so it composes into pipelines and build scripts. The
 flags are in the [command-line reference](reference/cli.md).
 
 To read a note in the terminal rather than write a file, use `shoin -p`
@@ -52,3 +55,19 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   exports as plain text; `math = false` then also reaches `pdf`, where `$`
   stays a dollar sign.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
+- In `html`, a wiki link becomes a link to `<note>.html`. A wiki link whose
+  target has a scheme (`[[https://…]]`) or starts with `//` exports as plain
+  text: it names an address, not a note. In `txt` a wiki link is its label.
+- In `html`, each heading gets an id from its text; a repeated heading
+  gets `-1`, `-2` added, as on GitHub. A line ending in two spaces or a
+  backslash breaks the line (`<br>`).
+- Setext headings (`Title` over `=====`), footnotes, indented code blocks
+  and raw HTML are not part of Shoin's Markdown. They export as the text
+  they are.
+- A link or picture title (`[a](url "title")`) becomes the `title`
+  attribute in `html`; `txt` drops it.
+- A relative picture path is read from the document's folder. `md` written
+  to another folder gets its picture paths rewritten to work from there;
+  `pdf` hands pandoc absolute paths, so it works from any folder. `txt`
+  names a picture as `[image: alt]`. Relative links to other files are not
+  rewritten.

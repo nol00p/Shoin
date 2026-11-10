@@ -159,6 +159,14 @@ fn stretch(row: &str, gaps: &[(usize, u16)]) -> String {
 /// the address, and a plain-text reader has no way to follow one that has been
 /// thrown away.
 fn strip_inline(line: &str, md: &MarkdownConfig) -> String {
+    strip_in(line, md, false)
+}
+
+/// `strip_inline`, with `in_link` set inside a link's text, where a nested
+/// link is only its text. Prose bodies (emphasis, a link's text) are
+/// stripped again, because `inline::scan` returns flat spans.
+fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
+    use inline::Inline;
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
     if spans.is_empty() {
@@ -173,27 +181,31 @@ fn strip_inline(line: &str, md: &MarkdownConfig) -> String {
         out.extend(&chars[i..sp.outer.start]);
         let inner: String = chars[sp.inner.clone()].iter().collect();
         match sp.kind {
-            inline::Inline::Link => {
-                let whole: String = chars[sp.outer.clone()].iter().collect();
-                match url_of(&whole) {
-                    Some(url) if url != inner => out.push_str(&format!("{inner} ({url})")),
-                    _ => out.push_str(&inner),
+            Inline::Bold | Inline::Italic | Inline::BoldItalic | Inline::Strikethrough | Inline::Highlight => {
+                out.push_str(&strip_in(&inner, md, in_link))
+            }
+            Inline::Link => {
+                let text = strip_in(&inner, md, true);
+                match inline::destination(sp, line) {
+                    Some((url, _)) if !in_link && !url.is_empty() && url != text => {
+                        out.push_str(&format!("{text} ({url})"))
+                    }
+                    _ => out.push_str(&text),
                 }
             }
-            inline::Inline::Image => out.push_str(&format!("[image: {inner}]")),
+            Inline::Image => out.push_str(&format!("[image: {inner}]")),
+            // What the reader sees in the editor: the label after `|`, or
+            // the target when there is none.
+            Inline::WikiLink => match inner.split_once('|') {
+                Some((_, label)) => out.push_str(label.trim()),
+                None => out.push_str(inner.trim()),
+            },
             _ => out.push_str(&inner),
         }
         i = sp.outer.end;
     }
     out.extend(&chars[i.min(chars.len())..]);
     out
-}
-
-/// The `url` from `[text](url)`.
-fn url_of(whole: &str) -> Option<&str> {
-    let open = whole.rfind("](")?;
-    let close = whole.rfind(')')?;
-    (close > open + 2).then(|| whole[open + 2..close].trim())
 }
 
 #[cfg(test)]
@@ -231,6 +243,25 @@ mod tests {
         // …unless the text already is the address.
         let got = render("[https://example.com](https://example.com)\n", 72, false, &MarkdownConfig::default());
         assert_eq!(got.trim(), "https://example.com");
+    }
+
+    /// Markup inside bold or a link's text goes too.
+    #[test]
+    fn nested_markers_go_as_well() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("**a [b](u)**\n", 72, false, &md), "a b (u)\n");
+        assert_eq!(render("[**bold** `c`](https://x.y)\n", 72, false, &md), "bold c (https://x.y)\n");
+        assert_eq!(render("*a ~~b~~ ==c==*\n", 72, false, &md), "a b c\n");
+        assert_eq!(render("`**kept**`\n", 72, false, &md), "**kept**\n");
+    }
+
+    /// A wiki link reads as its label; a title is not part of an address.
+    #[test]
+    fn wiki_links_read_as_their_labels_and_titles_go() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("see [[note|the note]] and [[other]]\n", 72, false, &md), "see the note and other\n");
+        assert_eq!(render("[docs](<a b.md> \"T\")\n", 72, false, &md), "docs (a b.md)\n");
+        assert_eq!(render("[w](https://x.y/a_(b))\n", 72, false, &md), "w (https://x.y/a_(b))\n");
     }
 
     #[test]
