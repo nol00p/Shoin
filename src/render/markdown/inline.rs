@@ -228,7 +228,7 @@ fn match_at(chars: &[char], i: usize, cfg: &MarkdownConfig) -> Option<InlineSpan
         '!' if chars.get(i + 1) == Some(&'[') => bracket_link(chars, i, true),
         '[' if cfg.wiki_links && chars.get(i + 1) == Some(&'[') => wiki_at(chars, i),
         '[' => bracket_link(chars, i, false),
-        '*' => emphasis_at(chars, i),
+        '*' | '_' => emphasis_at(chars, i, chars[i]),
         '~' => pair_at(chars, i, '~', Inline::Strikethrough),
         '=' if cfg.highlight => pair_at(chars, i, '=', Inline::Highlight),
         '#' if cfg.tags => tag_at(chars, i),
@@ -266,6 +266,49 @@ fn find_delim(chars: &[char], from: usize, ch: char, n: usize) -> Option<usize> 
         j += 1;
     }
     None
+}
+
+/// The first closing run of at least `n` of `ch` at or after `from`.
+///
+/// A closer may not follow whitespace or be escaped, and a `_` closer may not
+/// be followed by a letter or digit (so `snake_case` stays plain). A run that
+/// fails is skipped whole: `*a **` must not close on the second star alone.
+fn find_closer(chars: &[char], from: usize, ch: char, n: usize) -> Option<usize> {
+    let mut j = from;
+    while j < chars.len() {
+        if chars[j] != ch {
+            j += 1;
+            continue;
+        }
+        let run = run_len(chars, j, ch);
+        let after = chars.get(j + run);
+        let ok = run >= n
+            && j > 0
+            && !chars[j - 1].is_whitespace()
+            && !is_escaped(chars, j)
+            && !(ch == '_' && after.is_some_and(|c| c.is_alphanumeric()));
+        if ok {
+            return Some(j);
+        }
+        j += run;
+    }
+    None
+}
+
+/// Whether the run of `ch` at `i`, `run` long, may open a span: something
+/// other than whitespace follows it, and a `_` run is not inside a word
+/// (`snake_case`, `a__b__`).
+fn can_open(chars: &[char], i: usize, run: usize, ch: char) -> bool {
+    let Some(next) = chars.get(i + run) else {
+        return false;
+    };
+    if next.is_whitespace() {
+        return false;
+    }
+    if ch == '_' && i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+        return false;
+    }
+    true
 }
 
 fn all_blank(chars: &[char], range: Range<usize>) -> bool {
@@ -359,16 +402,22 @@ fn latex_delimited_at(chars: &[char], i: usize) -> Option<InlineSpan> {
     None
 }
 
-/// `*` / `**` / `***`. The run length picks italic / bold / both.
-fn emphasis_at(chars: &[char], i: usize) -> Option<InlineSpan> {
-    let n = run_len(chars, i, '*').min(3);
+/// `*` / `**` / `***`, and the same with `_`. The run length picks italic /
+/// bold / both. The opener must be followed, and the closer preceded, by a
+/// non-space, so `2 * 3 * 4` stays plain; `_` also stays plain inside a word.
+fn emphasis_at(chars: &[char], i: usize, ch: char) -> Option<InlineSpan> {
+    let run = run_len(chars, i, ch);
+    if !can_open(chars, i, run, ch) {
+        return None;
+    }
+    let n = run.min(3);
     let kind = match n {
         3 => Inline::BoldItalic,
         2 => Inline::Bold,
         _ => Inline::Italic,
     };
     let open_end = i + n;
-    let close = find_delim(chars, open_end, '*', n)?;
+    let close = find_closer(chars, open_end, ch, n)?;
     if close <= open_end || all_blank(chars, open_end..close) {
         return None;
     }
@@ -379,13 +428,15 @@ fn emphasis_at(chars: &[char], i: usize) -> Option<InlineSpan> {
     })
 }
 
-/// A two-character symmetric fence: `~~x~~`, `==x==`.
+/// A two-character symmetric fence: `~~x~~`, `==x==`. Spaced like emphasis:
+/// `a == b == c` stays plain.
 fn pair_at(chars: &[char], i: usize, ch: char, kind: Inline) -> Option<InlineSpan> {
-    if run_len(chars, i, ch) < 2 {
+    let run = run_len(chars, i, ch);
+    if run < 2 || !can_open(chars, i, run, ch) {
         return None;
     }
     let open_end = i + 2;
-    let close = find_delim(chars, open_end, ch, 2)?;
+    let close = find_closer(chars, open_end, ch, 2)?;
     if close <= open_end || all_blank(chars, open_end..close) {
         return None;
     }
@@ -712,6 +763,79 @@ mod tests {
         assert_eq!(only("==hi==").kind, Inline::Highlight);
     }
 
+    /// F14: a delimiter run opens only when no space follows it and closes only
+    /// when no space precedes it, so arithmetic stays plain.
+    #[test]
+    fn spaced_markers_do_not_emphasise() {
+        assert!(scan("2 * 3 * 4 = 24", &md()).is_empty());
+        assert!(scan("a ** b ** c", &md()).is_empty());
+        assert!(scan("x *** y *** z", &md()).is_empty());
+        assert!(scan("a ~~ b ~~ c", &md()).is_empty());
+        assert!(scan("a == b == c", &md()).is_empty());
+        assert!(scan("*a *", &md()).is_empty());
+        assert!(scan("* a*", &md()).is_empty());
+        // A closer that fails the rule is skipped whole, not split.
+        assert!(scan("*a **", &md()).is_empty());
+        // ... and the scan goes on to a closer that passes.
+        let line = "*a * b*";
+        let s = only(line);
+        assert_eq!((s.kind, text(line, &s.inner)), (Inline::Italic, "a * b".into()));
+        // Unchanged forms.
+        assert_eq!(only("*a*").kind, Inline::Italic);
+        assert_eq!(only("**a**").kind, Inline::Bold);
+        let line = "a*b*c";
+        let s = only(line);
+        assert_eq!((s.kind, text(line, &s.inner)), (Inline::Italic, "b".into()));
+        let line = "**a*b*c**";
+        let s = only(line);
+        assert_eq!((s.kind, text(line, &s.inner)), (Inline::Bold, "a*b*c".into()));
+        let line = "***both*** and **x**";
+        let v = scan(line, &md());
+        assert_eq!(v.iter().map(|s| s.kind).collect::<Vec<_>>(), [Inline::BoldItalic, Inline::Bold]);
+        // A list marker's `* ` never opens emphasis.
+        let line = "* item with *it*";
+        let s = only(line);
+        assert_eq!(text(line, &s.outer), "*it*");
+        assert!(scan("* item * more", &md()).is_empty());
+    }
+
+    /// F14: `_` and `__` emphasise like `*` and `**`, but never inside a word.
+    #[test]
+    fn underscore_emphasis() {
+        let line = "an _italic_ and __bold__ word";
+        let v = scan(line, &md());
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].kind, text(line, &v[0].inner)), (Inline::Italic, "italic".into()));
+        assert_eq!((v[1].kind, text(line, &v[1].inner)), (Inline::Bold, "bold".into()));
+        assert_eq!(only("_a_").kind, Inline::Italic);
+        assert_eq!(only("__a__").kind, Inline::Bold);
+        assert_eq!(only("___a___").kind, Inline::BoldItalic);
+        assert_eq!(only("__init__").kind, Inline::Bold);
+        let line = "(_a_), _b_.";
+        let v = scan(line, &md());
+        assert_eq!(v.iter().map(|s| text(line, &s.inner)).collect::<Vec<_>>(), ["a", "b"]);
+        for plain in [
+            "snake_case_name",
+            "a_b_c",
+            "a__b__c",
+            "a__b__",
+            "_a_b",
+            "_ a _",
+            "x _ y _ z",
+            "file_name.md and other_name.md",
+            "see example.com/a_b_c and x_y_z",
+        ] {
+            assert!(scan(plain, &md()).is_empty(), "{plain:?}");
+        }
+        // An escaped `_` does not close.
+        let kinds: Vec<Inline> = scan("_a\\_", &md()).iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, [Inline::Escape]);
+        // The address of a URL is one span; its underscores open nothing.
+        let line = "https://x.org/a_b_c_ and _d_";
+        let v = scan(line, &md());
+        assert_eq!(v.iter().map(|s| s.kind).collect::<Vec<_>>(), [Inline::Autolink, Inline::Italic]);
+    }
+
     #[test]
     fn unbalanced_markers_are_plain() {
         // The whole point: half-typed constructs never produce a span.
@@ -933,6 +1057,8 @@ mod tests {
             "[a](b\\) c) [d](( [e](f 'g) h",
             "((([x](y((z)))))) <https://a.b)>",
             "[a](b \"c) [d](e)",
+            "2 * 3 * 4 _a_ __b__ snake_case *a **b** c*",
+            "*a **  _ _x_ y_ __ ___z___ a_b_ _c_d",
         ] {
             let spans = scan(line, &md());
             let len = line.chars().count();
@@ -952,7 +1078,7 @@ mod tests {
     /// guarantees hold, and reading a destination never panics.
     #[test]
     fn link_soup_keeps_the_scanner_guarantees() {
-        let alphabet: Vec<char> = "[]()<>!\\\"' ahtps:/.é".chars().collect();
+        let alphabet: Vec<char> = "[]()<>!\\\"' ahtps:/.é*_~=".chars().collect();
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         for _ in 0..3000 {
             let mut line = String::new();
@@ -1002,6 +1128,7 @@ mod tests {
             "😀 **bold** 🎉", "\t\t- x", "a*b*c*d*e",
             "[a](", "[a](<", "[a](<b", "[a](b \"", "[a](()", "[a](\\", "<", "<h", "<https://",
             "<https://>", "[a](b (c", "![a](<>)", "[a]( )",
+            "_", "__", "___", "_ _", "* *", "** **", "a_", "_a", "__a_", "_a__", "~~ ~~",
         ] {
             for s in scan(line, &md()) {
                 let _ = (destination(&s, line), target_of(&s, line)); // must not panic
