@@ -493,6 +493,10 @@ fn is_url(s: &str) -> bool {
         .any(|p| s.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p)))
 }
 
+/// The most text one `p` may put in (16 MB): a register times its count.
+/// Past it the count is a typo, not a request.
+const PASTE_LIMIT: usize = 16 << 20;
+
 /// Extensions a dead link may CREATE. A missing note is a note to write; a
 /// missing `report.pdf` is a missing file, and touching an empty one in its
 /// place would answer a question nobody asked.
@@ -1837,7 +1841,7 @@ impl App {
             Action::YankLine => {
                 let line = self.buffer.cursor.line;
                 let last = self.buffer.last_line();
-                self.operate_linewise(Operator::Yank, line, (line + count - 1).min(last));
+                self.operate_linewise(Operator::Yank, line, line.saturating_add(count.saturating_sub(1)).min(last));
             }
             // `3rx` replaces three characters, so this needs the count and
             // belongs here rather than in `apply_action`.
@@ -1930,7 +1934,7 @@ impl App {
             Target::Line => {
                 let l1 = self.buffer.cursor.line;
                 let last = self.buffer.last_line();
-                self.operate_linewise(op, l1, (l1 + count - 1).min(last));
+                self.operate_linewise(op, l1, l1.saturating_add(count.saturating_sub(1)).min(last));
             }
             Target::Selection => self.visual_operate(op),
         }
@@ -3786,7 +3790,7 @@ impl App {
         if len == 0 || c.col >= len {
             return;
         }
-        let end_col = (c.col + count).min(len);
+        let end_col = c.col.saturating_add(count).min(len);
         let start = self.buffer.char_index(c);
         let end = self.buffer.char_index(Cursor::new(c.line, end_col));
         if end > start {
@@ -4583,6 +4587,11 @@ impl App {
         };
         if reg.linewise && !reg.text.ends_with('\n') {
             reg.text.push('\n');
+        }
+        // Checked BEFORE the repeat: `999999p` would otherwise ask for
+        // gigabytes, and a request that size aborts the process.
+        if count.max(1).saturating_mul(reg.text.len()) > PASTE_LIMIT {
+            return self.notify("paste: too large", FlashKind::Error);
         }
         reg.text = reg.text.repeat(count.max(1));
         if reg.linewise {
@@ -10259,6 +10268,49 @@ mod tests {
         assert!(app.open_file(dir.join("new.md")));
         assert_eq!(app.docs.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------------------ huge counts
+
+    /// A count typed by a sat-on keyboard neither panics (debug overflow) nor
+    /// allocates without bound, and leaves the buffer where undo can fix it.
+    #[test]
+    fn a_huge_count_neither_panics_nor_runs_away() {
+        let original = "one two\nthree\nfour\n";
+        for keys in ["p", "j", "$", "x", "J", "~", "dd", "G", "rx"] {
+            let mut app = app_with(original);
+            feed(&mut app, "yy");
+            feed(&mut app, "99999999999999999999999");
+            assert!(
+                app.pending.count.is_some_and(|n| n <= 99_999),
+                "the count is capped: {:?}",
+                app.pending.count
+            );
+            feed(&mut app, keys);
+            let c = app.buffer.cursor;
+            assert!(c.line <= app.buffer.last_line(), "{keys}: cursor line {c:?}");
+            assert!(c.col <= app.buffer.line_len(c.line), "{keys}: cursor col {c:?}");
+            assert!(app.pending.is_clean(), "{keys}: nothing left pending");
+            assert!(app.buffer.rope.len_bytes() < 16 << 20, "{keys}: bounded");
+            if text(&app) != original {
+                feed(&mut app, "u");
+            }
+            assert!(text(&app) == original, "{keys}: undo restores the text");
+        }
+    }
+
+    /// `100000p` of a 1 KB register would be 100 MB of text: refused, with a
+    /// message, before anything is allocated.
+    #[test]
+    fn a_paste_too_large_is_refused() {
+        let mut app = app_with("x\n");
+        app.registers.insert('"', Register { text: "a".repeat(1024), linewise: false });
+        feed(&mut app, "100000p");
+        assert_eq!(app.buffer.rope.len_bytes(), 2, "nothing pasted");
+        assert!(flash_text(&app).contains("paste: too large"), "got: {}", flash_text(&app));
+        // A sane count of the same register still pastes.
+        feed(&mut app, "3p");
+        assert_eq!(app.buffer.line_text(0).len(), 1 + 3 * 1024);
     }
 
     /// A directory deletion says how much is going — it is the only warning

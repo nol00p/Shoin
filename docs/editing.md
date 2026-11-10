@@ -90,6 +90,9 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 
 ## Details
 
+- A count stops at 99,999; more digits change nothing. A paste that would put
+  in more than 16 MB (`100000p` of a long register) is refused with
+  `paste: too large`.
 - Which indents are refused: `>al` on the first item of a list or sub-list
   (there is no item above it to nest under), `<al` and `<aL` on a top-level
   item (nowhere to go), and `>aL` when it would put a top-level list 4 or

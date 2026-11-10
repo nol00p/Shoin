@@ -19,6 +19,12 @@ use super::action::{Action, Operator, Target};
 use super::bindings::{self, Command, Verb};
 use super::keymap::{Keymap, Lookup};
 
+/// The largest count the grammar keeps (vim's own display limit). Digits past
+/// it are a typo or a sat-on key, and every count-driven loop and allocation
+/// stays bounded by it. Counts before and after an operator multiply, and the
+/// product is capped the same way.
+pub const MAX_COUNT: usize = 99_999;
+
 /// Which mode's grammar to resolve against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Table {
@@ -215,7 +221,8 @@ impl Pending {
         if let Some(c @ '0'..='9') = key.as_char() {
             if c != '0' || self.count.is_some() {
                 let d = c as usize - '0' as usize;
-                self.count = Some(self.count.unwrap_or(0).saturating_mul(10) + d);
+                let n = self.count.unwrap_or(0).saturating_mul(10).saturating_add(d);
+                self.count = Some(n.min(MAX_COUNT));
                 return Resolution::Pending;
             }
         }
@@ -439,7 +446,7 @@ impl Pending {
     fn take_count(&mut self) -> usize {
         let motion = self.count.take().unwrap_or(1).max(1);
         let operator = self.op_count.take().unwrap_or(1).max(1);
-        motion.saturating_mul(operator)
+        motion.saturating_mul(operator).min(MAX_COUNT)
     }
 
 }
