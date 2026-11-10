@@ -10282,17 +10282,19 @@ mod tests {
 
     #[test]
     fn clean_path_is_absolute_and_lexical() {
-        let base = Path::new("/home/me/notes");
-        assert_eq!(clean_path(base, Path::new("n.md")), PathBuf::from("/home/me/notes/n.md"));
-        assert_eq!(clean_path(base, Path::new("./n.md")), PathBuf::from("/home/me/notes/n.md"));
-        assert_eq!(clean_path(base, Path::new("sub/../n.md")), PathBuf::from("/home/me/notes/n.md"));
-        assert_eq!(clean_path(base, Path::new("../x/./n.md")), PathBuf::from("/home/me/x/n.md"));
+        // A base that exists nowhere: `clean_path` follows a symlink before
+        // `..`, and on macOS `/home` is one (to `/System/Volumes/Data/home`).
+        let base = Path::new("/shoin-no-such-dir/me/notes");
+        assert_eq!(clean_path(base, Path::new("n.md")), PathBuf::from("/shoin-no-such-dir/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("./n.md")), PathBuf::from("/shoin-no-such-dir/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("sub/../n.md")), PathBuf::from("/shoin-no-such-dir/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("../x/./n.md")), PathBuf::from("/shoin-no-such-dir/me/x/n.md"));
         assert_eq!(clean_path(base, Path::new("/a/./b/../c.md")), PathBuf::from("/a/c.md"));
         assert_eq!(clean_path(base, Path::new("../../../../n.md")), PathBuf::from("/n.md"));
         // Nothing has to exist: a new file has a path too.
         assert_eq!(
             clean_path(base, Path::new("not/yet/there.md")),
-            PathBuf::from("/home/me/notes/not/yet/there.md")
+            PathBuf::from("/shoin-no-such-dir/me/notes/not/yet/there.md")
         );
     }
 
@@ -10338,7 +10340,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn clean_path_follows_a_symlink_before_its_dot_dot() {
-        let dir = two_files();
+        // Canonical, because the temp folder may itself sit behind a symlink
+        // (`/var` is `/private/var` on macOS), which `..` would resolve.
+        let dir = std::fs::canonicalize(two_files()).unwrap();
         std::fs::create_dir_all(dir.join("real/sub")).unwrap();
         std::os::unix::fs::symlink(dir.join("real/sub"), dir.join("link")).unwrap();
         assert_eq!(
