@@ -5,7 +5,7 @@
 //! embed asked for. Everything above it (the export walk, and live preview)
 //! is built on these two answers.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Result};
 
@@ -123,36 +123,60 @@ fn linkable() -> Vec<String> {
 /// have several `index.md` and each folder's own one still wins locally.
 pub fn resolve(link: &Link, from: &Path, root: &Path) -> Result<PathBuf, Unresolved> {
     let dir = from.parent().unwrap_or(Path::new("."));
-    for cand in candidates(&link.target) {
+    // Hoisted: the vault search below asks about EVERY file under the root,
+    // and rebuilding the extension list per file allocated eight Strings each.
+    let exts = linkable();
+    for cand in candidates(&link.target, &exts) {
         let p = dir.join(&cand);
         if p.is_file() {
             return Ok(p);
         }
     }
-    // Bare-name search. Matches on the file NAME, with or without its
-    // extension, so `![[attention]]` finds `fragments/attention.md`.
+    // Vault search, on the file NAME, case-insensitively, so `![[attention]]`
+    // finds `fragments/attention.md`. What the link wrote is kept: a linkable
+    // extension must match exactly (`diagram.png` never means `diagram.md`),
+    // and folders must end the file's path (`archive/todo` is not
+    // `sub/todo.md`).
     let wanted = link.target.trim_end_matches('/');
-    let stem = Path::new(wanted)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase());
+    let named_ext = has_linkable_ext(Path::new(wanted), &exts);
+    let parts: Vec<String> = Path::new(wanted)
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let Some((name, folders)) = parts.split_last() else {
+        return Err(Unresolved::Missing(link.target.clone()));
+    };
     let mut found = Vec::new();
-    // Hoisted: this is the predicate for EVERY file under the root, and
-    // rebuilding the extension list inside it allocated eight Strings per file
-    // in the vault.
-    let exts = linkable();
     walk(root, 0, &mut |p| {
-        let is_embeddable = p
-            .extension()
-            .map(|e| exts.contains(&e.to_string_lossy().to_lowercase()))
-            .unwrap_or(false);
-        if !is_embeddable {
+        if !has_linkable_ext(p, &exts) {
             return;
         }
-        let s = p.file_stem().map(|s| s.to_string_lossy().to_lowercase());
-        if s == stem {
+        // Without a named extension, the name is everything before the
+        // linkable one: `2024.01.15 meeting` is `2024.01.15 meeting.md`.
+        let own = if named_ext { p.file_name() } else { p.file_stem() };
+        if own.map(|s| s.to_string_lossy().to_lowercase()).as_ref() != Some(name) {
+            return;
+        }
+        // Folders are read below the root only, so where the vault itself
+        // lives never counts as a match.
+        let rel = p.strip_prefix(root).unwrap_or(p);
+        let mut dirs = rel
+            .parent()
+            .into_iter()
+            .flat_map(|d| d.components().rev())
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase());
+        if folders.iter().rev().all(|f| dirs.next().as_ref() == Some(f)) {
             found.push(p.to_path_buf());
         }
     });
+    // A bare name prefers the note to the picture here too, as `candidates`
+    // does beside the linking file: the note is the one you can edit.
+    if !named_ext && found.iter().any(|p| is_text(p)) {
+        found.retain(|p| is_text(p));
+    }
     match found.len() {
         0 => Err(Unresolved::Missing(link.target.clone())),
         1 => Ok(found.remove(0)),
@@ -163,17 +187,35 @@ pub fn resolve(link: &Link, from: &Path, root: &Path) -> Result<PathBuf, Unresol
     }
 }
 
-/// The filenames a target could mean: as written, and with each embeddable
-/// extension appended when it has none.
-fn candidates(target: &str) -> Vec<PathBuf> {
-    let p = Path::new(target);
-    if p.extension().is_some() {
-        return vec![p.to_path_buf()];
+/// Whether `target` ends in a linkable extension, in any case. A dot followed
+/// by anything else is part of the name: `2024.01.15 meeting` has none.
+fn has_linkable_ext(target: &Path, exts: &[String]) -> bool {
+    target
+        .extension()
+        .is_some_and(|e| exts.contains(&e.to_string_lossy().to_lowercase()))
+}
+
+/// Whether a file's text can be embedded, rather than drawn as a picture.
+fn is_text(p: &Path) -> bool {
+    p.extension()
+        .is_some_and(|e| EMBEDDABLE.contains(&e.to_string_lossy().to_lowercase().as_str()))
+}
+
+/// The filenames a target could mean: as written when it names a linkable
+/// extension, otherwise with each linkable extension appended.
+///
+/// A target with some other extension (`paper.pdf`) is tried as written
+/// last, so `gx` on a link to a file beside the note still opens it.
+fn candidates(target: &str, exts: &[String]) -> Vec<PathBuf> {
+    if has_linkable_ext(Path::new(target), exts) {
+        return vec![PathBuf::from(target)];
     }
-    linkable()
-        .iter()
-        .map(|e| PathBuf::from(format!("{target}.{e}")))
-        .collect()
+    let mut out: Vec<PathBuf> =
+        exts.iter().map(|e| PathBuf::from(format!("{target}.{e}"))).collect();
+    if Path::new(target).extension().is_some() {
+        out.push(PathBuf::from(target));
+    }
+    out
 }
 
 /// Depth-capped directory walk, skipping dotfiles and build output — the same
@@ -609,6 +651,101 @@ more
             "md",
             "a bare name prefers the file you can edit"
         );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// F07: a dot in a note's name is part of the name, not an extension.
+    /// Dated names are common in Obsidian vaults.
+    #[test]
+    fn a_dotted_name_finds_its_note() {
+        let d = vault("dotted");
+        put(&d, "2024.01.15 meeting.md", "met\n");
+        put(&d, "far/2024.02.01 review.md", "rev\n");
+        let from = d.join("comp.md");
+        assert_eq!(
+            resolve(&link("2024.01.15 meeting"), &from, &d).unwrap(),
+            d.join("2024.01.15 meeting.md"),
+            "beside the linking note"
+        );
+        assert_eq!(
+            resolve(&link("2024.02.01 Review"), &from, &d).unwrap(),
+            d.join("far/2024.02.01 review.md"),
+            "and by name anywhere in the vault"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// F07: an extension the link names is kept. `![[diagram.png]]` with no
+    /// such picture is missing, not `diagram.md`.
+    #[test]
+    fn a_named_extension_is_not_dropped() {
+        let d = vault("named-ext");
+        put(&d, "sub/diagram.md", "note\n");
+        let from = d.join("comp.md");
+        match resolve(&link("diagram.png"), &from, &d) {
+            Err(Unresolved::Missing(t)) => assert_eq!(t, "diagram.png"),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+        assert!(resolve(&link("diagram.md"), &from, &d).is_ok());
+        assert!(resolve(&link("Diagram.MD"), &from, &d).is_ok(), "extension case is ignored");
+        assert!(resolve(&link("diagram"), &from, &d).is_ok());
+
+        // Another extension: tried as written beside the note, so `gx` opens
+        // it, and never read as `paper.md`.
+        put(&d, "paper.md", "p\n");
+        assert!(resolve(&link("paper.pdf"), &from, &d).is_err());
+        put(&d, "paper.pdf", "%PDF\n");
+        assert_eq!(resolve(&link("paper.pdf"), &from, &d).unwrap(), d.join("paper.pdf"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// F07: folders in a link narrow the vault search to paths that end in
+    /// them; they are not dropped.
+    #[test]
+    fn folders_in_a_link_must_match() {
+        let d = vault("folders");
+        put(&d, "sub/todo.md", "t\n");
+        put(&d, "a/Archive/todo.md", "old\n");
+        let from = d.join("comp.md");
+        match resolve(&link("archive/todo"), &from, &d) {
+            Ok(p) => assert_eq!(p, d.join("a/Archive/todo.md")),
+            other => panic!("expected a/Archive/todo.md, got {other:?}"),
+        }
+        match resolve(&link("other/todo"), &from, &d) {
+            Err(Unresolved::Missing(t)) => assert_eq!(t, "other/todo"),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+        // A component must match whole: `chive/todo` is not `archive/todo`.
+        assert!(resolve(&link("chive/todo"), &from, &d).is_err());
+        assert_eq!(resolve(&link("sub/todo.md"), &from, &d).unwrap(), d.join("sub/todo.md"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// What F07 must not break: a bare name still finds a picture, matches
+    /// case-insensitively, and two notes of one name still need a choice.
+    #[test]
+    fn the_vault_search_keeps_its_old_answers() {
+        let d = vault("kept");
+        std::fs::write(d.join("photo.png"), [0u8, 1, 2]).unwrap();
+        put(&d, "deep/Note.md", "n\n");
+        put(&d, "x/index.md", "1\n");
+        put(&d, "y/index.md", "2\n");
+        let from = d.join("comp.md");
+        assert_eq!(resolve(&link("photo"), &from, &d).unwrap(), d.join("photo.png"));
+        assert_eq!(resolve(&link("note"), &from, &d).unwrap(), d.join("deep/Note.md"));
+        assert!(matches!(
+            resolve(&link("index"), &from, &d),
+            Err(Unresolved::Ambiguous(_, ref f)) if f.len() == 2
+        ));
+        assert_eq!(resolve(&link("x/index"), &from, &d).unwrap(), d.join("x/index.md"));
+
+        // A bare name found as a note and a picture in the vault means the
+        // note, as it does beside the linking file.
+        put(&d, "p/chart.md", "c\n");
+        std::fs::create_dir_all(d.join("q")).unwrap();
+        std::fs::write(d.join("q/chart.png"), [0u8]).unwrap();
+        assert_eq!(resolve(&link("chart"), &from, &d).unwrap(), d.join("p/chart.md"));
+        assert_eq!(resolve(&link("chart.png"), &from, &d).unwrap(), d.join("q/chart.png"));
         std::fs::remove_dir_all(&d).ok();
     }
 

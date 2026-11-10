@@ -89,6 +89,14 @@ See [Reading](reading.md#print-a-note).
   not invented.
 - A bare `![[diagram]]` finds `diagram.png`, but prefers `diagram.md` if both
   exist, since that's the one you can edit.
+- A link looks beside the note first, then by name anywhere under the search
+  root, ignoring case. A name several notes answer to is an error that lists
+  them.
+- A dot in a name is part of it: `[[2024.01.15 meeting]]` finds
+  `2024.01.15 meeting.md`. An extension you write is kept, so
+  `![[diagram.png]]` never falls back to `diagram.md`.
+- Folders in a link narrow the search: `[[archive/todo]]` matches only a
+  `todo.md` inside an `archive` folder.
 - `SHOIN_IMAGE_PROTOCOL=kitty|iterm|none` overrides the terminal detection.
 - A cycle of embeds is a hard error naming the loop, and an unresolved link
   leaves a visible placeholder rather than a silent hole in your export.

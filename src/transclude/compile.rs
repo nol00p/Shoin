@@ -514,4 +514,27 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// F06 and F07 through the whole walk: a heading embed keeps its code
+    /// block closed, a dated name resolves, and folders and extensions in a
+    /// link are not dropped.
+    #[test]
+    fn embeds_keep_fences_and_resolve_by_full_name() {
+        let d = vault("f06f07");
+        write(&d, "setup.md", "## Setup\n\n```sh\n# install it\nmake install\n```\n\nAfter the code.\n\n## Next\nnot embedded\n");
+        write(&d, "2024.01.15 meeting.md", "We met.\n");
+        write(&d, "sub/diagram.md", "A note.\n");
+        write(&d, "sub/todo.md", "A list.\n");
+        let main = write(
+            &d,
+            "main.md",
+            "![[setup#Setup]]\n\nTail text.\n\n![[2024.01.15 meeting]]\n\n![[diagram.png]]\n\n![[archive/todo]]\n",
+        );
+        let out = compile(&main, &cfg()).unwrap();
+        assert_eq!(out.matches("```").count(), 2, "the fence is closed: {out}");
+        assert!(out.contains("After the code.") && !out.contains("not embedded"), "{out}");
+        assert!(out.contains("We met."), "{out}");
+        assert!(!out.contains("A note."), "diagram.png is not diagram.md: {out}");
+        assert!(!out.contains("A list."), "archive/todo is not sub/todo: {out}");
+        std::fs::remove_dir_all(&d).ok();
+    }
 }
