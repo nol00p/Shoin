@@ -74,23 +74,39 @@ pub fn whole_line_embed(line: &str) -> Option<Link> {
 
 /// Flatten `path` into a single document.
 pub fn compile(path: &Path, cfg: &TranscludeConfig) -> Result<String> {
-    compile_text(&read(path)?, path, cfg)
+    compile_with_sources(path, cfg).map(|(doc, _)| doc)
+}
+
+/// [`compile`], and the canonical paths of every file the document was built
+/// from: `path` first, then each embedded note and picture once, in the
+/// order they were first met. A target that failed to resolve or read (a
+/// placeholder in the output) is not in the list.
+pub fn compile_with_sources(path: &Path, cfg: &TranscludeConfig) -> Result<(String, Vec<PathBuf>)> {
+    let text = read(path)?;
+    let (doc, mut sources) = walk(&text, path, cfg)?;
+    sources.insert(0, canonical(path));
+    Ok((doc, sources))
 }
 
 /// [`compile`] for text that is not read from `path`, such as stdin. Links
 /// resolve as though it were a file at `path`.
 pub fn compile_text(text: &str, path: &Path, cfg: &TranscludeConfig) -> Result<String> {
-    let root = search_root(path, cfg);
-    let mut stack = vec![canonical(path)];
+    walk(text, path, cfg).map(|(doc, _)| doc)
+}
+
+/// The compile itself: the flat document and the embedded files it read.
+fn walk(text: &str, path: &Path, cfg: &TranscludeConfig) -> Result<(String, Vec<PathBuf>)> {
+    let mut w = Walk::new(path, cfg);
+    w.stack.push(canonical(path));
     let mut out = String::new();
     // The composition file keeps its own front matter (§14.4); only embedded
     // files are stripped.
-    expand(text, path, &root, cfg, 0, &mut stack, &mut out)?;
+    w.expand(text, path, 0, &mut out)?;
     // Block ids go from the WHOLE document, not just from embedded text. They
     // are addresses rather than prose, and the composition's own are as much
     // noise in a compiled document as an embed's. Done once at the end so the
     // rule is stated in one place.
-    Ok(link::strip_block_ids(&out))
+    Ok((link::strip_block_ids(&out), w.sources))
 }
 
 /// The directory bare-name resolution searches, from `transclude.root`
@@ -116,77 +132,107 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn expand(
-    text: &str,
-    from: &Path,
-    root: &Path,
-    cfg: &TranscludeConfig,
-    depth: u8,
-    stack: &mut Vec<PathBuf>,
-    out: &mut String,
-) -> Result<()> {
-    let mut fences = Fences::default();
-    for line in text.lines() {
-        // A fence is literal. A `![[…]]` inside one is the syntax being
-        // DOCUMENTED, not an embed being asked for, and expanding it destroys
-        // the very line that explains the feature. `demote` and
-        // `strip_block_ids` have always skipped fences; this is the third
-        // pass over the same text and it follows the same rule.
-        if fences.literal(line) {
-            out.push_str(line);
-            out.push('\n');
-            continue;
+/// The folder relative picture paths are written from: the top-level
+/// composition's, canonical when it exists.
+fn base_of(path: &Path) -> PathBuf {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    canonical(dir)
+}
+
+/// State for one walk over a composition.
+struct Walk<'a> {
+    cfg: &'a TranscludeConfig,
+    /// Where bare names are searched for.
+    root: PathBuf,
+    /// The top-level composition's folder; see [`picture_dest`].
+    base: PathBuf,
+    /// The chain of files being expanded, for loop detection.
+    stack: Vec<PathBuf>,
+    /// Every embedded file read, canonical, each once.
+    sources: Vec<PathBuf>,
+}
+
+impl<'a> Walk<'a> {
+    fn new(top: &Path, cfg: &'a TranscludeConfig) -> Self {
+        Walk {
+            cfg,
+            root: search_root(top, cfg),
+            base: base_of(top),
+            stack: Vec::new(),
+            sources: Vec::new(),
         }
-        let Some(link) = whole_line_embed(line) else {
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        };
-
-        // Depth is checked BEFORE resolving, so an over-deep document reports
-        // the cap rather than a file-not-found from somewhere unexpected.
-        if depth >= cfg.max_depth {
-            bail!(
-                "embedding stopped at depth {} ({}): raise transclude.max_depth",
-                cfg.max_depth,
-                link.label()
-            );
-        }
-
-        let target = match link::resolve(&link, from, root) {
-            Ok(p) => p,
-            Err(e) => {
-                out.push_str(&placeholder(&link, &e.to_string()));
-                out.push('\n');
-                continue;
-            }
-        };
-
-        let canon = canonical(&target);
-        if let Some(at) = stack.iter().position(|p| *p == canon) {
-            let loop_path: Vec<String> = stack[at..]
-                .iter()
-                .chain(std::iter::once(&canon))
-                .map(|p| name_of(p))
-                .collect();
-            bail!("embedding loop: {}", loop_path.join(" -> "));
-        }
-
-        let body = match shape(&target, &link, cfg, depth) {
-            Ok(b) => b,
-            Err(e) => {
-                out.push_str(&placeholder(&link, &e.to_string()));
-                out.push('\n');
-                continue;
-            }
-        };
-
-        stack.push(canon);
-        expand(&body, &target, root, cfg, depth + 1, stack, out)?;
-        stack.pop();
     }
-    Ok(())
+
+    fn expand(&mut self, text: &str, from: &Path, depth: u8, out: &mut String) -> Result<()> {
+        let cfg = self.cfg;
+        let mut fences = Fences::default();
+        for line in text.lines() {
+            // A fence is literal. A `![[…]]` inside one is the syntax being
+            // DOCUMENTED, not an embed being asked for, and expanding it destroys
+            // the very line that explains the feature. `demote` and
+            // `strip_block_ids` have always skipped fences; this is the third
+            // pass over the same text and it follows the same rule.
+            if fences.literal(line) {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            let Some(link) = whole_line_embed(line) else {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            };
+
+            // Depth is checked BEFORE resolving, so an over-deep document reports
+            // the cap rather than a file-not-found from somewhere unexpected.
+            if depth >= cfg.max_depth {
+                bail!(
+                    "embedding stopped at depth {} ({}): raise transclude.max_depth",
+                    cfg.max_depth,
+                    link.label()
+                );
+            }
+
+            let target = match link::resolve(&link, from, &self.root) {
+                Ok(p) => p,
+                Err(e) => {
+                    out.push_str(&placeholder(&link, &e.to_string()));
+                    out.push('\n');
+                    continue;
+                }
+            };
+
+            let canon = canonical(&target);
+            if let Some(at) = self.stack.iter().position(|p| *p == canon) {
+                let loop_path: Vec<String> = self.stack[at..]
+                    .iter()
+                    .chain(std::iter::once(&canon))
+                    .map(|p| name_of(p))
+                    .collect();
+                bail!("embedding loop: {}", loop_path.join(" -> "));
+            }
+
+            let body = match shape(&target, &link, cfg, depth, &self.base) {
+                Ok(b) => b,
+                Err(e) => {
+                    out.push_str(&placeholder(&link, &e.to_string()));
+                    out.push('\n');
+                    continue;
+                }
+            };
+
+            if !self.sources.contains(&canon) {
+                self.sources.push(canon.clone());
+            }
+            self.stack.push(canon);
+            self.expand(&body, &target, depth + 1, out)?;
+            self.stack.pop();
+        }
+        Ok(())
+    }
 }
 
 /// Read a target and shape it for insertion: front matter off, the requested
@@ -196,17 +242,21 @@ fn expand(
 /// preview and export drifted apart once already (an embedded `# H1` showed
 /// at level one on screen and came out demoted in the file), and a shared path
 /// is the only thing that stops it happening again.
+///
+/// `base` is the top-level composition's folder, from [`base_of`]: a
+/// picture's path is written relative to it.
 pub(super) fn shape(
     target: &Path,
     link: &Link,
     cfg: &TranscludeConfig,
     depth: u8,
+    base: &Path,
 ) -> Result<String> {
     // An image is not text to slice into sections: it becomes a Markdown
     // image, which every export format already knows — `<img>` in HTML, and
     // the link itself in Markdown and plain text.
     if crate::image::looks_like_image(target) {
-        return Ok(format!("![{}]({})\n", link.label(), target.display()));
+        return Ok(format!("![{}]({})\n", link.label(), picture_dest(target, base)));
     }
     let text = read(target)?;
     let text = if cfg.strip_frontmatter {
@@ -216,6 +266,25 @@ pub(super) fn shape(
     };
     let body = link::extract(&text, &link.section)?;
     Ok(demote(&body, cfg.heading_offset.saturating_mul(depth + 1)))
+}
+
+/// An embedded picture's destination in the flattened document: relative to
+/// `base` (the top-level composition's folder) when the picture is inside it,
+/// absolute otherwise, so the same document reads the same wherever the
+/// compile was started from. A space or a parenthesis would end the
+/// destination early, so such a path is written in `<…>`.
+fn picture_dest(target: &Path, base: &Path) -> String {
+    let abs = canonical(target);
+    let path = match abs.strip_prefix(base) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel.to_path_buf(),
+        _ => abs,
+    };
+    let s = path.to_string_lossy().into_owned();
+    if s.contains([' ', '(', ')']) {
+        format!("<{s}>")
+    } else {
+        s
+    }
 }
 
 /// Flatten ONE link, for live preview.
@@ -229,15 +298,15 @@ pub fn flatten_link(
     cfg: &TranscludeConfig,
     recurse: bool,
 ) -> Result<String> {
-    let root = search_root(from, cfg);
-    let target = link::resolve(link, from, &root).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let body = shape(&target, link, cfg, 0)?;
+    let mut w = Walk::new(from, cfg);
+    let target = link::resolve(link, from, &w.root).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let body = shape(&target, link, cfg, 0, &w.base)?;
     if !recurse {
         return Ok(link::strip_block_ids(&body));
     }
-    let mut stack = vec![canonical(from), canonical(&target)];
+    w.stack = vec![canonical(from), canonical(&target)];
     let mut out = String::new();
-    expand(&body, &target, &root, cfg, 1, &mut stack, &mut out)?;
+    w.expand(&body, &target, 1, &mut out)?;
     Ok(link::strip_block_ids(&out))
 }
 
@@ -451,6 +520,83 @@ mod tests {
         assert!(out.contains("title: note"), "the composition keeps its own");
         assert!(!out.contains("title: frag"), "the embed's is stripped");
         assert!(out.contains("fragment body"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// F08: an embedded note saved with Windows line endings loses its front
+    /// matter like any other.
+    #[test]
+    fn front_matter_of_a_crlf_embed_goes() {
+        let d = vault("fmcrlf");
+        write(&d, "frag.md", "---\r\ntitle: frag\r\n---\r\nfragment body\r\n");
+        let comp = write(&d, "note.md", "![[frag]]\n");
+
+        let out = compile(&comp, &cfg()).unwrap();
+        assert!(!out.contains("title:"), "{out:?}");
+        assert!(out.contains("fragment body"), "{out:?}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// F10: an embedded picture's path is relative to the composition's
+    /// folder when it is inside it, wherever the compile was started from,
+    /// and absolute otherwise. A space or a parenthesis puts the destination
+    /// in `<…>` so the image syntax holds.
+    #[test]
+    fn embedded_picture_paths_are_relative_to_the_composition() {
+        let d = vault("pics");
+        let outside = vault("pics-out");
+        write(&d, "notes/img/p.png", "x");
+        write(&d, "notes/my pic (1).png", "x");
+        write(&outside, "far.png", "x");
+        let far = outside.join("far.png");
+        let main = write(
+            &d,
+            "notes/a.md",
+            &format!("![[img/p.png]]\n\n![[my pic (1).png]]\n\n![[{}]]\n", far.display()),
+        );
+        // Given as a path with `..` and `.` in it, as a relative path from
+        // the command line would be after joining.
+        let given = d.join("notes/../notes/./a.md");
+        let out = compile(&given, &cfg()).unwrap();
+        assert!(out.contains("![img/p.png](img/p.png)"), "{out}");
+        assert!(out.contains("![my pic (1).png](<my pic (1).png>)"), "{out}");
+        let far = std::fs::canonicalize(&far).unwrap();
+        assert!(out.contains(&format!("]({})", far.display())), "{out}");
+        assert_eq!(compile(&main, &cfg()).unwrap(), out);
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// A picture embedded by a nested note is still written relative to the
+    /// TOP-LEVEL composition, not to the note that embeds it.
+    #[test]
+    fn a_nested_picture_is_relative_to_the_top_level_note() {
+        let d = vault("nested-pic");
+        write(&d, "fragments/pics/chart.png", "x");
+        write(&d, "fragments/part.md", "Part.\n\n![[pics/chart.png]]\n");
+        let main = write(&d, "main.md", "![[fragments/part]]\n");
+        let out = compile(&main, &cfg()).unwrap();
+        assert!(out.contains("](fragments/pics/chart.png)"), "{out}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `compile_with_sources` names every file the document came from, once
+    /// each and canonical, and leaves out what failed to resolve.
+    #[test]
+    fn compiling_lists_the_files_it_read() {
+        let d = vault("sources");
+        write(&d, "fragments/a.md", "A.\n\n![[b]]\n\n![[pic.png]]\n");
+        write(&d, "fragments/b.md", "B.\n");
+        write(&d, "fragments/pic.png", "x");
+        let main = write(&d, "main.md", "![[fragments/a]]\n\n![[b]]\n\n![[nope]]\n");
+        let given = d.join("fragments/../main.md");
+        let (doc, sources) = compile_with_sources(&given, &cfg()).unwrap();
+        assert_eq!(doc, compile(&main, &cfg()).unwrap());
+        let c = |rel: &str| std::fs::canonicalize(d.join(rel)).unwrap();
+        assert_eq!(
+            sources,
+            vec![c("main.md"), c("fragments/a.md"), c("fragments/b.md"), c("fragments/pic.png")]
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
