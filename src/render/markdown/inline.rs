@@ -88,22 +88,136 @@ pub fn span_at(line: &str, col: usize, cfg: &MarkdownConfig) -> Option<InlineSpa
 /// `None` for a span that is not a link, and for a link whose destination is
 /// empty — `[text]()` points nowhere.
 pub fn target_of(span: &InlineSpan, line: &str) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    let slice = |r: std::ops::Range<usize>| -> Option<String> {
-        Some(chars.get(r)?.iter().collect())
-    };
     let out = match span.kind {
-        Inline::WikiLink => slice(span.inner.clone())?,
-        // `[text](url)` — the destination is what sits between the `](` that
-        // closes the body and the `)` that closes the construct.
-        Inline::Link | Inline::Image => {
-            slice(span.inner.end + 2..span.outer.end.checked_sub(1)?)?
-        }
-        Inline::Autolink => slice(span.outer.clone())?,
-        _ => return None,
+        Inline::WikiLink => line
+            .chars()
+            .skip(span.inner.start)
+            .take(span.inner.len())
+            .collect::<String>(),
+        _ => destination(span, line)?.0,
     };
     let out = out.trim().to_string();
     (!out.is_empty()).then_some(out)
+}
+
+/// The address and title of a `[text](…)` / `![alt](…)` link or an autolink:
+/// `(url, Some(title))` for `[a](url "title")`, `(url, None)` without one.
+///
+/// The `(…)` part is read as CommonMark writes it: `url`, `url "title"`,
+/// `url 'title'`, `url (title)`, or `<url>` with any of those after it; a
+/// backslash before punctuation is dropped from both. What does not fit that
+/// shape — `[a](my note.md)`, a path with spaces — is all address, as before.
+/// An autolink's address is its body, without any `<…>`.
+///
+/// `None` for a span of another kind (a `[[wiki link]]` names a note, not an
+/// address). The address may be empty: `[text]()`.
+pub fn destination(span: &InlineSpan, line: &str) -> Option<(String, Option<String>)> {
+    let chars: Vec<char> = line.chars().collect();
+    match span.kind {
+        // `](` closes the body; the last char of the span is the `)`.
+        Inline::Link | Inline::Image => {
+            let raw = chars.get(span.inner.end + 2..span.outer.end.checked_sub(1)?)?;
+            Some(split_destination(raw))
+        }
+        Inline::Autolink => Some((chars.get(span.inner.clone())?.iter().collect(), None)),
+        _ => None,
+    }
+}
+
+/// `url "title"` → (url, title), for what sits between `](` and `)`.
+fn split_destination(raw: &[char]) -> (String, Option<String>) {
+    let whole = || (unescape(raw).trim().to_string(), None);
+    let start = raw.iter().take_while(|c| c.is_whitespace()).count();
+    let Some(url_end) = dest_end(raw, start) else {
+        return whole();
+    };
+    let rest = raw[url_end..].iter().skip_while(|c| c.is_whitespace()).count();
+    let rest = &raw[raw.len() - rest..];
+    let title = if rest.is_empty() {
+        None
+    } else {
+        match title_end(rest, 0) {
+            Some(end) if rest[end..].iter().all(|c| c.is_whitespace()) => {
+                Some(unescape(&rest[1..end - 1]))
+            }
+            _ => return whole(),
+        }
+    };
+    let url = &raw[start..url_end];
+    let url = match url.first() {
+        Some('<') => &url[1..url.len() - 1],
+        _ => url,
+    };
+    (unescape(url), title)
+}
+
+/// Where the address that starts at `from` ends (exclusive): past the `>` of
+/// a `<…>` address, else at whitespace or at the `)` that would bring the
+/// paren count below zero. `None` for a `<` with no `>`.
+fn dest_end(chars: &[char], from: usize) -> Option<usize> {
+    if chars.get(from) == Some(&'<') {
+        let mut j = from + 1;
+        while j < chars.len() {
+            match chars[j] {
+                '\\' => j += 1,
+                '<' => return None,
+                '>' => return Some(j + 1),
+                _ => {}
+            }
+            j += 1;
+        }
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut j = from;
+    while j < chars.len() {
+        match chars[j] {
+            '\\' => j += 1,
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(j),
+            ')' => depth -= 1,
+            c if c.is_whitespace() => return Some(j),
+            _ => {}
+        }
+        j += 1;
+    }
+    Some(chars.len().min(j))
+}
+
+/// A title starting at `from` — `"…"`, `'…'` or `(…)` — and the index just
+/// past its closing mark. `None` if `from` opens no title or it never closes.
+fn title_end(chars: &[char], from: usize) -> Option<usize> {
+    let close = match chars.get(from)? {
+        '"' => '"',
+        '\'' => '\'',
+        '(' => ')',
+        _ => return None,
+    };
+    let mut j = from + 1;
+    while j < chars.len() {
+        match chars[j] {
+            '\\' => j += 1,
+            '(' if close == ')' => return None,
+            c if c == close => return Some(j + 1),
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Drop the backslash from `\(` and every other escaped ASCII punctuation.
+fn unescape(chars: &[char]) -> String {
+    let mut out = String::new();
+    let mut j = 0;
+    while j < chars.len() {
+        if chars[j] == '\\' && chars.get(j + 1).is_some_and(|c| c.is_ascii_punctuation()) {
+            j += 1;
+        }
+        out.push(chars[j]);
+        j += 1;
+    }
+    out
 }
 
 /// Try every construct that can begin at `i`, in priority order.
@@ -119,6 +233,7 @@ fn match_at(chars: &[char], i: usize, cfg: &MarkdownConfig) -> Option<InlineSpan
         '=' if cfg.highlight => pair_at(chars, i, '=', Inline::Highlight),
         '#' if cfg.tags => tag_at(chars, i),
         'h' => autolink_at(chars, i),
+        '<' => angle_autolink_at(chars, i),
         '$' if cfg.math => {
             if chars.get(i + 1) == Some(&'$') {
                 latex_delimited_at(chars, i)
@@ -283,18 +398,62 @@ fn pair_at(chars: &[char], i: usize, ch: char, kind: Inline) -> Option<InlineSpa
 
 /// `[text](url)` and `![text](url)`. The rendered body is the text; the URL and
 /// brackets are markers. Naive: the first `]` closes the text.
+///
+/// The `)` that closes the construct is found as CommonMark finds it: the
+/// address may hold balanced parentheses (`wiki/Rust_(language)`), may be
+/// written `<…>`, and may be followed by a `"title"`. When the `(…)` does not
+/// have that shape — `[a](my note.md)`, an unbalanced `(` — the first
+/// balancing `)`, then simply the first `)`, closes it, so a link still
+/// forms wherever it formed before.
 fn bracket_link(chars: &[char], i: usize, image: bool) -> Option<InlineSpan> {
     let text_start = if image { i + 2 } else { i + 1 };
     let text_end = find_char(chars, text_start, ']')?;
     if chars.get(text_end + 1) != Some(&'(') {
         return None;
     }
-    let url_end = find_char(chars, text_end + 2, ')')?;
+    let from = text_end + 2;
+    let url_end = link_close(chars, from)
+        .or_else(|| balanced_close(chars, from))
+        .or_else(|| find_char(chars, from, ')'))?;
     Some(InlineSpan {
         kind: if image { Inline::Image } else { Inline::Link },
         outer: i..url_end + 1,
         inner: text_start..text_end,
     })
+}
+
+/// The closing `)` of a well-formed `(url "title")` starting at `from`.
+fn link_close(chars: &[char], from: usize) -> Option<usize> {
+    let skip_ws = |mut j: usize| {
+        while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+            j += 1;
+        }
+        j
+    };
+    let j = dest_end(chars, skip_ws(from))?;
+    let mut j = skip_ws(j);
+    if chars.get(j) != Some(&')') {
+        j = skip_ws(title_end(chars, j)?);
+    }
+    (chars.get(j) == Some(&')')).then_some(j)
+}
+
+/// The `)` that brings the paren count below zero, whitespace and quotes
+/// notwithstanding.
+fn balanced_close(chars: &[char], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut j = from;
+    while j < chars.len() {
+        match chars[j] {
+            '\\' => j += 1,
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(j),
+            ')' => depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
 }
 
 /// `[[target]]`.
@@ -366,6 +525,34 @@ fn autolink_at(chars: &[char], i: usize) -> Option<InlineSpan> {
         kind: Inline::Autolink,
         outer: i..j,
         inner: i..j,
+    })
+}
+
+/// `<https://…>`: the angle brackets are markers, the address is the body.
+/// No whitespace and no `<` inside, as in CommonMark.
+fn angle_autolink_at(chars: &[char], i: usize) -> Option<InlineSpan> {
+    let start = i + 1;
+    let scheme = if starts_with(chars, start, "https://") {
+        8
+    } else if starts_with(chars, start, "http://") {
+        7
+    } else {
+        return None;
+    };
+    let mut j = start + scheme;
+    while j < chars.len() && chars[j] != '>' {
+        if chars[j].is_whitespace() || chars[j] == '<' {
+            return None;
+        }
+        j += 1;
+    }
+    if j >= chars.len() || j == start + scheme {
+        return None;
+    }
+    Some(InlineSpan {
+        kind: Inline::Autolink,
+        outer: i..j + 1,
+        inner: start..j,
     })
 }
 
@@ -608,6 +795,77 @@ mod tests {
         assert_eq!(target_of(&span, "[label]()"), None);
     }
 
+    /// F13: an address may hold balanced parentheses, a title, or `<…>`.
+    #[test]
+    fn link_destinations_balance_parens_and_split_titles() {
+        let wiki = "[Rust](https://en.wikipedia.org/wiki/Rust_(programming_language))";
+        let s = only(wiki);
+        assert_eq!(s.kind, Inline::Link);
+        assert_eq!(s.outer, 0..wiki.chars().count(), "the closing `)` belongs to the link");
+        assert_eq!(
+            target_of(&s, wiki).as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust_(programming_language)")
+        );
+
+        let img = r#"![alt](pic.png "title")"#;
+        let s = only(img);
+        assert_eq!(s.kind, Inline::Image);
+        assert_eq!(destination(&s, img), Some(("pic.png".into(), Some("title".into()))));
+        assert_eq!(target_of(&s, img).as_deref(), Some("pic.png"));
+
+        let line = "[a](b 'one') [c](d (two)) [e](f \"a (b\")";
+        let spans = scan(line, &md());
+        let got: Vec<_> = spans.iter().map(|s| destination(s, line).unwrap()).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("b".into(), Some("one".into())),
+                ("d".into(), Some("two".into())),
+                ("f".into(), Some("a (b".into())),
+            ]
+        );
+
+        // The first `)` still closes a link that has no `(` of its own.
+        let line = "[a](b) and (c)";
+        let s = only(line);
+        assert_eq!(text(line, &s.outer), "[a](b)");
+        assert_eq!(target_of(&s, line).as_deref(), Some("b"));
+
+        // `<…>` holds spaces and parentheses; the brackets are not the address.
+        let line = "[a](<b c>) x";
+        let s = only(line);
+        assert_eq!(text(line, &s.outer), "[a](<b c>)");
+        assert_eq!(target_of(&s, line).as_deref(), Some("b c"));
+        let line = "[a](<b) c> \"t\") x";
+        let s = only(line);
+        assert_eq!(destination(&s, line), Some(("b) c".into(), Some("t".into()))));
+
+        // Escaped parentheses do not count, and lose their backslash.
+        let line = r"[a](b\(c) d)";
+        let s = only(line);
+        assert_eq!(text(line, &s.outer), r"[a](b\(c)");
+        assert_eq!(target_of(&s, line).as_deref(), Some("b(c"));
+
+        // A path with spaces, as people write them, still reads whole.
+        let line = "[n](my note.md)";
+        assert_eq!(target_of(&only(line), line).as_deref(), Some("my note.md"));
+    }
+
+    #[test]
+    fn angle_autolink_hides_its_brackets() {
+        let line = "see <https://a.b/c_(d)> now";
+        let s = only(line);
+        assert_eq!(s.kind, Inline::Autolink);
+        assert_eq!(text(line, &s.outer), "<https://a.b/c_(d)>");
+        assert_eq!(text(line, &s.inner), "https://a.b/c_(d)");
+        assert_eq!(target_of(&s, line).as_deref(), Some("https://a.b/c_(d)"));
+        assert_eq!(destination(&s, line), Some(("https://a.b/c_(d)".into(), None)));
+        // Not an autolink: no scheme, a space, or no closing `>`.
+        assert!(scan("<b>x</b>", &md()).is_empty());
+        assert_eq!(only("<https://a b>").outer, 1..10, "only the bare URL");
+        assert_eq!(only("<https://a.b").outer, 1..12);
+    }
+
     #[test]
     fn autolink_trims_trailing_punctuation() {
         let s = only("visit https://example.com/path.");
@@ -668,15 +926,51 @@ mod tests {
 
     #[test]
     fn spans_never_overlap_and_stay_in_bounds() {
-        let line = "**a** `b` [c](d) #e ~~f~~ *g* \\!";
-        let spans = scan(line, &md());
-        let len = line.chars().count();
-        let mut prev_end = 0;
-        for s in &spans {
-            assert!(s.outer.start >= prev_end, "overlap at {:?}", s.outer);
-            assert!(s.inner.start >= s.outer.start && s.inner.end <= s.outer.end);
-            assert!(s.outer.end <= len);
-            prev_end = s.outer.end;
+        for line in [
+            "**a** `b` [c](d) #e ~~f~~ *g* \\!",
+            "[a](b(c)d) (e) [f](g)) ![h](i(j \"k)\")",
+            "[a](<b) [c](d) <https://e(f)> <http://>",
+            "[a](b\\) c) [d](( [e](f 'g) h",
+            "((([x](y((z)))))) <https://a.b)>",
+            "[a](b \"c) [d](e)",
+        ] {
+            let spans = scan(line, &md());
+            let len = line.chars().count();
+            let mut prev_end = 0;
+            for s in &spans {
+                assert!(s.outer.start >= prev_end, "overlap at {:?} in {line:?}", s.outer);
+                assert!(s.inner.start >= s.outer.start && s.inner.end <= s.outer.end);
+                assert!(s.outer.end <= len, "past the end in {line:?}");
+                let _ = destination(s, line);
+                let _ = target_of(s, line);
+                prev_end = s.outer.end;
+            }
+        }
+    }
+
+    /// Random lines over the characters links are made of: the same
+    /// guarantees hold, and reading a destination never panics.
+    #[test]
+    fn link_soup_keeps_the_scanner_guarantees() {
+        let alphabet: Vec<char> = "[]()<>!\\\"' ahtps:/.é".chars().collect();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..3000 {
+            let mut line = String::new();
+            for _ in 0..(seed % 24) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                line.push(alphabet[(seed % alphabet.len() as u64) as usize]);
+            }
+            let len = line.chars().count();
+            let mut prev_end = 0;
+            for s in scan(&line, &md()) {
+                assert!(s.outer.start >= prev_end && s.outer.end > s.outer.start, "{line:?}");
+                assert!(s.inner.start >= s.outer.start && s.inner.end <= s.outer.end, "{line:?}");
+                assert!(s.outer.end <= len, "{line:?}");
+                let _ = (destination(&s, &line), target_of(&s, &line));
+                prev_end = s.outer.end;
+            }
         }
     }
 
@@ -706,8 +1000,12 @@ mod tests {
             "", "*", "**", "***", "~", "==", "`", "[", "](", "![]", "[[", "]]",
             "\\", "#", "# ", "http://", "https://", "*******", "``````", "[a](b",
             "😀 **bold** 🎉", "\t\t- x", "a*b*c*d*e",
+            "[a](", "[a](<", "[a](<b", "[a](b \"", "[a](()", "[a](\\", "<", "<h", "<https://",
+            "<https://>", "[a](b (c", "![a](<>)", "[a]( )",
         ] {
-            let _ = scan(line, &md()); // must not panic
+            for s in scan(line, &md()) {
+                let _ = (destination(&s, line), target_of(&s, line)); // must not panic
+            }
         }
     }
 }
