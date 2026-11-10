@@ -100,5 +100,11 @@ See [Reading](reading.md#print-a-note).
 - `SHOIN_IMAGE_PROTOCOL=kitty|iterm|none` overrides the terminal detection.
 - A cycle of embeds is a hard error naming the loop, and an unresolved link
   leaves a visible placeholder rather than a silent hole in your export.
+- In an export, an embedded picture becomes `![name](path)`, with the path
+  relative to the exported note's folder when the picture is inside it and
+  absolute otherwise. A path with a space or a parenthesis is written in
+  `<…>`.
+- An embedded note's front matter is left out of an export, whatever its line
+  endings.
 - The `[transclude]` settings set the search root, recursion depth, how far
   embedded headings are demoted, and whether embeds get a border.
