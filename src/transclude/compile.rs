@@ -454,6 +454,20 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// F08: an embedded note saved with Windows line endings loses its front
+    /// matter like any other.
+    #[test]
+    fn front_matter_of_a_crlf_embed_goes() {
+        let d = vault("fmcrlf");
+        write(&d, "frag.md", "---\r\ntitle: frag\r\n---\r\nfragment body\r\n");
+        let comp = write(&d, "note.md", "![[frag]]\n");
+
+        let out = compile(&comp, &cfg()).unwrap();
+        assert!(!out.contains("title:"), "{out:?}");
+        assert!(out.contains("fragment body"), "{out:?}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     #[test]
     fn a_section_embed_takes_only_that_section() {
         let d = vault("section");

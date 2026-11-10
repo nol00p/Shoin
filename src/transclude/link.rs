@@ -415,17 +415,29 @@ fn without_block_id(line: &str) -> String {
 
 /// Strip a leading `---` front-matter block. Returns the body unchanged when
 /// there is none.
+///
+/// Both fences are tested with `trim_end()`, as the editor's classifier tests
+/// them, so `\r\n` line endings and trailing spaces do not hide the block.
 pub fn strip_front_matter(text: &str) -> &str {
-    let rest = match text.strip_prefix("---\n") {
-        Some(r) => r,
-        None => return text,
+    let Some(nl) = text.find('\n') else {
+        return text;
     };
+    if text[..nl].trim_end() != "---" {
+        return text;
+    }
+    let rest = &text[nl + 1..];
     // The closing fence must be its own line.
     let mut idx = 0usize;
     for line in rest.split_inclusive('\n') {
         let t = line.trim_end();
         if t == "---" || t == "..." {
-            return rest[idx + line.len()..].trim_start_matches('\n');
+            let mut body = &rest[idx + line.len()..];
+            // Blank lines between the block and the body go, whatever their
+            // line ending.
+            while let Some(b) = body.strip_prefix('\n').or_else(|| body.strip_prefix("\r\n")) {
+                body = b;
+            }
+            return body;
         }
         idx += line.len();
     }
@@ -799,5 +811,18 @@ echo done ^notanid
         assert_eq!(strip_front_matter("text\n---\nmore\n"), "text\n---\nmore\n");
         // An unterminated block is not front matter either.
         assert_eq!(strip_front_matter("---\nnope\n"), "---\nnope\n");
+    }
+
+    /// F08: the opening line is tested the way the editor's classifier tests
+    /// it, `trim_end() == "---"`, so Windows line endings and trailing spaces
+    /// are front matter too.
+    #[test]
+    fn front_matter_with_crlf_or_trailing_spaces_is_stripped() {
+        assert_eq!(strip_front_matter("---\r\ntitle: x\r\n---\r\nbody\r\n"), "body\r\n");
+        assert_eq!(strip_front_matter("--- \ntitle: x\n---\nbody\n"), "body\n");
+        assert_eq!(strip_front_matter("---\r\ntitle: x\r\n---\r\n\r\n\nbody\r\n"), "body\r\n");
+        assert_eq!(strip_front_matter("---\r\nnope\r\n"), "---\r\nnope\r\n");
+        assert_eq!(strip_front_matter("----\nx\n---\nbody\n"), "----\nx\n---\nbody\n");
+        assert_eq!(strip_front_matter("---"), "---");
     }
 }
