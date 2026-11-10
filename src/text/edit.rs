@@ -161,7 +161,7 @@ impl Buffer {
     /// empty and transclusion turned out not to need it — and that one branch
     /// is what keeps the guarantee cheap to reintroduce. See
     /// `Buffer::readonly_ranges` and SPEC.md §14.5.
-    fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
+    pub(super) fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
         !self.read_only
             && !self
             .readonly_ranges

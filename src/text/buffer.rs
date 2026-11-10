@@ -275,7 +275,17 @@ impl Buffer {
             return Ok(false);
         }
 
-        self.replace_all(&loaded.rope.to_string());
+        // Taking the file's text is not an edit by the reader, so read-only
+        // mode (where watching a file is the point) must not refuse it. The
+        // flag is lifted for this one replacement only. Anything else that
+        // refuses leaves the text, and the old mtime, so the next check
+        // tries again rather than reporting a reload that did not happen.
+        let read_only = std::mem::replace(&mut self.read_only, false);
+        let replaced = self.replace_all(&loaded.rope.to_string());
+        self.read_only = read_only;
+        if !replaced {
+            anyhow::bail!("{} could not be reloaded — part of it refuses edits", name_of(&path));
+        }
 
         self.line_ending = loaded.line_ending;
         self.final_newline = loaded.final_newline;
@@ -297,9 +307,16 @@ impl Buffer {
     /// The cursor is left where it was; callers clamp (`App::sync_after_input`
     /// does it for every input path anyway), and the group records the
     /// pre-replacement cursor so undo lands where the reader was.
-    pub fn replace_all(&mut self, text: &str) {
-        self.history.begin_group(Some(self.cursor));
+    ///
+    /// Returns false, having changed nothing, when the buffer refuses edits
+    /// (read-only mode or a read-only range), so no caller can report a
+    /// replacement that did not happen.
+    pub fn replace_all(&mut self, text: &str) -> bool {
         let len = self.rope.len_chars();
+        if !self.is_editable(&(0..len)) {
+            return false;
+        }
+        self.history.begin_group(Some(self.cursor));
         if len > 0 {
             self.delete_chars(0, len);
         }
@@ -307,6 +324,7 @@ impl Buffer {
             self.insert_str(Cursor::new(0, 0), text);
         }
         self.history.end_group();
+        true
     }
 
     /// Recompute `modified` from the revision the disk holds. Undoing back to
@@ -613,5 +631,136 @@ mod tests {
         assert_eq!(b.char_index(Cursor::new(1, 1)), 5);
         assert_eq!(b.char_index(Cursor::new(0, 99)), 3, "column clamps to the line");
         assert!(b.char_index(Cursor::new(99, 99)) <= b.rope.len_chars());
+    }
+
+    /// A fresh, empty directory under the system temp dir.
+    fn dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("shoin-buf-{tag}-{t}-{n}"));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn policy() -> SavePolicy {
+        SavePolicy {
+            trim_trailing_whitespace: false,
+            final_newline: save::FinalNewline::Preserve,
+        }
+    }
+
+    /// Writes `bytes` with an mtime an hour back, so the next write is
+    /// certain to move it.
+    fn write_old(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        let past = SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    }
+
+    /// Read-only mode is where a file is watched, so a reload there must
+    /// take the new text. It used to keep the old text, record the new
+    /// mtime and report success. F02.
+    #[test]
+    fn a_read_only_buffer_reloads_the_new_text() {
+        let d = dir("ro-reload");
+        let path = d.join("n.md");
+        write_old(&path, b"one\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.read_only = true;
+        let before = b.disk_mtime;
+
+        std::fs::write(&path, b"two\nthree\n").unwrap();
+        assert!(b.reload(&[]).unwrap(), "reported as replaced");
+        assert_eq!(b.rope.to_string(), "two\nthree\n");
+        assert!(b.read_only, "still read-only");
+        assert!(!b.modified);
+        assert_ne!(b.disk_mtime, before);
+
+        // The reader cannot undo while reading.
+        assert!(!b.undo());
+        assert_eq!(b.rope.to_string(), "two\nthree\n");
+
+        // Leaving read-only: clean, and `u` takes the reload back in one step.
+        b.read_only = false;
+        assert!(!b.modified);
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), "one\n");
+        assert!(b.modified, "holding text the file does not have");
+        assert!(b.redo());
+        assert_eq!(b.rope.to_string(), "two\nthree\n");
+        assert!(!b.modified, "back at what the disk holds");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A read-only reload takes the file's line ending and final newline
+    /// too, so the next save writes the file's own bytes.
+    #[test]
+    fn a_read_only_reload_keeps_crlf_and_a_missing_final_newline() {
+        let d = dir("ro-crlf");
+        let path = d.join("n.md");
+        write_old(&path, b"one\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.read_only = true;
+
+        std::fs::write(&path, b"a\r\nb\r\nc").unwrap();
+        assert!(b.reload(&[]).unwrap());
+        assert_eq!(b.rope.to_string(), "a\nb\nc");
+        assert_eq!(b.line_ending, LineEnding::Crlf);
+        assert!(!b.final_newline);
+
+        b.read_only = false;
+        b.save(policy(), false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\nc");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `replace_all` says whether it replaced, and a refusal changes
+    /// nothing: no text, no history step, no half-done group.
+    #[test]
+    fn replace_all_reports_a_refusal() {
+        let mut b = Buffer::unnamed(b"old\n".to_vec()).unwrap();
+        b.read_only = true;
+        assert!(!b.replace_all("new\n"));
+        assert_eq!(b.rope.to_string(), "old\n");
+
+        b.read_only = false;
+        b.readonly_ranges.push(1..2);
+        assert!(!b.replace_all("new\n"));
+        assert_eq!(b.rope.to_string(), "old\n");
+        assert!(!b.undo(), "nothing was recorded");
+
+        b.readonly_ranges.clear();
+        assert!(b.replace_all("new\n"));
+        assert_eq!(b.rope.to_string(), "new\n");
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), "old\n", "one step");
+    }
+
+    /// A reload that cannot replace the text is an error, and leaves the
+    /// mtime alone so the next check tries again.
+    #[test]
+    fn a_refused_reload_is_an_error_and_keeps_the_old_mtime() {
+        let d = dir("refused");
+        let path = d.join("n.md");
+        write_old(&path, b"one\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.readonly_ranges.push(0..1);
+        let before = b.disk_mtime;
+
+        std::fs::write(&path, b"two\n").unwrap();
+        assert!(b.reload(&[]).is_err());
+        assert_eq!(b.rope.to_string(), "one\n");
+        assert_eq!(b.disk_mtime, before);
+        std::fs::remove_dir_all(&d).ok();
     }
 }
