@@ -1468,7 +1468,17 @@ impl App {
         self.diff = None;
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let doc = &mut self.docs[doc];
-        doc.buffer.replace_all(&merged);
+        // The merge has to land in the buffer before it is written. A buffer
+        // that refuses it (read-only mode, a read-only range) must not be
+        // written either: that would put the UNMERGED text over the file.
+        if !doc.buffer.replace_all(&merged) {
+            let msg = if doc.buffer.read_only {
+                "read-only — nothing written; :view to edit, then :diff".to_string()
+            } else {
+                format!("part of {name} refuses edits — nothing written")
+            };
+            return self.notify(msg, FlashKind::Error);
+        }
         // Forced, and safe to force: the guard exists to catch a change nobody
         // has looked at, and the check above just proved there is none.
         match doc.buffer.save(policy, true) {
@@ -6698,6 +6708,60 @@ mod tests {
 
         // The write recorded a fresh mtime, so the next plain :w is fine again.
         app.buffer.save(SavePolicy::default(), false).expect("guard rearms against the new mtime");
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ------------------------------------------------- read-only and the disk
+
+    /// Read-only mode takes a change made on disk, as one undo step that `u`
+    /// gives back once editing again.
+    #[test]
+    fn read_only_takes_changes_from_disk() {
+        let (mut app, path) = app_on_disk("ro-check", "mine\n");
+        app.set_view(true);
+        write_settled(&path, "theirs\n");
+        assert!(app.check_disk(), "the change was noticed");
+        assert_eq!(text(&app), "theirs\n", "and taken");
+        assert!(!app.buffer.modified, "the buffer matches the file");
+        assert!(app.buffer.read_only, "still read-only");
+        app.set_view(false);
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "mine\n", "one undo step");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `:revert!` in read-only mode re-reads the file too.
+    #[test]
+    fn read_only_reverts_from_disk() {
+        let (mut app, path) = app_on_disk("ro-revert", "mine\n");
+        app.set_view(true);
+        write_settled(&path, "theirs\n");
+        ex(&mut app, "revert!");
+        assert_eq!(text(&app), "theirs\n");
+        assert!(flash_text(&app).contains("reverted"), "got: {}", flash_text(&app));
+        assert!(app.buffer.read_only, "still read-only");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `w` in the diff view writes nothing in read-only mode. The merge
+    /// cannot go into a buffer that refuses edits, and writing the buffer
+    /// as it stands would put the unmerged text over the file's.
+    #[test]
+    fn read_only_diff_commit_writes_nothing() {
+        let (mut app, path) = app_on_disk("ro-diff", "mine\n");
+        feed(&mut app, "A edited");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        app.set_view(true);
+        app.open_diff();
+        assert!(app.diff.is_some(), "a read-only buffer can still be compared");
+        diff_key(&mut app, 'f');
+        diff_key(&mut app, 'w');
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "the file is untouched");
+        assert_eq!(text(&app), "mine edited\n", "so is the buffer");
+        assert!(app.buffer.modified, "and its changes are still unsaved");
+        assert!(app.diff.is_none(), "closed, so the message can be seen");
+        assert!(flash_text(&app).contains("read-only"), "got: {}", flash_text(&app));
         let _ = std::fs::remove_file(path);
     }
 

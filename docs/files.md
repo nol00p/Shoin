@@ -95,6 +95,9 @@ version and then the file's, in the order shown on screen.
   — `:w` recreates it.
 - `:set autoreload off` stops taking outside changes automatically; `:revert`
   still does it on request.
+- In read-only mode, outside changes and `:revert!` still come in, and
+  `:diff` still shows the two versions, but its `w` writes nothing: `:view`
+  to edit first.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
