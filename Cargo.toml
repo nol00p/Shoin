@@ -27,8 +27,10 @@ path = "src/main.rs"
 # separate dependency — two crossterm versions would fight over the terminal.
 ratatui = "0.30"
 
-# Rope text buffer
-ropey = "1.6"
+# Rope text buffer. Only `\n` breaks a line, as everywhere else in Shoin:
+# the default features also break on `\r`, U+2028 and friends, which put the
+# rope's lines out of step with the ones on screen.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
 
 # Config
 toml = "1.1"

@@ -94,3 +94,6 @@ version and then the file's, in the order shown on screen.
   still does it on request.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
+- Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
+  separator (U+2028) stays inside its line and is saved as it was. A form
+  feed, a lone `\r` and other control characters show as nothing on screen.

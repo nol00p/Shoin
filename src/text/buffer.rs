@@ -81,8 +81,8 @@ pub struct Buffer {
     /// rescan that stopped as soon as its state matched again would miss
     /// them. Counted from the END because an edit above a line does not move
     /// it relative to the end, so later edits need no bookkeeping, and the
-    /// rope's own line metric (which also breaks on `\r` and U+2028) is the
-    /// only one used. Read through `take_dirty`.
+    /// rope's own line metric (`\n` only, as everywhere else) is the only
+    /// one used. Read through `take_dirty`.
     pub(crate) dirty_tail: Option<usize>,
 
     /// The file changed on disk while this buffer had unsaved work.
@@ -333,6 +333,10 @@ impl Buffer {
         self.modified = self.history.state() != self.saved_state;
     }
 
+    /// Lines as ropey counts them, which is by `\n` alone: ropey is built
+    /// without its `unicode_lines` feature, so `\r`, U+2028 and the other
+    /// Unicode breaks are ordinary characters inside a line, as they are to
+    /// `str::lines`, `line_text` and the renderer.
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()
     }
@@ -470,10 +474,10 @@ mod tests {
         b.delete_chars(at, at + 2);
         assert_eq!(b.take_dirty(), Some((2, 5)));
 
-        // A break the rope counts that is not `\n`: U+2028.
+        // U+2028 is not a break: the edit stays on one line.
         let mut b = Buffer::unnamed(text.clone()).unwrap();
         b.insert_str(Cursor::new(1, 0), "p\u{2028}q");
-        assert_eq!(b.take_dirty(), Some((1, 2)));
+        assert_eq!(b.take_dirty(), Some((1, 1)));
 
         // Two edits far apart that keep the line count between them: every
         // line from the first to the second is in the range.
@@ -508,8 +512,9 @@ mod tests {
         assert_eq!(b.take_dirty(), Some((1, 3)), "redo put two lines back");
     }
 
-    /// Deleting the `\n` of a `\r\n` leaves a lone `\r`, still a break to
-    /// the rope: the first line touched is the one before it either way.
+    /// Deleting the `\n` of a `\r\n` leaves a lone `\r`, which is an
+    /// ordinary character: the two lines join, and the first line touched
+    /// is the one the `\r` is on.
     #[test]
     fn a_lone_carriage_return_keeps_the_first_line() {
         let mut b = Buffer::empty();
@@ -517,8 +522,9 @@ mod tests {
         assert_eq!(b.rope.len_lines(), 4);
         b.delete_chars(2, 3);
         assert_eq!(b.rope.to_string(), "a\rb\nc\n");
-        assert_eq!(b.rope.len_lines(), 4, "the lone \\r still breaks the line");
-        assert_eq!(b.take_dirty().map(|(first, _)| first), Some(0));
+        assert_eq!(b.rope.len_lines(), 3, "the lone \\r does not break the line");
+        assert_eq!(b.line_text(0), "a\rb");
+        assert_eq!(b.take_dirty(), Some((0, 0)));
     }
 
     /// Piped text has no name and nothing unsaved, and keeps its line ending
@@ -762,5 +768,92 @@ mod tests {
         assert_eq!(b.rope.to_string(), "one\n");
         assert_eq!(b.disk_mtime, before);
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Characters other text tools treat as line breaks. Shoin breaks lines
+    /// on `\n` only, so each of these sits inside its line. F05.
+    const NOT_BREAKS: [&str; 6] = ["\u{2028}", "\u{2029}", "\u{85}", "\x0b", "\x0c", "\r"];
+
+    /// One line holding the character is one line: the line count, its
+    /// length and its text agree with what the screen shows, and typing at
+    /// the end of it lands at the real end, not after the character.
+    #[test]
+    fn only_a_newline_breaks_a_line() {
+        for sep in NOT_BREAKS {
+            let text = format!("abc{sep}def\n");
+            let mut b = Buffer::unnamed(text.clone().into_bytes()).unwrap();
+            assert_eq!(b.line_count(), 2, "{sep:?}: the line and the empty one after it");
+            assert_eq!(b.last_line(), 0, "{sep:?}");
+            assert_eq!(b.line_text(0), format!("abc{sep}def"), "{sep:?}");
+            assert_eq!(b.line_len(0), 7, "{sep:?}");
+
+            // What `A` then `Q` does: insert at the end of the line.
+            let end = Cursor::new(0, b.line_len(0));
+            assert!(b.insert_str(end, "Q"));
+            assert_eq!(b.rope.to_string(), format!("abc{sep}defQ\n"), "{sep:?}");
+            assert_eq!(b.rope.char_to_line(7), 0, "{sep:?}: Q is on line 0");
+
+            // What `dd` on the line removes: all of it.
+            let to = b.rope.line_to_char(1);
+            b.delete_chars(0, to);
+            assert_eq!(b.rope.to_string(), "", "{sep:?}");
+        }
+    }
+
+    /// The characters are kept as they are on load and written back as they
+    /// were, in an LF file and in a CRLF one.
+    #[test]
+    fn a_file_with_them_saves_byte_for_byte() {
+        let d = dir("seps");
+        for (i, sep) in NOT_BREAKS.iter().enumerate() {
+            for (j, eol) in ["\n", "\r\n"].iter().enumerate() {
+                let bytes = format!("abc{sep}def{eol}two{eol}");
+                let path = d.join(format!("f{i}-{j}.md"));
+                std::fs::write(&path, &bytes).unwrap();
+                let mut b = Buffer::open(path.clone(), &[]).unwrap();
+                assert_eq!(b.line_count(), 3, "{sep:?} {eol:?}");
+                assert_eq!(b.line_text(0), format!("abc{sep}def"), "{sep:?} {eol:?}");
+                assert_eq!(b.line_text(1), "two", "{sep:?} {eol:?}");
+                b.save(policy(), false).unwrap();
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes, "{sep:?} {eol:?}");
+            }
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+}
+
+/// How the screen shows the characters that no longer break a line. Here
+/// rather than in `render/` because it guards what changing the rope's line
+/// metric (F05) let through to the renderer; it only reads the drawn frame.
+#[cfg(test)]
+mod drawn {
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::render::markdown::block::BlockCache;
+    use crate::text::cursor::Cursor;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A control character inside a line is drawn as nothing, never sent to
+    /// the terminal, and the caret still sits on the character it is on.
+    #[test]
+    fn control_characters_inside_a_line_draw_as_nothing() {
+        for sep in ["\u{85}", "\x0b", "\x0c", "\r", "\x07", "\x1b"] {
+            let mut app = App::new(Config::default(), None, None).unwrap();
+            app.buffer.insert_str(Cursor::new(0, 0), &format!("abc{sep}def\n"));
+            app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+            app.buffer.cursor = Cursor::new(0, 6); // on the `f`
+            let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();
+            t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+            let caret = t.get_cursor_position().unwrap();
+            let buf = t.backend().buffer();
+            let row: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, caret.y)].symbol()).collect();
+            assert!(
+                !row.iter().any(|s| s.chars().any(char::is_control)),
+                "{sep:?} reached the screen: {row:?}"
+            );
+            assert_eq!(row.concat().trim(), "abcdef", "{sep:?}");
+            assert_eq!(row[caret.x as usize], "f", "{sep:?}: the caret is on the f");
+        }
     }
 }
