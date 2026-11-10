@@ -74,12 +74,28 @@ pub fn whole_line_embed(line: &str) -> Option<Link> {
 
 /// Flatten `path` into a single document.
 pub fn compile(path: &Path, cfg: &TranscludeConfig) -> Result<String> {
-    compile_text(&read(path)?, path, cfg)
+    compile_with_sources(path, cfg).map(|(doc, _)| doc)
+}
+
+/// [`compile`], and the canonical paths of every file the document was built
+/// from: `path` first, then each embedded note and picture once, in the
+/// order they were first met. A target that failed to resolve or read (a
+/// placeholder in the output) is not in the list.
+pub fn compile_with_sources(path: &Path, cfg: &TranscludeConfig) -> Result<(String, Vec<PathBuf>)> {
+    let text = read(path)?;
+    let (doc, mut sources) = walk(&text, path, cfg)?;
+    sources.insert(0, canonical(path));
+    Ok((doc, sources))
 }
 
 /// [`compile`] for text that is not read from `path`, such as stdin. Links
 /// resolve as though it were a file at `path`.
 pub fn compile_text(text: &str, path: &Path, cfg: &TranscludeConfig) -> Result<String> {
+    walk(text, path, cfg).map(|(doc, _)| doc)
+}
+
+/// The compile itself: the flat document and the embedded files it read.
+fn walk(text: &str, path: &Path, cfg: &TranscludeConfig) -> Result<(String, Vec<PathBuf>)> {
     let mut w = Walk::new(path, cfg);
     w.stack.push(canonical(path));
     let mut out = String::new();
@@ -90,7 +106,7 @@ pub fn compile_text(text: &str, path: &Path, cfg: &TranscludeConfig) -> Result<S
     // are addresses rather than prose, and the composition's own are as much
     // noise in a compiled document as an embed's. Done once at the end so the
     // rule is stated in one place.
-    Ok(link::strip_block_ids(&out))
+    Ok((link::strip_block_ids(&out), w.sources))
 }
 
 /// The directory bare-name resolution searches, from `transclude.root`
@@ -135,6 +151,8 @@ struct Walk<'a> {
     base: PathBuf,
     /// The chain of files being expanded, for loop detection.
     stack: Vec<PathBuf>,
+    /// Every embedded file read, canonical, each once.
+    sources: Vec<PathBuf>,
 }
 
 impl<'a> Walk<'a> {
@@ -144,6 +162,7 @@ impl<'a> Walk<'a> {
             root: search_root(top, cfg),
             base: base_of(top),
             stack: Vec::new(),
+            sources: Vec::new(),
         }
     }
 
@@ -205,6 +224,9 @@ impl<'a> Walk<'a> {
                 }
             };
 
+            if !self.sources.contains(&canon) {
+                self.sources.push(canon.clone());
+            }
             self.stack.push(canon);
             self.expand(&body, &target, depth + 1, out)?;
             self.stack.pop();
@@ -555,6 +577,26 @@ mod tests {
         let main = write(&d, "main.md", "![[fragments/part]]\n");
         let out = compile(&main, &cfg()).unwrap();
         assert!(out.contains("](fragments/pics/chart.png)"), "{out}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `compile_with_sources` names every file the document came from, once
+    /// each and canonical, and leaves out what failed to resolve.
+    #[test]
+    fn compiling_lists_the_files_it_read() {
+        let d = vault("sources");
+        write(&d, "fragments/a.md", "A.\n\n![[b]]\n\n![[pic.png]]\n");
+        write(&d, "fragments/b.md", "B.\n");
+        write(&d, "fragments/pic.png", "x");
+        let main = write(&d, "main.md", "![[fragments/a]]\n\n![[b]]\n\n![[nope]]\n");
+        let given = d.join("fragments/../main.md");
+        let (doc, sources) = compile_with_sources(&given, &cfg()).unwrap();
+        assert_eq!(doc, compile(&main, &cfg()).unwrap());
+        let c = |rel: &str| std::fs::canonicalize(d.join(rel)).unwrap();
+        assert_eq!(
+            sources,
+            vec![c("main.md"), c("fragments/a.md"), c("fragments/b.md"), c("fragments/pic.png")]
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
