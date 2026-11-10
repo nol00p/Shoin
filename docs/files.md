@@ -99,6 +99,9 @@ version and then the file's, in the order shown on screen.
 
 - Saving through a symlink writes the file it points to rather than replacing
   the link.
+- A file opens in one buffer however it is named: `n.md`, `./n.md`,
+  `sub/../n.md`, the tree's path and a symlink to it all switch to the same
+  buffer. Renaming or moving it in the tree takes the buffer along.
 - `:w other.md` won't overwrite an existing file without `!`.
 - Text piped in (`git show HEAD:notes.md | shoin`) opens with no filename
   until `:w name.md` gives it one. See [Reading](reading.md#from-a-pipe).
@@ -109,6 +112,9 @@ version and then the file's, in the order shown on screen.
   — `:w` recreates it.
 - `:set autoreload off` stops taking outside changes automatically; `:revert`
   still does it on request.
+- In read-only mode, outside changes and `:revert!` still come in, and
+  `:diff` still shows the two versions, but its `w` writes nothing: `:view`
+  to edit first.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
 - A recovery file is written on a crash, `SIGTERM` or `SIGHUP` only. A

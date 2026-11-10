@@ -109,7 +109,7 @@ pub fn resolve(
             if len == 0 || cur.col >= max {
                 return None;
             }
-            (Cursor::new(cur.line, (cur.col + count).min(max)), Exclusive)
+            (Cursor::new(cur.line, cur.col.saturating_add(count).min(max)), Exclusive)
         }
         Up => {
             if cur.line == 0 {
@@ -125,7 +125,7 @@ pub fn resolve(
             if cur.line >= last_line {
                 return None;
             }
-            let line = (cur.line + count).min(last_line);
+            let line = cur.line.saturating_add(count).min(last_line);
             let mut c = cur;
             c.line = line;
             c.col = cur.goal_col.min(buffer.line_len(line).saturating_sub(1));
@@ -141,7 +141,7 @@ pub fn resolve(
         LineEnd => {
             // `3$` is the end of the line two below, as in vim. The count
             // reached here and was dropped, so every `N$` acted as `$`.
-            let line = (cur.line + count - 1).min(last_line);
+            let line = cur.line.saturating_add(count - 1).min(last_line);
             let len = buffer.line_len(line);
             (Cursor::new(line, len.saturating_sub(1)), Inclusive)
         }

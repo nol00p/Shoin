@@ -493,26 +493,85 @@ fn is_url(s: &str) -> bool {
         .any(|p| s.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p)))
 }
 
+/// The most text a counted `p` may put in (16 MB): a register times its
+/// count. Past it the count is a typo, not a request.
+const PASTE_LIMIT: usize = 16 << 20;
+
 /// Extensions a dead link may CREATE. A missing note is a note to write; a
 /// missing `report.pdf` is a missing file, and touching an empty one in its
 /// place would answer a question nobody asked.
 const CREATABLE: &[&str] = &["md", "markdown", "txt"];
 
+/// The extension a dead link's target names, lowercased, or `None` when its
+/// last dot is part of the name.
+///
+/// A wiki link's target is a NAME (`name` true): only a linkable extension (a
+/// note's or a picture's, the ones `link::resolve` reads) is an extension, so
+/// `[[2024.01.16 meeting]]` and `[[Dr.Who]]` are notes to write, exactly the
+/// files the link resolves to once they exist. A markdown link's target is a
+/// PATH, and any extension it has is the file's type: `paper.pdf` is a PDF.
+fn named_ext(path: &Path, name: bool) -> Option<String> {
+    let e = path.extension()?.to_string_lossy().to_lowercase();
+    let linkable = CREATABLE.contains(&e.as_str())
+        || crate::image::IMAGE_EXTENSIONS.contains(&e.as_str());
+    (linkable || !name).then_some(e)
+}
+
 /// A link target with no extension means a note — the same default
 /// `link::candidates` resolves with, so what `gf` creates is what the link
-/// finds next time.
-fn with_default_ext(path: PathBuf) -> PathBuf {
-    match path.extension() {
-        Some(_) => path,
-        None => path.with_extension("md"),
+/// finds next time. `.md` goes on the WHOLE name: `2024.01.16 meeting` is
+/// `2024.01.16 meeting.md`, not `2024.01.md`.
+fn with_default_ext(path: PathBuf, name: bool) -> PathBuf {
+    if named_ext(&path, name).is_some() {
+        return path;
+    }
+    match path.file_name() {
+        Some(name) => {
+            let mut name = name.to_os_string();
+            name.push(".md");
+            path.with_file_name(name)
+        }
+        None => path,
     }
 }
 
-fn creatable(path: &Path) -> bool {
-    match path.extension() {
+fn creatable(path: &Path, name: bool) -> bool {
+    match named_ext(path, name) {
         None => true,
-        Some(e) => CREATABLE.contains(&e.to_string_lossy().to_lowercase().as_str()),
+        Some(e) => CREATABLE.contains(&e.as_str()),
     }
+}
+
+/// A buffer path in the one form every buffer keeps: absolute (joined onto
+/// `base`, the working directory, when relative) with `.` dropped and `..`
+/// resolved lexically. Nothing has to exist — a new file has a path too.
+///
+/// The one exception is `..` after a symlink, where the text and the
+/// filesystem disagree (`link/..` is the parent of where `link` points, not
+/// the folder `link` sits in): there the path so far is resolved first, so
+/// the file opened is the one the shell would open.
+///
+/// One form is what makes `n.md`, `./n.md` and the tree's `/home/…/n.md`
+/// one buffer, and what lets a tree rename find the buffer it moves.
+fn clean_path(base: &Path, path: &Path) -> PathBuf {
+    use std::path::Component;
+    let joined = if path.is_absolute() { path.to_path_buf() } else { base.join(path) };
+    let mut out = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            Component::CurDir => {}
+            // `/..` is `/`: `pop` leaves the root where it is.
+            Component::ParentDir => {
+                let link = std::fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink());
+                if let Some(real) = link.then(|| std::fs::canonicalize(&out).ok()).flatten() {
+                    out = real;
+                }
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// How a section reads in a message: as the reader wrote it after the `#`.
@@ -585,8 +644,13 @@ impl App {
         file: Option<PathBuf>,
         config_explicit: Option<PathBuf>,
     ) -> Result<Self> {
+        // Absolute and clean from the start, like every path a buffer keeps
+        // (see `clean_path`): `shoin n.md` must be the buffer the tree opens.
+        let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let buffer = match file {
-            Some(path) => Buffer::open(path, &config.markdown.plain_text_extensions)?,
+            Some(path) => {
+                Buffer::open(clean_path(&here, &path), &config.markdown.plain_text_extensions)?
+            }
             None => Buffer::empty(),
         };
         let config_focus = config.layout.focus.clone();
@@ -1442,7 +1506,17 @@ impl App {
         self.diff = None;
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let doc = &mut self.docs[doc];
-        doc.buffer.replace_all(&merged);
+        // The merge has to land in the buffer before it is written. A buffer
+        // that refuses it (read-only mode, a read-only range) must not be
+        // written either: that would put the UNMERGED text over the file.
+        if !doc.buffer.replace_all(&merged) {
+            let msg = if doc.buffer.read_only {
+                "read-only — nothing written; :view to edit, then :diff".to_string()
+            } else {
+                format!("part of {name} refuses edits — nothing written")
+            };
+            return self.notify(msg, FlashKind::Error);
+        }
         // Forced, and safe to force: the guard exists to catch a change nobody
         // has looked at, and the check above just proved there is none.
         match doc.buffer.save(policy, true) {
@@ -1815,7 +1889,7 @@ impl App {
             Action::YankLine => {
                 let line = self.buffer.cursor.line;
                 let last = self.buffer.last_line();
-                self.operate_linewise(Operator::Yank, line, (line + count - 1).min(last));
+                self.operate_linewise(Operator::Yank, line, line.saturating_add(count.saturating_sub(1)).min(last));
             }
             // `3rx` replaces three characters, so this needs the count and
             // belongs here rather than in `apply_action`.
@@ -1908,7 +1982,7 @@ impl App {
             Target::Line => {
                 let l1 = self.buffer.cursor.line;
                 let last = self.buffer.last_line();
-                self.operate_linewise(op, l1, (l1 + count - 1).min(last));
+                self.operate_linewise(op, l1, l1.saturating_add(count.saturating_sub(1)).min(last));
             }
             Target::Selection => self.visual_operate(op),
         }
@@ -2325,14 +2399,17 @@ impl App {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
-    /// A buffer path as the panels see it: absolute, so it can be matched
-    /// against a root that always is.
+    /// A path in the form a buffer keeps it: absolute and lexically clean
+    /// (`clean_path`), so it can be matched against the tree's and the
+    /// finder's paths, which always are.
     fn absolute(&self, p: &Path) -> PathBuf {
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.cwd().join(p)
-        }
+        clean_path(&self.cwd(), p)
+    }
+
+    /// A path as a message names it: relative to the working directory when
+    /// it is beneath it, whole otherwise.
+    fn shown(&self, p: &Path) -> String {
+        p.strip_prefix(self.cwd()).unwrap_or(p).display().to_string()
     }
 
     /// The finder's near view: the edited file's own directory, or the working
@@ -2600,7 +2677,16 @@ impl App {
     /// is already open. Nothing is displaced, so unlike before there is no
     /// reason to refuse when the current buffer has unsaved changes.
     fn open_file(&mut self, path: PathBuf) -> bool {
-        if let Some(i) = self.docs.iter().position(|d| d.buffer.path.as_deref() == Some(&*path)) {
+        // One file, one buffer, however it was spelled: the clean path catches
+        // `n.md` against `./n.md`, `same_file` a symlink against its target.
+        let path = self.absolute(&path);
+        let real = std::fs::canonicalize(&path).ok();
+        let open = self.docs.iter().position(|d| {
+            d.buffer.path.as_deref().is_some_and(|p| {
+                p == path || real.is_some() && std::fs::canonicalize(p).ok() == real
+            })
+        });
+        if let Some(i) = open {
             self.switch_to(i);
             return true;
         }
@@ -2609,7 +2695,7 @@ impl App {
                 buffer.read_only = self.view;
                 self.docs.push(BufferState::new(buffer, self.config.markdown.math));
                 self.switch_to(self.docs.len() - 1);
-                self.notify(format!("opened {}", path.display()), FlashKind::Info);
+                self.notify(format!("opened {}", self.shown(&path)), FlashKind::Info);
                 true
             }
             Err(e) => {
@@ -2668,17 +2754,17 @@ impl App {
             Some(Dest::Url(u)) => {
                 self.notify(format!("{u} is a URL — gx opens it"), FlashKind::Info)
             }
-            Some(Dest::Path { path, section }) => self.open_or_create(path, &section),
+            Some(Dest::Path { path, section }) => self.open_or_create(path, &section, false),
             Some(Dest::Note(l)) => {
                 let (root, from) = (self.link_root(), self.link_from());
                 match link::resolve(&l, &from, &root) {
-                    Ok(path) => self.open_or_create(path, &l.section),
+                    Ok(path) => self.open_or_create(path, &l.section, true),
                     // A name nothing answers to is a note not written YET.
                     // Resolution is unchanged; what is new is that its miss is
                     // a starting point rather than an error.
                     Err(link::Unresolved::Missing(_)) => {
                         let path = self.file_dir().join(&l.target);
-                        self.open_or_create(path, &l.section)
+                        self.open_or_create(path, &l.section, true)
                     }
                     // The refusal becomes a choice: the finder already knows
                     // how to pick one path out of several.
@@ -2703,11 +2789,14 @@ impl App {
     /// started. It is created ON DISK rather than as an unnamed buffer so that
     /// the link that made it resolves from now on — including from every other
     /// note already pointing here.
-    fn open_or_create(&mut self, path: PathBuf, section: &link::Section) {
-        let path = if path.exists() { path } else { with_default_ext(path) };
+    ///
+    /// `name` is true for a wiki link's target, a note's name rather than a
+    /// path (see `named_ext`).
+    fn open_or_create(&mut self, path: PathBuf, section: &link::Section, name: bool) {
+        let path = if path.exists() { path } else { with_default_ext(path, name) };
         if !path.exists() {
-            if !creatable(&path) {
-                self.notify(format!("no {}", path.display()), FlashKind::Error);
+            if !creatable(&path, name) {
+                self.notify(format!("no {}", self.shown(&path)), FlashKind::Error);
                 return;
             }
             if let Err(e) = ops::create(&path, false) {
@@ -2716,7 +2805,7 @@ impl App {
             }
             self.disk_changed();
             if self.open_file(path.clone()) {
-                self.notify(format!("created {}", path.display()), FlashKind::Info);
+                self.notify(format!("created {}", self.shown(&path)), FlashKind::Info);
             }
             return;
         }
@@ -2771,7 +2860,7 @@ impl App {
                 }
             }
             Some(Dest::Path { path, .. }) => {
-                self.notify(format!("no {}", path.display()), FlashKind::Error);
+                self.notify(format!("no {}", self.shown(&path)), FlashKind::Error);
                 return;
             }
         };
@@ -3757,7 +3846,7 @@ impl App {
         if len == 0 || c.col >= len {
             return;
         }
-        let end_col = (c.col + count).min(len);
+        let end_col = c.col.saturating_add(count).min(len);
         let start = self.buffer.char_index(c);
         let end = self.buffer.char_index(Cursor::new(c.line, end_col));
         if end > start {
@@ -4555,6 +4644,12 @@ impl App {
         if reg.linewise && !reg.text.ends_with('\n') {
             reg.text.push('\n');
         }
+        // Checked BEFORE the repeat: `99999p` would otherwise ask for
+        // gigabytes. Only a count is refused — one copy of a register is
+        // already in memory, however large it is.
+        if count > 1 && count.saturating_mul(reg.text.len()) > PASTE_LIMIT {
+            return self.notify("paste: too large", FlashKind::Error);
+        }
         reg.text = reg.text.repeat(count.max(1));
         if reg.linewise {
             let cur = self.buffer.cursor;
@@ -5183,11 +5278,7 @@ impl App {
         // Shown relative to the working directory, because an absolute path in
         // a 60-column box is mostly directories they already know they are in.
         let suggestion = crate::export::default_path(&src, format);
-        let shown = suggestion
-            .strip_prefix(self.cwd())
-            .unwrap_or(&suggestion)
-            .to_string_lossy()
-            .into_owned();
+        let shown = self.shown(&suggestion);
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::Export { format, justify },
             target: src,
@@ -5240,20 +5331,40 @@ impl App {
     /// buffer pointing at a name that no longer exists, and the next `:w` would
     /// silently recreate the old one.
     fn move_path(&mut self, from: &Path, to: &Path) -> anyhow::Result<Option<PathBuf>> {
-        ops::rename(from, to)?;
-        for doc in &mut self.docs {
-            let Some(path) = doc.buffer.path.clone() else { continue };
-            // A moved DIRECTORY takes every buffer beneath it, not just an
-            // exact match.
-            if let Ok(rest) = path.strip_prefix(from) {
-                doc.buffer.path = Some(if rest.as_os_str().is_empty() {
-                    to.to_path_buf()
-                } else {
-                    to.join(rest)
-                });
-            }
+        let (from, to) = (self.absolute(from), self.absolute(to));
+        // Which buffers go along is decided BEFORE the rename, while `from`
+        // still resolves: a buffer spelled through a symlinked folder (a
+        // `/home` that is really `/var/home`) is matched by where it really
+        // is. Not when `from` IS a symlink: moving a link leaves the file it
+        // points at, and that file's buffer, where they are. A moved
+        // DIRECTORY takes every buffer beneath it, not just an exact match.
+        let is_link = std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_symlink());
+        let real_from = if is_link { None } else { std::fs::canonicalize(&from).ok() };
+        let carried: Vec<(usize, PathBuf)> = self
+            .docs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, doc)| {
+                let path = doc.buffer.path.as_deref()?;
+                let rest = match path.strip_prefix(&from) {
+                    Ok(rest) => rest.to_path_buf(),
+                    Err(_) => {
+                        let real = std::fs::canonicalize(path).ok()?;
+                        real.strip_prefix(real_from.as_deref()?).ok()?.to_path_buf()
+                    }
+                };
+                Some((i, rest))
+            })
+            .collect();
+        ops::rename(&from, &to)?;
+        for (i, rest) in carried {
+            self.docs[i].buffer.path = Some(if rest.as_os_str().is_empty() {
+                to.clone()
+            } else {
+                to.join(rest)
+            });
         }
-        Ok(Some(to.to_path_buf()))
+        Ok(Some(to))
     }
 
     /// Open a tree prompt on the selected row, if the operation makes sense for
@@ -5704,7 +5815,10 @@ impl App {
     fn write(&mut self, path: Option<&str>, force: bool) -> bool {
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let result = match path {
-            Some(p) => self.buffer.save_as(PathBuf::from(p), policy, force),
+            Some(p) => {
+                let p = self.absolute(Path::new(p));
+                self.buffer.save_as(p, policy, force)
+            }
             None => self.buffer.save(policy, force),
         };
         match result {
@@ -6223,6 +6337,31 @@ mod tests {
         assert!(flash.contains("gx"), "the message points at gx — got {flash:?}");
     }
 
+    /// A dot in a note's NAME is not an extension: a dead dated link creates
+    /// the note the link resolves to next time, `.md` appended to the whole
+    /// name rather than replacing its last part.
+    #[test]
+    fn gf_creates_a_dated_note() {
+        for (name, file) in [
+            ("2024.01.16 meeting", "2024.01.16 meeting.md"),
+            ("2024.01.16", "2024.01.16.md"),
+            ("Mr. Smith", "Mr. Smith.md"),
+            ("Dr.Who", "Dr.Who.md"),
+        ] {
+            let (d, mut app) = vault(&format!("see [[{name}]]\n"), &[]);
+            cursor_on(&mut app, 0, name);
+            feed(&mut app, "gf");
+            assert!(d.join(file).is_file(), "{name}: created {file}, got {}", flash_text(&app));
+            assert_eq!(shown(&app), file, "{name}: and open");
+            let l = link::Link::parse(name).unwrap();
+            assert_eq!(
+                link::resolve(&l, &app.link_from(), &app.link_root()).ok(),
+                Some(d.join(file)),
+                "{name}: the link finds what gf made"
+            );
+        }
+    }
+
     /// A dead link to something that is not text does NOT get an empty file
     /// written in its place.
     #[test]
@@ -6639,6 +6778,60 @@ mod tests {
 
         // The write recorded a fresh mtime, so the next plain :w is fine again.
         app.buffer.save(SavePolicy::default(), false).expect("guard rearms against the new mtime");
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ------------------------------------------------- read-only and the disk
+
+    /// Read-only mode takes a change made on disk, as one undo step that `u`
+    /// gives back once editing again.
+    #[test]
+    fn read_only_takes_changes_from_disk() {
+        let (mut app, path) = app_on_disk("ro-check", "mine\n");
+        app.set_view(true);
+        write_settled(&path, "theirs\n");
+        assert!(app.check_disk(), "the change was noticed");
+        assert_eq!(text(&app), "theirs\n", "and taken");
+        assert!(!app.buffer.modified, "the buffer matches the file");
+        assert!(app.buffer.read_only, "still read-only");
+        app.set_view(false);
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "mine\n", "one undo step");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `:revert!` in read-only mode re-reads the file too.
+    #[test]
+    fn read_only_reverts_from_disk() {
+        let (mut app, path) = app_on_disk("ro-revert", "mine\n");
+        app.set_view(true);
+        write_settled(&path, "theirs\n");
+        ex(&mut app, "revert!");
+        assert_eq!(text(&app), "theirs\n");
+        assert!(flash_text(&app).contains("reverted"), "got: {}", flash_text(&app));
+        assert!(app.buffer.read_only, "still read-only");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `w` in the diff view writes nothing in read-only mode. The merge
+    /// cannot go into a buffer that refuses edits, and writing the buffer
+    /// as it stands would put the unmerged text over the file's.
+    #[test]
+    fn read_only_diff_commit_writes_nothing() {
+        let (mut app, path) = app_on_disk("ro-diff", "mine\n");
+        feed(&mut app, "A edited");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        app.set_view(true);
+        app.open_diff();
+        assert!(app.diff.is_some(), "a read-only buffer can still be compared");
+        diff_key(&mut app, 'f');
+        diff_key(&mut app, 'w');
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "the file is untouched");
+        assert_eq!(text(&app), "mine edited\n", "so is the buffer");
+        assert!(app.buffer.modified, "and its changes are still unsaved");
+        assert!(app.diff.is_none(), "closed, so the message can be seen");
+        assert!(flash_text(&app).contains("read-only"), "got: {}", flash_text(&app));
         let _ = std::fs::remove_file(path);
     }
 
@@ -10081,6 +10274,214 @@ mod tests {
         assert!(!dir.join("one.md").exists(), "y deleted it");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------- buffer path identity
+
+    /// `abs` spelled relative to the working directory, by climbing to `/`
+    /// with `..` and back down: a relative path to a scratch file that does
+    /// not need the test to change directory (tests run in parallel).
+    #[cfg(unix)]
+    fn relative_to_cwd(abs: &Path) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap();
+        let mut rel = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            rel.push("..");
+        }
+        rel.join(abs.strip_prefix("/").unwrap())
+    }
+
+    #[test]
+    fn clean_path_is_absolute_and_lexical() {
+        // A base that exists nowhere: `clean_path` follows a symlink before
+        // `..`, and on macOS `/home` is one (to `/System/Volumes/Data/home`).
+        let base = Path::new("/shoin-no-such-dir/me/notes");
+        assert_eq!(clean_path(base, Path::new("n.md")), PathBuf::from("/shoin-no-such-dir/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("./n.md")), PathBuf::from("/shoin-no-such-dir/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("sub/../n.md")), PathBuf::from("/shoin-no-such-dir/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("../x/./n.md")), PathBuf::from("/shoin-no-such-dir/me/x/n.md"));
+        assert_eq!(clean_path(base, Path::new("/a/./b/../c.md")), PathBuf::from("/a/c.md"));
+        assert_eq!(clean_path(base, Path::new("../../../../n.md")), PathBuf::from("/n.md"));
+        // Nothing has to exist: a new file has a path too.
+        assert_eq!(
+            clean_path(base, Path::new("not/yet/there.md")),
+            PathBuf::from("/shoin-no-such-dir/me/notes/not/yet/there.md")
+        );
+    }
+
+    /// `shoin README.md`, then the same file from the tree (absolute) or by
+    /// `:e ./README.md`: one buffer, not two. README.md is read, never written.
+    #[test]
+    fn a_bare_name_and_its_other_spellings_are_one_buffer() {
+        let cwd = std::env::current_dir().unwrap();
+        let mut app = App::new(Config::default(), Some(PathBuf::from("README.md")), None).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(cwd.join("README.md").as_path()));
+        assert_eq!(app.buffer.display_name(), "README.md", "the screen still shows the short name");
+
+        assert!(app.open_file(cwd.join("README.md")));
+        assert_eq!(app.docs.len(), 1, "the tree's absolute path finds the open buffer");
+        ex(&mut app, "e ./README.md");
+        assert_eq!(app.docs.len(), 1, ":e ./README.md finds it too");
+        ex(&mut app, "e src/../README.md");
+        assert_eq!(app.docs.len(), 1, "and so does a path through ..");
+    }
+
+    /// `shoin sub/../n.md` and `shoin ./n.md` name the file `n.md` does.
+    #[cfg(unix)]
+    #[test]
+    fn startup_paths_are_cleaned_before_they_are_kept() {
+        let dir = two_files();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let one = dir.join("one.md");
+        let via_sub = relative_to_cwd(&dir.join("sub")).join("..").join("one.md");
+        let mut app = App::new(Config::default(), Some(via_sub), None).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(one.as_path()));
+        assert!(app.open_file(one.clone()));
+        assert_eq!(app.docs.len(), 1);
+
+        let dotted = PathBuf::from(".").join(relative_to_cwd(&one));
+        let mut app = App::new(Config::default(), Some(dotted), None).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(one.as_path()));
+        app.open_file(relative_to_cwd(&one));
+        assert_eq!(app.docs.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `link/..` is the parent of where `link` points, as the shell has it.
+    #[cfg(unix)]
+    #[test]
+    fn clean_path_follows_a_symlink_before_its_dot_dot() {
+        // Canonical, because the temp folder may itself sit behind a symlink
+        // (`/var` is `/private/var` on macOS), which `..` would resolve.
+        let dir = std::fs::canonicalize(two_files()).unwrap();
+        std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real/sub"), dir.join("link")).unwrap();
+        assert_eq!(
+            clean_path(&dir, Path::new("link/../x.md")),
+            dir.join("real/x.md"),
+        );
+        assert_eq!(clean_path(&dir, Path::new("real/sub/../x.md")), dir.join("real/x.md"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Renaming a symlink in the tree leaves the buffer of the file it points
+    /// at alone: that file did not move.
+    #[cfg(unix)]
+    #[test]
+    fn renaming_a_symlink_leaves_its_targets_buffer() {
+        let dir = two_files();
+        std::os::unix::fs::symlink(dir.join("one.md"), dir.join("link.md")).unwrap();
+        let mut app = App::new(Config::default(), Some(dir.join("one.md")), None).unwrap();
+        app.move_path(&dir.join("link.md"), &dir.join("alias.md")).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("one.md").as_path()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A symlink and the file it points at are one buffer.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_and_its_target_are_one_buffer() {
+        let dir = two_files();
+        std::os::unix::fs::symlink(dir.join("one.md"), dir.join("link.md")).unwrap();
+        let mut app = App::new(Config::default(), Some(dir.join("one.md")), None).unwrap();
+        assert!(app.open_file(dir.join("link.md")));
+        assert_eq!(app.docs.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `shoin n.md`, rename it in the tree: the buffer follows, and `:w`
+    /// writes the new name rather than recreating the old one.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_rename_carries_a_buffer_opened_by_relative_path() {
+        let dir = two_files();
+        let rel = relative_to_cwd(&dir.join("one.md"));
+        let mut app = App::new(Config::default(), Some(rel), None).unwrap();
+        app.move_path(&dir.join("one.md"), &dir.join("m.md")).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("m.md").as_path()));
+        feed(&mut app, "Ax");
+        esc(&mut app);
+        ex(&mut app, "w");
+        assert!(!dir.join("one.md").exists(), ":w did not recreate the old name");
+        assert_eq!(std::fs::read_to_string(dir.join("m.md")).unwrap(), "file onex\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A buffer opened through a symlinked folder (`/home` → `/var/home`)
+    /// still follows a rename the tree makes under the real path.
+    #[cfg(unix)]
+    #[test]
+    fn a_rename_finds_a_buffer_spelled_through_a_symlinked_folder() {
+        let dir = two_files();
+        let alias = dir.with_extension("alias");
+        std::os::unix::fs::symlink(&dir, &alias).unwrap();
+        let mut app = App::new(Config::default(), Some(alias.join("one.md")), None).unwrap();
+        app.move_path(&dir.join("one.md"), &dir.join("m.md")).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("m.md").as_path()));
+        std::fs::remove_file(&alias).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `:w <path>` keeps the path in the same clean, absolute form.
+    #[cfg(unix)]
+    #[test]
+    fn write_as_keeps_a_clean_absolute_path() {
+        let dir = two_files();
+        let mut app = app_with("new\n");
+        let target = relative_to_cwd(&dir.join("sub")).join("..").join("new.md");
+        ex(&mut app, &format!("w {}", target.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("new.md").as_path()));
+        assert!(app.open_file(dir.join("new.md")));
+        assert_eq!(app.docs.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------------------ huge counts
+
+    /// A count typed by a sat-on keyboard neither panics (debug overflow) nor
+    /// allocates without bound, and leaves the buffer where undo can fix it.
+    #[test]
+    fn a_huge_count_neither_panics_nor_runs_away() {
+        let original = "one two\nthree\nfour\n";
+        for keys in ["p", "j", "$", "x", "J", "~", "dd", "G", "rx"] {
+            let mut app = app_with(original);
+            feed(&mut app, "yy");
+            feed(&mut app, "99999999999999999999999");
+            feed(&mut app, keys);
+            let c = app.buffer.cursor;
+            assert!(c.line <= app.buffer.last_line(), "{keys}: cursor line {c:?}");
+            assert!(c.col <= app.buffer.line_len(c.line), "{keys}: cursor col {c:?}");
+            assert!(app.pending.is_clean(), "{keys}: nothing left pending");
+            assert!(app.buffer.rope.len_bytes() < 16 << 20, "{keys}: bounded");
+            if text(&app) != original {
+                feed(&mut app, "u");
+            }
+            assert!(text(&app) == original, "{keys}: undo restores the text");
+        }
+    }
+
+    /// `100000p` of a 1 KB register would be 100 MB of text: refused, with a
+    /// message, before anything is allocated.
+    #[test]
+    fn a_paste_too_large_is_refused() {
+        let mut app = app_with("x\n");
+        app.registers.insert('"', Register { text: "a".repeat(1024), linewise: false });
+        feed(&mut app, "100000p");
+        assert_eq!(app.buffer.rope.len_bytes(), 2, "nothing pasted");
+        assert!(flash_text(&app).contains("paste: too large"), "got: {}", flash_text(&app));
+        // A sane count of the same register still pastes.
+        feed(&mut app, "3p");
+        assert_eq!(app.buffer.line_text(0).len(), 1 + 3 * 1024);
+    }
+
+    /// The limit is on the COUNT: one copy of a big register always pastes.
+    #[test]
+    fn one_copy_of_a_big_register_still_pastes() {
+        let mut app = app_with("x\n");
+        let big = (16 << 20) + 1;
+        app.registers.insert('"', Register { text: "a".repeat(big), linewise: false });
+        feed(&mut app, "p");
+        assert_eq!(app.buffer.rope.len_bytes(), 2 + big);
     }
 
     /// A directory deletion says how much is going — it is the only warning

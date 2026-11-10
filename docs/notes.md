@@ -93,7 +93,8 @@ See [Reading](reading.md#print-a-note).
   root, ignoring case. A name several notes answer to is an error that lists
   them.
 - A dot in a name is part of it: `[[2024.01.15 meeting]]` finds
-  `2024.01.15 meeting.md`. An extension you write is kept, so
+  `2024.01.15 meeting.md`, and `gf` creates that file when it is missing.
+  An extension you write is kept, so
   `![[diagram.png]]` never falls back to `diagram.md`.
 - Folders in a link narrow the search: `[[archive/todo]]` matches only a
   `todo.md` inside an `archive` folder.
