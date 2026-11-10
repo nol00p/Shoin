@@ -705,6 +705,12 @@ impl App {
             self.term_size = (size.width, size.height);
         }
         while !self.quit {
+            // Keep the crash-recovery copy of the unsaved buffers current, and
+            // say so when an open file has a recovery file beside it.
+            if let Some(text) = crate::recover::tick(self.docs.iter().map(|d| &d.buffer)) {
+                self.notify(text, FlashKind::Error);
+                self.needs_redraw = true;
+            }
             // Before the draw, so their status lines reach the same frame.
             // Disk before autosave: a clean buffer that just took the file's
             // changes has nothing to write, and a conflicted one should be

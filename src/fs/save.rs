@@ -6,7 +6,9 @@
 //!
 //! No swap files, and autosave is OFF unless `[editor] autosave` asks for it —
 //! a writing tool should not surprise the user with writes they did not ask
-//! for. When it IS on it writes through this same `write_atomic`, guard
+//! for. The one exception is an editor that is dying: a crash, `SIGTERM` or
+//! `SIGHUP` writes each modified buffer to a recovery file (`crate::recover`),
+//! and only then. When it IS on it writes through this same `write_atomic`, guard
 //! included, so a timer can never clobber what `:w` would have refused to.
 
 use std::io::Write;
