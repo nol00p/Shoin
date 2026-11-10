@@ -591,7 +591,7 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
                 let url = url_of(&whole).unwrap_or("");
                 out.push_str(&format!(
                     "<img src=\"{}\" alt=\"{body}\">",
-                    escape_attr(&inline_src(url, base))
+                    safe_src(&inline_src(url, base))
                 ));
             }
             Inline::WikiLink => out.push_str(&wiki_link(&inner)),
@@ -618,6 +618,11 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
 /// to HTML lands beside each other — the only guess available, since a wiki
 /// link names a NOTE and HTML has only addresses. `|` renames it and `#` is a
 /// heading anchor, exactly as in the editor.
+///
+/// A target with a scheme in it (`[[javascript:…]]`, `[[https://…]]`) is not a
+/// note name, so it is not a link either: the label is kept as plain text. A
+/// `:` counts as a scheme's when it comes before the first `/`, which is how a
+/// browser would read it; `[[a/b:c]]` is a path and stays a link.
 fn wiki_link(inner: &str) -> String {
     let (target, label) = match inner.split_once('|') {
         Some((t, l)) => (t.trim(), l.trim()),
@@ -627,6 +632,9 @@ fn wiki_link(inner: &str) -> String {
         Some((f, s)) => (f.trim(), Some(s.trim())),
         None => (target, None),
     };
+    if file.split('/').next().is_some_and(|head| head.contains(':')) {
+        return escape(label);
+    }
     let mut href = String::new();
     if !file.is_empty() {
         href.push_str(&format!("{file}.html"));
@@ -635,7 +643,7 @@ fn wiki_link(inner: &str) -> String {
         href.push('#');
         href.push_str(&slug(s));
     }
-    format!("<a class=\"wiki\" href=\"{}\">{}</a>", escape_attr(&href), escape(label))
+    format!("<a class=\"wiki\" href=\"{}\">{}</a>", safe_href(&href), escape(label))
 }
 
 /// Inline markup removed rather than translated — for a `<title>` and for the
@@ -867,6 +875,17 @@ fn safe_href(url: &str) -> String {
         // just as `javascript:` is. Images go through `inline_src`, which
         // builds its own `data:` URI and never reaches here.
         _ => "#".to_string(),
+    }
+}
+
+/// An image's `src`: what `safe_href` allows, plus an inline `data:image/…`
+/// (which is what `inline_src` builds, and which an `<img>` never runs).
+fn safe_src(url: &str) -> String {
+    let lower = url.trim_start().to_ascii_lowercase();
+    if lower.starts_with("data:image/") {
+        escape_attr(url)
+    } else {
+        safe_href(url)
     }
 }
 
@@ -1457,6 +1476,105 @@ mod tests {
                 html.contains("href=\"#\""),
                 "{url:?} should have been refused: {html}"
             );
+        }
+    }
+
+    /// A wiki link names a note, never an address: a target with a scheme is
+    /// not a link at all, and its label stays as text.
+    #[test]
+    fn a_wiki_link_cannot_carry_a_scheme() {
+        let evil = [
+            "[[javascript:alert(1)//|click me]]",
+            "[[JavaScript:alert(1)|click me]]",
+            "[[ javascript:alert(1)|click me]]",
+            "[[java\tscript:alert(1)|click me]]",
+            "[[vbscript:msgbox(1)|click me]]",
+            "[[data:text/html,<script>alert(1)</script>|click me]]",
+            "[[javascript:alert(1)#part|click me]]",
+            "[[https://example.com|click me]]",
+        ];
+        for src in evil {
+            let html = render(&format!("{src}\n"), "t", &Page::default());
+            let low = html.to_ascii_lowercase();
+            for bad in ["javascript:", "vbscript:", "data:text", "java\tscript:", "https://example.com"] {
+                assert!(!low.contains(bad), "{src:?} leaked {bad:?}: {html}");
+            }
+            assert!(!html.contains("class=\"wiki\""), "{src:?} is no link: {html}");
+            assert!(html.contains("click me"), "{src:?} keeps its label: {html}");
+        }
+    }
+
+    #[test]
+    fn ordinary_wiki_links_are_unchanged() {
+        let got = body("[[note]] [[note#Head]] [[folder/note|Label]] [[#Local]] [[a/b:c]]\n");
+        assert!(got.contains("<a class=\"wiki\" href=\"note.html\">note</a>"), "{got}");
+        assert!(got.contains("<a class=\"wiki\" href=\"note.html#head\">note#Head</a>"), "{got}");
+        assert!(got.contains("<a class=\"wiki\" href=\"folder/note.html\">Label</a>"), "{got}");
+        assert!(got.contains("<a class=\"wiki\" href=\"#local\">#Local</a>"), "{got}");
+        // A `:` after a `/` is part of a path, not a scheme.
+        assert!(got.contains("<a class=\"wiki\" href=\"a/b:c.html\">a/b:c</a>"), "{got}");
+    }
+
+    /// Every `href` and `src` value in `html`.
+    fn addresses(html: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for attr in ["href=\"", "src=\""] {
+            let mut rest = html;
+            while let Some(i) = rest.find(attr) {
+                rest = &rest[i + attr.len()..];
+                let end = rest.find('"').unwrap_or(rest.len());
+                out.push(rest[..end].to_string());
+                rest = &rest[end..];
+            }
+        }
+        out
+    }
+
+    /// The scheme of an address as a browser reads it, if it has one:
+    /// leading controls and spaces go, and tabs and newlines inside are
+    /// ignored.
+    fn scheme_of(addr: &str) -> Option<String> {
+        let a: String = addr
+            .trim_start_matches(|c: char| c <= ' ')
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+            .collect();
+        let head: String = a.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')).collect();
+        (!head.is_empty() && a[head.len()..].starts_with(':')).then(|| head.to_ascii_lowercase())
+    }
+
+    /// Whatever an inline kind is fed, the page it lands in links only to
+    /// schemes on the allow list.
+    #[test]
+    fn no_inline_kind_puts_a_foreign_scheme_in_the_page() {
+        let targets = [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            " javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "\u{1}javascript:alert(1)",
+            "vbscript:msgbox(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "data:image/svg+xml,<svg onload=alert(1)>",
+            "&#106;avascript:alert(1)",
+            "javascript&colon;alert(1)",
+            "livescript:x",
+            "javascript://%0aalert(1)",
+            "a/b:c",
+        ];
+        for t in targets {
+            let md = format!(
+                "[a]({t}) <{t}> ![i]({t}) [[{t}]] [[{t}|w]] [[{t}#h|w]] **b** _i_ ~~s~~ ==m== `c` #tag $x$ \\*\n\n\
+                 - [l]({t}) [[{t}]]\n\n> [q]({t}) ![q]({t})\n\n| [c]({t}) | [[{t}]] |\n|---|---|\n| ![x]({t}) | y |\n"
+            );
+            let html = render(&md, "t", &Page::default());
+            for addr in addresses(&html) {
+                if let Some(s) = scheme_of(&addr) {
+                    let ok = matches!(s.as_str(), "http" | "https" | "mailto" | "ftp" | "file" | "tel")
+                        || (s == "data" && addr.to_ascii_lowercase().starts_with("data:image/"));
+                    assert!(ok, "{t:?} put {addr:?} in the page: {html}");
+                }
+            }
         }
     }
 
