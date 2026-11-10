@@ -87,7 +87,7 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
             }
             BlockKind::ListItem { marker, checked, depth } => {
                 let indent = " ".repeat(*depth as usize);
-                let body = list_body(line);
+                let body = super::item_body(line);
                 let bullet = match (marker, checked) {
                     // A checkbox has to survive: unticked and ticked are the
                     // whole point of the line.
@@ -110,21 +110,6 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
         joined.push('\n');
     }
     joined
-}
-
-/// The text of a list item, past its marker and any checkbox.
-fn list_body(line: &str) -> &str {
-    let t = line.trim_start();
-    let past_marker = match t.find(' ') {
-        Some(i) => &t[i + 1..],
-        None => "",
-    };
-    let t = past_marker.trim_start();
-    if (t.starts_with("[ ]") || t.starts_with("[x]") || t.starts_with("[X]")) && t.len() >= 3 {
-        t[3..].trim_start()
-    } else {
-        t
-    }
 }
 
 /// `12.` from `  12. text`.
@@ -256,6 +241,17 @@ mod tests {
         assert!(got.contains("2. second"));
         assert!(got.contains("[ ] todo"), "an unticked box is the point of the line");
         assert!(got.contains("[x] done"));
+    }
+
+    /// A tab after the marker is whitespace like a space; the first word
+    /// after it is text, not part of the marker.
+    #[test]
+    fn a_tab_after_the_marker_keeps_the_first_word() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("-\tfoo bar\n", 72, false, &md), "- foo bar\n");
+        assert_eq!(render("1.\tone two\n", 72, false, &md), "1. one two\n");
+        assert_eq!(render("- [x]\tdone\n", 72, false, &md), "[x] done\n");
+        assert_eq!(render("*\t[ ]\tto do\n", 72, false, &md), "[ ] to do\n");
     }
 
     #[test]

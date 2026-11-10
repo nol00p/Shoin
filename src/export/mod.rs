@@ -214,8 +214,57 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The text of a list item, past its marker and any checkbox, read the way
+/// `block::classify` reads them: `-`, `*`, `+` or digits with `.`/`)`, then
+/// one space or tab; a `[ ]`/`[x]` box counts only when whitespace or the end
+/// of the line follows it. A line that is not an item comes back trimmed.
+fn item_body(line: &str) -> &str {
+    let t = line.trim_start();
+    let after_marker = if let Some(rest) = t.strip_prefix(['-', '*', '+']) {
+        rest
+    } else {
+        let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+        match t[digits..].strip_prefix(['.', ')']) {
+            Some(rest) if digits > 0 => rest,
+            _ => return t,
+        }
+    };
+    let Some(after) = after_marker.strip_prefix([' ', '\t']) else {
+        return after_marker.trim_start();
+    };
+    for b in ["[ ]", "[x]", "[X]"] {
+        if let Some(rest) = after.strip_prefix(b) {
+            if rest.is_empty() || rest.starts_with([' ', '\t']) {
+                return rest.trim_start();
+            }
+        }
+    }
+    after.trim_start()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_item_body_skips_the_marker_as_the_classifier_reads_it() {
+        for (line, want) in [
+            ("- foo bar", "foo bar"),
+            ("-\tfoo bar", "foo bar"),
+            ("  * a", "a"),
+            ("+   spaced", "spaced"),
+            ("1.\tone two", "one two"),
+            ("12) twelve", "twelve"),
+            ("- [x]\tdone", "done"),
+            ("- [ ] open", "open"),
+            ("- [X]", ""),
+            ("- [x]y", "[x]y"),
+            ("-  [x] two spaces", "[x] two spaces"),
+            ("-", ""),
+            ("1.", ""),
+        ] {
+            assert_eq!(item_body(line), want, "{line:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

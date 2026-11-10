@@ -269,7 +269,7 @@ impl<'a> Body<'a> {
                 self.item_open = true;
                 self.item_filled = false;
                 self.lazy = true;
-                self.para.push(item_body(line).to_string());
+                self.para.push(super::item_body(line).to_string());
             }
 
             BlockKind::Table => {
@@ -533,21 +533,6 @@ impl<'a> Body<'a> {
         if self.fence.take().is_some() {
             self.out.push_str("</code></pre>\n");
         }
-    }
-}
-
-/// The text of a list item, past its marker and any checkbox.
-fn item_body(line: &str) -> &str {
-    let t = line.trim_start();
-    let past = match t.find(' ') {
-        Some(i) => &t[i + 1..],
-        None => "",
-    };
-    let t = past.trim_start();
-    if t.len() >= 3 && (t.starts_with("[ ]") || t.starts_with("[x]") || t.starts_with("[X]")) {
-        t[3..].trim_start()
-    } else {
-        t
     }
 }
 
@@ -1477,6 +1462,14 @@ mod tests {
                 "{url:?} should have been refused: {html}"
             );
         }
+    }
+
+    #[test]
+    fn a_tab_after_the_marker_keeps_the_first_word() {
+        let got = body("-\tfoo bar\n\n1.\tone two\n\n- [x]\tdone\n");
+        assert!(got.contains("<li>foo bar</li>"), "{got}");
+        assert!(got.contains("<li>one two</li>"), "{got}");
+        assert!(got.contains("checked disabled> done</li>"), "{got}");
     }
 
     /// A wiki link names a note, never an address: a target with a scheme is
