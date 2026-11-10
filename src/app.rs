@@ -515,6 +515,29 @@ fn creatable(path: &Path) -> bool {
     }
 }
 
+/// A buffer path in the one form every buffer keeps: absolute (joined onto
+/// `base`, the working directory, when relative) with `.` dropped and `..`
+/// resolved lexically. Nothing has to exist — a new file has a path too.
+///
+/// One form is what makes `n.md`, `./n.md` and the tree's `/home/…/n.md`
+/// one buffer, and what lets a tree rename find the buffer it moves.
+fn clean_path(base: &Path, path: &Path) -> PathBuf {
+    use std::path::Component;
+    let joined = if path.is_absolute() { path.to_path_buf() } else { base.join(path) };
+    let mut out = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            Component::CurDir => {}
+            // `/..` is `/`: `pop` leaves the root where it is.
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// How a section reads in a message: as the reader wrote it after the `#`.
 fn section_label(section: &link::Section) -> String {
     match section {
@@ -585,8 +608,13 @@ impl App {
         file: Option<PathBuf>,
         config_explicit: Option<PathBuf>,
     ) -> Result<Self> {
+        // Absolute and clean from the start, like every path a buffer keeps
+        // (see `clean_path`): `shoin n.md` must be the buffer the tree opens.
+        let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let buffer = match file {
-            Some(path) => Buffer::open(path, &config.markdown.plain_text_extensions)?,
+            Some(path) => {
+                Buffer::open(clean_path(&here, &path), &config.markdown.plain_text_extensions)?
+            }
             None => Buffer::empty(),
         };
         let config_focus = config.layout.focus.clone();
@@ -2319,14 +2347,17 @@ impl App {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
-    /// A buffer path as the panels see it: absolute, so it can be matched
-    /// against a root that always is.
+    /// A path in the form a buffer keeps it: absolute and lexically clean
+    /// (`clean_path`), so it can be matched against the tree's and the
+    /// finder's paths, which always are.
     fn absolute(&self, p: &Path) -> PathBuf {
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.cwd().join(p)
-        }
+        clean_path(&self.cwd(), p)
+    }
+
+    /// A path as a message names it: relative to the working directory when
+    /// it is beneath it, whole otherwise.
+    fn shown(&self, p: &Path) -> String {
+        p.strip_prefix(self.cwd()).unwrap_or(p).display().to_string()
     }
 
     /// The finder's near view: the edited file's own directory, or the working
@@ -2594,7 +2625,16 @@ impl App {
     /// is already open. Nothing is displaced, so unlike before there is no
     /// reason to refuse when the current buffer has unsaved changes.
     fn open_file(&mut self, path: PathBuf) -> bool {
-        if let Some(i) = self.docs.iter().position(|d| d.buffer.path.as_deref() == Some(&*path)) {
+        // One file, one buffer, however it was spelled: the clean path catches
+        // `n.md` against `./n.md`, `same_file` a symlink against its target.
+        let path = self.absolute(&path);
+        let open = self.docs.iter().position(|d| {
+            d.buffer
+                .path
+                .as_deref()
+                .is_some_and(|p| p == path || crate::transclude::same_file(p, &path))
+        });
+        if let Some(i) = open {
             self.switch_to(i);
             return true;
         }
@@ -2603,7 +2643,7 @@ impl App {
                 buffer.read_only = self.view;
                 self.docs.push(BufferState::new(buffer, self.config.markdown.math));
                 self.switch_to(self.docs.len() - 1);
-                self.notify(format!("opened {}", path.display()), FlashKind::Info);
+                self.notify(format!("opened {}", self.shown(&path)), FlashKind::Info);
                 true
             }
             Err(e) => {
@@ -2701,7 +2741,7 @@ impl App {
         let path = if path.exists() { path } else { with_default_ext(path) };
         if !path.exists() {
             if !creatable(&path) {
-                self.notify(format!("no {}", path.display()), FlashKind::Error);
+                self.notify(format!("no {}", self.shown(&path)), FlashKind::Error);
                 return;
             }
             if let Err(e) = ops::create(&path, false) {
@@ -2710,7 +2750,7 @@ impl App {
             }
             self.disk_changed();
             if self.open_file(path.clone()) {
-                self.notify(format!("created {}", path.display()), FlashKind::Info);
+                self.notify(format!("created {}", self.shown(&path)), FlashKind::Info);
             }
             return;
         }
@@ -2765,7 +2805,7 @@ impl App {
                 }
             }
             Some(Dest::Path { path, .. }) => {
-                self.notify(format!("no {}", path.display()), FlashKind::Error);
+                self.notify(format!("no {}", self.shown(&path)), FlashKind::Error);
                 return;
             }
         };
@@ -5229,20 +5269,38 @@ impl App {
     /// buffer pointing at a name that no longer exists, and the next `:w` would
     /// silently recreate the old one.
     fn move_path(&mut self, from: &Path, to: &Path) -> anyhow::Result<Option<PathBuf>> {
-        ops::rename(from, to)?;
-        for doc in &mut self.docs {
-            let Some(path) = doc.buffer.path.clone() else { continue };
-            // A moved DIRECTORY takes every buffer beneath it, not just an
-            // exact match.
-            if let Ok(rest) = path.strip_prefix(from) {
-                doc.buffer.path = Some(if rest.as_os_str().is_empty() {
-                    to.to_path_buf()
-                } else {
-                    to.join(rest)
-                });
-            }
+        let (from, to) = (self.absolute(from), self.absolute(to));
+        // Which buffers go along is decided BEFORE the rename, while `from`
+        // still resolves: a buffer spelled through a symlinked folder (a
+        // `/home` that is really `/var/home`) is matched by where it really
+        // is. A moved DIRECTORY takes every buffer beneath it, not just an
+        // exact match.
+        let real_from = std::fs::canonicalize(&from).ok();
+        let carried: Vec<(usize, PathBuf)> = self
+            .docs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, doc)| {
+                let path = doc.buffer.path.as_deref()?;
+                let rest = match path.strip_prefix(&from) {
+                    Ok(rest) => rest.to_path_buf(),
+                    Err(_) => {
+                        let real = std::fs::canonicalize(path).ok()?;
+                        real.strip_prefix(real_from.as_deref()?).ok()?.to_path_buf()
+                    }
+                };
+                Some((i, rest))
+            })
+            .collect();
+        ops::rename(&from, &to)?;
+        for (i, rest) in carried {
+            self.docs[i].buffer.path = Some(if rest.as_os_str().is_empty() {
+                to.clone()
+            } else {
+                to.join(rest)
+            });
         }
-        Ok(Some(to.to_path_buf()))
+        Ok(Some(to))
     }
 
     /// Open a tree prompt on the selected row, if the operation makes sense for
@@ -5693,7 +5751,10 @@ impl App {
     fn write(&mut self, path: Option<&str>, force: bool) -> bool {
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let result = match path {
-            Some(p) => self.buffer.save_as(PathBuf::from(p), policy, force),
+            Some(p) => {
+                let p = self.absolute(Path::new(p));
+                self.buffer.save_as(p, policy, force)
+            }
             None => self.buffer.save(policy, force),
         };
         match result {
@@ -10069,6 +10130,134 @@ mod tests {
         feed(&mut app, "y");
         assert!(!dir.join("one.md").exists(), "y deleted it");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------- buffer path identity
+
+    /// `abs` spelled relative to the working directory, by climbing to `/`
+    /// with `..` and back down: a relative path to a scratch file that does
+    /// not need the test to change directory (tests run in parallel).
+    #[cfg(unix)]
+    fn relative_to_cwd(abs: &Path) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap();
+        let mut rel = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            rel.push("..");
+        }
+        rel.join(abs.strip_prefix("/").unwrap())
+    }
+
+    #[test]
+    fn clean_path_is_absolute_and_lexical() {
+        let base = Path::new("/home/me/notes");
+        assert_eq!(clean_path(base, Path::new("n.md")), PathBuf::from("/home/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("./n.md")), PathBuf::from("/home/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("sub/../n.md")), PathBuf::from("/home/me/notes/n.md"));
+        assert_eq!(clean_path(base, Path::new("../x/./n.md")), PathBuf::from("/home/me/x/n.md"));
+        assert_eq!(clean_path(base, Path::new("/a/./b/../c.md")), PathBuf::from("/a/c.md"));
+        assert_eq!(clean_path(base, Path::new("../../../../n.md")), PathBuf::from("/n.md"));
+        // Nothing has to exist: a new file has a path too.
+        assert_eq!(
+            clean_path(base, Path::new("not/yet/there.md")),
+            PathBuf::from("/home/me/notes/not/yet/there.md")
+        );
+    }
+
+    /// `shoin README.md`, then the same file from the tree (absolute) or by
+    /// `:e ./README.md`: one buffer, not two. README.md is read, never written.
+    #[test]
+    fn a_bare_name_and_its_other_spellings_are_one_buffer() {
+        let cwd = std::env::current_dir().unwrap();
+        let mut app = App::new(Config::default(), Some(PathBuf::from("README.md")), None).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(cwd.join("README.md").as_path()));
+        assert_eq!(app.buffer.display_name(), "README.md", "the screen still shows the short name");
+
+        assert!(app.open_file(cwd.join("README.md")));
+        assert_eq!(app.docs.len(), 1, "the tree's absolute path finds the open buffer");
+        ex(&mut app, "e ./README.md");
+        assert_eq!(app.docs.len(), 1, ":e ./README.md finds it too");
+        ex(&mut app, "e src/../README.md");
+        assert_eq!(app.docs.len(), 1, "and so does a path through ..");
+    }
+
+    /// `shoin sub/../n.md` and `shoin ./n.md` name the file `n.md` does.
+    #[cfg(unix)]
+    #[test]
+    fn startup_paths_are_cleaned_before_they_are_kept() {
+        let dir = two_files();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let one = dir.join("one.md");
+        let via_sub = relative_to_cwd(&dir.join("sub")).join("..").join("one.md");
+        let mut app = App::new(Config::default(), Some(via_sub), None).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(one.as_path()));
+        assert!(app.open_file(one.clone()));
+        assert_eq!(app.docs.len(), 1);
+
+        let dotted = PathBuf::from(".").join(relative_to_cwd(&one));
+        let mut app = App::new(Config::default(), Some(dotted), None).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(one.as_path()));
+        app.open_file(relative_to_cwd(&one));
+        assert_eq!(app.docs.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A symlink and the file it points at are one buffer.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_and_its_target_are_one_buffer() {
+        let dir = two_files();
+        std::os::unix::fs::symlink(dir.join("one.md"), dir.join("link.md")).unwrap();
+        let mut app = App::new(Config::default(), Some(dir.join("one.md")), None).unwrap();
+        assert!(app.open_file(dir.join("link.md")));
+        assert_eq!(app.docs.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `shoin n.md`, rename it in the tree: the buffer follows, and `:w`
+    /// writes the new name rather than recreating the old one.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_rename_carries_a_buffer_opened_by_relative_path() {
+        let dir = two_files();
+        let rel = relative_to_cwd(&dir.join("one.md"));
+        let mut app = App::new(Config::default(), Some(rel), None).unwrap();
+        app.move_path(&dir.join("one.md"), &dir.join("m.md")).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("m.md").as_path()));
+        feed(&mut app, "Ax");
+        esc(&mut app);
+        ex(&mut app, "w");
+        assert!(!dir.join("one.md").exists(), ":w did not recreate the old name");
+        assert_eq!(std::fs::read_to_string(dir.join("m.md")).unwrap(), "file onex\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A buffer opened through a symlinked folder (`/home` → `/var/home`)
+    /// still follows a rename the tree makes under the real path.
+    #[cfg(unix)]
+    #[test]
+    fn a_rename_finds_a_buffer_spelled_through_a_symlinked_folder() {
+        let dir = two_files();
+        let alias = dir.with_extension("alias");
+        std::os::unix::fs::symlink(&dir, &alias).unwrap();
+        let mut app = App::new(Config::default(), Some(alias.join("one.md")), None).unwrap();
+        app.move_path(&dir.join("one.md"), &dir.join("m.md")).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("m.md").as_path()));
+        std::fs::remove_file(&alias).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `:w <path>` keeps the path in the same clean, absolute form.
+    #[cfg(unix)]
+    #[test]
+    fn write_as_keeps_a_clean_absolute_path() {
+        let dir = two_files();
+        let mut app = app_with("new\n");
+        let target = relative_to_cwd(&dir.join("sub")).join("..").join("new.md");
+        ex(&mut app, &format!("w {}", target.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("new.md").as_path()));
+        assert!(app.open_file(dir.join("new.md")));
+        assert_eq!(app.docs.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
