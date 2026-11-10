@@ -493,8 +493,8 @@ fn is_url(s: &str) -> bool {
         .any(|p| s.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p)))
 }
 
-/// The most text one `p` may put in (16 MB): a register times its count.
-/// Past it the count is a typo, not a request.
+/// The most text a counted `p` may put in (16 MB): a register times its
+/// count. Past it the count is a typo, not a request.
 const PASTE_LIMIT: usize = 16 << 20;
 
 /// Extensions a dead link may CREATE. A missing note is a note to write; a
@@ -503,28 +503,26 @@ const PASTE_LIMIT: usize = 16 << 20;
 const CREATABLE: &[&str] = &["md", "markdown", "txt"];
 
 /// The extension a dead link's target names, lowercased, or `None` when its
-/// last dot is part of the NAME.
+/// last dot is part of the name.
 ///
-/// A linkable extension (a note's or a picture's, as `link::resolve` reads
-/// them) always counts. Any other suffix counts only when it looks like a file
-/// type: no spaces and not all digits. So `paper.pdf` names a PDF, while
-/// `2024.01.16 meeting`, `2024.01.16` and `Mr. Smith` are names of notes.
-fn named_ext(path: &Path) -> Option<String> {
+/// A wiki link's target is a NAME (`name` true): only a linkable extension (a
+/// note's or a picture's, the ones `link::resolve` reads) is an extension, so
+/// `[[2024.01.16 meeting]]` and `[[Dr.Who]]` are notes to write, exactly the
+/// files the link resolves to once they exist. A markdown link's target is a
+/// PATH, and any extension it has is the file's type: `paper.pdf` is a PDF.
+fn named_ext(path: &Path, name: bool) -> Option<String> {
     let e = path.extension()?.to_string_lossy().to_lowercase();
     let linkable = CREATABLE.contains(&e.as_str())
         || crate::image::IMAGE_EXTENSIONS.contains(&e.as_str());
-    let looks_like_a_type = !e.is_empty()
-        && !e.chars().any(char::is_whitespace)
-        && !e.chars().all(|c| c.is_ascii_digit());
-    (linkable || looks_like_a_type).then_some(e)
+    (linkable || !name).then_some(e)
 }
 
 /// A link target with no extension means a note — the same default
 /// `link::candidates` resolves with, so what `gf` creates is what the link
 /// finds next time. `.md` goes on the WHOLE name: `2024.01.16 meeting` is
 /// `2024.01.16 meeting.md`, not `2024.01.md`.
-fn with_default_ext(path: PathBuf) -> PathBuf {
-    if named_ext(&path).is_some() {
+fn with_default_ext(path: PathBuf, name: bool) -> PathBuf {
+    if named_ext(&path, name).is_some() {
         return path;
     }
     match path.file_name() {
@@ -537,8 +535,8 @@ fn with_default_ext(path: PathBuf) -> PathBuf {
     }
 }
 
-fn creatable(path: &Path) -> bool {
-    match named_ext(path) {
+fn creatable(path: &Path, name: bool) -> bool {
+    match named_ext(path, name) {
         None => true,
         Some(e) => CREATABLE.contains(&e.as_str()),
     }
@@ -547,6 +545,11 @@ fn creatable(path: &Path) -> bool {
 /// A buffer path in the one form every buffer keeps: absolute (joined onto
 /// `base`, the working directory, when relative) with `.` dropped and `..`
 /// resolved lexically. Nothing has to exist — a new file has a path too.
+///
+/// The one exception is `..` after a symlink, where the text and the
+/// filesystem disagree (`link/..` is the parent of where `link` points, not
+/// the folder `link` sits in): there the path so far is resolved first, so
+/// the file opened is the one the shell would open.
 ///
 /// One form is what makes `n.md`, `./n.md` and the tree's `/home/…/n.md`
 /// one buffer, and what lets a tree rename find the buffer it moves.
@@ -559,6 +562,10 @@ fn clean_path(base: &Path, path: &Path) -> PathBuf {
             Component::CurDir => {}
             // `/..` is `/`: `pop` leaves the root where it is.
             Component::ParentDir => {
+                let link = std::fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink());
+                if let Some(real) = link.then(|| std::fs::canonicalize(&out).ok()).flatten() {
+                    out = real;
+                }
                 out.pop();
             }
             other => out.push(other),
@@ -2667,11 +2674,11 @@ impl App {
         // One file, one buffer, however it was spelled: the clean path catches
         // `n.md` against `./n.md`, `same_file` a symlink against its target.
         let path = self.absolute(&path);
+        let real = std::fs::canonicalize(&path).ok();
         let open = self.docs.iter().position(|d| {
-            d.buffer
-                .path
-                .as_deref()
-                .is_some_and(|p| p == path || crate::transclude::same_file(p, &path))
+            d.buffer.path.as_deref().is_some_and(|p| {
+                p == path || real.is_some() && std::fs::canonicalize(p).ok() == real
+            })
         });
         if let Some(i) = open {
             self.switch_to(i);
@@ -2741,17 +2748,17 @@ impl App {
             Some(Dest::Url(u)) => {
                 self.notify(format!("{u} is a URL — gx opens it"), FlashKind::Info)
             }
-            Some(Dest::Path { path, section }) => self.open_or_create(path, &section),
+            Some(Dest::Path { path, section }) => self.open_or_create(path, &section, false),
             Some(Dest::Note(l)) => {
                 let (root, from) = (self.link_root(), self.link_from());
                 match link::resolve(&l, &from, &root) {
-                    Ok(path) => self.open_or_create(path, &l.section),
+                    Ok(path) => self.open_or_create(path, &l.section, true),
                     // A name nothing answers to is a note not written YET.
                     // Resolution is unchanged; what is new is that its miss is
                     // a starting point rather than an error.
                     Err(link::Unresolved::Missing(_)) => {
                         let path = self.file_dir().join(&l.target);
-                        self.open_or_create(path, &l.section)
+                        self.open_or_create(path, &l.section, true)
                     }
                     // The refusal becomes a choice: the finder already knows
                     // how to pick one path out of several.
@@ -2776,10 +2783,13 @@ impl App {
     /// started. It is created ON DISK rather than as an unnamed buffer so that
     /// the link that made it resolves from now on — including from every other
     /// note already pointing here.
-    fn open_or_create(&mut self, path: PathBuf, section: &link::Section) {
-        let path = if path.exists() { path } else { with_default_ext(path) };
+    ///
+    /// `name` is true for a wiki link's target, a note's name rather than a
+    /// path (see `named_ext`).
+    fn open_or_create(&mut self, path: PathBuf, section: &link::Section, name: bool) {
+        let path = if path.exists() { path } else { with_default_ext(path, name) };
         if !path.exists() {
-            if !creatable(&path) {
+            if !creatable(&path, name) {
                 self.notify(format!("no {}", self.shown(&path)), FlashKind::Error);
                 return;
             }
@@ -4623,9 +4633,10 @@ impl App {
         if reg.linewise && !reg.text.ends_with('\n') {
             reg.text.push('\n');
         }
-        // Checked BEFORE the repeat: `999999p` would otherwise ask for
-        // gigabytes, and a request that size aborts the process.
-        if count.max(1).saturating_mul(reg.text.len()) > PASTE_LIMIT {
+        // Checked BEFORE the repeat: `99999p` would otherwise ask for
+        // gigabytes. Only a count is refused — one copy of a register is
+        // already in memory, however large it is.
+        if count > 1 && count.saturating_mul(reg.text.len()) > PASTE_LIMIT {
             return self.notify("paste: too large", FlashKind::Error);
         }
         reg.text = reg.text.repeat(count.max(1));
@@ -5256,11 +5267,7 @@ impl App {
         // Shown relative to the working directory, because an absolute path in
         // a 60-column box is mostly directories they already know they are in.
         let suggestion = crate::export::default_path(&src, format);
-        let shown = suggestion
-            .strip_prefix(self.cwd())
-            .unwrap_or(&suggestion)
-            .to_string_lossy()
-            .into_owned();
+        let shown = self.shown(&suggestion);
         self.mode = Mode::Prompt(Prompt {
             kind: PromptKind::Export { format, justify },
             target: src,
@@ -5317,9 +5324,11 @@ impl App {
         // Which buffers go along is decided BEFORE the rename, while `from`
         // still resolves: a buffer spelled through a symlinked folder (a
         // `/home` that is really `/var/home`) is matched by where it really
-        // is. A moved DIRECTORY takes every buffer beneath it, not just an
-        // exact match.
-        let real_from = std::fs::canonicalize(&from).ok();
+        // is. Not when `from` IS a symlink: moving a link leaves the file it
+        // points at, and that file's buffer, where they are. A moved
+        // DIRECTORY takes every buffer beneath it, not just an exact match.
+        let is_link = std::fs::symlink_metadata(&from).is_ok_and(|m| m.file_type().is_symlink());
+        let real_from = if is_link { None } else { std::fs::canonicalize(&from).ok() };
         let carried: Vec<(usize, PathBuf)> = self
             .docs
             .iter()
@@ -6326,6 +6335,7 @@ mod tests {
             ("2024.01.16 meeting", "2024.01.16 meeting.md"),
             ("2024.01.16", "2024.01.16.md"),
             ("Mr. Smith", "Mr. Smith.md"),
+            ("Dr.Who", "Dr.Who.md"),
         ] {
             let (d, mut app) = vault(&format!("see [[{name}]]\n"), &[]);
             cursor_on(&mut app, 0, name);
@@ -10324,6 +10334,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// `link/..` is the parent of where `link` points, as the shell has it.
+    #[cfg(unix)]
+    #[test]
+    fn clean_path_follows_a_symlink_before_its_dot_dot() {
+        let dir = two_files();
+        std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real/sub"), dir.join("link")).unwrap();
+        assert_eq!(
+            clean_path(&dir, Path::new("link/../x.md")),
+            dir.join("real/x.md"),
+        );
+        assert_eq!(clean_path(&dir, Path::new("real/sub/../x.md")), dir.join("real/x.md"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Renaming a symlink in the tree leaves the buffer of the file it points
+    /// at alone: that file did not move.
+    #[cfg(unix)]
+    #[test]
+    fn renaming_a_symlink_leaves_its_targets_buffer() {
+        let dir = two_files();
+        std::os::unix::fs::symlink(dir.join("one.md"), dir.join("link.md")).unwrap();
+        let mut app = App::new(Config::default(), Some(dir.join("one.md")), None).unwrap();
+        app.move_path(&dir.join("link.md"), &dir.join("alias.md")).unwrap();
+        assert_eq!(app.buffer.path.as_deref(), Some(dir.join("one.md").as_path()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A symlink and the file it points at are one buffer.
     #[cfg(unix)]
     #[test]
@@ -10394,11 +10432,6 @@ mod tests {
             let mut app = app_with(original);
             feed(&mut app, "yy");
             feed(&mut app, "99999999999999999999999");
-            assert!(
-                app.pending.count.is_some_and(|n| n <= 99_999),
-                "the count is capped: {:?}",
-                app.pending.count
-            );
             feed(&mut app, keys);
             let c = app.buffer.cursor;
             assert!(c.line <= app.buffer.last_line(), "{keys}: cursor line {c:?}");
@@ -10424,6 +10457,16 @@ mod tests {
         // A sane count of the same register still pastes.
         feed(&mut app, "3p");
         assert_eq!(app.buffer.line_text(0).len(), 1 + 3 * 1024);
+    }
+
+    /// The limit is on the COUNT: one copy of a big register always pastes.
+    #[test]
+    fn one_copy_of_a_big_register_still_pastes() {
+        let mut app = app_with("x\n");
+        let big = (16 << 20) + 1;
+        app.registers.insert('"', Register { text: "a".repeat(big), linewise: false });
+        feed(&mut app, "p");
+        assert_eq!(app.buffer.rope.len_bytes(), 2 + big);
     }
 
     /// A directory deletion says how much is going — it is the only warning

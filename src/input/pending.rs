@@ -19,10 +19,11 @@ use super::action::{Action, Operator, Target};
 use super::bindings::{self, Command, Verb};
 use super::keymap::{Keymap, Lookup};
 
-/// The largest count the grammar keeps (vim's own display limit). Digits past
-/// it are a typo or a sat-on key, and every count-driven loop and allocation
-/// stays bounded by it. Counts before and after an operator multiply, and the
-/// product is capped the same way.
+/// The most times a command repeats. A larger count is a typo or a sat-on
+/// key, and every count-driven loop and allocation stays bounded by this.
+/// Counts before and after an operator multiply, and the product is capped
+/// the same way. A count that is a line number (`150000G`) is not a repeat
+/// and is not capped.
 pub const MAX_COUNT: usize = 99_999;
 
 /// Which mode's grammar to resolve against.
@@ -221,8 +222,9 @@ impl Pending {
         if let Some(c @ '0'..='9') = key.as_char() {
             if c != '0' || self.count.is_some() {
                 let d = c as usize - '0' as usize;
-                let n = self.count.unwrap_or(0).saturating_mul(10).saturating_add(d);
-                self.count = Some(n.min(MAX_COUNT));
+                // Saturating: twenty digits must not overflow. The repeat is
+                // capped where the count is spent (`take_count`).
+                self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
                 return Resolution::Pending;
             }
         }
@@ -576,6 +578,19 @@ mod tests {
         assert_eq!(one("42G").action, Action::Move(Motion::GotoLine(41)));
         assert_eq!(one("42G").count, 1, "the count was spent on the target");
         assert_eq!(one("G").action, Action::Move(Motion::BufferEnd));
+        // A line number is not a repeat, so the cap does not apply to it.
+        assert_eq!(one("150000G").action, Action::Move(Motion::GotoLine(149_999)));
+    }
+
+    /// Twenty-odd digits neither overflow nor repeat a command without bound.
+    #[test]
+    fn a_huge_count_saturates_and_its_repeat_is_capped() {
+        assert_eq!(one("99999999999999999999999j").count, MAX_COUNT);
+        assert_eq!(one("99999d99999j").count, MAX_COUNT, "the product too");
+        assert_eq!(
+            one("99999999999999999999999G").action,
+            Action::Move(Motion::GotoLine(usize::MAX - 1))
+        );
     }
 
     #[test]
