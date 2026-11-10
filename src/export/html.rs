@@ -115,7 +115,9 @@ struct Body<'a> {
     out: String,
     /// Lines of the paragraph being accumulated, or of the current list item's
     /// lazy continuation.
-    para: Vec<String>,
+    para: Vec<ParaLine>,
+    /// Heading ids given so far, so a repeated heading gets `-1`, `-2`.
+    ids: std::collections::HashSet<String>,
     lists: Vec<Level>,
     /// Whether an `<li>` element is open and still awaiting its `</li>`.
     item_open: bool,
@@ -136,6 +138,30 @@ struct Body<'a> {
     fence: Option<(Option<Lang>, Cont, usize)>,
 }
 
+/// One line of a paragraph: its text with trailing whitespace gone, and the
+/// text to use when it ends in a hard line break (two spaces, or a
+/// backslash, which then goes).
+struct ParaLine {
+    text: String,
+    brk: Option<String>,
+}
+
+impl ParaLine {
+    fn new(line: &str) -> Self {
+        let text = line.trim_end();
+        let spaces = line.len() - line.trim_end_matches(' ').len();
+        let slashes = text.len() - text.trim_end_matches('\\').len();
+        let brk = if spaces >= 2 {
+            Some(text.to_string())
+        } else if spaces == 0 && slashes % 2 == 1 {
+            Some(text[..text.len() - 1].to_string())
+        } else {
+            None
+        };
+        ParaLine { text: text.to_string(), brk }
+    }
+}
+
 impl<'a> Body<'a> {
     fn new(md: &'a MarkdownConfig, base: &'a std::path::Path) -> Self {
         Body {
@@ -143,6 +169,7 @@ impl<'a> Body<'a> {
             base,
             out: String::new(),
             para: Vec::new(),
+            ids: std::collections::HashSet::new(),
             lists: Vec::new(),
             item_open: false,
             item_filled: false,
@@ -229,7 +256,7 @@ impl<'a> Body<'a> {
             BlockKind::Heading(level) => {
                 self.open_block(leading_ws_cols(line));
                 let body = line.trim_start().trim_start_matches('#').trim();
-                let id = slug(&plain_text(body, self.md));
+                let id = self.unique_id(slug(&plain_text(body, self.md)));
                 let n = (*level).clamp(1, 6);
                 self.out.push_str(&format!(
                     "<h{n} id=\"{}\">{}</h{n}>\n",
@@ -250,7 +277,10 @@ impl<'a> Body<'a> {
                 self.close_lists();
                 self.open_quote(*depth);
                 let body = line.trim_start().trim_start_matches(['>', ' ']);
-                self.para.push(body.to_string());
+                // A bare `>` only separates the quote's paragraphs.
+                if !body.trim().is_empty() {
+                    self.para.push(ParaLine::new(body));
+                }
             }
 
             BlockKind::ListItem { depth, marker, checked } => {
@@ -269,7 +299,7 @@ impl<'a> Body<'a> {
                 self.item_open = true;
                 self.item_filled = false;
                 self.lazy = true;
-                self.para.push(super::item_body(line).to_string());
+                self.para.push(ParaLine::new(super::item_body(line)));
             }
 
             BlockKind::Table => {
@@ -279,7 +309,7 @@ impl<'a> Body<'a> {
                 // promotes it in the editor by looking back one line; this walk
                 // does the same, from the paragraph it is still holding.
                 let header = match self.table.is_empty() {
-                    true => self.para.last().filter(|l| has_cell_separator(l)).cloned(),
+                    true => self.para.last().map(|l| l.text.clone()).filter(|l| has_cell_separator(l)),
                     false => None,
                 };
                 if header.is_some() {
@@ -303,7 +333,7 @@ impl<'a> Body<'a> {
                 if !self.lazy && self.quote == 0 {
                     self.close_lists_from(leading_ws_cols(line));
                 }
-                self.para.push(line.trim().to_string());
+                self.para.push(ParaLine::new(line.trim_start()));
             }
 
             // Only reached with `math` on: off, the classifier never opens one.
@@ -331,14 +361,41 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// `id`, or `id-1`, `id-2`… if a heading already has it (GitHub's rule).
+    fn unique_id(&mut self, id: String) -> String {
+        let mut out = id.clone();
+        let mut n = 0;
+        while self.ids.contains(&out) {
+            n += 1;
+            out = format!("{id}-{n}");
+        }
+        self.ids.insert(out.clone());
+        out
+    }
+
     /// Emit whatever text has accumulated, as the thing it belongs to.
     fn flush_para(&mut self) {
         if self.para.is_empty() {
             return;
         }
-        let joined = self.para.join(" ");
-        self.para.clear();
-        let html = inline_html(joined.trim(), self.md, self.base);
+        // A hard line break splits the text into runs, each rendered on its
+        // own: a span does not cross a `<br>`.
+        let lines = std::mem::take(&mut self.para);
+        let last = lines.len() - 1;
+        let mut runs: Vec<String> = Vec::new();
+        let mut run: Vec<&str> = Vec::new();
+        for (i, l) in lines.iter().enumerate() {
+            match &l.brk {
+                Some(text) if i < last => {
+                    run.push(text);
+                    runs.push(inline_html(run.join(" ").trim(), self.md, self.base));
+                    run.clear();
+                }
+                _ => run.push(&l.text),
+            }
+        }
+        runs.push(inline_html(run.join(" ").trim(), self.md, self.base));
+        let html = runs.join("<br>\n");
         // Inside an item the text IS the item; everywhere else — including
         // inside a blockquote — it is a paragraph of its own.
         if self.item_open && !self.item_filled {
@@ -1080,6 +1137,43 @@ mod tests {
         let got = body("# The Title\n\n### A Deeper One\n");
         assert!(got.contains("<h1 id=\"the-title\">The Title</h1>"), "{got}");
         assert!(got.contains("<h3 id=\"a-deeper-one\">A Deeper One</h3>"), "{got}");
+    }
+
+    /// Two headings with the same text get distinct ids, GitHub's way.
+    #[test]
+    fn repeated_headings_get_distinct_ids() {
+        let got = body("# Same\n\n## Same\n\n### Same\n\n# Same 1\n");
+        assert!(got.contains("<h1 id=\"same\">"), "{got}");
+        assert!(got.contains("<h2 id=\"same-1\">"), "{got}");
+        assert!(got.contains("<h3 id=\"same-2\">"), "{got}");
+        // `Same 1` would be `same-1`, which is taken.
+        assert!(got.contains("<h1 id=\"same-1-1\">"), "{got}");
+    }
+
+    /// A bare `>` separates paragraphs in a quote; it is not one itself.
+    #[test]
+    fn an_empty_quote_line_is_not_a_paragraph() {
+        let got = body("> one\n>\n> two\n");
+        assert!(!got.contains("<p></p>"), "{got}");
+        assert!(got.contains("<blockquote>\n<p>one</p>\n<p>two</p>\n</blockquote>"), "{got}");
+        let got = body(">\n> one\n>\n");
+        assert!(!got.contains("<p></p>"), "{got}");
+        well_formed(&got).unwrap();
+    }
+
+    /// Two trailing spaces or a backslash end a line with `<br>`.
+    #[test]
+    fn a_hard_line_break_is_kept() {
+        assert!(body("one  \ntwo\n").contains("<p>one<br>\ntwo</p>"), "{}", body("one  \ntwo\n"));
+        assert!(body("one\\\ntwo\n").contains("<p>one<br>\ntwo</p>"), "{}", body("one\\\ntwo\n"));
+        // An escaped backslash is a backslash, and one space is a space.
+        assert!(body("one\\\\\ntwo\n").contains("<p>one\\ two</p>"), "{}", body("one\\\\\ntwo\n"));
+        assert!(body("one \ntwo\n").contains("<p>one two</p>"));
+        // Not at the end of a paragraph.
+        assert!(body("one  \n\ntwo\n").contains("<p>one</p>"));
+        assert!(body("one\\\n").contains("<p>one\\</p>"), "{}", body("one\\\n"));
+        // In an item's lazy continuation too.
+        assert!(body("- a  \n  b\n").contains("<li>a<br>\nb</li>"), "{}", body("- a  \n  b\n"));
     }
 
     /// Consecutive lines are one paragraph; a blank line starts the next.

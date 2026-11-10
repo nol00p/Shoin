@@ -58,6 +58,12 @@ instead: it prints the page as the editor shows it, styled, with pictures.
 - In `html`, a wiki link becomes a link to `<note>.html`. A wiki link whose
   target has a scheme (`[[https://…]]`) or starts with `//` exports as plain
   text: it names an address, not a note. In `txt` a wiki link is its label.
+- In `html`, each heading gets an id from its text; a repeated heading
+  gets `-1`, `-2` added, as on GitHub. A line ending in two spaces or a
+  backslash breaks the line (`<br>`).
+- Setext headings (`Title` over `=====`), footnotes, indented code blocks
+  and raw HTML are not part of Shoin's Markdown. They export as the text
+  they are.
 - A link or picture title (`[a](url "title")`) becomes the `title`
   attribute in `html`; `txt` drops it.
 - A relative picture path is read from the document's folder. `md` written
