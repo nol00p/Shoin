@@ -159,6 +159,14 @@ fn stretch(row: &str, gaps: &[(usize, u16)]) -> String {
 /// the address, and a plain-text reader has no way to follow one that has been
 /// thrown away.
 fn strip_inline(line: &str, md: &MarkdownConfig) -> String {
+    strip_in(line, md, false)
+}
+
+/// `strip_inline`, with `in_link` set inside a link's text, where a nested
+/// link is only its text. Prose bodies (emphasis, a link's text) are
+/// stripped again, because `inline::scan` returns flat spans.
+fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
+    use inline::Inline;
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
     if spans.is_empty() {
@@ -173,14 +181,18 @@ fn strip_inline(line: &str, md: &MarkdownConfig) -> String {
         out.extend(&chars[i..sp.outer.start]);
         let inner: String = chars[sp.inner.clone()].iter().collect();
         match sp.kind {
-            inline::Inline::Link => {
+            Inline::Bold | Inline::Italic | Inline::BoldItalic | Inline::Strikethrough | Inline::Highlight => {
+                out.push_str(&strip_in(&inner, md, in_link))
+            }
+            Inline::Link => {
+                let text = strip_in(&inner, md, true);
                 let whole: String = chars[sp.outer.clone()].iter().collect();
                 match url_of(&whole) {
-                    Some(url) if url != inner => out.push_str(&format!("{inner} ({url})")),
-                    _ => out.push_str(&inner),
+                    Some(url) if !in_link && url != text => out.push_str(&format!("{text} ({url})")),
+                    _ => out.push_str(&text),
                 }
             }
-            inline::Inline::Image => out.push_str(&format!("[image: {inner}]")),
+            Inline::Image => out.push_str(&format!("[image: {inner}]")),
             _ => out.push_str(&inner),
         }
         i = sp.outer.end;
@@ -231,6 +243,16 @@ mod tests {
         // …unless the text already is the address.
         let got = render("[https://example.com](https://example.com)\n", 72, false, &MarkdownConfig::default());
         assert_eq!(got.trim(), "https://example.com");
+    }
+
+    /// Markup inside bold or a link's text goes too.
+    #[test]
+    fn nested_markers_go_as_well() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("**a [b](u)**\n", 72, false, &md), "a b (u)\n");
+        assert_eq!(render("[**bold** `c`](https://x.y)\n", 72, false, &md), "bold c (https://x.y)\n");
+        assert_eq!(render("*a ~~b~~ ==c==*\n", 72, false, &md), "a b c\n");
+        assert_eq!(render("`**kept**`\n", 72, false, &md), "**kept**\n");
     }
 
     #[test]

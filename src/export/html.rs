@@ -540,9 +540,19 @@ impl<'a> Body<'a> {
 // Inline
 // ---------------------------------------------------------------------------
 
-/// One line's inline markup as HTML. Spans never overlap (`inline::scan`
-/// guarantees it), so this is a single pass with no nesting to track.
+/// One line's inline markup as HTML.
 fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> String {
+    inline_in(line, md, base, false)
+}
+
+/// `inline_html`, with `in_link` set inside a link's text.
+///
+/// `inline::scan` returns flat spans, so markup INSIDE a span — a link in
+/// bold, bold in a link — is reached by scanning that span's body again. Only
+/// prose bodies are: code, math, tags and an image's alt text are what they
+/// say. In a link's text a nested link is its text, since HTML forbids an
+/// anchor inside an anchor.
+fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: bool) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
     if spans.is_empty() {
@@ -557,28 +567,33 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
         out.push_str(&escape_chars(&chars[i..sp.outer.start]));
         let inner: String = chars[sp.inner.clone()].iter().collect();
         let whole: String = chars[sp.outer.clone()].iter().collect();
-        let body = escape(&inner);
+        let prose = || inline_in(&inner, md, base, in_link);
         match sp.kind {
-            Inline::Bold => out.push_str(&format!("<strong>{body}</strong>")),
-            Inline::Italic => out.push_str(&format!("<em>{body}</em>")),
-            Inline::BoldItalic => out.push_str(&format!("<strong><em>{body}</em></strong>")),
-            Inline::Strikethrough => out.push_str(&format!("<del>{body}</del>")),
-            Inline::Highlight => out.push_str(&format!("<mark>{body}</mark>")),
-            Inline::Code => out.push_str(&format!("<code>{body}</code>")),
+            Inline::Bold => out.push_str(&format!("<strong>{}</strong>", prose())),
+            Inline::Italic => out.push_str(&format!("<em>{}</em>", prose())),
+            Inline::BoldItalic => out.push_str(&format!("<strong><em>{}</em></strong>", prose())),
+            Inline::Strikethrough => out.push_str(&format!("<del>{}</del>", prose())),
+            Inline::Highlight => out.push_str(&format!("<mark>{}</mark>", prose())),
+            Inline::Code => out.push_str(&format!("<code>{}</code>", escape(&inner))),
+            Inline::Link if in_link => out.push_str(&prose()),
             Inline::Link => {
                 let url = url_of(&whole).unwrap_or(&inner);
-                out.push_str(&format!("<a href=\"{}\">{body}</a>", safe_href(url)));
+                let text = inline_in(&inner, md, base, true);
+                out.push_str(&format!("<a href=\"{}\">{text}</a>", safe_href(url)));
             }
+            Inline::Autolink if in_link => out.push_str(&escape(&inner)),
             Inline::Autolink => {
-                out.push_str(&format!("<a href=\"{}\">{body}</a>", safe_href(&inner)));
+                out.push_str(&format!("<a href=\"{}\">{}</a>", safe_href(&inner), escape(&inner)));
             }
             Inline::Image => {
                 let url = url_of(&whole).unwrap_or("");
                 out.push_str(&format!(
-                    "<img src=\"{}\" alt=\"{body}\">",
-                    safe_src(&inline_src(url, base))
+                    "<img src=\"{}\" alt=\"{}\">",
+                    safe_src(&inline_src(url, base)),
+                    escape(&inner)
                 ));
             }
+            Inline::WikiLink if in_link => out.push_str(&escape(wiki_parts(&inner).2)),
             Inline::WikiLink => out.push_str(&wiki_link(&inner)),
             Inline::Tag => out.push_str(&format!("<span class=\"tag\">{}</span>", escape(&whole))),
             Inline::Latex => {
@@ -589,12 +604,25 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
                 }
             }
             // The backslash was markup; what it protected is literal text.
-            Inline::Escape => out.push_str(&body),
+            Inline::Escape => out.push_str(&escape(&inner)),
         }
         i = sp.outer.end;
     }
     out.push_str(&escape_chars(&chars[i.min(chars.len())..]));
     out
+}
+
+/// A wiki link's `(note, heading, label)`: `|` renames it, `#` names a
+/// heading, as in the editor.
+fn wiki_parts(inner: &str) -> (&str, Option<&str>, &str) {
+    let (target, label) = match inner.split_once('|') {
+        Some((t, l)) => (t.trim(), l.trim()),
+        None => (inner.trim(), inner.trim()),
+    };
+    match target.split_once('#') {
+        Some((f, s)) => (f.trim(), Some(s.trim()), label),
+        None => (target, None, label),
+    }
 }
 
 /// A `[[wiki link]]` as an anchor.
@@ -609,14 +637,7 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
 /// `:` counts as a scheme's when it comes before the first `/`, which is how a
 /// browser would read it; `[[a/b:c]]` is a path and stays a link.
 fn wiki_link(inner: &str) -> String {
-    let (target, label) = match inner.split_once('|') {
-        Some((t, l)) => (t.trim(), l.trim()),
-        None => (inner.trim(), inner.trim()),
-    };
-    let (file, section) = match target.split_once('#') {
-        Some((f, s)) => (f.trim(), Some(s.trim())),
-        None => (target, None),
-    };
+    let (file, section, label) = wiki_parts(inner);
     if file.split('/').next().is_some_and(|head| head.contains(':')) {
         return escape(label);
     }
@@ -632,7 +653,8 @@ fn wiki_link(inner: &str) -> String {
 }
 
 /// Inline markup removed rather than translated — for a `<title>` and for the
-/// heading ids, neither of which can hold tags.
+/// heading ids, neither of which can hold tags. Prose bodies are stripped
+/// again, as `inline_in` renders them again.
 fn plain_text(line: &str, md: &MarkdownConfig) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
@@ -646,7 +668,17 @@ fn plain_text(line: &str, md: &MarkdownConfig) -> String {
             continue;
         }
         out.extend(&chars[i..sp.outer.start]);
-        out.extend(&chars[sp.inner.clone()]);
+        let inner: String = chars[sp.inner.clone()].iter().collect();
+        match sp.kind {
+            Inline::Bold
+            | Inline::Italic
+            | Inline::BoldItalic
+            | Inline::Strikethrough
+            | Inline::Highlight
+            | Inline::Link => out.push_str(&plain_text(&inner, md)),
+            Inline::WikiLink => out.push_str(wiki_parts(&inner).2),
+            _ => out.push_str(&inner),
+        }
         i = sp.outer.end;
     }
     out.extend(&chars[i.min(chars.len())..]);
@@ -1191,6 +1223,50 @@ mod tests {
         assert!(got.contains("href=\"note.html#a-part\""), "{got}");
         assert!(got.contains(">the part</a>"), "{got}");
         assert!(got.contains("<span class=\"tag\">#tag</span>"), "{got}");
+    }
+
+    /// Markup inside bold, italic or a link's text is markup, not literal
+    /// characters.
+    #[test]
+    fn markup_nests_inside_emphasis_and_link_text() {
+        let got = body("**bold with `code` and [a link](https://x.y)**\n");
+        assert!(
+            got.contains("<strong>bold with <code>code</code> and <a href=\"https://x.y\">a link</a></strong>"),
+            "{got}"
+        );
+        let got = body("[**bold link**](https://x.y)\n");
+        assert!(got.contains("<a href=\"https://x.y\"><strong>bold link</strong></a>"), "{got}");
+        let got = body("*it ~~gone~~ ==hi==* and ~~a *b*~~\n");
+        assert!(got.contains("<em>it <del>gone</del> <mark>hi</mark></em>"), "{got}");
+        assert!(got.contains("<del>a <em>b</em></del>"), "{got}");
+        // Code stays code: its stars are text.
+        let got = body("`**not bold**`\n");
+        assert!(got.contains("<code>**not bold**</code>"), "{got}");
+        // Prose inside the markup is still escaped.
+        let got = body("**a < b & [c > d](https://x.y)**\n");
+        assert!(got.contains("<strong>a &lt; b &amp; <a href=\"https://x.y\">c &gt; d</a></strong>"), "{got}");
+        well_formed(&got).unwrap();
+    }
+
+    /// HTML forbids an anchor inside an anchor: a link in a link's text is
+    /// its text.
+    #[test]
+    fn a_link_inside_link_text_is_text() {
+        // (`inline::scan` does not read brackets inside a link's text, so an
+        // autolink is the one link that can sit there today.)
+        let got = body("[see <https://a.b> **x**](https://x.y)\n");
+        assert_eq!(got.matches("<a ").count(), 1, "{got}");
+        assert!(got.contains("<a href=\"https://x.y\">see https://a.b <strong>x</strong></a>"), "{got}");
+        well_formed(&got).unwrap();
+    }
+
+    /// Titles and heading ids drop nested markup too.
+    #[test]
+    fn titles_and_ids_drop_nested_markup() {
+        let md = MarkdownConfig::default();
+        assert_eq!(plain_text("**a [b](u) `c`**", &md), "a b c");
+        let got = body("# **Big [deal](u)**\n");
+        assert!(got.contains("<h1 id=\"big-deal\">"), "{got}");
     }
 
     /// The one thing an exporter must never get wrong: prose that contains
