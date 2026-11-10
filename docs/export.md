@@ -10,8 +10,10 @@ shell without opening the editor.
   :export [md|txt|html|pdf] [justify]
 ```
 
-It opens a save dialog with a suggested name you can change. The default
-format is `md`.
+It opens a save dialog with a suggested name you can change: the document's
+name with the format's extension, beside it. The default format is `md`, and
+since `notes.md` is the document itself, its Markdown export is named
+`notes-export.md`.
 
 ## From the shell
 
@@ -21,7 +23,8 @@ shoin --export notes.md --format txt --stdout | pandoc …
 shoin --export notes.md --format html --justify --out notes.html
 ```
 
-No terminal is acquired, so it composes into pipelines and build scripts. The
+Without `--out`, the file is written beside the document under the name
+`:export` suggests. No terminal is acquired, so it composes into pipelines and build scripts. The
 flags are in the [command-line reference](reference/cli.md).
 
 To read a note in the terminal rather than write a file, use `shoin -p`

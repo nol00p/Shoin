@@ -52,7 +52,9 @@ impl Format {
     }
 }
 
-/// Where an export defaults to: beside the source, same stem, new extension.
+/// Where an export defaults to: beside the source, same stem, new extension;
+/// `<stem>-export.<ext>` when that would be the source itself (Markdown from
+/// `notes.md` is `notes-export.md`).
 ///
 /// Never the source itself — that is checked at the call site as well, because
 /// a suggestion the reader can edit is only a suggestion.
@@ -61,7 +63,11 @@ pub fn default_path(source: &Path, format: Format) -> PathBuf {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "export".into());
-    source.with_file_name(format!("{stem}.{}", format.extension()))
+    let plain = source.with_file_name(format!("{stem}.{}", format.extension()));
+    if plain == source || crate::transclude::same_file(&plain, source) {
+        return source.with_file_name(format!("{stem}-export.{}", format.extension()));
+    }
+    plain
 }
 
 /// Flatten `source` and write it to `dest` in `format`.
@@ -284,10 +290,35 @@ mod tests {
         assert_eq!(default_path(src, Format::Text), Path::new("/tmp/notes.txt"));
         assert_eq!(default_path(src, Format::Pdf), Path::new("/tmp/notes.pdf"));
         assert_eq!(default_path(src, Format::Html), Path::new("/tmp/notes.html"));
-        // Markdown is the one that could collide, and does not: the flattened
-        // document is a different file from the composition.
-        let md = default_path(src, Format::Markdown);
-        assert_eq!(md, Path::new("/tmp/notes.md"));
+        // Markdown would be the source itself, so it takes a suffix.
+        assert_eq!(default_path(src, Format::Markdown), Path::new("/tmp/notes-export.md"));
+        // Given relative, and with no folder at all.
+        assert_eq!(default_path(Path::new("notes.md"), Format::Markdown), Path::new("notes-export.md"));
+        assert_eq!(default_path(Path::new("a/b.md"), Format::Markdown), Path::new("a/b-export.md"));
+        // A source with another extension keeps the plain name.
+        assert_eq!(default_path(Path::new("notes.markdown"), Format::Markdown), Path::new("notes.md"));
+    }
+
+    /// Whether the plain name is the source is the file system's call, not
+    /// the spelling's (a link, or `notes.MD` on a case-insensitive disk).
+    #[test]
+    fn the_default_path_asks_the_file_system() {
+        let d = vault("default");
+        let src = d.join("notes.md");
+        std::fs::write(&src, "x\n").unwrap();
+        #[cfg(unix)]
+        {
+            let other = d.join("other.markdown");
+            std::fs::write(&other, "y\n").unwrap();
+            std::os::unix::fs::symlink(&other, d.join("other.md")).unwrap();
+            assert_eq!(default_path(&other, Format::Markdown), d.join("other-export.md"));
+        }
+        assert_eq!(default_path(&src, Format::Markdown), d.join("notes-export.md"));
+        // And the default is accepted by `write`.
+        let dest = default_path(&src, Format::Markdown);
+        write(&src, &dest, Format::Markdown, &TranscludeConfig::default(), &html::Page::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "x\n");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     fn vault(tag: &str) -> PathBuf {
