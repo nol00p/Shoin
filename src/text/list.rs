@@ -26,7 +26,7 @@ use std::ops::Range;
 use ropey::Rope;
 
 use super::buffer::Buffer;
-use crate::render::markdown::block::{leading_ws_cols, BlockCache, BlockKind, Marker};
+use crate::render::markdown::block::{item_text_col, leading_ws_cols, BlockCache, BlockKind, Marker};
 
 /// Leading whitespace in columns, a tab counting as `tab_width`. Matches how
 /// the renderer lays out a tabbed list (`render::layout::content_column`).
@@ -340,8 +340,8 @@ impl<'a> Lists<'a> {
     /// rewritten with spaces at the column Shoin shows it at.
     ///
     /// The result is checked by classifying the new text: an item whose move
-    /// would change any line's kind, or any item's extent or parent (a fence
-    /// at 4+ columns reads as prose here), is left as written with its
+    /// would change any line's kind, or any item's extent or parent (prose
+    /// 4 columns past T would become a fence at T), is left as written with its
     /// subtree, and so is one whose move would push code left of column 0.
     /// The rest is tried again.
     pub fn realign(&self, line: usize, math: bool) -> Option<Realign> {
@@ -515,35 +515,7 @@ impl<'a> Lists<'a> {
     /// more, one column past the marker. Columns are counted as `indent`
     /// counts them, so T and the lines under the item compare.
     fn text_col(&self, item: usize) -> usize {
-        let text = self.buffer.line_text(item);
-        let ws = |c: char| match c {
-            ' ' => Some(1),
-            '\t' => Some(self.tab_width),
-            _ => None,
-        };
-        let mut chars = text.chars().peekable();
-        let mut col = 0;
-        while let Some(w) = chars.peek().copied().and_then(ws) {
-            col += w;
-            chars.next();
-        }
-        while chars.next_if(char::is_ascii_digit).is_some() {
-            col += 1;
-        }
-        // The bullet, or the ordinal's `.` / `)`.
-        chars.next();
-        col += 1;
-        let marker_end = col;
-        while let Some(w) = chars.peek().copied().and_then(ws) {
-            col += w;
-            chars.next();
-        }
-        let gap = col - marker_end;
-        if chars.peek().is_none() || gap == 0 || gap > 4 {
-            marker_end + 1
-        } else {
-            col
-        }
+        item_text_col(&self.buffer.line_text(item), self.tab_width)
     }
 
     /// Whether `line`'s indent has a tab that CommonMark, with its tab stops
@@ -580,9 +552,9 @@ impl<'a> Lists<'a> {
     /// whose extent or parent changes. Empty when it would look the same.
     ///
     /// Only the list and two lines past it are classified again, from a copy
-    /// of the rope (so its lines are numbered exactly as the buffer's). A
-    /// list starts at an item line, which no carried state can be open
-    /// across.
+    /// of the rope (so its lines are numbered exactly as the buffer's),
+    /// entered with the state the real document enters it with: the
+    /// classifier may still count items above it as open.
     fn changes(&self, first: usize, end: usize, moves: &BTreeMap<usize, usize>, math: bool) -> BTreeSet<usize> {
         let mut blamed = BTreeSet::new();
         if moves.is_empty() {
@@ -597,7 +569,8 @@ impl<'a> Lists<'a> {
         }
         let mut buffer = Buffer::empty();
         buffer.rope = copy;
-        let cache = BlockCache::build(&buffer, math);
+        let entering = BlockCache::carry_before(self.buffer, first, math);
+        let cache = BlockCache::build_from(&buffer, math, entering);
         let after = Lists::new(&buffer, &cache.kinds, self.tab_width);
         let same = |a: Option<&BlockKind>, b: Option<&BlockKind>| match (a, b) {
             (Some(BlockKind::ListItem { marker: m, .. }), Some(BlockKind::ListItem { marker: n, .. })) => m == n,
@@ -1200,19 +1173,30 @@ mod tests {
         assert_eq!(realigned(t, 0).0, "- a\n\n  ```\n  code\n    more\n  ```\n");
     }
 
+    /// Column 4 under `10.` is the item's text column, where a fence is
+    /// still a fence.
     #[test]
-    fn realign_skips_a_fence_it_would_put_4_columns_in() {
+    fn realign_moves_a_fence_to_4_columns_under_10() {
         let t = format!("{NINE}9. i\n10. j\n\n   ```\n   x\n   ```\n   - y\n11. k\n   - z\n");
         let (out, skipped) = realigned(&t, 0);
-        assert_eq!(skipped, vec![9]);
-        assert_eq!(out, format!("{NINE}9. i\n10. j\n\n   ```\n   x\n   ```\n   - y\n11. k\n    - z\n"));
+        assert!(skipped.is_empty());
+        assert_eq!(out, format!("{NINE}9. i\n10. j\n\n    ```\n    x\n    ```\n    - y\n11. k\n    - z\n"));
     }
 
     #[test]
-    fn realign_skips_display_math_it_would_put_4_columns_in() {
+    fn realign_moves_display_math_to_4_columns_under_10() {
         let t = format!("{NINE}9. i\n10. j\n\n   $$\n   x\n   $$\n");
         let (out, skipped) = realigned(&t, 0);
-        assert_eq!((out, skipped), (t.clone(), vec![9]));
+        assert!(skipped.is_empty());
+        assert_eq!(out, format!("{NINE}9. i\n10. j\n\n    $$\n    x\n    $$\n"));
+    }
+
+    /// Prose 4 columns past the text column would turn into a fence at it.
+    #[test]
+    fn realign_skips_a_move_that_would_open_a_fence() {
+        let t = "- a\n\n      ```\n      x\n";
+        let (out, skipped) = realigned(t, 0);
+        assert_eq!((out.as_str(), skipped), (t, vec![0]));
     }
 
     #[test]

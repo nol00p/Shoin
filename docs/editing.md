@@ -139,14 +139,12 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   that sat at column 3 under `9.` falls out of the item at `10.`. Shoin still
   shows it nested, so this only shows on GitHub or in PDF export.
   `:fixlist` repairs it afterwards. To write numbered lists that survive it:
-  - Nest sub-lists and continuation text by 4 spaces. That is deep enough
-    for every item up to `99.`, and in a file that nests by 4, `>al` keeps
-    doing so.
-  - For a list whose items hold code blocks or `$$` blocks, write `1.` on
-    every item and set `list_renumber = false`. The numbers never change
-    width, and GitHub and export number the items for you. (A code block
-    indented 4 or more columns is not yet shown as code by Shoin, even
-    inside a list item, so moving one to column 4 is not an option there.)
+  - Nest sub-lists, code blocks, `$$` blocks and continuation text by 4
+    spaces. That is deep enough for every item up to `99.`, and in a file
+    that nests by 4, `>al` keeps doing so.
+  - Or write `1.` on every item and set `list_renumber = false`. The
+    numbers never change width, and GitHub and export number the items for
+    you.
 - `:fixlist` moves a sub-item, paragraph, code block, `$$` block or table
   only if it starts left of its item's text, or 4 or more columns past it;
   anything already in between stays, so a list nested by 4 stays nested by
@@ -154,10 +152,16 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   and unindented "lazy" lines never move. Moved lines are indented with
   spaces, and so is a line whose tabs GitHub would count to another column
   than Shoin does (it puts tab stops every 4 columns, whatever `tab_width`
-  says). An item whose move would change how Shoin shows the list (a code
-  block or `$$` block pushed to 4 columns, which Shoin does not yet show as
-  code there) is left as written with its sub-items, and the message gives
-  its line.
+  says). An item whose move would change how Shoin shows the list (text 4
+  columns past the item's text that would turn into a code block at it) is
+  left as written with its sub-items, and the message gives its line.
+- Inside a list item, a code block, `$$` block, heading or rule counts its
+  indent from the item's text, as GitHub does: under `10. ` a code block at
+  column 4 is code, and one 4 or more columns past the text is plain text.
+  One between the marker and the text, like a code block at column 3 under
+  `10.`, is still read as code. For this, a tab in the indent counts as one
+  column. HTML export keeps these blocks, and the text after them, in their
+  item.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.

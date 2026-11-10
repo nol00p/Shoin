@@ -1099,7 +1099,7 @@ fn rule(glyph: &str, width: u16) -> String {
 mod tests {
     use super::*;
     use crate::config::schema::MarkdownConfig;
-    use crate::render::markdown::block::{classify, Carry};
+    use crate::render::markdown::block::{classify, Carry, Open};
     use crate::render::markdown::inline;
 
     /// Build a conceal map the way the frame will: classify the line, scan it,
@@ -1107,7 +1107,7 @@ mod tests {
     const MEASURE: u16 = 20;
 
     fn map(line: &str) -> ConcealMap {
-        map_in(line, &Carry::None)
+        map_in(line, &Carry::default())
     }
 
     /// Build a conceal map the way the frame will: classify the line, scan it,
@@ -1138,7 +1138,7 @@ mod tests {
 
     /// The concealed display text, ignoring styling.
     fn shown(line: &str) -> String {
-        shown_in(line, &Carry::None)
+        shown_in(line, &Carry::default())
     }
 
     fn shown_in(line: &str, carry: &Carry) -> String {
@@ -1242,8 +1242,8 @@ mod tests {
 
     #[test]
     fn math_block_lines_keep_their_indentation() {
-        assert_eq!(shown_in(r"  \frac{a}{b}", &Carry::InMath), "  a⁄b");
-        assert_eq!(shown_in(r"  x = 1 $$", &Carry::InMath), "  x = 1");
+        assert_eq!(shown_in(r"  \frac{a}{b}", &Carry::from(Open::InMath)), "  a⁄b");
+        assert_eq!(shown_in(r"  x = 1 $$", &Carry::from(Open::InMath)), "  x = 1");
         assert_eq!(shown("  $$ x"), "  x");
     }
 
@@ -1254,12 +1254,12 @@ mod tests {
 
     #[test]
     fn multiline_math_block_renders() {
-        assert_eq!(shown_in("$$", &Carry::None), "");
+        assert_eq!(shown_in("$$", &Carry::default()), "");
         assert_eq!(
-            shown_in("\\nabla \\cdot \\vec{B} = 0", &Carry::InMath),
+            shown_in("\\nabla \\cdot \\vec{B} = 0", &Carry::from(Open::InMath)),
             "∇ · B⃗ = 0"
         );
-        assert_eq!(shown_in("$$", &Carry::InMath), "");
+        assert_eq!(shown_in("$$", &Carry::from(Open::InMath)), "");
     }
 
     #[test]
@@ -1291,7 +1291,7 @@ mod tests {
         // The closing fence needs the carry state that says we are inside one.
         let close = shown_in(
             "```",
-            &Carry::InFence { fence: "```".into(), lang: None, cont: Default::default() },
+            &Carry::from(Open::InFence { fence: "```".into(), lang: None, cont: Default::default() }),
         );
         assert_eq!(UnicodeWidthStr::width(close.as_str()), MEASURE as usize);
     }

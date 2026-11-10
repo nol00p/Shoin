@@ -7996,11 +7996,12 @@ mod tests {
 
     #[test]
     fn fixlist_says_what_it_left_and_why() {
-        let t = format!("{NINE_ITEMS}10. j\n\n   ```\n   x\n   ```\n");
-        let mut app = app_with(&t);
+        // Moved to the text column, the prose would open a fence.
+        let t = "- a\n\n      ```\n      x\n";
+        let mut app = app_with(t);
         ex(&mut app, "fixlist");
         assert_eq!(text(&app), t);
-        assert!(flash_text(&app).contains("left 1 item as written (line 10)"), "{}", flash_text(&app));
+        assert!(flash_text(&app).contains("left 1 item as written (line 1)"), "{}", flash_text(&app));
         let mut app = app_with("para\n");
         ex(&mut app, "fixlist");
         assert_eq!(flash_text(&app), "not in a list");
