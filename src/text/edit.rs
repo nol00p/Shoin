@@ -131,8 +131,10 @@ impl Buffer {
     /// minimum is what makes one rescan cover a command that made several
     /// edits — and `dirty_tail` to the distance from its last line to the
     /// end of the file. Both are read off the rope, so they use its line
-    /// metric. `line` is taken before the edit, and the line of `at` after
-    /// it, since a deleted `\n` after a `\r` can move it.
+    /// metric, which breaks on `\n` only. `line` is taken before the edit;
+    /// the line of `at` after it is the same line, since only the text
+    /// before `at` decides it, and taking the smaller of the two keeps that
+    /// true even if the metric ever changes again.
     fn mark_dirty(&mut self, line: usize, at: usize, end: usize) {
         let len = self.rope.len_chars();
         let first = line.min(self.rope.char_to_line(at.min(len)));
@@ -161,7 +163,7 @@ impl Buffer {
     /// empty and transclusion turned out not to need it — and that one branch
     /// is what keeps the guarantee cheap to reintroduce. See
     /// `Buffer::readonly_ranges` and SPEC.md §14.5.
-    fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
+    pub(super) fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
         !self.read_only
             && !self
             .readonly_ranges

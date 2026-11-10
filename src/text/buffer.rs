@@ -81,8 +81,8 @@ pub struct Buffer {
     /// rescan that stopped as soon as its state matched again would miss
     /// them. Counted from the END because an edit above a line does not move
     /// it relative to the end, so later edits need no bookkeeping, and the
-    /// rope's own line metric (which also breaks on `\r` and U+2028) is the
-    /// only one used. Read through `take_dirty`.
+    /// rope's own line metric (`\n` only, as everywhere else) is the only
+    /// one used. Read through `take_dirty`.
     pub(crate) dirty_tail: Option<usize>,
 
     /// The file changed on disk while this buffer had unsaved work.
@@ -275,7 +275,17 @@ impl Buffer {
             return Ok(false);
         }
 
-        self.replace_all(&loaded.rope.to_string());
+        // Taking the file's text is not an edit by the reader, so read-only
+        // mode (where watching a file is the point) must not refuse it. The
+        // flag is lifted for this one replacement only. Anything else that
+        // refuses leaves the text, and the old mtime, so the next check
+        // tries again rather than reporting a reload that did not happen.
+        let read_only = std::mem::replace(&mut self.read_only, false);
+        let replaced = self.replace_all(&loaded.rope.to_string());
+        self.read_only = read_only;
+        if !replaced {
+            anyhow::bail!("{} could not be reloaded — part of it refuses edits", name_of(&path));
+        }
 
         self.line_ending = loaded.line_ending;
         self.final_newline = loaded.final_newline;
@@ -297,9 +307,16 @@ impl Buffer {
     /// The cursor is left where it was; callers clamp (`App::sync_after_input`
     /// does it for every input path anyway), and the group records the
     /// pre-replacement cursor so undo lands where the reader was.
-    pub fn replace_all(&mut self, text: &str) {
-        self.history.begin_group(Some(self.cursor));
+    ///
+    /// Returns false, having changed nothing, when the buffer refuses edits
+    /// (read-only mode or a read-only range), so no caller can report a
+    /// replacement that did not happen.
+    pub fn replace_all(&mut self, text: &str) -> bool {
         let len = self.rope.len_chars();
+        if !self.is_editable(&(0..len)) {
+            return false;
+        }
+        self.history.begin_group(Some(self.cursor));
         if len > 0 {
             self.delete_chars(0, len);
         }
@@ -307,6 +324,7 @@ impl Buffer {
             self.insert_str(Cursor::new(0, 0), text);
         }
         self.history.end_group();
+        true
     }
 
     /// Recompute `modified` from the revision the disk holds. Undoing back to
@@ -315,6 +333,10 @@ impl Buffer {
         self.modified = self.history.state() != self.saved_state;
     }
 
+    /// Lines as ropey counts them, which is by `\n` alone: ropey is built
+    /// without its `unicode_lines` feature, so `\r`, U+2028 and the other
+    /// Unicode breaks are ordinary characters inside a line, as they are to
+    /// `str::lines`, `line_text` and the renderer.
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()
     }
@@ -452,10 +474,10 @@ mod tests {
         b.delete_chars(at, at + 2);
         assert_eq!(b.take_dirty(), Some((2, 5)));
 
-        // A break the rope counts that is not `\n`: U+2028.
+        // U+2028 is not a break: the edit stays on one line.
         let mut b = Buffer::unnamed(text.clone()).unwrap();
         b.insert_str(Cursor::new(1, 0), "p\u{2028}q");
-        assert_eq!(b.take_dirty(), Some((1, 2)));
+        assert_eq!(b.take_dirty(), Some((1, 1)));
 
         // Two edits far apart that keep the line count between them: every
         // line from the first to the second is in the range.
@@ -490,8 +512,9 @@ mod tests {
         assert_eq!(b.take_dirty(), Some((1, 3)), "redo put two lines back");
     }
 
-    /// Deleting the `\n` of a `\r\n` leaves a lone `\r`, still a break to
-    /// the rope: the first line touched is the one before it either way.
+    /// Deleting the `\n` of a `\r\n` leaves a lone `\r`, which is an
+    /// ordinary character: the two lines join, and the first line touched
+    /// is the one the `\r` is on.
     #[test]
     fn a_lone_carriage_return_keeps_the_first_line() {
         let mut b = Buffer::empty();
@@ -499,8 +522,9 @@ mod tests {
         assert_eq!(b.rope.len_lines(), 4);
         b.delete_chars(2, 3);
         assert_eq!(b.rope.to_string(), "a\rb\nc\n");
-        assert_eq!(b.rope.len_lines(), 4, "the lone \\r still breaks the line");
-        assert_eq!(b.take_dirty().map(|(first, _)| first), Some(0));
+        assert_eq!(b.rope.len_lines(), 3, "the lone \\r does not break the line");
+        assert_eq!(b.line_text(0), "a\rb");
+        assert_eq!(b.take_dirty(), Some((0, 0)));
     }
 
     /// Piped text has no name and nothing unsaved, and keeps its line ending
@@ -613,5 +637,223 @@ mod tests {
         assert_eq!(b.char_index(Cursor::new(1, 1)), 5);
         assert_eq!(b.char_index(Cursor::new(0, 99)), 3, "column clamps to the line");
         assert!(b.char_index(Cursor::new(99, 99)) <= b.rope.len_chars());
+    }
+
+    /// A fresh, empty directory under the system temp dir.
+    fn dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("shoin-buf-{tag}-{t}-{n}"));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn policy() -> SavePolicy {
+        SavePolicy {
+            trim_trailing_whitespace: false,
+            final_newline: save::FinalNewline::Preserve,
+        }
+    }
+
+    /// Writes `bytes` with an mtime an hour back, so the next write is
+    /// certain to move it.
+    fn write_old(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        let past = SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+    }
+
+    /// Read-only mode is where a file is watched, so a reload there must
+    /// take the new text. It used to keep the old text, record the new
+    /// mtime and report success. F02.
+    #[test]
+    fn a_read_only_buffer_reloads_the_new_text() {
+        let d = dir("ro-reload");
+        let path = d.join("n.md");
+        write_old(&path, b"one\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.read_only = true;
+        let before = b.disk_mtime;
+
+        std::fs::write(&path, b"two\nthree\n").unwrap();
+        assert!(b.reload(&[]).unwrap(), "reported as replaced");
+        assert_eq!(b.rope.to_string(), "two\nthree\n");
+        assert!(b.read_only, "still read-only");
+        assert!(!b.modified);
+        assert_ne!(b.disk_mtime, before);
+
+        // The reader cannot undo while reading.
+        assert!(!b.undo());
+        assert_eq!(b.rope.to_string(), "two\nthree\n");
+
+        // Leaving read-only: clean, and `u` takes the reload back in one step.
+        b.read_only = false;
+        assert!(!b.modified);
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), "one\n");
+        assert!(b.modified, "holding text the file does not have");
+        assert!(b.redo());
+        assert_eq!(b.rope.to_string(), "two\nthree\n");
+        assert!(!b.modified, "back at what the disk holds");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A read-only reload takes the file's line ending and final newline
+    /// too, so the next save writes the file's own bytes.
+    #[test]
+    fn a_read_only_reload_keeps_crlf_and_a_missing_final_newline() {
+        let d = dir("ro-crlf");
+        let path = d.join("n.md");
+        write_old(&path, b"one\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.read_only = true;
+
+        std::fs::write(&path, b"a\r\nb\r\nc").unwrap();
+        assert!(b.reload(&[]).unwrap());
+        assert_eq!(b.rope.to_string(), "a\nb\nc");
+        assert_eq!(b.line_ending, LineEnding::Crlf);
+        assert!(!b.final_newline);
+
+        b.read_only = false;
+        b.save(policy(), false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\r\nc");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `replace_all` says whether it replaced, and a refusal changes
+    /// nothing: no text, no history step, no half-done group.
+    #[test]
+    fn replace_all_reports_a_refusal() {
+        let mut b = Buffer::unnamed(b"old\n".to_vec()).unwrap();
+        b.read_only = true;
+        assert!(!b.replace_all("new\n"));
+        assert_eq!(b.rope.to_string(), "old\n");
+
+        b.read_only = false;
+        b.readonly_ranges.push(1..2);
+        assert!(!b.replace_all("new\n"));
+        assert_eq!(b.rope.to_string(), "old\n");
+        assert!(!b.undo(), "nothing was recorded");
+
+        b.readonly_ranges.clear();
+        assert!(b.replace_all("new\n"));
+        assert_eq!(b.rope.to_string(), "new\n");
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), "old\n", "one step");
+    }
+
+    /// A reload that cannot replace the text is an error, and leaves the
+    /// mtime alone so the next check tries again.
+    #[test]
+    fn a_refused_reload_is_an_error_and_keeps_the_old_mtime() {
+        let d = dir("refused");
+        let path = d.join("n.md");
+        write_old(&path, b"one\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.readonly_ranges.push(0..1);
+        let before = b.disk_mtime;
+
+        std::fs::write(&path, b"two\n").unwrap();
+        assert!(b.reload(&[]).is_err());
+        assert_eq!(b.rope.to_string(), "one\n");
+        assert_eq!(b.disk_mtime, before);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Characters other text tools treat as line breaks. Shoin breaks lines
+    /// on `\n` only, so each of these sits inside its line. F05.
+    const NOT_BREAKS: [&str; 6] = ["\u{2028}", "\u{2029}", "\u{85}", "\x0b", "\x0c", "\r"];
+
+    /// One line holding the character is one line: the line count, its
+    /// length and its text agree with what the screen shows, and typing at
+    /// the end of it lands at the real end, not after the character.
+    #[test]
+    fn only_a_newline_breaks_a_line() {
+        for sep in NOT_BREAKS {
+            let text = format!("abc{sep}def\n");
+            let mut b = Buffer::unnamed(text.clone().into_bytes()).unwrap();
+            assert_eq!(b.line_count(), 2, "{sep:?}: the line and the empty one after it");
+            assert_eq!(b.last_line(), 0, "{sep:?}");
+            assert_eq!(b.line_text(0), format!("abc{sep}def"), "{sep:?}");
+            assert_eq!(b.line_len(0), 7, "{sep:?}");
+
+            // What `A` then `Q` does: insert at the end of the line.
+            let end = Cursor::new(0, b.line_len(0));
+            assert!(b.insert_str(end, "Q"));
+            assert_eq!(b.rope.to_string(), format!("abc{sep}defQ\n"), "{sep:?}");
+            assert_eq!(b.rope.char_to_line(7), 0, "{sep:?}: Q is on line 0");
+
+            // What `dd` on the line removes: all of it.
+            let to = b.rope.line_to_char(1);
+            b.delete_chars(0, to);
+            assert_eq!(b.rope.to_string(), "", "{sep:?}");
+        }
+    }
+
+    /// The characters are kept as they are on load and written back as they
+    /// were, in an LF file and in a CRLF one.
+    #[test]
+    fn a_file_with_them_saves_byte_for_byte() {
+        let d = dir("seps");
+        for (i, sep) in NOT_BREAKS.iter().enumerate() {
+            for (j, eol) in ["\n", "\r\n"].iter().enumerate() {
+                let bytes = format!("abc{sep}def{eol}two{eol}");
+                let path = d.join(format!("f{i}-{j}.md"));
+                std::fs::write(&path, &bytes).unwrap();
+                let mut b = Buffer::open(path.clone(), &[]).unwrap();
+                assert_eq!(b.line_count(), 3, "{sep:?} {eol:?}");
+                assert_eq!(b.line_text(0), format!("abc{sep}def"), "{sep:?} {eol:?}");
+                assert_eq!(b.line_text(1), "two", "{sep:?} {eol:?}");
+                b.save(policy(), false).unwrap();
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes, "{sep:?} {eol:?}");
+            }
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+}
+
+/// How the screen shows the characters that no longer break a line. Here
+/// rather than in `render/` because it guards what changing the rope's line
+/// metric (F05) let through to the renderer; it only reads the drawn frame.
+#[cfg(test)]
+mod drawn {
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::render::markdown::block::BlockCache;
+    use crate::text::cursor::Cursor;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A control character inside a line is drawn as nothing, never sent to
+    /// the terminal, and the caret still sits on the character it is on.
+    #[test]
+    fn control_characters_inside_a_line_draw_as_nothing() {
+        for sep in ["\u{85}", "\x0b", "\x0c", "\r", "\x07", "\x1b"] {
+            let mut app = App::new(Config::default(), None, None).unwrap();
+            app.buffer.insert_str(Cursor::new(0, 0), &format!("abc{sep}def\n"));
+            app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+            app.buffer.cursor = Cursor::new(0, 6); // on the `f`
+            let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();
+            t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+            let caret = t.get_cursor_position().unwrap();
+            let buf = t.backend().buffer();
+            let row: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, caret.y)].symbol()).collect();
+            assert!(
+                !row.iter().any(|s| s.chars().any(char::is_control)),
+                "{sep:?} reached the screen: {row:?}"
+            );
+            assert_eq!(row.concat().trim(), "abcdef", "{sep:?}");
+            assert_eq!(row[caret.x as usize], "f", "{sep:?}: the caret is on the f");
+        }
     }
 }
