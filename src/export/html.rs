@@ -1768,6 +1768,7 @@ mod tests {
         for t in targets {
             let md = format!(
                 "[a]({t}) <{t}> ![i]({t}) [[{t}]] [[{t}|w]] [[{t}#h|w]] **b** _i_ ~~s~~ ==m== `c` #tag $x$ \\*\n\n\
+                 [a](<{t}>) [a]({t} \"x\") ![i](<{t}> 'x') **[b]({t}) ![b]({t}) [[{t}|b]]** *[[//{t}]]*\n\n\
                  - [l]({t}) [[{t}]]\n\n> [q]({t}) ![q]({t})\n\n| [c]({t}) | [[{t}]] |\n|---|---|\n| ![x]({t}) | y |\n"
             );
             let html = render(&md, "t", &Page::default());
