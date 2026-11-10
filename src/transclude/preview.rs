@@ -109,7 +109,7 @@ pub fn expand(
     }
     // Classified as a document in its own right, so a fence opened inside the
     // embed closes inside it and cannot leak into the composition.
-    let mut carry = Carry::None;
+    let mut carry = Carry::default();
     // A closed box costs four columns — `\u{2502} ` on the left and ` \u{2502}` on the
     // right — and a wrapped row has to fit between them.
     let inner = measure.saturating_sub(if cfg.border { 4 } else { 0 }).max(8);

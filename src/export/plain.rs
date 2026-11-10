@@ -26,7 +26,7 @@ use crate::render::markdown::inline;
 /// table's `|` columns would break what they are.
 pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> String {
     let mut out: Vec<String> = Vec::new();
-    let mut carry = Carry::None;
+    let mut carry = Carry::default();
     let mut in_fence = false;
 
     for (i, line) in text.lines().enumerate() {

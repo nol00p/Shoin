@@ -1,15 +1,17 @@
 //! Pass A — per-line block classification with a cached state vector.
 //! SPEC.md §5.2.
 //!
-//! Only two constructs carry state across lines: fenced code blocks and front
-//! matter. Both are captured by `Carry`. Because carry state is one small enum,
-//! incremental invalidation is cheap: after edits touching lines L..=M, rescan
-//! forward from L and STOP at the first line past M where the recomputed carry
-//! matches the cached carry. A typical paragraph edit terminates after one
-//! line.
+//! State crosses lines in two ways, both captured by `Carry`: the block a
+//! line may be inside (a fence, front matter, a table, a math block), and the
+//! list items it may be inside, which set where a nested fence or heading is
+//! measured from. Carry state is small, so incremental invalidation is cheap:
+//! after edits touching lines L..=M, rescan forward from L and STOP at the
+//! first line past M where the recomputed carry matches the cached carry. A
+//! typical paragraph edit terminates after one line.
 
 use super::code::{self, Cont, Lang};
 use crate::text::buffer::Buffer;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Marker {
@@ -50,9 +52,31 @@ pub enum BlockKind {
     MathBlock,
 }
 
-/// The only state that crosses a line boundary.
+/// The state that crosses a line boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub enum Carry {
+pub struct Carry {
+    /// The block the next line is inside, if any.
+    pub open: Open,
+    /// The list items the next line may be inside.
+    pub items: Items,
+}
+
+impl Carry {
+    /// Whether the line this state follows is inside a list item.
+    pub fn in_list(&self) -> bool {
+        !self.items.open.is_empty()
+    }
+}
+
+impl From<Open> for Carry {
+    fn from(open: Open) -> Self {
+        Carry { open, items: Items::default() }
+    }
+}
+
+/// A block that runs on past the line that opened it.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Open {
     #[default]
     None,
     /// Inside a fenced block opened with this fence string, in the language its
@@ -63,6 +87,135 @@ pub enum Carry {
     /// until a line without a `|` ends it.
     InTable,
     InMath,
+}
+
+/// The list items open above a line, outermost first, as (marker column, text
+/// column) pairs, with marker columns strictly increasing.
+///
+/// A line is inside an item when it is indented deeper than the item's
+/// marker, or is a lazy continuation of its text, or is blank (the next
+/// non-blank line decides): the rule `Lists::bounds` applies in the editor.
+/// Inside an item, a fence, `$$` block, heading or rule is measured from the
+/// item's text column, as CommonMark measures it: under `10. ` a fence at
+/// column 4 is a fence, not indented code.
+///
+/// Shared, not copied: every line of a list carries the same stack until an
+/// item opens or closes, so a clone is a count bump.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Items {
+    open: Rc<[(u16, u16)]>,
+    /// What the line before was, which lazy continuation depends on. Always
+    /// `Other` with no item open, so prose outside lists carries nothing.
+    after: After,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum After {
+    #[default]
+    Other,
+    /// Paragraph text or an item's own line: a paragraph line may follow it
+    /// lazily, at any indent.
+    Text,
+    /// A display math line: another display block may follow it lazily.
+    Math,
+}
+
+impl After {
+    fn of(kind: &BlockKind) -> After {
+        match kind {
+            BlockKind::Paragraph | BlockKind::ListItem { .. } => After::Text,
+            BlockKind::MathBlock => After::Math,
+            _ => After::Other,
+        }
+    }
+}
+
+impl Items {
+    /// How many of the open items a line at `indent` is deeper than.
+    fn kept(&self, indent: usize) -> usize {
+        self.open.iter().take_while(|&&(marker, _)| usize::from(marker) < indent).count()
+    }
+
+    /// The column blocks are measured from inside the first `kept` items.
+    fn base(&self, kept: usize) -> usize {
+        match kept {
+            0 => 0,
+            k => usize::from(self.open[k - 1].1),
+        }
+    }
+
+    /// The items open after a line that is not inside a running block.
+    ///
+    /// This is `Lists::bounds`'s rule, line by line: keep it in step with
+    /// `Lists::measure`.
+    fn next(&self, line: &str, indent: usize, kept: usize, kind: &BlockKind) -> Items {
+        let stays = match (kind, self.after) {
+            // A blank line closes nothing yet: the next line decides.
+            (BlockKind::Blank, _) => true,
+            (BlockKind::Paragraph, After::Text) => true,
+            (BlockKind::MathBlock, After::Text | After::Math) => true,
+            _ => kept == self.open.len(),
+        };
+        let open = match kind {
+            BlockKind::ListItem { .. } => {
+                let col = |c: usize| c.min(u16::MAX as usize) as u16;
+                let item = (col(indent), col(item_text_col(line, 1)));
+                self.open[..kept].iter().copied().chain([item]).collect()
+            }
+            _ if stays => self.open.clone(),
+            _ => self.open[..kept].into(),
+        };
+        self.with(open, kind)
+    }
+
+    /// These items, after a line of `kind` inside a running block.
+    fn after_line(&self, kind: &BlockKind) -> Items {
+        self.with(self.open.clone(), kind)
+    }
+
+    fn with(&self, open: Rc<[(u16, u16)]>, kind: &BlockKind) -> Items {
+        let after = match open.is_empty() {
+            true => After::Other,
+            false => After::of(kind),
+        };
+        Items { open, after }
+    }
+}
+
+/// The column an item line's text starts at, CommonMark's way: past the
+/// marker and the 1 to 4 spaces after it. With none (an empty item), nothing
+/// after them, or 5 or more, one column past the marker. A tab counts `tab`
+/// columns: 1 here, as `leading_ws_cols` counts it, and `tab_width` in
+/// `Lists`, as its own indents do.
+pub(crate) fn item_text_col(line: &str, tab: usize) -> usize {
+    let ws = |c: char| match c {
+        ' ' => Some(1),
+        '\t' => Some(tab),
+        _ => None,
+    };
+    let mut chars = line.chars().peekable();
+    let mut col = 0;
+    while let Some(w) = chars.peek().copied().and_then(ws) {
+        col += w;
+        chars.next();
+    }
+    while chars.next_if(char::is_ascii_digit).is_some() {
+        col += 1;
+    }
+    // The bullet, or the ordinal's `.` / `)`.
+    chars.next();
+    col += 1;
+    let marker_end = col;
+    while let Some(w) = chars.peek().copied().and_then(ws) {
+        col += w;
+        chars.next();
+    }
+    let gap = col - marker_end;
+    if chars.peek().is_none() || gap == 0 || gap > 4 {
+        marker_end + 1
+    } else {
+        col
+    }
 }
 
 /// Cached classification, parallel to the buffer's lines.
@@ -78,10 +231,16 @@ pub struct BlockCache {
 
 impl BlockCache {
     pub fn build(buffer: &Buffer, math: bool) -> Self {
+        Self::build_from(buffer, math, Carry::default())
+    }
+
+    /// `build` for a buffer that starts in the middle of a document, entered
+    /// with the state `entering`.
+    pub fn build_from(buffer: &Buffer, math: bool, entering: Carry) -> Self {
         let n = buffer.line_count();
         let mut kinds = Vec::with_capacity(n);
         let mut carry = Vec::with_capacity(n);
-        let mut cur = Carry::None;
+        let mut cur = entering;
         for i in 0..n {
             carry.push(cur.clone());
             let line = buffer.line_text(i);
@@ -96,6 +255,15 @@ impl BlockCache {
             revision: buffer.revision,
             math,
         }
+    }
+
+    /// The state entering `line` of `buffer`, classified from the top.
+    pub fn carry_before(buffer: &Buffer, line: usize, math: bool) -> Carry {
+        let mut cur = Carry::default();
+        for i in 0..line.min(buffer.line_count()) {
+            cur = classify(&buffer.line_text(i), &cur, i == 0, math).1;
+        }
+        cur
     }
 
     /// Rescan forward from the edit at `edited`, stopping early once the
@@ -128,7 +296,7 @@ impl BlockCache {
         let mut cur = self.carry[start].clone();
 
         self.kinds.resize(n, BlockKind::Paragraph);
-        self.carry.resize(n, Carry::None);
+        self.carry.resize(n, Carry::default());
 
         let mut last = start;
         let mut i = start;
@@ -164,7 +332,7 @@ impl BlockCache {
             // edited header row unstyled until something rescanned the table.
             let opens_table = i + 1 < n
                 && self.kinds[i + 1] == BlockKind::Table
-                && self.carry[i + 1] != Carry::InTable;
+                && self.carry[i + 1].open != Open::InTable;
             if can_early_stop && i >= edited.max(edited_last) && !opens_table {
                 if let Some(old) = old_next {
                     if next == old {
@@ -205,19 +373,37 @@ fn find_math_close(s: &str) -> Option<usize> {
 /// math existed: it never opens a block, so the lines under it classify
 /// exactly as they would without the feature.
 pub fn classify(line: &str, carry: &Carry, is_file_head: bool, math: bool) -> (BlockKind, Carry) {
+    // Inside a fence, front matter or math block the line is text, not
+    // structure: the items around it stay as they are.
+    if !matches!(carry.open, Open::None | Open::InTable) {
+        let (kind, open) = classify_block(line, &carry.open, 0, is_file_head, math);
+        let items = carry.items.after_line(&kind);
+        return (kind, Carry { open, items });
+    }
+    let indent = leading_ws_cols(line);
+    let kept = carry.items.kept(indent);
+    let (kind, open) = classify_block(line, &carry.open, carry.items.base(kept), is_file_head, math);
+    let items = carry.items.next(line, indent, kept, &kind);
+    (kind, Carry { open, items })
+}
+
+/// `classify` for one line, given the block it is inside and the column
+/// `base` its indent counts from (the text column of the list item it is in,
+/// else 0).
+fn classify_block(line: &str, carry: &Open, base: usize, is_file_head: bool, math: bool) -> (BlockKind, Open) {
     // Multi-line constructs win over anything their body might resemble.
     match carry {
-        Carry::InFrontMatter => {
+        Open::InFrontMatter => {
             let leaving = if closes_front_matter(line) {
-                Carry::None
+                Open::None
             } else {
-                Carry::InFrontMatter
+                Open::InFrontMatter
             };
             return (BlockKind::FrontMatter, leaving);
         }
-        Carry::InFence { fence, lang, cont } => {
+        Open::InFence { fence, lang, cont } => {
             if closes_fence(line, fence) {
-                return (BlockKind::FenceClose, Carry::None);
+                return (BlockKind::FenceClose, Open::None);
             }
             // The body is lexed HERE, in the pass that already walks every line
             // and already caches its result, so the styler below never has to
@@ -230,91 +416,94 @@ pub fn classify(line: &str, carry: &Carry, is_file_head: bool, math: bool) -> (B
             };
             return (
                 BlockKind::FenceBody { lang: *lang, cont: *cont },
-                Carry::InFence { fence: fence.clone(), lang: *lang, cont: next },
+                Open::InFence { fence: fence.clone(), lang: *lang, cont: next },
             );
         }
         // A table runs until a line with no cell separator in it.
-        Carry::InTable => {
+        Open::InTable => {
             if has_cell_separator(line) {
-                return (BlockKind::Table, Carry::InTable);
+                return (BlockKind::Table, Open::InTable);
             }
         }
-        Carry::InMath => {
+        Open::InMath => {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 // An unclosed $$ is bounded by a blank line so a stray $$
                 // does not turn the entire rest of the file into math.
-                return (BlockKind::Blank, Carry::None);
+                return (BlockKind::Blank, Open::None);
             }
             if closes_math(trimmed) {
-                return (BlockKind::MathBlock, Carry::None);
+                return (BlockKind::MathBlock, Open::None);
             }
-            return (BlockKind::MathBlock, Carry::InMath);
+            return (BlockKind::MathBlock, Open::InMath);
         }
-        Carry::None => {}
+        Open::None => {}
     }
 
-    // Leading whitespace: 4+ columns is (CommonMark) indented code, which this
-    // ruleset has no block kind for — such lines simply stay Paragraph.
+    // Leading whitespace: 4+ columns past `base` is (CommonMark) indented
+    // code, which this ruleset has no block kind for — such lines simply stay
+    // Paragraph.
     let indent = leading_ws_cols(line);
+    let shallow = indent < base + 4;
 
-    if math && indent < 4 {
+    if math && shallow {
         if let Some(after) = line.trim_start().strip_prefix("$$") {
             match find_math_close(after) {
                 // `$$x$$` alone on its line is a one-line block.
                 Some(p) if after[p + 2..].trim().is_empty() => {
-                    return (BlockKind::MathBlock, Carry::None);
+                    return (BlockKind::MathBlock, Open::None);
                 }
                 // `$$x$$ more text` is a paragraph that holds display math,
                 // as in Pandoc; the inline scanner picks out the `$$…$$`.
                 Some(_) => {}
                 // No closing `$$` yet: the block runs on below.
-                None => return (BlockKind::MathBlock, Carry::InMath),
+                None => return (BlockKind::MathBlock, Open::InMath),
             }
         }
     }
 
-    if let Some(fence) = fence_opener(line) {
+    if let Some(fence) = fence_opener(line).filter(|_| shallow) {
         let info = line.trim_start()[fence.len()..].trim().to_string();
         let lang = Lang::from_info(&info);
         return (
             BlockKind::FenceOpen(info),
-            Carry::InFence { fence, lang, cont: Cont::None },
+            Open::InFence { fence, lang, cont: Cont::None },
         );
     }
 
     if is_file_head && line.trim_end() == "---" {
-        return (BlockKind::FrontMatter, Carry::InFrontMatter);
+        return (BlockKind::FrontMatter, Open::InFrontMatter);
     }
 
     let body = line.trim();
     if body.is_empty() {
-        return (BlockKind::Blank, Carry::None);
+        return (BlockKind::Blank, Open::None);
     }
 
     // `|---|:--:|` — the delimiter row is what makes the lines around it a
     // table. The header ABOVE it is upgraded by `BlockCache`, which is the only
     // place that can see backwards. SPEC.md §5.2.
     if is_table_delimiter(body) {
-        return (BlockKind::Table, Carry::InTable);
+        return (BlockKind::Table, Open::InTable);
     }
 
-    // Headings and rules anchor the left margin: 4+ columns of indent (which a
-    // richer ruleset would read as indented code) demotes them to prose.
-    if indent < 4 {
+    // Headings and rules anchor the left margin (or the text column of the
+    // item they are in): 4+ columns of indent past it (which a richer ruleset
+    // would read as indented code) demotes them to prose.
+    if shallow {
         // Thematic break before list: `* * *` and `- - -` are rules, not items.
         if is_thematic_break(body) {
-            return (BlockKind::Rule, Carry::None);
+            return (BlockKind::Rule, Open::None);
         }
         if let Some(level) = atx_heading_level(line.trim_start()) {
-            return (BlockKind::Heading(level), Carry::None);
+            return (BlockKind::Heading(level), Open::None);
         }
     }
 
     // Lists and quotes nest, so their indentation is meaningful rather than
     // disqualifying — depth is exactly what we want to keep.
     if line.trim_start().starts_with('>') {
-        return (BlockKind::Quote(quote_depth(line.trim_start())), Carry::None);
+        return (BlockKind::Quote(quote_depth(line.trim_start())), Open::None);
     }
     if let Some((marker, checked)) = list_marker(line.trim_start()) {
         return (
@@ -323,11 +512,11 @@ pub fn classify(line: &str, carry: &Carry, is_file_head: bool, math: bool) -> (B
                 marker,
                 checked,
             },
-            Carry::None,
+            Open::None,
         );
     }
 
-    (BlockKind::Paragraph, Carry::None)
+    (BlockKind::Paragraph, Open::None)
 }
 
 /// Leading whitespace measured in columns (a tab counts as one column here — it
@@ -336,13 +525,10 @@ pub(crate) fn leading_ws_cols(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
-/// A run of >=3 backticks or tildes at the line start (after <4 spaces) opens a
-/// fence. Returns the delimiter run, e.g. `"```"`. A backtick fence's info
-/// string may not itself contain a backtick.
+/// A run of >=3 backticks or tildes at the line start opens a fence (the
+/// caller checks the indent). Returns the delimiter run, e.g. `"```"`. A
+/// backtick fence's info string may not itself contain a backtick.
 fn fence_opener(line: &str) -> Option<String> {
-    if leading_ws_cols(line) >= 4 {
-        return None;
-    }
     let s = line.trim_start();
     let ch = s.chars().next()?;
     if ch != '`' && ch != '~' {
@@ -394,7 +580,7 @@ fn atx_heading_level(s: &str) -> Option<u8> {
 /// table, the line before it is upgraded here — the one place with the whole
 /// sequence in hand.
 fn promote_table_header(kinds: &mut [BlockKind], buffer: &Buffer, i: usize, entering: &Carry) {
-    if i == 0 || kinds[i] != BlockKind::Table || *entering == Carry::InTable {
+    if i == 0 || kinds[i] != BlockKind::Table || entering.open == Open::InTable {
         return;
     }
     if has_cell_separator(&buffer.line_text(i - 1)) {
@@ -562,7 +748,7 @@ mod tests {
 
     /// Classify a standalone line with no carry, not at file head.
     fn kind(line: &str) -> BlockKind {
-        classify(line, &Carry::None, false, true).0
+        classify(line, &Carry::default(), false, true).0
     }
 
     fn buf(text: &str) -> Buffer {
@@ -808,19 +994,105 @@ mod tests {
 
     #[test]
     fn text_after_a_closed_one_line_block_makes_it_a_paragraph() {
-        let k = |l: &str| classify(l, &Carry::None, false, true);
-        assert_eq!(k("$$x$$"), (BlockKind::MathBlock, Carry::None));
-        assert_eq!(k("  $$x$$  "), (BlockKind::MathBlock, Carry::None));
-        assert_eq!(k("$$E=mc^2$$ is famous"), (BlockKind::Paragraph, Carry::None));
-        assert_eq!(k("$$a$$ and $$b$$"), (BlockKind::Paragraph, Carry::None));
-        assert_eq!(k("$$ x"), (BlockKind::MathBlock, Carry::InMath));
+        let k = |l: &str| classify(l, &Carry::default(), false, true);
+        assert_eq!(k("$$x$$"), (BlockKind::MathBlock, Carry::default()));
+        assert_eq!(k("  $$x$$  "), (BlockKind::MathBlock, Carry::default()));
+        assert_eq!(k("$$E=mc^2$$ is famous"), (BlockKind::Paragraph, Carry::default()));
+        assert_eq!(k("$$a$$ and $$b$$"), (BlockKind::Paragraph, Carry::default()));
+        assert_eq!(k("$$ x"), (BlockKind::MathBlock, Carry::from(Open::InMath)));
         // An escaped `$` before the last one: not a closing `$$`.
-        assert_eq!(k(r"$$a\$$"), (BlockKind::MathBlock, Carry::InMath));
+        assert_eq!(k(r"$$a\$$"), (BlockKind::MathBlock, Carry::from(Open::InMath)));
         assert_eq!(
-            classify(r"x = \$$", &Carry::InMath, false, true),
-            (BlockKind::MathBlock, Carry::InMath)
+            classify(r"x = \$$", &Carry::from(Open::InMath), false, true),
+            (BlockKind::MathBlock, Carry::from(Open::InMath))
         );
-        assert_eq!(classify(r"x = \\$$", &Carry::InMath, false, true), (BlockKind::MathBlock, Carry::None));
+        assert_eq!(classify(r"x = \\$$", &Carry::from(Open::InMath), false, true), (BlockKind::MathBlock, Carry::default()));
+    }
+
+    fn kinds(text: &str) -> Vec<BlockKind> {
+        BlockCache::build(&buf(text), true).kinds
+    }
+
+    const NINE: &str = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n";
+
+    /// Under `10. ` the text starts at column 4, and so do the blocks in it.
+    #[test]
+    fn blocks_in_an_item_count_from_its_text_column() {
+        let k = kinds(&format!("{NINE}10. j\n    ```\n    1. step\n    ```\n    $$\n    x\n    $$\n    # head\n    ---\n"));
+        assert_eq!(k[10], BlockKind::FenceOpen(String::new()));
+        assert!(matches!(k[11], BlockKind::FenceBody { .. }), "{:?}", k[11]);
+        assert_eq!(k[12], BlockKind::FenceClose);
+        assert_eq!(&k[13..16], &[BlockKind::MathBlock, BlockKind::MathBlock, BlockKind::MathBlock]);
+        assert_eq!(k[16], BlockKind::Heading(1));
+        assert_eq!(k[17], BlockKind::Rule);
+        // 4 past the text column is indented code: prose here.
+        assert_eq!(kinds(&format!("{NINE}10. j\n        ```\n"))[10], BlockKind::Paragraph);
+        // Between the marker and the text column it still counts, as before.
+        assert_eq!(kinds(&format!("{NINE}10. j\n   ```\n"))[10], BlockKind::FenceOpen(String::new()));
+        // Two levels nested by 2: the text is at column 6.
+        let k = kinds("- a\n  - b\n    - c\n      ```\n      x\n      ```\n");
+        assert_eq!(k[3], BlockKind::FenceOpen(String::new()));
+        assert!(matches!(k[4], BlockKind::FenceBody { .. }));
+        // The item's own spacing sets its text column: `-   a` is at 4.
+        assert_eq!(kinds("-   a\n    # h\n")[1], BlockKind::Heading(1));
+        // `-      a` (5+ spaces) and `-` alone: one column past the marker.
+        assert_eq!(kinds("-      a\n      # h\n")[1], BlockKind::Paragraph);
+        assert_eq!(kinds("-\n      # h\n")[1], BlockKind::Paragraph);
+    }
+
+    /// Inside means what `Lists::bounds` says: deeper than the marker, a lazy
+    /// line, or past blank lines.
+    #[test]
+    fn an_item_lasts_as_long_as_it_does_in_the_editor() {
+        let fence = |t: &str| kinds(t.trim_end()).last().cloned().unwrap();
+        let open = BlockKind::FenceOpen(String::new());
+        assert_eq!(fence(&format!("{NINE}10. j\n\n\n    ```\n")), open, "past blank lines");
+        assert_eq!(fence(&format!("{NINE}10. j\nlazy\n    ```\n")), open, "after a lazy line");
+        assert_eq!(fence(&format!("{NINE}10. j\n    para\n\n    ```\n")), open, "after a paragraph in it");
+        assert_eq!(fence(&format!("{NINE}10. j\n    ```\n    x\n    ```\n    ```\n")), open, "after a fence in it");
+        assert_eq!(fence("- a\n  - b\n  ```\n  x\n  ```\n      ```\n"), BlockKind::Paragraph, "b ended at the fence");
+        let prose = BlockKind::Paragraph;
+        assert_eq!(fence(&format!("{NINE}10. j\n\nafter\n    ```\n")), prose, "a blank line ends laziness");
+        assert_eq!(fence(&format!("{NINE}10. j\n# h\n    ```\n")), prose, "a heading ends the list");
+        assert_eq!(fence(&format!("{NINE}10. j\n```\nx\n```\n    ```\n")), prose, "so does a fence at 0");
+        assert_eq!(fence("    ```\n"), prose, "outside any list");
+        // A lazy line in a fence is code, not the list's.
+        assert_eq!(fence(&format!("{NINE}10. j\n    ```\nx\n    ```\n    ```\n")), open);
+        // A table row ends an item only when it is not deeper than the marker.
+        assert_eq!(fence("- a\n  | x |\n  |---|\n  # h\n").clone(), BlockKind::Heading(1));
+    }
+
+    /// Typing inside a list must leave the cache as a rebuild would: the
+    /// carry now holds the open items, so random edits check the rescan.
+    #[test]
+    fn incremental_invalidation_matches_a_rebuild_in_lists() {
+        let pool = [
+            "", "- a", "  - b", "    - c", "10. j", "1. x", "   ```", "    ```", "      ```", "    $$", "$$",
+            "lazy", "    para", "# h", "    # h", "  ---", "| a |", "|---|", "\tx", "\t- t", "-   w", "> q",
+        ];
+        let mut seed = 0x2545_f491_u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..300 {
+            let lines: Vec<&str> = (0..12).map(|_| pool[next(pool.len())]).collect();
+            let mut b = buf(&(lines.join("\n") + "\n"));
+            let mut cache = BlockCache::build(&b, true);
+            for _ in 0..6 {
+                let at = next(12);
+                let start = b.rope.line_to_char(at);
+                let end = b.rope.line_to_char(at + 1) - 1;
+                b.delete_chars(start, end);
+                b.insert_str(Cursor::new(at, 0), pool[next(pool.len())]);
+                cache.invalidate_from(&b, at, at);
+                let fresh = BlockCache::build(&b, true);
+                assert_eq!(cache.kinds, fresh.kinds, "{}", b.rope);
+                assert_eq!(cache.carry, fresh.carry, "{}", b.rope);
+            }
+        }
     }
 
     #[test]
@@ -834,6 +1106,6 @@ mod tests {
         assert_eq!(cache.kinds[4], BlockKind::FenceOpen(String::new()));
         assert!(matches!(cache.kinds[5], BlockKind::FenceBody { .. }));
         assert_eq!(cache.kinds[6], BlockKind::FenceClose);
-        assert!(!cache.carry.contains(&Carry::InMath));
+        assert!(!cache.carry.contains(&Carry::from(Open::InMath)));
     }
 }

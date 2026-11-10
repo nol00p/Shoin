@@ -17,7 +17,7 @@
 //!     rather than a second, differently-opinionated highlighter.
 
 use crate::config::schema::MarkdownConfig;
-use crate::render::markdown::block::{classify, has_cell_separator, leading_ws_cols, BlockKind, Carry, Marker};
+use crate::render::markdown::block::{classify, has_cell_separator, leading_ws_cols, BlockKind, Carry, Marker, Open};
 use crate::render::markdown::code::{self, Class, Cont, Lang};
 use crate::render::markdown::inline::{self, Inline};
 use crate::render::theme::{Color, Theme};
@@ -81,11 +81,13 @@ pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
 
 /// The document's own title: its first heading, at whatever level.
 fn first_heading(text: &str, md: &MarkdownConfig) -> Option<String> {
-    let mut carry = Carry::None;
+    let mut carry = Carry::default();
     for (i, line) in text.lines().enumerate() {
         let (kind, next) = classify(line, &carry, i == 0, md.math);
+        let in_list = next.in_list();
         carry = next;
-        if let BlockKind::Heading(_) = kind {
+        // A heading inside a list item heads that item, not the page.
+        if let (BlockKind::Heading(_), false) = (&kind, in_list) {
             let body = line.trim_start().trim_start_matches('#').trim();
             return Some(plain_text(body, md));
         }
@@ -117,6 +119,9 @@ struct Body<'a> {
     lists: Vec<Level>,
     /// Whether an `<li>` element is open and still awaiting its `</li>`.
     item_open: bool,
+    /// Whether that item already holds text or a block, so further text in
+    /// it is a paragraph of its own rather than the item's first line.
+    item_filled: bool,
     /// Whether that item is still taking continuation lines. A blank line ends
     /// the LAZY continuation without closing the item — that is what makes a
     /// loose list one list rather than two.
@@ -126,7 +131,9 @@ struct Body<'a> {
     table: Vec<String>,
     /// Raw lines of the display math block being accumulated.
     math_block: Vec<String>,
-    fence: Option<(Option<Lang>, Cont)>,
+    /// The open fence: its language, the lexer state, and its indent, which
+    /// is stripped from its lines.
+    fence: Option<(Option<Lang>, Cont, usize)>,
 }
 
 impl<'a> Body<'a> {
@@ -138,6 +145,7 @@ impl<'a> Body<'a> {
             para: Vec::new(),
             lists: Vec::new(),
             item_open: false,
+            item_filled: false,
             lazy: false,
             quote: 0,
             table: Vec::new(),
@@ -147,7 +155,7 @@ impl<'a> Body<'a> {
     }
 
     fn run(mut self, text: &str) -> String {
-        let mut carry = Carry::None;
+        let mut carry = Carry::default();
         for (i, line) in text.lines().enumerate() {
             let (kind, next) = classify(line, &carry, i == 0, self.md.math);
             // `tables = false` turns a table back into the prose it also is,
@@ -158,7 +166,7 @@ impl<'a> Body<'a> {
             };
             // The classifier's word decides where a math block ends, so this
             // walk cannot group lines differently from the editor.
-            let math_continues = next == Carry::InMath;
+            let math_continues = next.open == Open::InMath;
             carry = next;
             self.line(line, &kind, math_continues);
         }
@@ -173,7 +181,8 @@ impl<'a> Body<'a> {
             BlockKind::FrontMatter => {}
 
             BlockKind::FenceOpen(info) => {
-                self.close_all();
+                let indent = leading_ws_cols(line);
+                self.open_block(indent);
                 let lang = if self.md.code_syntax { Lang::from_info(info) } else { None };
                 // The `language-x` class is emitted for ANY info string, known
                 // or not: it is what a reader's own stylesheet, or a highlighter
@@ -184,17 +193,22 @@ impl<'a> Body<'a> {
                     false => format!(" class=\"language-{}\"", escape_attr(word)),
                 };
                 self.out.push_str(&format!("<pre><code{class}>"));
-                self.fence = Some((lang, Cont::None));
+                self.fence = Some((lang, Cont::None, indent));
             }
             BlockKind::FenceBody { .. } => {
                 // The state is taken from the fence we opened, not from the
                 // kind: an exported document is walked from the top, so this
                 // walk's own lexer state is the authoritative one.
-                let (lang, cont) = self.fence.unwrap_or((None, Cont::None));
-                let (html, next) = highlight(line, lang, cont);
+                let (lang, cont, indent) = self.fence.unwrap_or((None, Cont::None, 0));
+                // As in CommonMark, a fence indented N columns takes up to N
+                // columns of indent off each of its lines: code nested in an
+                // item lines up with the item, not the page.
+                let strip = leading_ws_cols(line).min(indent);
+                let line: String = line.chars().skip(strip).collect();
+                let (html, next) = highlight(&line, lang, cont);
                 self.out.push_str(&html);
                 self.out.push('\n');
-                self.fence = Some((lang, next));
+                self.fence = Some((lang, next, indent));
             }
             BlockKind::FenceClose => {
                 self.out.push_str("</code></pre>\n");
@@ -213,7 +227,7 @@ impl<'a> Body<'a> {
             }
 
             BlockKind::Heading(level) => {
-                self.close_all();
+                self.open_block(leading_ws_cols(line));
                 let body = line.trim_start().trim_start_matches('#').trim();
                 let id = slug(&plain_text(body, self.md));
                 let n = (*level).clamp(1, 6);
@@ -225,7 +239,7 @@ impl<'a> Body<'a> {
             }
 
             BlockKind::Rule => {
-                self.close_all();
+                self.open_block(leading_ws_cols(line));
                 self.out.push_str("<hr>\n");
             }
 
@@ -253,6 +267,7 @@ impl<'a> Body<'a> {
                 let class = if checked.is_some() { " class=\"task\"" } else { "" };
                 self.out.push_str(&format!("<li{class}>{box_html}"));
                 self.item_open = true;
+                self.item_filled = false;
                 self.lazy = true;
                 self.para.push(item_body(line).to_string());
             }
@@ -284,8 +299,9 @@ impl<'a> Body<'a> {
             BlockKind::Paragraph => {
                 self.flush_table();
                 self.flush_math_block();
+                // Not lazy, it stays in the items it is indented deeper than.
                 if !self.lazy && self.quote == 0 {
-                    self.close_lists();
+                    self.close_lists_from(leading_ws_cols(line));
                 }
                 self.para.push(line.trim().to_string());
             }
@@ -301,10 +317,7 @@ impl<'a> Body<'a> {
                     // indented deeper than, and the rest close: the same call
                     // `Lists::bounds` makes in the editor.
                     if !self.lazy {
-                        let indent = leading_ws_cols(line);
-                        while self.lists.last().is_some_and(|l| usize::from(l.indent) >= indent) {
-                            self.pop_list();
-                        }
+                        self.close_lists_from(leading_ws_cols(line));
                     }
                 }
                 self.math_block.push(line.to_string());
@@ -328,8 +341,9 @@ impl<'a> Body<'a> {
         let html = inline_html(joined.trim(), self.md, self.base);
         // Inside an item the text IS the item; everywhere else — including
         // inside a blockquote — it is a paragraph of its own.
-        if self.item_open {
+        if self.item_open && !self.item_filled {
             self.out.push_str(&html);
+            self.item_filled = true;
         } else {
             self.out.push_str(&format!("<p>{html}</p>\n"));
         }
@@ -382,7 +396,34 @@ impl<'a> Body<'a> {
         self.out.push_str(if l.ordered { "</ol>\n" } else { "</ul>\n" });
         // Whatever list is left below has an item open around what just closed.
         self.item_open = !self.lists.is_empty();
+        self.item_filled = true;
         self.lazy = self.item_open;
+    }
+
+    /// Close the lists whose items a line at `indent` is not deeper than:
+    /// it stays in the rest, as in the editor (`Lists::bounds`).
+    fn close_lists_from(&mut self, indent: usize) {
+        while self.lists.last().is_some_and(|l| usize::from(l.indent) >= indent) {
+            self.pop_list();
+        }
+        if self.lists.is_empty() {
+            self.close_item();
+        }
+    }
+
+    /// Start a block that is not text (a fence, heading or rule): whatever
+    /// is pending ends, and it goes in the items it is indented deeper than.
+    /// It never joins an item lazily, and text after it does not either.
+    fn open_block(&mut self, indent: usize) {
+        self.flush_para();
+        self.flush_table();
+        self.flush_math_block();
+        self.close_quote();
+        self.close_lists_from(indent);
+        if self.item_open {
+            self.item_filled = true;
+        }
+        self.lazy = false;
     }
 
     fn close_lists(&mut self) {
@@ -475,6 +516,9 @@ impl<'a> Body<'a> {
             "<div class=\"math display\">\\[{}\\]</div>\n",
             escape(inner)
         ));
+        if self.item_open {
+            self.item_filled = true;
+        }
     }
 
     fn close_all(&mut self) {
@@ -932,6 +976,56 @@ mod tests {
 
     fn body(md: &str) -> String {
         Body::new(&MarkdownConfig::default(), std::path::Path::new("")).run(md)
+    }
+
+    /// A fence indented under an item stays in it, so the list carries on
+    /// and keeps its numbering; its lines lose the fence's indent.
+    #[test]
+    fn a_fence_in_an_item_stays_in_it() {
+        let got = body("1. step\n\n   ```\n   make\n     all\n   ```\n2. next\n");
+        assert_eq!(got.matches("<ol>").count(), 1, "{got}");
+        assert!(got.contains("<li>step<pre><code>make\n  all\n</code></pre>\n</li>\n<li>next"), "{got}");
+        // Under `10.` at column 4: a fence, in the item.
+        let nine = (1..=9).map(|n| format!("{n}. x\n")).collect::<String>();
+        let got = body(&format!("{nine}10. j\n    ```\n    1. code\n    ```\n11. k\n"));
+        assert_eq!(got.matches("<ol>").count(), 1, "{got}");
+        assert!(got.contains("<li>j<pre><code>1. code\n</code></pre>\n</li>"), "{got}");
+        // In a nested item only, the inner list closes around it.
+        let got = body("- a\n  - b\n\n  ```\n  x\n  ```\n");
+        assert!(got.contains("<li>b</li>\n</ul>\n<pre><code>x\n</code></pre>\n</li>\n</ul>"), "{got}");
+        // Not indented: the list ends, even right after the item's text.
+        let got = body("- a\n```\nx\n```\n");
+        assert!(got.contains("<li>a</li>\n</ul>\n<pre><code>x\n"), "{got}");
+    }
+
+    /// Headings and rules indented under an item stay in it too, and text
+    /// after a block in an item is a paragraph of that item.
+    #[test]
+    fn blocks_and_text_after_them_stay_in_the_item() {
+        let nine = (1..=9).map(|n| format!("{n}. x\n")).collect::<String>();
+        let got = body(&format!("{nine}10. j\n    # head\n    ---\n11. k\n"));
+        assert_eq!(got.matches("<ol>").count(), 1, "{got}");
+        assert!(got.contains("<li>j<h1 id=\"head\">head</h1>\n<hr>\n</li>\n<li>k"), "{got}");
+        let got = body("1. step\n\n   ```\n   make\n   ```\n\n   then run it\n2. next\n");
+        assert_eq!(got.matches("<ol>").count(), 1, "{got}");
+        assert!(got.contains("</code></pre>\n<p>then run it</p>\n</li>\n<li>next"), "{got}");
+        // A loose item's second paragraph is a paragraph, not glued on.
+        let got = body("- a\n\n  more\n- b\n");
+        assert!(got.contains("<li>a<p>more</p>\n</li>\n<li>b"), "{got}");
+        // After a nested list closes, the parent's text goes on as a paragraph.
+        let got = body("- a\n  - b\n\n  more\n");
+        assert!(got.contains("</ul>\n<p>more</p>\n</li>"), "{got}");
+        // Unindented after a blank line, text still ends the list.
+        let got = body("- a\n\n  ```\n  x\n  ```\n\nafter\n");
+        assert!(got.contains("</ul>\n<p>after</p>"), "{got}");
+    }
+
+    /// The page title is the first heading outside any list item.
+    #[test]
+    fn a_heading_in_an_item_is_not_the_title() {
+        let md = MarkdownConfig::default();
+        assert_eq!(first_heading("- a\n    # Notes\n# Real\n", &md).as_deref(), Some("Real"));
+        assert_eq!(first_heading("- a\n  # Notes\n", &md), None);
     }
 
     #[test]
