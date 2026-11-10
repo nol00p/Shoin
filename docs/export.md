@@ -55,6 +55,11 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   exports as plain text; `math = false` then also reaches `pdf`, where `$`
   stays a dollar sign.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
+- In `html`, a wiki link becomes a link to `<note>.html`. A wiki link whose
+  target has a scheme (`[[https://…]]`) or starts with `//` exports as plain
+  text: it names an address, not a note. In `txt` a wiki link is its label.
+- A link or picture title (`[a](url "title")`) becomes the `title`
+  attribute in `html`; `txt` drops it.
 - A relative picture path is read from the document's folder. `md` written
   to another folder gets its picture paths rewritten to work from there;
   `pdf` hands pandoc absolute paths, so it works from any folder. `txt`

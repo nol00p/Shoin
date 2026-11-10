@@ -577,21 +577,21 @@ fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: b
             Inline::Code => out.push_str(&format!("<code>{}</code>", escape(&inner))),
             Inline::Link if in_link => out.push_str(&prose()),
             Inline::Link => {
-                let url = url_of(&whole).unwrap_or(&inner);
+                let (url, title) = inline::destination(sp, line).unwrap_or_else(|| (inner.clone(), None));
                 let text = inline_in(&inner, md, base, true);
-                out.push_str(&format!("<a href=\"{}\">{text}</a>", safe_href(url)));
+                out.push_str(&format!("<a href=\"{}\"{}>{text}</a>", safe_href(&url), title_attr(title)));
             }
             Inline::Autolink if in_link => out.push_str(&escape(&inner)),
             Inline::Autolink => {
                 out.push_str(&format!("<a href=\"{}\">{}</a>", safe_href(&inner), escape(&inner)));
             }
             Inline::Image => {
-                let url = inline::destination(sp, line).map(|(u, _)| u).unwrap_or_default();
-                let url = url.as_str();
+                let (url, title) = inline::destination(sp, line).unwrap_or_default();
                 out.push_str(&format!(
-                    "<img src=\"{}\" alt=\"{}\">",
-                    safe_src(&inline_src(url, base)),
-                    escape(&inner)
+                    "<img src=\"{}\" alt=\"{}\"{}>",
+                    safe_src(&inline_src(&url, base)),
+                    escape(&inner),
+                    title_attr(title)
                 ));
             }
             Inline::WikiLink if in_link => out.push_str(&escape(wiki_parts(&inner).2)),
@@ -636,10 +636,11 @@ fn wiki_parts(inner: &str) -> (&str, Option<&str>, &str) {
 /// A target with a scheme in it (`[[javascript:…]]`, `[[https://…]]`) is not a
 /// note name, so it is not a link either: the label is kept as plain text. A
 /// `:` counts as a scheme's when it comes before the first `/`, which is how a
-/// browser would read it; `[[a/b:c]]` is a path and stays a link.
+/// browser would read it; `[[a/b:c]]` is a path and stays a link. Nor is
+/// `[[//host/x]]`, which a browser reads as an address on another host.
 fn wiki_link(inner: &str) -> String {
     let (file, section, label) = wiki_parts(inner);
-    if file.split('/').next().is_some_and(|head| head.contains(':')) {
+    if file.split('/').next().is_some_and(|head| head.contains(':')) || off_host(file) {
         return escape(label);
     }
     let mut href = String::new();
@@ -651,6 +652,17 @@ fn wiki_link(inner: &str) -> String {
         href.push_str(&slug(s));
     }
     format!("<a class=\"wiki\" href=\"{}\">{}</a>", safe_href(&href), escape(label))
+}
+
+/// Whether a browser reads `file` as `//host/…`, an address on another host:
+/// it skips leading controls and spaces, drops tabs and newlines, and takes
+/// `\\` for `/`.
+fn off_host(file: &str) -> bool {
+    let mut seps = file
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'));
+    matches!((seps.next(), seps.next()), (Some('/' | '\\'), Some('/' | '\\')))
 }
 
 /// Inline markup removed rather than translated — for a `<title>` and for the
@@ -686,11 +698,9 @@ fn plain_text(line: &str, md: &MarkdownConfig) -> String {
     out
 }
 
-/// The `url` from `[text](url)`.
-fn url_of(whole: &str) -> Option<&str> {
-    let open = whole.rfind("](")?;
-    let close = whole.rfind(')')?;
-    (close > open + 2).then(|| whole[open + 2..close].trim())
+/// ` title="…"` for a link or picture that has one.
+fn title_attr(title: Option<String>) -> String {
+    title.map(|t| format!(" title=\"{}\"", escape_attr(&t))).unwrap_or_default()
 }
 
 /// A heading's anchor: lowercase, words joined by hyphens. The GitHub form,
@@ -1585,6 +1595,34 @@ mod tests {
         assert!(got.contains("<a class=\"wiki\" href=\"a/b:c.html\">a/b:c</a>"), "{got}");
     }
 
+    /// A title is a title, not part of the address; `<…>` is unwrapped.
+    #[test]
+    fn link_and_image_titles_become_attributes() {
+        let got = body("![alt](pic.png \"the \\\"title\\\"\") [x](<a b.md> \"it's\") [y](u (paren))\n");
+        assert!(got.contains("<img src=\"pic.png\" alt=\"alt\" title=\"the &quot;title&quot;\">"), "{got}");
+        assert!(got.contains("<a href=\"a b.md\" title=\"it&#39;s\">x</a>"), "{got}");
+        assert!(got.contains("<a href=\"u\" title=\"paren\">y</a>"), "{got}");
+        let got = body("[z](https://x.y/a_(b))\n");
+        assert!(got.contains("<a href=\"https://x.y/a_(b)\">z</a>"), "{got}");
+        // No title, no attribute.
+        let got = body("[w](https://x.y)\n");
+        assert!(got.contains("<a href=\"https://x.y\">w</a>"), "{got}");
+    }
+
+    /// `//host/x` is an address on another host, not a note.
+    #[test]
+    fn a_wiki_link_cannot_be_protocol_relative() {
+        for src in ["[[//evil.example/x|w]]", "[[\\\\evil.example/x|w]]", "[[/\\evil.example|w]]", "[[\u{1}//evil.example|w]]"] {
+            let got = body(&format!("{src}\n"));
+            assert!(!got.contains("evil"), "{src:?}: {got}");
+            assert!(!got.contains("class=\"wiki\""), "{src:?}: {got}");
+            assert!(got.contains(">w<") || got.contains("<p>w</p>"), "{src:?} keeps its label: {got}");
+        }
+        // A rooted path is still a note.
+        let got = body("[[/notes/a]]\n");
+        assert!(got.contains("href=\"/notes/a.html\""), "{got}");
+    }
+
     /// Every `href` and `src` value in `html`.
     fn addresses(html: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -1631,6 +1669,7 @@ mod tests {
             "livescript:x",
             "javascript://%0aalert(1)",
             "a/b:c",
+            "//evil.example/x",
         ];
         for t in targets {
             let md = format!(

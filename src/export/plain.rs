@@ -186,26 +186,26 @@ fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
             }
             Inline::Link => {
                 let text = strip_in(&inner, md, true);
-                let whole: String = chars[sp.outer.clone()].iter().collect();
-                match url_of(&whole) {
-                    Some(url) if !in_link && url != text => out.push_str(&format!("{text} ({url})")),
+                match inline::destination(sp, line) {
+                    Some((url, _)) if !in_link && !url.is_empty() && url != text => {
+                        out.push_str(&format!("{text} ({url})"))
+                    }
                     _ => out.push_str(&text),
                 }
             }
             Inline::Image => out.push_str(&format!("[image: {inner}]")),
+            // What the reader sees in the editor: the label after `|`, or
+            // the target when there is none.
+            Inline::WikiLink => match inner.split_once('|') {
+                Some((_, label)) => out.push_str(label.trim()),
+                None => out.push_str(inner.trim()),
+            },
             _ => out.push_str(&inner),
         }
         i = sp.outer.end;
     }
     out.extend(&chars[i.min(chars.len())..]);
     out
-}
-
-/// The `url` from `[text](url)`.
-fn url_of(whole: &str) -> Option<&str> {
-    let open = whole.rfind("](")?;
-    let close = whole.rfind(')')?;
-    (close > open + 2).then(|| whole[open + 2..close].trim())
 }
 
 #[cfg(test)]
@@ -253,6 +253,15 @@ mod tests {
         assert_eq!(render("[**bold** `c`](https://x.y)\n", 72, false, &md), "bold c (https://x.y)\n");
         assert_eq!(render("*a ~~b~~ ==c==*\n", 72, false, &md), "a b c\n");
         assert_eq!(render("`**kept**`\n", 72, false, &md), "**kept**\n");
+    }
+
+    /// A wiki link reads as its label; a title is not part of an address.
+    #[test]
+    fn wiki_links_read_as_their_labels_and_titles_go() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("see [[note|the note]] and [[other]]\n", 72, false, &md), "see the note and other\n");
+        assert_eq!(render("[docs](<a b.md> \"T\")\n", 72, false, &md), "docs (a b.md)\n");
+        assert_eq!(render("[w](https://x.y/a_(b))\n", 72, false, &md), "w (https://x.y/a_(b))\n");
     }
 
     #[test]
