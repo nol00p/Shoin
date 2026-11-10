@@ -1,7 +1,8 @@
 # Files
 
 Shoin saves atomically, never autosaves unless you ask, and never quietly
-overwrites changes made by something else. When a file changes on disk while
+overwrites changes made by something else. If it crashes or is killed with
+unsaved work, that work goes to a recovery file. When a file changes on disk while
 you have unsaved work, `:diff` lets you merge the two.
 
 ## Saving
@@ -49,6 +50,22 @@ unsaved changes?**
   :revert!   take theirs — re-read the file, discarding my changes
 ```
 
+## After a crash
+
+Shoin writes nothing while it runs that you did not ask for. The one exception
+is when it dies with unsaved work: a crash, a `kill`, or the terminal window
+closing. Then each modified buffer is written to a recovery file beside its
+file, and the paths are printed once the terminal is back:
+
+```
+  notes.md                  your file, as last saved
+  notes.md.shoin-recover    the text you had not saved
+```
+
+Opening `notes.md` again says the recovery file is there. Nothing applies it
+for you: compare the two (`diff notes.md notes.md.shoin-recover`), keep what
+you want, and delete the recovery file.
+
 ## Merging with :diff
 
 `:diff` lines your buffer up against the file, row for row, with a filler bar
@@ -94,6 +111,11 @@ version and then the file's, in the order shown on screen.
   still does it on request.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
+- A recovery file is written on a crash, `SIGTERM` or `SIGHUP` only. A
+  normal quit, `:q!` included, writes none. A buffer with no filename, or one
+  whose folder refuses the write, goes to
+  `$XDG_STATE_HOME/shoin/recover-<pid>-<n>.md` (`~/.local/state/shoin/` when
+  `XDG_STATE_HOME` is unset). Recovery files are readable by you only.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
   separator (U+2028) stays inside its line and is saved as it was. A form
   feed, a lone `\r` and other control characters show as nothing on screen.

@@ -705,6 +705,12 @@ impl App {
             self.term_size = (size.width, size.height);
         }
         while !self.quit {
+            // Keep the crash-recovery copy of the unsaved buffers current, and
+            // say so when an open file has a recovery file beside it.
+            if let Some(text) = crate::recover::tick(self.docs.iter().map(|d| &d.buffer)) {
+                self.notify(text, FlashKind::Error);
+                self.needs_redraw = true;
+            }
             // Before the draw, so their status lines reach the same frame.
             // Disk before autosave: a clean buffer that just took the file's
             // changes has nothing to write, and a conflicted one should be
@@ -2781,6 +2787,11 @@ impl App {
     fn spawn_opener(&mut self, arg: &str) {
         if arg.starts_with('-') {
             self.notify("refusing a target that starts with '-'", FlashKind::Error);
+            return;
+        }
+        // No test may ever open a browser or a file manager.
+        if cfg!(test) {
+            self.notify(format!("opened {arg}"), FlashKind::Info);
             return;
         }
         let cmd = if cfg!(target_os = "macos") {
@@ -11002,3 +11013,7 @@ mod tests {
         assert_eq!(text(&app), "ab\n");
     }
 }
+
+#[cfg(test)]
+#[path = "app_fuzz.rs"]
+mod fuzz;

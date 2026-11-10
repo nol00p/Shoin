@@ -25,6 +25,7 @@ mod fs;
 mod help;
 mod image;
 mod input;
+mod recover;
 mod render;
 mod text;
 mod transclude;
@@ -292,14 +293,33 @@ fn main() -> Result<()> {
     // `ratatui::init`'s panic hook restores raw mode and the screen but knows
     // nothing of the modes above: a crash would leave the shell with mouse
     // reports and kitty-encoded keys. Release them first, then run its hook.
+    //
+    // The unsaved text goes to recovery files FIRST: it is the one thing a
+    // crash can lose for good, and nothing after it may get the chance.
     let restore_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let written = recover::dump();
         release_terminal_modes();
         restore_hook(info);
+        recover::report(&written);
     }));
+    // SIGTERM and SIGHUP (the window closed) would end the process where it
+    // stands, terminal modes and unsaved text with it. Caught, they end it the
+    // way a crash does, from a thread of their own.
+    recover::catch_signals(|sig| {
+        let written = recover::dump();
+        release_terminal_modes();
+        ratatui::restore();
+        recover::report(&written);
+        std::process::exit(128 + sig);
+    });
     let result = app.run_loop(&mut terminal);
+    // An error that ends the loop (a terminal that went away) leaves the
+    // buffers unsaved: the editor is dying, so the text is kept.
+    let written = if result.is_err() { recover::dump() } else { Vec::new() };
     release_terminal_modes();
     ratatui::restore();
+    recover::report(&written);
 
     result
 }

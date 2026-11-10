@@ -15,7 +15,8 @@
 //!     is it), and a decoder would be a dependency plus a decompression bomb
 //!     in the render path.
 //!   * The bytes are sent to the terminal verbatim, in the file's own format.
-//!     Both protocols below take PNG/JPEG/GIF as they are.
+//!     iTerm2's protocol takes PNG, JPEG and GIF as they are; kitty's takes
+//!     only PNG (`f=100`), so a JPEG or GIF keeps its box but no pixels there.
 //!   * A file that is not one of the formats here is not an image, even if it
 //!     ends in `.png`. The header is the authority.
 
@@ -39,8 +40,9 @@ pub fn looks_like_image(path: &Path) -> bool {
 pub struct Info {
     pub width: u32,
     pub height: u32,
-    /// PNG, JPEG and GIF are what both graphics protocols accept verbatim.
-    /// A WEBP or BMP still measures — it just cannot be sent as pixels.
+    /// PNG, JPEG and GIF are what iTerm2's protocol accepts verbatim (kitty's
+    /// takes PNG alone: `draw` holds the other two back there). A WEBP or BMP
+    /// still measures — it just cannot be sent as pixels.
     pub sendable: bool,
 }
 
@@ -272,6 +274,11 @@ pub fn draw(protocol: Protocol, bytes: &[u8], cols: u16, rows: u16) -> String {
         // the caret ends up under the picture and the next frame draws from
         // there. The payload is chunked at 4096 base64 bytes, with `m=1` on
         // every chunk but the last — kitty's own limit, not ours.
+        //
+        // `f=100` is PNG and only PNG: the protocol's file formats are raw
+        // RGB, RGBA and PNG. A JPEG or GIF sent under it would be a PNG that
+        // fails to decode, so it is not sent; its box and caption remain.
+        Protocol::Kitty if png(bytes).is_none() => String::new(),
         Protocol::Kitty => {
             let mut out = String::new();
             let chunks: Vec<&str> = data.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
@@ -403,7 +410,7 @@ mod tests {
         assert!(iterm.ends_with('\x07'));
         assert!(iterm.contains("Zm9v"), "the payload is base64");
 
-        let kitty = draw(Protocol::Kitty, b"foo", 10, 5);
+        let kitty = draw(Protocol::Kitty, PNG_1X1, 10, 5);
         assert!(kitty.starts_with("\x1b_Ga=T,f=100,C=1,c=10,r=5,m=0;"));
         assert!(kitty.contains("C=1"), "the cursor must stay where the editor put it");
         assert!(kitty.ends_with("\x1b\\"));
@@ -412,11 +419,31 @@ mod tests {
         assert_eq!(draw(Protocol::Kitty, b"foo", 0, 5), "", "and nothing for an empty box");
     }
 
+    /// Kitty's `f=100` is PNG only, so a JPEG or GIF is not sent there (the
+    /// box and caption still show); iTerm2 still gets them verbatim.
+    #[test]
+    fn kitty_is_sent_png_only() {
+        let jpg = [0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x2C, 0x02, 0x58, 0x00, 0x00];
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&[0x20, 0x00, 0x10, 0x00]);
+        for bytes in [&jpg[..], &gif[..]] {
+            assert!(probe(bytes).unwrap().sendable, "still sendable: iTerm2 takes it");
+            assert_eq!(draw(Protocol::Kitty, bytes, 10, 5), "");
+            let iterm = draw(Protocol::Iterm2, bytes, 10, 5);
+            assert_eq!(
+                iterm,
+                format!("\x1b]1337;File=inline=1;width=10;height=5;preserveAspectRatio=1:{}\x07", base64(bytes))
+            );
+        }
+        assert!(!draw(Protocol::Kitty, PNG_1X1, 10, 5).is_empty());
+    }
+
     /// Kitty caps a chunk at 4096 base64 bytes, and every chunk but the last
     /// has to say more is coming.
     #[test]
     fn a_big_image_is_chunked_for_kitty() {
-        let big = vec![0u8; 9000]; // 12000 base64 bytes → three chunks
+        let mut big = PNG_1X1.to_vec();
+        big.resize(9000, 0); // 12000 base64 bytes → three chunks
         let seq = draw(Protocol::Kitty, &big, 10, 5);
         assert_eq!(seq.matches("\x1b_G").count(), 3, "three chunks");
         assert_eq!(seq.matches("m=1").count(), 2, "the first two say 'more'");
