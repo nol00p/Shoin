@@ -1276,6 +1276,11 @@ pub fn locate_drag(app: &App, area: Rect, col: u16, row: u16) -> Option<Cursor> 
 fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Cursor> {
     let cfg = &app.config;
     let rect = focused_rect(app, area)?;
+    // A pane squeezed to nothing (a tiny terminal, a split in a narrow one) has
+    // no cell to land on, and the clamps below would get `min > max`.
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
     // A click outside the pane — in the tree sidebar, say — is not a position.
     if !clamp && (col < rect.x || col >= rect.right() || row < rect.y || row >= rect.bottom()) {
         return None;
@@ -3008,6 +3013,23 @@ mod tests {
         assert_eq!(end.line, last, "the last line");
         // Left of the pane clamps back to its first column.
         assert_eq!(locate_drag(&app, area, 0, 2).map(|c| c.col), Some(0));
+    }
+
+    /// A drag in a terminal so small the focused pane has no width or height
+    /// is not a position — and must not panic on an inverted clamp.
+    #[test]
+    fn a_drag_in_an_empty_pane_does_not_panic() {
+        for (w, h) in [(3, 2), (1, 1)] {
+            let mut app = app_with("# One\n\nsecond paragraph here\n");
+            app.split_pane_for_test(true);
+            let area = Rect { x: 0, y: 0, width: w, height: h };
+            for col in 0..=w + 1 {
+                for row in 0..=h + 1 {
+                    let _ = locate_drag(&app, area, col, row);
+                    let _ = locate_click(&app, area, col, row);
+                }
+            }
+        }
     }
 
     /// The theme background fills the whole surface, so a theme renders on its
