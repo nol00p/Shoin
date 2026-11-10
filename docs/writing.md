@@ -23,6 +23,9 @@ On a plain list item, `gt` adds an empty checkbox. `gl` writes a link and `gf`
 walks it — see [Notes](notes.md). In Visual mode, `<leader>b` and `<leader>i` also
 toggle bold and italic.
 
+Emphasis can be written with `*` or `_`: `*italic*` and `_italic_`,
+`**bold**` and `__bold__`. `gb` and `gi` write the `*` forms.
+
 `ga` pads every cell of a table to its column's width, in the file itself,
 so the `|`s line up in any editor. The delimiter row is redrawn to match and
 keeps its `:--:` alignment markers; cells in a right or centered column are
@@ -59,6 +62,9 @@ setting under `[layout]` — see [Configuration](configuration.md).
 - Relative line numbers read `0` on the cursor's line. A margin too narrow to
   hold the numbers (`align = "left"`, or a narrow terminal) goes without
   rather than crowding the text.
+- A `*`, `_`, `~~` or `==` with a space on its inner side stays plain text, so
+  `2 * 3 * 4` is not italic. A `_` inside a word stays plain too:
+  `snake_case_name`.
 - `shoin --zen notes.md` starts in zen mode.
 - To read a page rather than write it, `:view` (or `shoin -R`) conceals every
   line and refuses edits — see [Reading](reading.md#read-only).

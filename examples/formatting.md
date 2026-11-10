@@ -29,6 +29,9 @@ This paragraph has **bold**, *italic*, ***both***, ~~struck~~, ==highlit==,
 and `inline code`. A [labelled link](https://example.com), a [[Wiki Page]],
 a #project tag, a bare https://example.com/path, and an escaped \*star\*.
 
+Underscores work too: __bold__ and _italic_. A snake_case_name and
+2 * 3 * 4 stay plain.
+
 ## Math
 
 Inline formulas like $x^2 + y^2 = r^2$, $\alpha \rightarrow \beta$, and
