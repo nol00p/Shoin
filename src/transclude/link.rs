@@ -226,15 +226,15 @@ pub fn section_line(text: &str, section: &Section) -> Option<usize> {
         Section::All => Some(0),
         Section::Heading(want) => {
             let want = want.trim().to_lowercase();
-            text.lines()
-                .position(|l| heading_of(l).is_some_and(|(_, t)| t.trim().to_lowercase() == want))
+            let mut fences = super::Fences::default();
+            text.lines().position(|l| {
+                !fences.literal(l)
+                    && heading_of(l).is_some_and(|(_, t)| t.trim().to_lowercase() == want)
+            })
         }
-        // The same `ends_with` rule `block_with_id` matches on, so a link that
-        // resolves to a block lands on the line that block ends at.
-        Section::Block(id) => {
-            let marker = format!("^{id}");
-            text.lines().position(|l| l.trim_end().ends_with(&marker))
-        }
+        // The same rule `block_with_id` matches on, so a link that resolves to
+        // a block lands on the line that block ends at.
+        Section::Block(id) => block_end(&text.lines().collect::<Vec<_>>(), id),
     }
 }
 
@@ -245,8 +245,12 @@ fn heading_section(text: &str, want: &str) -> Result<String> {
     let mut out: Vec<&str> = Vec::new();
     let mut level = 0usize;
 
+    // A `#` inside a fence is code — a shell comment, most often. It is copied
+    // into the section like any other line, but it never opens or closes one.
+    let mut fences = super::Fences::default();
     for line in text.lines() {
-        if let Some((l, title)) = heading_of(line) {
+        let heading = if fences.literal(line) { None } else { heading_of(line) };
+        if let Some((l, title)) = heading {
             if level == 0 {
                 if title.trim().to_lowercase() == want_lc {
                     level = l;
@@ -269,9 +273,13 @@ fn heading_section(text: &str, want: &str) -> Result<String> {
     Ok(out.join("\n"))
 }
 
-/// `## Title` -> (2, "Title").
+/// `## Title` -> (2, "Title"). Four columns of indent make it an indented
+/// code block instead, as `compile::demote` holds.
 fn heading_of(line: &str) -> Option<(usize, &str)> {
     let t = line.trim_start();
+    if line.len() - t.len() >= 4 {
+        return None;
+    }
     let hashes = t.chars().take_while(|c| *c == '#').count();
     if hashes == 0 || hashes > 6 {
         return None;
@@ -289,7 +297,7 @@ fn heading_of(line: &str) -> Option<(usize, &str)> {
 fn block_with_id(text: &str, id: &str) -> Result<String> {
     let marker = format!("^{id}");
     let lines: Vec<&str> = text.lines().collect();
-    let Some(end) = lines.iter().position(|l| l.trim_end().ends_with(&marker)) else {
+    let Some(end) = block_end(&lines, id) else {
         bail!("no block ^{id}");
     };
     let mut start = end;
@@ -301,6 +309,16 @@ fn block_with_id(text: &str, id: &str) -> Result<String> {
         *last = last.trim_end().trim_end_matches(&marker).trim_end().to_string();
     }
     Ok(out.join("\n"))
+}
+
+/// The line a `^id` block ends on: the first line, outside fenced code, that
+/// ends with the marker. Inside a fence a trailing `^abc` is code.
+fn block_end(lines: &[&str], id: &str) -> Option<usize> {
+    let marker = format!("^{id}");
+    let mut fences = super::Fences::default();
+    lines
+        .iter()
+        .position(|l| !fences.literal(l) && l.trim_end().ends_with(&marker))
 }
 
 /// Remove Obsidian block ids (`^abc123` at the end of a line).
@@ -453,6 +471,52 @@ third para
         let got = extract(doc, &Section::Block("keep".into())).unwrap();
         assert_eq!(got, "second para\nruns two lines");
         assert!(extract(doc, &Section::Block("nope".into())).is_err());
+    }
+
+    /// F06: a `#` comment inside a fenced block is code, not a heading. Read
+    /// as one, it ended the section mid-fence and the export kept an opening
+    /// fence with no close.
+    #[test]
+    fn a_hash_inside_a_fence_does_not_end_the_section() {
+        let doc = "\
+## Setup
+
+```sh
+# install it
+make install
+```
+
+After the code.
+
+## Next
+more
+";
+        let got = extract(doc, &Section::Heading("Setup".into())).unwrap();
+        assert_eq!(got, "## Setup\n\n```sh\n# install it\nmake install\n```\n\nAfter the code.\n");
+        assert_eq!(section_line(doc, &Section::Heading("install it".into())), None);
+        assert!(extract(doc, &Section::Heading("install it".into())).is_err());
+        assert_eq!(section_line(doc, &Section::Heading("next".into())), Some(9));
+    }
+
+    /// An indented code block is literal too: a `#` four columns in is not a
+    /// heading, as `demote` already holds.
+    #[test]
+    fn an_indented_hash_is_not_a_heading() {
+        let doc = "## A\n\n    # not a heading\n\ntext\n\n   ## B\n";
+        let got = extract(doc, &Section::Heading("A".into())).unwrap();
+        assert!(got.contains("# not a heading") && got.contains("text"), "{got}");
+        assert!(!got.contains("## B"), "three columns in is still a heading");
+        assert_eq!(section_line(doc, &Section::Heading("not a heading".into())), None);
+    }
+
+    /// A `^id` at the end of a line inside a fence is code, not an anchor.
+    #[test]
+    fn a_block_id_inside_a_fence_is_not_found() {
+        let doc = "```\necho ^abc\n```\n\nreal ^def\n";
+        assert!(extract(doc, &Section::Block("abc".into())).is_err());
+        assert_eq!(section_line(doc, &Section::Block("abc".into())), None);
+        assert_eq!(extract(doc, &Section::Block("def".into())).unwrap(), "real");
+        assert_eq!(section_line(doc, &Section::Block("def".into())), Some(4));
     }
 
     fn vault(tag: &str) -> PathBuf {
