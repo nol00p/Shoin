@@ -55,3 +55,8 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   exports as plain text; `math = false` then also reaches `pdf`, where `$`
   stays a dollar sign.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
+- A relative picture path is read from the document's folder. `md` written
+  to another folder gets its picture paths rewritten to work from there;
+  `pdf` hands pandoc absolute paths, so it works from any folder. `txt`
+  names a picture as `[image: alt]`. Relative links to other files are not
+  rewritten.

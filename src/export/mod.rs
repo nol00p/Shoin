@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::config::schema::TranscludeConfig;
+use crate::config::schema::{MarkdownConfig, TranscludeConfig};
+use crate::render::markdown::block::{classify, BlockKind, Carry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -92,7 +93,10 @@ pub fn write(
             .with_context(|| format!("creating {}", short(parent)))?;
     }
     match format {
-        Format::Markdown => std::fs::write(dest, flat).with_context(|| short(dest))?,
+        Format::Markdown => {
+            let flat = rebase_images(&flat, source, Some(dest), &page.md);
+            std::fs::write(dest, flat).with_context(|| short(dest))?
+        }
         Format::Text => {
             std::fs::write(dest, plain::render(&flat, page.measure, page.justify, &page.md))
                 .with_context(|| short(dest))?
@@ -104,9 +108,157 @@ pub fn write(
                 .unwrap_or_else(|| "document".into());
             std::fs::write(dest, html::render(&flat, &title, page)).with_context(|| short(dest))?
         }
-        Format::Pdf => write_pdf(&flat, dest, page.md.math)?,
+        Format::Pdf => {
+            let flat = rebase_images(&flat, source, None, &page.md);
+            write_pdf(&flat, source, dest, page.md.math)?
+        }
     }
     Ok(())
+}
+
+/// `markdown` with every relative image path, written against `source`'s
+/// folder, rewritten for a reader in another place: relative to the folder
+/// `to` names, or absolute when `to` is `None` (what pandoc is given, since
+/// it runs in the working directory). Unchanged when `to` is the source's
+/// own folder.
+///
+/// A path that is not there beside the source but is from the working
+/// directory is taken from there, as HTML export does: that is the spelling
+/// an embed compiled before 0.2.4 arrives in. Addresses, absolute paths,
+/// code and fenced blocks are left alone. A path with a space or a
+/// parenthesis is written `<…>`; one that cannot be written that way (`<`,
+/// `>`, `\`) is left as it was.
+fn rebase_images(markdown: &str, source: &Path, to: Option<&Path>, md: &MarkdownConfig) -> String {
+    let Some(from) = folder(source) else {
+        return markdown.to_string();
+    };
+    let to = match to.map(folder) {
+        None => None,
+        Some(Some(to)) if to == from => return markdown.to_string(),
+        Some(Some(to)) => Some(to),
+        Some(None) => return markdown.to_string(),
+    };
+    let mut out = String::with_capacity(markdown.len());
+    let mut carry = Carry::default();
+    for (i, raw) in markdown.split_inclusive('\n').enumerate() {
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let (kind, next) = classify(line, &carry, i == 0, md.math);
+        carry = next;
+        match kind {
+            BlockKind::FenceOpen(_)
+            | BlockKind::FenceBody { .. }
+            | BlockKind::FenceClose
+            | BlockKind::FrontMatter
+            | BlockKind::MathBlock => out.push_str(raw),
+            _ => {
+                out.push_str(&rebase_line(line, &from, to.as_deref(), md));
+                out.push_str(&raw[line.len()..]);
+            }
+        }
+    }
+    out
+}
+
+/// The folder `path` is in, resolved on disk.
+fn folder(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::canonicalize(parent).ok()
+}
+
+/// One line of `rebase_images`, reaching into emphasis the way export does.
+fn rebase_line(line: &str, from: &Path, to: Option<&Path>, md: &MarkdownConfig) -> String {
+    use crate::render::markdown::inline::{self, Inline};
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    for sp in inline::scan(line, md) {
+        if sp.outer.start < i {
+            continue;
+        }
+        out.extend(&chars[i..sp.outer.start]);
+        let whole: String = chars[sp.outer.clone()].iter().collect();
+        match sp.kind {
+            Inline::Bold | Inline::Italic | Inline::BoldItalic | Inline::Strikethrough | Inline::Highlight => {
+                let inner: String = chars[sp.inner.clone()].iter().collect();
+                out.extend(&chars[sp.outer.start..sp.inner.start]);
+                out.push_str(&rebase_line(&inner, from, to, md));
+                out.extend(&chars[sp.inner.end..sp.outer.end]);
+            }
+            Inline::Image => {
+                let alt: String = chars[sp.inner.clone()].iter().collect();
+                match inline::destination(&sp, line).and_then(|(url, title)| {
+                    let url = rebased(&url, from, to)?;
+                    Some((url, title))
+                }) {
+                    Some((url, title)) => {
+                        out.push_str(&format!("![{alt}]({url}"));
+                        if let Some(t) = title {
+                            out.push_str(&format!(" \"{}\"", t.replace('\\', "\\\\").replace('"', "\\\"")));
+                        }
+                        out.push(')');
+                    }
+                    None => out.push_str(&whole),
+                }
+            }
+            _ => out.push_str(&whole),
+        }
+        i = sp.outer.end;
+    }
+    out.extend(&chars[i.min(chars.len())..]);
+    out
+}
+
+/// `url`, relative to `from`, made relative to `to` (absolute without one)
+/// and written as an image destination; `None` when it is not a relative
+/// path or cannot be written.
+fn rebased(url: &str, from: &Path, to: Option<&Path>) -> Option<String> {
+    let scheme = url.split(['/', '?', '#']).next().is_some_and(|head| head.contains(':'));
+    if url.is_empty() || scheme || url.starts_with(['/', '#', '~']) {
+        return None;
+    }
+    let mut target = normal(&from.join(url));
+    if !target.exists() {
+        if let Some(cwd) = std::env::current_dir().ok().map(|d| normal(&d.join(url))).filter(|p| p.exists()) {
+            target = cwd;
+        }
+    }
+    let rel = match to {
+        None => target,
+        Some(to) => {
+            let to = normal(to);
+            let common = target.components().zip(to.components()).take_while(|(a, b)| a == b).count();
+            let mut rel = PathBuf::new();
+            for _ in to.components().skip(common) {
+                rel.push("..");
+            }
+            rel.extend(target.components().skip(common));
+            rel
+        }
+    };
+    let rel = rel.to_string_lossy().into_owned();
+    if rel.is_empty() || rel.contains(['<', '>', '\\', '\n', '\r']) {
+        return None;
+    }
+    Some(match rel.contains(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+        true => format!("<{rel}>"),
+        false => rel,
+    })
+}
+
+/// `p` with `.` and `..` folded away, without touching the disk.
+fn normal(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// A path as an error message should name it. The status line is one row and
@@ -124,7 +276,7 @@ fn short(p: &Path) -> String {
 /// fonts inside a terminal text editor, for output worse than what the tools
 /// people already have produce. `pandoc` was named as the pipeline in SPEC
 /// §14.4 before any of this existed; this just runs it for you.
-fn write_pdf(markdown: &str, dest: &Path, math: bool) -> Result<()> {
+fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -148,6 +300,10 @@ fn write_pdf(markdown: &str, dest: &Path, math: bool) -> Result<()> {
         .arg(if math { "--from=markdown" } else { "--from=markdown-tex_math_dollars" })
         .arg(format!("--pdf-engine={engine}"))
         .args(engine_args(engine))
+        // pandoc runs here, not in the document's folder. Pictures arrive
+        // with absolute paths (`rebase_images`); the resource path covers
+        // any left as written, for the engines that read it.
+        .arg(resource_path(source))
         .arg("--output")
         .arg(dest)
         .stdin(Stdio::piped())
@@ -172,6 +328,17 @@ fn write_pdf(markdown: &str, dest: &Path, math: bool) -> Result<()> {
         bail!("pandoc: {why}");
     }
     Ok(())
+}
+
+/// `--resource-path=<document's folder>:<working directory>`.
+fn resource_path(source: &Path) -> std::ffi::OsString {
+    let folder = source.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let folder = std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let dirs = std::env::join_paths([folder.as_path(), Path::new(".")])
+        .unwrap_or_else(|_| folder.clone().into_os_string());
+    let mut arg = std::ffi::OsString::from("--resource-path=");
+    arg.push(dirs);
+    arg
 }
 
 /// What to say when pandoc is there but no engine is. Homebrew is the easy
@@ -205,9 +372,14 @@ const PDF_ENGINES: &[&str] = &[
 /// Typst 0.15 rejects an empty font list, so every export failed with "font
 /// fallback list must not be empty". Libertinus Serif is built into the typst
 /// binary, so naming it works on any machine with typst, fonts installed or not.
+///
+/// typst also gets `/` as its root, so the absolute picture paths export
+/// writes are found.
 fn engine_args(engine: &str) -> &'static [&'static str] {
     match engine {
-        "typst" => &["--variable=mainfont:Libertinus Serif"],
+        // typst reads files only under its root, which pandoc leaves at its
+        // temporary file's folder, and reads an absolute path from there.
+        "typst" => &["--variable=mainfont:Libertinus Serif", "--pdf-engine-opt=--root=/"],
         _ => &[],
     }
 }
@@ -475,7 +647,112 @@ mod tests {
     #[test]
     fn typst_is_given_a_font_and_the_others_are_left_alone() {
         assert!(engine_args("typst").iter().any(|a| a.starts_with("--variable=mainfont:")));
+        assert!(engine_args("typst").contains(&"--pdf-engine-opt=--root=/"));
         assert!(engine_args("xelatex").is_empty());
+    }
+
+    /// A valid 1x1 PNG, which a PDF engine has to decode for real.
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00,
+        0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01,
+        0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60,
+        0x82,
+    ];
+
+    /// `notes/a.md` with a picture in `notes/img/`, and `notes/my pic (1).png`.
+    fn document_with_pictures(d: &Path) -> PathBuf {
+        let notes = d.join("notes");
+        std::fs::create_dir_all(notes.join("img")).unwrap();
+        std::fs::write(notes.join("img/p.png"), PNG).unwrap();
+        std::fs::write(notes.join("my pic (1).png"), PNG).unwrap();
+        let src = notes.join("a.md");
+        std::fs::write(
+            &src,
+            "# A\n\n![pic](img/p.png) and **![t](<my pic (1).png> \"A \\\"title\\\"\")**\n\n\
+             ![web](https://x.y/p.png) ![abs](/abs/p.png) `![code](img/p.png)`\n\n\
+             ```\n![fenced](img/p.png)\n```\n",
+        )
+        .unwrap();
+        src
+    }
+
+    /// pandoc runs in the working directory, not the document's: the
+    /// document's folder is on its resource path, so a relative picture
+    /// is found from anywhere.
+    #[test]
+    fn pdf_export_finds_pictures_beside_the_document() {
+        if which("pandoc").is_none() || !PDF_ENGINES.iter().any(|e| which(e).is_some()) {
+            return;
+        }
+        let d = vault("pdf-img");
+        let src = d.join("notes/a.md");
+        std::fs::create_dir_all(d.join("notes/img")).unwrap();
+        std::fs::write(d.join("notes/img/p.png"), PNG).unwrap();
+        std::fs::write(d.join("notes/my pic (1).png"), PNG).unwrap();
+        std::fs::write(&src, "# A\n\n![pic](img/p.png) ![b](<my pic (1).png>)\n").unwrap();
+        let dest = d.join("out/a.pdf");
+        write(&src, &dest, Format::Pdf, &TranscludeConfig::default(), &html::Page::default()).unwrap();
+        let bytes = std::fs::read(&dest).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(
+            bytes.windows(13).any(|w| w == b"/Subtype /Ima") || bytes.windows(14).any(|w| w == b"/Subtype/Image"),
+            "the picture is in the PDF"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Exported elsewhere, a relative picture is rewritten to be relative to
+    /// the export; beside the source, the text is left exactly as it was.
+    #[test]
+    fn markdown_export_keeps_pictures_working_from_another_folder() {
+        let d = vault("md-img");
+        let src = document_with_pictures(&d);
+        let cfg = TranscludeConfig::default();
+        let page = html::Page::default();
+
+        let beside = d.join("notes/flat.md");
+        write(&src, &beside, Format::Markdown, &cfg, &page).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&beside).unwrap(),
+            std::fs::read_to_string(&src).unwrap(),
+            "nothing to rewrite beside the source"
+        );
+
+        let dest = d.join("out/deeper/a.md");
+        write(&src, &dest, Format::Markdown, &cfg, &page).unwrap();
+        let got = std::fs::read_to_string(&dest).unwrap();
+        assert!(got.contains("![pic](../../notes/img/p.png)"), "{got}");
+        assert!(got.contains("**![t](<../../notes/my pic (1).png> \"A \\\"title\\\"\")**"), "{got}");
+        assert!(got.contains("![web](https://x.y/p.png) ![abs](/abs/p.png)"), "addresses stay: {got}");
+        assert!(got.contains("`![code](img/p.png)`"), "code is text: {got}");
+        assert!(got.contains("\n![fenced](img/p.png)\n"), "so is a fence: {got}");
+        // Every rewritten path names a real file from the export's folder.
+        for rel in ["../../notes/img/p.png", "../../notes/my pic (1).png"] {
+            assert!(d.join("out/deeper").join(rel).is_file(), "{rel}");
+        }
+
+        // A sibling folder of the source, given relative to nothing.
+        let up = d.join("a.md");
+        write(&src, &up, Format::Markdown, &cfg, &page).unwrap();
+        let got = std::fs::read_to_string(&up).unwrap();
+        assert!(got.contains("![pic](notes/img/p.png)"), "{got}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A picture written `<…>` (spaces, parentheses) reaches the HTML page as
+    /// a `data:` URI, title and all.
+    #[test]
+    fn html_export_inlines_a_picture_with_spaces_in_its_name() {
+        let d = vault("html-img");
+        let src = document_with_pictures(&d);
+        let page = html::Page { base: d.join("notes"), ..html::Page::default() };
+        let dest = d.join("out/a.html");
+        write(&src, &dest, Format::Html, &TranscludeConfig::default(), &page).unwrap();
+        let got = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(got.matches("<img src=\"data:image/png;base64,").count(), 2, "{got}");
+        assert!(!got.contains("my pic"), "{got}");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// Exporting over the document you are exporting would destroy it.

@@ -586,7 +586,8 @@ fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: b
                 out.push_str(&format!("<a href=\"{}\">{}</a>", safe_href(&inner), escape(&inner)));
             }
             Inline::Image => {
-                let url = url_of(&whole).unwrap_or("");
+                let url = inline::destination(sp, line).map(|(u, _)| u).unwrap_or_default();
+                let url = url.as_str();
                 out.push_str(&format!(
                     "<img src=\"{}\" alt=\"{}\">",
                     safe_src(&inline_src(url, base)),
