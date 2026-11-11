@@ -135,6 +135,17 @@ impl History {
         self.grouping = true;
     }
 
+    /// Whether a group is open, so an edit made from outside the command
+    /// (a save that trims, mid-insert) can open it again afterwards.
+    pub fn is_grouping(&self) -> bool {
+        self.grouping
+    }
+
+    /// Whether there is anything to redo, which any new change would drop.
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
     pub fn end_group(&mut self) {
         self.grouping = false;
         self.seal();

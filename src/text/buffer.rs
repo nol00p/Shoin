@@ -109,6 +109,11 @@ pub struct Buffer {
     /// become editable — auditing every mutation site later would not be.
     pub readonly_ranges: Vec<std::ops::Range<usize>>,
 
+    /// Revisions spent by saves that trimmed the text, not yet claimed by the
+    /// app. A save's own edit is not the reader's command: the app takes this
+    /// to keep it out of `.` and the "did this command edit" checks.
+    pub save_revisions: u64,
+
     /// The whole buffer refuses edits: read-only mode (`shoin -R`, `:view`).
     /// The app refuses editing commands before they get here, with a message;
     /// this is the guarantee underneath, for any path that does not.
@@ -134,6 +139,7 @@ impl Buffer {
             conflict: false,
             reload_failed: None,
             readonly_ranges: Vec::new(),
+            save_revisions: 0,
             read_only: false,
             words: std::cell::Cell::new(None),
         }
@@ -170,6 +176,7 @@ impl Buffer {
             conflict: false,
             reload_failed: None,
             readonly_ranges: Vec::new(),
+            save_revisions: 0,
             read_only: false,
             words: std::cell::Cell::new(None),
         })
@@ -220,28 +227,103 @@ impl Buffer {
         if !force && !same_file && path.exists() {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
-        let mtime = save::write_atomic(path, &self.rope, &self.save_options(policy))?;
+        let opts = self.save_options(path, policy);
+        let mut out = save::outgoing(self.rope.to_string(), &opts);
+        // A buffer that refuses the edits (read-only mode, `:view`) is written
+        // as it stands: a file it cannot follow would leave the two apart with
+        // nothing marked modified.
+        let end = self.rope.len_chars();
+        if !out.cuts.iter().all(|r| self.is_editable(r))
+            || (out.added_newline && !self.is_editable(&(end..end)))
+        {
+            out = save::Outgoing::unchanged(self.rope.to_string());
+        }
+        let mtime = save::write_text(path, &out.text, opts.line_ending)?;
         self.disk_mtime = Some(mtime);
+        // The write settled whichever divergence there was: this text IS the
+        // file now. `:w!` is how a reader says "keep mine", so the marker has
+        // to come down here rather than needing its own command.
+        self.conflict = false;
+
+        let edited = !out.cuts.is_empty() || out.added_newline;
+        if edited && self.history.can_redo() {
+            // Taking the edits would be a new change, and a new change drops
+            // the redo stack: a reader who undid to an older version and saved
+            // it would lose the newer one. So the buffer stays as it is, and
+            // says it differs from the file, which no history position holds.
+            self.history.split();
+            self.saved_state = u64::MAX;
+            self.modified = true;
+            return Ok(());
+        }
+        self.take_save_edits(&out, policy.insert_mode);
         // Close any in-flight step first, so what was written corresponds to a
         // sealed position and the next keystroke starts a new one.
         self.history.split();
         self.saved_state = self.history.state();
         self.modified = false;
-        // The write settled whichever divergence there was: this text IS the
-        // file now. `:w!` is how a reader says "keep mine", so the marker has
-        // to come down here rather than needing its own command.
-        self.conflict = false;
         Ok(())
     }
 
-    /// How this buffer's text goes to disk under `policy`.
-    fn save_options(&self, policy: SavePolicy) -> SaveOptions {
+    /// Bring the text to what a save just wrote (`trim_on_save`, the final
+    /// newline), as ONE undo step, so the buffer and the file agree and `u`
+    /// gives the trimmed spaces back. The edits are the ones `save::outgoing`
+    /// made, replayed exactly.
+    fn take_save_edits(&mut self, out: &save::Outgoing, insert_mode: bool) {
+        if out.cuts.is_empty() && !out.added_newline {
+            return;
+        }
+        let before = self.revision;
+        // An autosave can land mid-insert, inside the group the entering
+        // command opened; that group has to be open again afterwards, or each
+        // key typed after it becomes its own undo step.
+        let grouped = self.history.is_grouping();
+        self.history.begin_group(Some(self.cursor));
+        if out.added_newline {
+            let last = self.rope.len_lines() - 1;
+            self.insert_str(Cursor::new(last, self.rope.line(last).len_chars()), "\n");
+        }
+        // Positions in the text as it was; last first, so none moves another.
+        for r in &out.cuts {
+            self.delete_chars(r.start, r.end);
+        }
+        self.history.end_group();
+        if grouped {
+            self.history.begin_group(None);
+        }
+        self.save_revisions += self.revision - before;
+
+        // A dropped final newline can take the cursor's line with it, and a
+        // trim its column. Insert mode may sit just past the end; Normal not.
+        let last = match insert_mode {
+            true => self.rope.len_lines() - 1,
+            false => self.last_line(),
+        };
+        self.cursor.line = self.cursor.line.min(last);
+        let len = self.line_len(self.cursor.line);
+        let max = if insert_mode || len == 0 { len } else { len - 1 };
+        self.cursor.col = self.cursor.col.min(max);
+    }
+
+    /// How this buffer's text goes to `path` under `policy`.
+    fn save_options(&self, path: &Path, policy: SavePolicy) -> SaveOptions {
+        // Mid-insert, the cursor in or after its line's trailing spaces is
+        // typing there: trimming them would eat the space before the next
+        // word. Anywhere else the line is trimmed like any other.
+        let line = self.cursor.line;
+        let body = self.line_text(line).trim_end().chars().count();
+        let typing = policy.insert_mode && self.cursor.col >= body;
         SaveOptions {
             line_ending: self.line_ending,
             // `preserve` answers with what the file arrived with; the other two
             // overrule it. This is the only place that distinction is made.
             final_newline: policy.final_newline.resolve(self.final_newline),
             trim_trailing_whitespace: policy.trim_trailing_whitespace,
+            // The destination decides, not the buffer's old name: `:saveas
+            // notes.md` from a `.txt` gets Markdown's rules. Only `.md` and
+            // `.markdown` are Markdown, whatever the plain-text list says.
+            markdown: open::syntax_for(path, &[]) == Syntax::Markdown,
+            keep_line: typing.then_some(line),
         }
     }
 
@@ -255,7 +337,9 @@ impl Buffer {
         if !force && path.exists() {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
-        save::write_atomic(path, &self.rope, &self.save_options(policy))?;
+        // No line kept for the cursor: the buffer does not follow a copy.
+        let opts = SaveOptions { keep_line: None, ..self.save_options(path, policy) };
+        save::write_atomic(path, &self.rope, &opts)?;
         Ok(())
     }
 
@@ -688,6 +772,7 @@ mod tests {
         SavePolicy {
             trim_trailing_whitespace: false,
             final_newline: save::FinalNewline::Preserve,
+            insert_mode: false,
         }
     }
 
@@ -781,6 +866,221 @@ mod tests {
         assert_eq!(b.rope.to_string(), "new\n");
         assert!(b.undo());
         assert_eq!(b.rope.to_string(), "old\n", "one step");
+    }
+
+    /// A save that changes the text on the way out changes the buffer the
+    /// same way, so `:diff` straight after `:w` finds nothing, and `u` brings
+    /// the trimmed spaces back as one step.
+    #[test]
+    fn the_buffer_takes_what_the_save_wrote() {
+        let d = dir("trim-sync");
+        let path = d.join("n.md");
+        write_old(&path, b"x\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a \nb  \nc\n```\nd \n```\ne\t\n\n\n");
+        let typed = b.rope.to_string();
+        let trim = SavePolicy {
+            trim_trailing_whitespace: true,
+            final_newline: save::FinalNewline::Never,
+            ..policy()
+        };
+
+        // Cursor off the trimmed lines, as after `:` from Normal mode on a
+        // line with nothing to trim.
+        b.cursor = Cursor::new(2, 0);
+        b.save(trim, false).unwrap();
+        let disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(disk, "a\nb  \nc\n```\nd \n```\ne\n\n");
+        assert_eq!(b.rope.to_string(), disk, "the buffer is what the file holds");
+        assert!(!b.modified);
+        let theirs = crate::fs::open::load(&path, &[]).unwrap().rope.to_string();
+        assert_eq!(crate::diff::lines_of(&b.rope.to_string()), crate::diff::lines_of(&theirs));
+
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), typed, "one step");
+        assert!(b.modified, "holding text the file does not have");
+
+        // And the other way: `always` gives the buffer its final newline.
+        write_old(&path, b"x");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a \nb");
+        let always = SavePolicy { final_newline: save::FinalNewline::Always, ..trim };
+        b.save(always, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+        assert_eq!(b.rope.to_string(), "a\nb\n");
+        assert!(!b.modified);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A cursor past the end of its line is typing there (an autosave in
+    /// Insert mode): that line keeps its space, and the insert's open group
+    /// is open again afterwards, so the session stays one undo step.
+    #[test]
+    fn a_save_mid_insert_keeps_the_typing_line_and_the_group() {
+        let d = dir("trim-insert");
+        let path = d.join("n.md");
+        write_old(&path, b"x\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a \nword \n");
+        b.cursor = Cursor::new(1, 5);
+        let trim = SavePolicy {
+            trim_trailing_whitespace: true,
+            final_newline: save::FinalNewline::Preserve,
+            insert_mode: true,
+        };
+
+        b.history.begin_group(Some(b.cursor));
+        b.save(trim, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nword \n");
+        assert_eq!(b.rope.to_string(), "a\nword \n");
+        assert!(b.history.is_grouping(), "the insert's group is open again");
+
+        b.insert_str(Cursor::new(1, 5), "n");
+        b.insert_str(Cursor::new(1, 6), "e");
+        b.history.end_group();
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), "a\nword \n", "the typing is one step");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Read-only mode can still `:w`, but cannot take the trim: the file gets
+    /// the text as it stands, so the two still agree.
+    #[test]
+    fn a_read_only_buffer_is_written_as_it_stands() {
+        let d = dir("trim-ro");
+        let path = d.join("n.md");
+        write_old(&path, b"a \nb\n\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.read_only = true;
+        let policy = SavePolicy {
+            trim_trailing_whitespace: true,
+            final_newline: save::FinalNewline::Never,
+            ..policy()
+        };
+        b.save(policy, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a \nb\n\n");
+        assert_eq!(b.rope.to_string(), "a \nb\n\n");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    fn trim_never() -> SavePolicy {
+        SavePolicy {
+            trim_trailing_whitespace: true,
+            final_newline: save::FinalNewline::Never,
+            ..policy()
+        }
+    }
+
+    /// The newline a save drops can sit before a last line of spaces, not at
+    /// the very end: the buffer once kept `foo\n ` while the file got `foo`.
+    #[test]
+    fn a_trimmed_last_line_and_its_newline_both_go() {
+        let d = dir("trim-last");
+        let path = d.join("n.md");
+        for (typed, saved) in [("foo\n  ", "foo"), ("a\n\n ", "a\n")] {
+            write_old(&path, b"x");
+            let mut b = Buffer::open(path.clone(), &[]).unwrap();
+            b.replace_all(typed);
+            b.cursor = Cursor::new(0, 0);
+            b.save(trim_never(), false).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+            assert_eq!(b.rope.to_string(), saved, "the buffer follows for {typed:?}");
+            assert!(!b.modified);
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Undo to an older version, then save: taking the trim would be a new
+    /// change and drop the redo stack. The file is trimmed, the buffer and its
+    /// redo are left, and the buffer says it differs from the file.
+    #[test]
+    fn a_trimming_save_keeps_the_redo_stack() {
+        let d = dir("trim-redo");
+        let path = d.join("n.md");
+        write_old(&path, b"x\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a \nb\n");
+        b.replace_all("a \nnewer\n");
+        assert!(b.undo());
+        b.cursor = Cursor::new(1, 0);
+
+        b.save(trim_never(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb");
+        assert_eq!(b.rope.to_string(), "a \nb\n", "the buffer is untouched");
+        assert!(b.modified, "and does not claim to match the file");
+        assert!(b.redo(), "redo survived");
+        assert_eq!(b.rope.to_string(), "a \nnewer\n");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A dropped final newline can take the cursor's line with it: Normal
+    /// mode's cursor comes back to the last line.
+    #[test]
+    fn the_cursor_stays_on_the_text() {
+        let d = dir("trim-cursor");
+        let path = d.join("n.md");
+        write_old(&path, b"x");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a\n\n");
+        b.cursor = Cursor::new(1, 0);
+        b.save(trim_never(), false).unwrap();
+        assert_eq!(b.rope.to_string(), "a\n");
+        assert_eq!(b.last_line(), 0);
+        assert_eq!((b.cursor.line, b.cursor.col), (0, 0));
+
+        // Normal mode on a trailing space: the column comes back too.
+        b.replace_all("word \t\nx");
+        b.cursor = Cursor::new(0, 5);
+        b.save(trim_never(), false).unwrap();
+        assert_eq!(b.rope.to_string(), "word\nx");
+        assert_eq!((b.cursor.line, b.cursor.col), (0, 3));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Mid-insert, a cursor anywhere in the trailing spaces is typing there;
+    /// one before them is not, and Normal mode never is.
+    #[test]
+    fn the_typing_line_is_kept_from_the_start_of_its_spaces() {
+        let d = dir("trim-typing");
+        let path = d.join("n.md");
+        let insert = SavePolicy { insert_mode: true, ..trim_never() };
+        for (col, policy, saved) in [
+            (6, insert, "word \t\nx"),
+            (5, insert, "word \t\nx"),
+            (4, insert, "word \t\nx"),
+            (3, insert, "word\nx"),
+            (5, trim_never(), "word\nx"),
+        ] {
+            write_old(&path, b"x");
+            let mut b = Buffer::open(path.clone(), &[]).unwrap();
+            // A tab, so it is not a hard break and would be trimmed.
+            b.replace_all("word \t\nx");
+            b.cursor = Cursor::new(0, col);
+            b.save(policy, false).unwrap();
+            assert_eq!(b.rope.to_string(), saved, "col {col}, insert {}", policy.insert_mode);
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The destination's name decides the Markdown rules, not the buffer's
+    /// old one: `:saveas notes.md` from a `.txt` keeps a hard break.
+    #[test]
+    fn markdown_rules_follow_the_destination() {
+        let d = dir("trim-dest");
+        let txt = d.join("n.txt");
+        write_old(&txt, b"x\n");
+        let mut b = Buffer::open(txt.clone(), &[".txt".to_string()]).unwrap();
+        b.replace_all("a  \nb\n");
+        b.cursor = Cursor::new(1, 0);
+        let trim = SavePolicy { trim_trailing_whitespace: true, ..policy() };
+
+        b.write_copy(&d.join("copy.md"), trim, false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("copy.md")).unwrap(), "a  \nb\n");
+        b.save_as(d.join("notes.md"), trim, false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("notes.md")).unwrap(), "a  \nb\n");
+        b.save_as(d.join("plain.txt"), trim, false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("plain.txt")).unwrap(), "a\nb\n");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// A reload that cannot replace the text is an error, and leaves the

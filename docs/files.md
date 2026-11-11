@@ -134,6 +134,19 @@ version and then the file's, in the order shown on screen.
   half written.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
+- In a Markdown file (`.md`, `.markdown`, judged by the name being saved
+  to), `trim_on_save` leaves lines inside a fenced code block alone, and a
+  hard line break (two or more spaces after text, with text on the next
+  line) keeps two spaces.
+- An autosave in Insert mode leaves the line you are typing alone when the
+  cursor is in or after its trailing whitespace.
+- A save in read-only mode writes the text as it stands, untrimmed.
+- Without a final newline, a save drops only the last one: blank lines at
+  the end of the text stay.
+- When a save trims a line or changes the last newline, the buffer changes
+  the same way, as one step: `u` brings the spaces back. After `u`, while
+  there is something to redo, the save changes only the file, so the redo
+  is kept and the buffer stays marked modified.
 - A recovery file is written on a crash, `SIGTERM` or `SIGHUP` only. A
   normal quit, `:q!` included, writes none. A buffer with no filename, or one
   whose folder refuses the write, goes to

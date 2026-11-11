@@ -1714,6 +1714,7 @@ impl App {
         // has looked at, and the check above just proved there is none.
         match doc.buffer.save(policy, true) {
             Ok(()) => {
+                self.claim_save_revisions();
                 self.disk_changed();
                 self.notify(format!("{name} merged and written"), FlashKind::Info)
             }
@@ -1866,10 +1867,13 @@ impl App {
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let mut written: Vec<String> = Vec::new();
         let mut refused: Option<String> = None;
-        for doc in &mut self.docs {
+        let (current, typing) = (self.current(), self.mode.allows_past_end());
+        for (i, doc) in self.docs.iter_mut().enumerate() {
             if !doc.buffer.modified || doc.buffer.path.is_none() {
                 continue;
             }
+            let policy =
+                crate::fs::save::SavePolicy { insert_mode: typing && i == current, ..policy };
             // A conflicted buffer would be refused by the guard every single
             // interval. The status marker already says the file diverged, and
             // saying it again on a timer buries whatever else the line had.
@@ -1886,7 +1890,14 @@ impl App {
             }
         }
         if !written.is_empty() {
+            self.claim_save_revisions();
             self.disk_changed();
+            // A trim may have shortened the Visual anchor's line (the cursor
+            // is clamped by the buffer; other panes clamp theirs on focus).
+            if let Some(a) = self.anchor.as_mut() {
+                a.line = a.line.min(self.docs[current].buffer.last_line());
+                a.col = a.col.min(self.docs[current].buffer.line_len(a.line));
+            }
         }
         match (refused, written.len()) {
             (Some(why), _) => self.notify(format!("autosave: {why}"), FlashKind::Error),
@@ -1895,6 +1906,19 @@ impl App {
             (None, n) => self.notify(format!("autosaved {n} files"), FlashKind::Info),
         }
         true
+    }
+
+    /// A save that trimmed the text edited the buffer, but that edit is not
+    /// the reader's command: move the "did this command edit" mark past it, so
+    /// `.` and the table alignment on leaving Insert see only the reader's.
+    fn claim_save_revisions(&mut self) {
+        let current = self.current();
+        for (i, doc) in self.docs.iter_mut().enumerate() {
+            let spent = std::mem::take(&mut doc.buffer.save_revisions);
+            if i == current {
+                self.dot_rev += spent;
+            }
+        }
     }
 
     /// Drop a flash whose time is up, reporting whether it actually cleared —
@@ -6424,6 +6448,7 @@ impl App {
     fn after_write(&mut self, result: anyhow::Result<()>) -> bool {
         match result {
             Ok(()) => {
+                self.claim_save_revisions();
                 self.disk_changed();
                 let name = self.buffer.display_name();
                 let words = self.buffer.word_count();
@@ -7467,6 +7492,51 @@ mod tests {
         assert!(app.diff.is_none());
         assert!(flash_text(&app).contains("matches the file"), "got: {}", flash_text(&app));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// `:w` with `trim_on_save` trims the buffer as it trims the file, so
+    /// `:diff` straight after finds nothing; and `.` still repeats the edit
+    /// made before the save, not the `:w`. F21.
+    #[test]
+    fn a_trimming_save_leaves_the_buffer_matching_and_dot_alone() {
+        let (mut app, path) = app_on_disk("trim", "one two\nx \nthree four\n");
+        app.config.editor.trim_on_save = true;
+        feed(&mut app, "dw:w");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\nx\nthree four\n");
+        assert_eq!(text(&app), "two\nx\nthree four\n");
+        app.open_diff();
+        assert!(flash_text(&app).contains("matches the file"), "got: {}", flash_text(&app));
+
+        feed(&mut app, "jj.");
+        assert_eq!(text(&app), "two\nx\nfour\n", "`.` is still `dw`");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// An autosave that trims mid-command is the save's edit, not the
+    /// command's: a `:noh` or a Visual yank around it must not become `.`.
+    #[test]
+    fn an_autosave_trim_mid_command_is_not_what_dot_repeats() {
+        for (around, then) in [(":", "noh\r"), ("v", "ly")] {
+            let (mut app, path) = app_on_disk("trim-dot", "one two three\nx \n");
+            app.config.editor.trim_on_save = true;
+            feed(&mut app, "dw");
+            feed(&mut app, around);
+            autosave_due(&mut app);
+            assert!(app.autosave_tick());
+            assert_eq!(text(&app), "two three\nx\n", "trimmed by the autosave");
+            for c in then.chars() {
+                let code = if c == '\r' { KeyCode::Enter } else { KeyCode::Char(c) };
+                app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+                app.sync_after_input();
+            }
+            esc(&mut app);
+            app.buffer.cursor = Cursor::new(0, 0);
+            feed(&mut app, ".");
+            assert_eq!(text(&app), "three\nx\n", "`.` is still `dw` after {around:?}");
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// The view aligns the two versions: an edited line is one row carrying
