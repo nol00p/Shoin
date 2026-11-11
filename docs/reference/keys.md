@@ -154,6 +154,22 @@ line. They have no key until you give them one:
 | `:` | the command line — see [Commands](commands.md) |
 | `Ctrl-^` `Ctrl-6` | back to the previous buffer |
 
+## Command line, search and prompts
+
+The same keys in the `:` line, the `/` `?` search line, the finder's query
+and the tree's rename, move and new prompts. A delete's `(y/N)` takes only
+`y` as a yes; any other key is a no.
+
+| Key | Does |
+|---|---|
+| `Enter` | run, search, or answer |
+| `Esc` `Ctrl-c` | cancel; so does `Backspace` on an empty line |
+| `Ctrl-u` | clear the line |
+| `Ctrl-w` `Alt-Backspace` | delete the last word |
+| `Ctrl-h` | backspace |
+
+Other control and Alt chords are ignored, never typed as their letter.
+
 ## Read-only
 
 With `shoin -R`, `:view` or `<leader>v`. Every line is concealed and there is no caret.
@@ -227,7 +243,7 @@ remove it.
 |---|---|
 | type | narrow the list |
 | `Ctrl-n` `Ctrl-p`, arrows | next / previous match |
-| `Ctrl-u` | clear the query |
+| `Ctrl-u` `Ctrl-w` `Ctrl-h` | clear the query / delete its last word / backspace |
 | `Enter` `Esc` | open / close |
 
 ## :diff view

@@ -159,6 +159,7 @@ impl Finder {
         Some(self.files[m.file].path.clone())
     }
 
+    #[cfg(test)]
     pub fn push_char(&mut self, c: char) {
         self.query.push(c);
         self.refilter();
@@ -170,14 +171,26 @@ impl Finder {
         self.refilter();
     }
 
+    #[cfg(test)]
     pub fn pop_char(&mut self) {
-        self.query.pop();
-        self.refilter();
+        self.edit_query(|q| {
+            q.pop();
+        });
     }
 
+    #[cfg(test)]
     pub fn clear_query(&mut self) {
-        self.query.clear();
-        self.refilter();
+        self.edit_query(String::clear);
+    }
+
+    /// Change the query with `f` (the field keys: a letter, a backspace,
+    /// `Ctrl-W`), then refilter, unless nothing changed.
+    pub fn edit_query(&mut self, f: impl FnOnce(&mut String)) {
+        let before = self.query.clone();
+        f(&mut self.query);
+        if self.query != before {
+            self.refilter();
+        }
     }
 
     pub fn up(&mut self) {
