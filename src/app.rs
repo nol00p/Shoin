@@ -1383,8 +1383,11 @@ impl App {
             // disagrees with the filesystem (mtime in the future, which NFS
             // does) — act rather than wait forever on a comparison that will
             // never come true.
-            let settled = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
+            //
+            // Read BEFORE the load below, so a failed load is tied to the
+            // version it failed on, not to one written a moment after.
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let settled = mtime
                 .map(|m| now.duration_since(m).map(|age| age >= DISK_SETTLE).unwrap_or(true))
                 .unwrap_or(true);
             if !settled {
@@ -1402,12 +1405,24 @@ impl App {
             }
 
             match doc.buffer.reload(&exts) {
-                Ok(true) => reloaded.push(doc.buffer.display_name()),
+                Ok(true) => {
+                    doc.buffer.reload_failed = None;
+                    reloaded.push(doc.buffer.display_name());
+                }
                 // The mtime moved but the bytes did not. Absorbed in silence:
                 // there is nothing to tell the reader about a `touch`.
-                Ok(false) => {}
-                Err(e) if failed.is_none() => failed = Some(e.to_string()),
-                Err(_) => {}
+                Ok(false) => doc.buffer.reload_failed = None,
+                // A file that cannot be loaded (not UTF-8, unreadable) leaves
+                // the text and the old mtime, so the next poll tries again and
+                // a fixed file — rewritten, or `chmod`ed — still reloads. But
+                // each broken version is announced ONCE: re-flashing it every
+                // second would bury everything else.
+                Err(e) => {
+                    if doc.buffer.reload_failed != mtime {
+                        doc.buffer.reload_failed = mtime;
+                        failed.get_or_insert_with(|| e.to_string());
+                    }
+                }
             }
         }
 
@@ -1416,19 +1431,19 @@ impl App {
         }
         // A conflict outranks a reload in the report: one of them needs a
         // decision and the other is already finished.
-        match (failed, conflicted.len(), reloaded.len()) {
-            (Some(why), _, _) => self.notify(format!("reload: {why}"), FlashKind::Error),
-            (None, 1, _) => self.notify(
-                format!("{} changed on disk — :revert! or :w!", conflicted[0]),
-                FlashKind::Error,
-            ),
-            (None, n, _) if n > 1 => self.notify(
-                format!("{n} files changed on disk — see :ls"),
-                FlashKind::Error,
-            ),
-            (None, _, 0) => return false,
-            (None, _, 1) => self.notify(format!("reloaded {}", reloaded[0]), FlashKind::Info),
-            (None, _, n) => self.notify(format!("reloaded {n} files"), FlashKind::Info),
+        let conflict = match conflicted.len() {
+            0 => None,
+            1 => Some(format!("{} changed on disk — :revert! or :w!", conflicted[0])),
+            n => Some(format!("{n} files changed on disk — see :ls")),
+        };
+        // Both are announced only once, so neither may hide the other.
+        let failed = failed.map(|why| format!("reload: {why} — the text here is kept"));
+        match (conflict, failed, reloaded.len()) {
+            (Some(c), Some(f), _) => self.notify(format!("{c} · {f}"), FlashKind::Error),
+            (Some(msg), None, _) | (None, Some(msg), _) => self.notify(msg, FlashKind::Error),
+            (None, None, 0) => return false,
+            (None, None, 1) => self.notify(format!("reloaded {}", reloaded[0]), FlashKind::Info),
+            (None, None, n) => self.notify(format!("reloaded {n} files"), FlashKind::Info),
         }
         true
     }
@@ -7115,6 +7130,47 @@ mod tests {
         assert!(!app.buffer.modified, "and the buffer matches disk, so it is clean");
         assert!(!app.buffer.conflict, "nothing to resolve");
         assert!(flash_text(&app).contains("reloaded"), "got: {}", flash_text(&app));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// F22: a file that changes into something that cannot be loaded is
+    /// reported once, not every poll. The text stays, the poll keeps trying,
+    /// and a readable version reloads as usual. `:w` still refuses to write
+    /// over the file; `:w!` does.
+    #[test]
+    fn an_unloadable_file_is_reported_once() {
+        let backdate = |path: &std::path::Path, secs: u64| {
+            let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            f.set_modified(std::time::SystemTime::now() - Duration::from_secs(secs)).unwrap();
+        };
+        let (mut app, path) = app_on_disk("unloadable", "mine\n");
+        std::fs::write(&path, [0xff, 0xfe, b'x', b'\n']).unwrap();
+        backdate(&path, 5);
+
+        assert!(app.check_disk(), "the first poll reports it");
+        assert!(flash_text(&app).contains("reload"), "got: {}", flash_text(&app));
+        assert_eq!(text(&app), "mine\n", "the text is untouched");
+        assert!(!app.buffer.conflict, "a clean buffer is not a conflict");
+
+        app.flash = None;
+        assert!(!app.check_disk(), "the next poll stays quiet");
+        assert!(app.flash.is_none());
+        assert!(app.buffer.save(SavePolicy::default(), false).is_err(), ":w refuses");
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff, 0xfe, b'x', b'\n']);
+
+        // Broken again, a different version: announced again, once.
+        std::fs::write(&path, [0xff, b'y', b'\n']).unwrap();
+        backdate(&path, 4);
+        assert!(app.check_disk(), "a new broken version is news");
+        app.flash = None;
+        assert!(!app.check_disk());
+
+        // Readable again: reloaded.
+        write_settled(&path, "theirs\n");
+        backdate(&path, 3);
+        assert!(app.check_disk());
+        assert_eq!(text(&app), "theirs\n");
+        assert!(app.buffer.reload_failed.is_none());
         let _ = std::fs::remove_file(path);
     }
 
