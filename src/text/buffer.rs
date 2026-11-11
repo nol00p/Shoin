@@ -93,6 +93,12 @@ pub struct Buffer {
     /// can say which wins" — `:w!` keeps yours, `:revert!` takes theirs.
     pub conflict: bool,
 
+    /// The file's mtime when an automatic reload last FAILED (not UTF-8,
+    /// unreadable). `App::check_disk` reports a failure once per mtime: the
+    /// poll keeps retrying, so a fixed file still reloads on its own, but the
+    /// same broken file is not announced again every second.
+    pub reload_failed: Option<SystemTime>,
+
     /// Char ranges that refuse edits. Always EMPTY, and deliberately kept.
     ///
     /// It was built for transclusion, which then did not need it: an embed
@@ -126,6 +132,7 @@ impl Buffer {
             dirty_line: None,
             dirty_tail: None,
             conflict: false,
+            reload_failed: None,
             readonly_ranges: Vec::new(),
             read_only: false,
             words: std::cell::Cell::new(None),
@@ -161,6 +168,7 @@ impl Buffer {
             dirty_line: None,
             dirty_tail: None,
             conflict: false,
+            reload_failed: None,
             readonly_ranges: Vec::new(),
             read_only: false,
             words: std::cell::Cell::new(None),
