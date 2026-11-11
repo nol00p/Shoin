@@ -121,6 +121,11 @@ version and then the file's, in the order shown on screen.
 - In read-only mode, outside changes and `:revert!` still come in, and
   `:diff` still shows the two versions, but its `w` writes nothing: `:view`
   to edit first.
+- A file Shoin cannot replace atomically is written in place instead: one
+  in a folder you cannot write to, one whose name is too long for the
+  temporary name, one with other hard links (they all keep seeing the same
+  text) or one owned by someone else (it keeps its owner and group). A file
+  you cannot write is still replaced when its folder allows it.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
 - A recovery file is written on a crash, `SIGTERM` or `SIGHUP` only. A
