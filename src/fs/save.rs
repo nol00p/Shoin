@@ -28,6 +28,13 @@ pub struct SaveOptions {
     pub line_ending: LineEnding,
     pub final_newline: bool,
     pub trim_trailing_whitespace: bool,
+    /// Markdown's trimming rule: the two trailing spaces of a hard line break
+    /// are markup, not whitespace.
+    pub markdown: bool,
+    /// The cursor's line, which trimming and the final-newline rule leave
+    /// alone: the buffer takes the same changes after a save, and an autosave
+    /// must not eat the space just typed before the next word.
+    pub keep_line: Option<usize>,
 }
 
 /// What `[editor] final_newline` asks of a save.
@@ -155,42 +162,86 @@ impl Autosave {
     }
 }
 
-/// Returns the new mtime, for external-modification tracking.
+/// The text as a save writes it, before the line ending is applied: trimmed
+/// and with its final newline settled as `opts` asks.
 ///
-/// A symlink is written through to the file it names: renaming over the link
-/// itself would swap it for a regular file and leave the real one unedited.
-pub fn write_atomic(path: &Path, rope: &Rope, opts: &SaveOptions) -> Result<SystemTime> {
-    let resolved = path
-        .is_symlink()
-        .then(|| std::fs::canonicalize(path).ok())
-        .flatten();
-    let path = resolved.as_deref().unwrap_or(path);
-    let mut text: String = rope.chunks().collect();
-
-    if opts.trim_trailing_whitespace {
-        let mut out = String::with_capacity(text.len());
-        for (i, line) in text.split('\n').enumerate() {
-            if i > 0 {
-                out.push('\n');
-            }
-            out.push_str(line.trim_end());
-        }
-        text = out;
-    }
+/// Only ever shortens lines and adds or removes the one final newline, which
+/// is what lets `Buffer` replay the result as a few small edits.
+pub fn outgoing(text: &str, opts: &SaveOptions) -> String {
+    let mut text = if opts.trim_trailing_whitespace {
+        trim_lines(text, opts)
+    } else {
+        text.to_string()
+    };
 
     if opts.final_newline {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-    } else {
-        while text.ends_with('\n') {
+    } else if text.ends_with('\n') {
+        // One newline, not all of them: blank lines at the end are text the
+        // writer put there. And none while the cursor sits on the empty line
+        // after it, where Insert mode is about to type.
+        let last = text.matches('\n').count();
+        if opts.keep_line != Some(last) {
             text.pop();
         }
     }
+    text
+}
 
-    if opts.line_ending == LineEnding::Crlf {
-        text = text.replace('\n', "\r\n");
+/// `trim_on_save`, minus what only looks like trailing whitespace: lines of
+/// fenced code (literal, and a trailing space there may be the point), the
+/// two spaces of a Markdown hard break, and the cursor's line.
+fn trim_lines(text: &str, opts: &SaveOptions) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut fences = crate::transclude::Fences::default();
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        // Fences are Markdown's: in a plain file a stray ``` is just text,
+        // and must not stop trimming for the rest of it.
+        let literal = opts.markdown && fences.literal(line);
+        let keep = literal
+            || opts.keep_line == Some(i)
+            || (opts.markdown && hard_break(line, lines.get(i + 1).copied()));
+        out.push_str(if keep { line } else { line.trim_end() });
     }
+    out
+}
+
+/// Exactly two trailing spaces after text, with a line of text after it.
+fn hard_break(line: &str, next: Option<&str>) -> bool {
+    let body = line.trim_end();
+    !body.is_empty()
+        && &line[body.len()..] == "  "
+        && next.is_some_and(|n| !n.trim().is_empty())
+}
+
+/// Returns the new mtime, for external-modification tracking.
+///
+/// A symlink is written through to the file it names: renaming over the link
+/// itself would swap it for a regular file and leave the real one unedited.
+pub fn write_atomic(path: &Path, rope: &Rope, opts: &SaveOptions) -> Result<SystemTime> {
+    let text = outgoing(&rope.chunks().collect::<String>(), opts);
+    write_text(path, &text, opts.line_ending)
+}
+
+/// `write_atomic` for text `outgoing` has already prepared, so a caller that
+/// needs that text too computes it once.
+pub fn write_text(path: &Path, text: &str, line_ending: LineEnding) -> Result<SystemTime> {
+    let resolved = path
+        .is_symlink()
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten();
+    let path = resolved.as_deref().unwrap_or(path);
+
+    let text: std::borrow::Cow<str> = match line_ending {
+        LineEnding::Crlf => text.replace('\n', "\r\n").into(),
+        LineEnding::Lf => text.into(),
+    };
 
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = dir.unwrap_or_else(|| Path::new("."));
@@ -376,6 +427,8 @@ mod tests {
             line_ending: LineEnding::Lf,
             final_newline,
             trim_trailing_whitespace: trim,
+            markdown: true,
+            keep_line: None,
         }
     }
 
@@ -491,12 +544,13 @@ mod tests {
         write_atomic(&p, &Rope::from_str("one\ntwo"), &opts(true, false)).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\n");
 
-        write_atomic(&p, &Rope::from_str("one\ntwo\n\n\n"), &opts(false, false)).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            "one\ntwo",
-            "every trailing newline goes, not just the last"
-        );
+        write_atomic(&p, &Rope::from_str("one\ntwo\n"), &opts(false, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo");
+
+        // Blank lines the writer put at the end are text, not newlines to
+        // strip: only the final one goes.
+        write_atomic(&p, &Rope::from_str("a\n\n\n"), &opts(false, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\n\n");
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -508,9 +562,50 @@ mod tests {
         write_atomic(&p, &Rope::from_str("a  \nb\t\n"), &opts(true, false)).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a  \nb\t\n");
 
-        write_atomic(&p, &Rope::from_str("a  \nb\t\n"), &opts(true, true)).unwrap();
+        write_atomic(&p, &Rope::from_str("a \nb\t\n"), &opts(true, true)).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nb\n");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    fn trimmed(text: &str, markdown: bool, keep_line: Option<usize>) -> String {
+        let o = SaveOptions { markdown, keep_line, ..opts(true, true) };
+        outgoing(text, &o)
+    }
+
+    /// Code is literal: a trailing space inside a fence may be the point.
+    #[test]
+    fn trimming_leaves_fenced_code_alone() {
+        assert_eq!(
+            trimmed("x \n```\nx  \n```\ny \n", true, None),
+            "x\n```\nx  \n```\ny\n"
+        );
+        assert_eq!(trimmed("~~~ \n\tx\t\n~~~\n", true, None), "~~~ \n\tx\t\n~~~\n");
+        // Outside Markdown a stray ``` is text, and trimming carries on.
+        assert_eq!(trimmed("```\nx \n", false, None), "```\nx\n");
+    }
+
+    /// Two trailing spaces before a line of text are a hard line break in
+    /// Markdown. Anything else at the end of a line is whitespace.
+    #[test]
+    fn trimming_keeps_a_markdown_hard_break() {
+        assert_eq!(trimmed("one  \ntwo\n", true, None), "one  \ntwo\n");
+        assert_eq!(trimmed("one  \ntwo\n", false, None), "one\ntwo\n", "not in plain text");
+        assert_eq!(trimmed("one   \ntwo\n", true, None), "one\ntwo\n", "three is not two");
+        assert_eq!(trimmed("one  \n\ntwo\n", true, None), "one\n\ntwo\n", "nothing to break to");
+        assert_eq!(trimmed("one  \n", true, None), "one\n", "last line");
+        assert_eq!(trimmed("  \ntwo\n", true, None), "\ntwo\n", "a blank line");
+    }
+
+    /// The cursor's line keeps its spaces, and a cursor on the empty line
+    /// after the final newline keeps that newline: the buffer takes the same
+    /// changes, and the reader is typing there.
+    #[test]
+    fn the_cursor_line_is_left_alone() {
+        assert_eq!(trimmed("a \nb \n", true, Some(1)), "a\nb \n");
+        let never = SaveOptions { keep_line: Some(1), ..opts(false, false) };
+        assert_eq!(outgoing("a\n", &never), "a\n");
+        let never = SaveOptions { keep_line: Some(0), ..opts(false, false) };
+        assert_eq!(outgoing("a\n", &never), "a");
     }
 
     /// The rope holds `\n` only; the file gets whatever the original used.
@@ -522,6 +617,8 @@ mod tests {
             line_ending: LineEnding::Crlf,
             final_newline: true,
             trim_trailing_whitespace: false,
+            markdown: true,
+            keep_line: None,
         };
         write_atomic(&p, &Rope::from_str("one\ntwo\n"), &o).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\r\ntwo\r\n");

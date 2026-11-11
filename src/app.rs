@@ -6424,6 +6424,9 @@ impl App {
     fn after_write(&mut self, result: anyhow::Result<()>) -> bool {
         match result {
             Ok(()) => {
+                // A save that trims edits the buffer; `.` still repeats the
+                // change made before `:w`, not the `:w`.
+                self.dot_rev = self.buffer.revision;
                 self.disk_changed();
                 let name = self.buffer.display_name();
                 let words = self.buffer.word_count();
@@ -7466,6 +7469,26 @@ mod tests {
         app.open_diff();
         assert!(app.diff.is_none());
         assert!(flash_text(&app).contains("matches the file"), "got: {}", flash_text(&app));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `:w` with `trim_on_save` trims the buffer as it trims the file, so
+    /// `:diff` straight after finds nothing; and `.` still repeats the edit
+    /// made before the save, not the `:w`. F21.
+    #[test]
+    fn a_trimming_save_leaves_the_buffer_matching_and_dot_alone() {
+        let (mut app, path) = app_on_disk("trim", "one two\nx \nthree four\n");
+        app.config.editor.trim_on_save = true;
+        feed(&mut app, "dw:w");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\nx\nthree four\n");
+        assert_eq!(text(&app), "two\nx\nthree four\n");
+        app.open_diff();
+        assert!(flash_text(&app).contains("matches the file"), "got: {}", flash_text(&app));
+
+        feed(&mut app, "jj.");
+        assert_eq!(text(&app), "two\nx\nfour\n", "`.` is still `dw`");
         let _ = std::fs::remove_file(path);
     }
 

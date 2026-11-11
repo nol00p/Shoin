@@ -220,8 +220,22 @@ impl Buffer {
         if !force && !same_file && path.exists() {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
-        let mtime = save::write_atomic(path, &self.rope, &self.save_options(policy))?;
+        let opts = self.save_options(policy);
+        let mine = self.rope.to_string();
+        let mut out = save::outgoing(&mine, &opts);
+        let mut edits = save_edits(&mine, &out);
+        // A buffer that refuses any of them (read-only mode, `:view`) is
+        // written as it stands: a file it cannot follow would leave the two
+        // apart with nothing marked modified.
+        if !edits.cuts.iter().all(|r| self.is_editable(r))
+            || (edits.newline && !self.is_editable(&(edits.end..edits.end)))
+        {
+            out = mine;
+            edits = SaveEdits::default();
+        }
+        let mtime = save::write_text(path, &out, opts.line_ending)?;
         self.disk_mtime = Some(mtime);
+        self.take_save_edits(edits);
         // Close any in-flight step first, so what was written corresponds to a
         // sealed position and the next keystroke starts a new one.
         self.history.split();
@@ -234,14 +248,49 @@ impl Buffer {
         Ok(())
     }
 
+    /// Bring the text to what a save just wrote (`trim_on_save`, the final
+    /// newline), as ONE undo step, so the buffer and the file agree and `u`
+    /// gives the trimmed spaces back.
+    fn take_save_edits(&mut self, edits: SaveEdits) {
+        if edits.cuts.is_empty() && !edits.newline {
+            return;
+        }
+        // An autosave can land mid-insert, inside the group the entering
+        // command opened; that group has to be open again afterwards, or each
+        // key typed after it becomes its own undo step.
+        let grouped = self.history.is_grouping();
+        self.history.begin_group(Some(self.cursor));
+        if edits.newline {
+            let last = self.rope.len_lines() - 1;
+            self.insert_str(Cursor::new(last, self.rope.line(last).len_chars()), "\n");
+        }
+        for r in edits.cuts {
+            self.delete_chars(r.start, r.end);
+        }
+        self.history.end_group();
+        if grouped {
+            self.history.begin_group(None);
+        }
+        // Insert mode may type between trailing spaces; the cut ones are gone.
+        let len = self.line_len(self.cursor.line);
+        self.cursor.col = self.cursor.col.min(len);
+    }
+
     /// How this buffer's text goes to disk under `policy`.
     fn save_options(&self, policy: SavePolicy) -> SaveOptions {
+        // Only a cursor past the line's last character is mid-typing there
+        // (Insert mode, or the empty line after the final newline): Normal
+        // mode rests ON a character, and its line is trimmed like any other.
+        let line = self.cursor.line;
+        let typing = self.cursor.col >= self.line_len(line);
         SaveOptions {
             line_ending: self.line_ending,
             // `preserve` answers with what the file arrived with; the other two
             // overrule it. This is the only place that distinction is made.
             final_newline: policy.final_newline.resolve(self.final_newline),
             trim_trailing_whitespace: policy.trim_trailing_whitespace,
+            markdown: self.syntax == Syntax::Markdown,
+            keep_line: typing.then_some(line),
         }
     }
 
@@ -255,7 +304,9 @@ impl Buffer {
         if !force && path.exists() {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
-        save::write_atomic(path, &self.rope, &self.save_options(policy))?;
+        // No line kept for the cursor: the buffer does not follow a copy.
+        let opts = SaveOptions { keep_line: None, ..self.save_options(policy) };
+        save::write_atomic(path, &self.rope, &opts)?;
         Ok(())
     }
 
@@ -461,6 +512,44 @@ impl Buffer {
 
 /// A path as the status line and error messages name it: the file name alone,
 /// falling back to the whole path when there isn't one.
+/// What a save changed on the way out, as edits to the buffer's text.
+#[derive(Default)]
+struct SaveEdits {
+    /// Char ranges to delete, last first so each leaves the next in place.
+    cuts: Vec<std::ops::Range<usize>>,
+    /// A newline to add at the end (char index `end`).
+    newline: bool,
+    end: usize,
+}
+
+/// The edits that turn `mine` into `out`. `save::outgoing` only shortens
+/// lines and adds or drops the one final newline, so lines pair up one to one
+/// and each differs by a cut at its end.
+fn save_edits(mine: &str, out: &str) -> SaveEdits {
+    let mut edits = SaveEdits { end: mine.chars().count(), ..SaveEdits::default() };
+    if mine == out {
+        return edits;
+    }
+    // Counted, not `ends_with`: `a\n\n\n` loses one newline and still ends
+    // with one.
+    match out.matches('\n').count().cmp(&mine.matches('\n').count()) {
+        std::cmp::Ordering::Greater => edits.newline = true,
+        std::cmp::Ordering::Less => edits.cuts.push(edits.end - 1..edits.end),
+        std::cmp::Ordering::Equal => {}
+    }
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (a, b) in mine.split('\n').zip(out.split('\n')) {
+        let (na, nb) = (a.chars().count(), b.chars().count());
+        if nb < na {
+            lines.push(start + nb..start + na);
+        }
+        start += na + 1;
+    }
+    edits.cuts.extend(lines.into_iter().rev());
+    edits
+}
+
 fn name_of(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -781,6 +870,98 @@ mod tests {
         assert_eq!(b.rope.to_string(), "new\n");
         assert!(b.undo());
         assert_eq!(b.rope.to_string(), "old\n", "one step");
+    }
+
+    /// A save that changes the text on the way out changes the buffer the
+    /// same way, so `:diff` straight after `:w` finds nothing, and `u` brings
+    /// the trimmed spaces back as one step.
+    #[test]
+    fn the_buffer_takes_what_the_save_wrote() {
+        let d = dir("trim-sync");
+        let path = d.join("n.md");
+        write_old(&path, b"x\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a \nb  \nc\n```\nd \n```\ne\t\n\n\n");
+        let typed = b.rope.to_string();
+        let trim = SavePolicy {
+            trim_trailing_whitespace: true,
+            final_newline: save::FinalNewline::Never,
+        };
+
+        // Cursor off the trimmed lines, as after `:` from Normal mode on a
+        // line with nothing to trim.
+        b.cursor = Cursor::new(2, 0);
+        b.save(trim, false).unwrap();
+        let disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(disk, "a\nb  \nc\n```\nd \n```\ne\n\n");
+        assert_eq!(b.rope.to_string(), disk, "the buffer is what the file holds");
+        assert!(!b.modified);
+        let theirs = crate::fs::open::load(&path, &[]).unwrap().rope.to_string();
+        assert_eq!(crate::diff::lines_of(&b.rope.to_string()), crate::diff::lines_of(&theirs));
+
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), typed, "one step");
+        assert!(b.modified, "holding text the file does not have");
+
+        // And the other way: `always` gives the buffer its final newline.
+        write_old(&path, b"x");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a \nb");
+        let always = SavePolicy { final_newline: save::FinalNewline::Always, ..trim };
+        b.save(always, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+        assert_eq!(b.rope.to_string(), "a\nb\n");
+        assert!(!b.modified);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A cursor past the end of its line is typing there (an autosave in
+    /// Insert mode): that line keeps its space, and the insert's open group
+    /// is open again afterwards, so the session stays one undo step.
+    #[test]
+    fn a_save_mid_insert_keeps_the_typing_line_and_the_group() {
+        let d = dir("trim-insert");
+        let path = d.join("n.md");
+        write_old(&path, b"x\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("a \nword \n");
+        b.cursor = Cursor::new(1, 5);
+        let trim = SavePolicy {
+            trim_trailing_whitespace: true,
+            final_newline: save::FinalNewline::Preserve,
+        };
+
+        b.history.begin_group(Some(b.cursor));
+        b.save(trim, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nword \n");
+        assert_eq!(b.rope.to_string(), "a\nword \n");
+        assert!(b.history.is_grouping(), "the insert's group is open again");
+
+        b.insert_str(Cursor::new(1, 5), "n");
+        b.insert_str(Cursor::new(1, 6), "e");
+        b.history.end_group();
+        assert!(b.undo());
+        assert_eq!(b.rope.to_string(), "a\nword \n", "the typing is one step");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Read-only mode can still `:w`, but cannot take the trim: the file gets
+    /// the text as it stands, so the two still agree.
+    #[test]
+    fn a_read_only_buffer_is_written_as_it_stands() {
+        let d = dir("trim-ro");
+        let path = d.join("n.md");
+        write_old(&path, b"a \nb\n\n");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.read_only = true;
+        let policy = SavePolicy {
+            trim_trailing_whitespace: true,
+            final_newline: save::FinalNewline::Never,
+        };
+        b.save(policy, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a \nb\n\n");
+        assert_eq!(b.rope.to_string(), "a \nb\n\n");
+        std::fs::remove_dir_all(&d).ok();
     }
 
     /// A reload that cannot replace the text is an error, and leaves the
