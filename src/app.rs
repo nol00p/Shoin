@@ -502,19 +502,32 @@ const PASTE_LIMIT: usize = 16 << 20;
 /// place would answer a question nobody asked.
 const CREATABLE: &[&str] = &["md", "markdown", "txt"];
 
+/// Common file types that are not notes. In a wiki link's NAME these still
+/// read as an extension, so `[[report.pdf]]` is a missing PDF (refused), not
+/// a note called `report.pdf` (which would create `report.pdf.md`). Kept to
+/// documents, data, media and archives: a name like `[[Dr.Who]]` must not
+/// stop being a note because its tail happens to be a file type.
+const FILE_TYPES: &[&str] = &[
+    "pdf", "doc", "docx", "odt", "rtf", "epub", "xls", "xlsx", "ods", "csv", "ppt",
+    "pptx", "odp", "json", "xml", "html", "htm", "zip", "gz", "tgz", "tar", "7z", "rar",
+    "mp3", "wav", "flac", "ogg", "m4a", "mp4", "mov", "mkv", "avi", "webm",
+];
+
 /// The extension a dead link's target names, lowercased, or `None` when its
 /// last dot is part of the name.
 ///
 /// A wiki link's target is a NAME (`name` true): only a linkable extension (a
-/// note's or a picture's, the ones `link::resolve` reads) is an extension, so
-/// `[[2024.01.16 meeting]]` and `[[Dr.Who]]` are notes to write, exactly the
-/// files the link resolves to once they exist. A markdown link's target is a
-/// PATH, and any extension it has is the file's type: `paper.pdf` is a PDF.
+/// note's or a picture's, the ones `link::resolve` reads) or a common file
+/// type (`FILE_TYPES`) is an extension, so `[[2024.01.16 meeting]]` and
+/// `[[Dr.Who]]` are notes to write, exactly the files the link resolves to
+/// once they exist, while `[[report.pdf]]` is a PDF. A markdown link's target
+/// is a PATH, and any extension it has is the file's type.
 fn named_ext(path: &Path, name: bool) -> Option<String> {
     let e = path.extension()?.to_string_lossy().to_lowercase();
-    let linkable = CREATABLE.contains(&e.as_str())
-        || crate::image::IMAGE_EXTENSIONS.contains(&e.as_str());
-    (linkable || !name).then_some(e)
+    let known = CREATABLE.contains(&e.as_str())
+        || crate::image::IMAGE_EXTENSIONS.contains(&e.as_str())
+        || FILE_TYPES.contains(&e.as_str());
+    (known || !name).then_some(e)
 }
 
 /// A link target with no extension means a note — the same default
@@ -6371,6 +6384,22 @@ mod tests {
         feed(&mut app, "gf");
         assert!(!d.join("out/paper.pdf").exists(), "no empty pdf was invented");
         assert_eq!(shown(&app), "note.md");
+    }
+
+    /// The same for a wiki link: `[[report.pdf]]` names a PDF, so a missing
+    /// one is reported, not turned into a note called `report.pdf.md`.
+    #[test]
+    fn a_missing_non_note_wiki_link_is_never_created() {
+        for name in ["report.pdf", "Data.CSV", "song.mp3"] {
+            let (d, mut app) = vault(&format!("see [[{name}]]\n"), &[]);
+            cursor_on(&mut app, 0, name);
+            feed(&mut app, "gf");
+            assert!(!d.join(name).exists(), "{name}: no empty file was invented");
+            assert!(!d.join(format!("{name}.md")).exists(), "{name}: no note either");
+            assert_eq!(shown(&app), "note.md", "{name}: the buffer did not change");
+            let flash = flash_text(&app);
+            assert!(flash.contains(name), "{name}: the miss is reported, got {flash:?}");
+        }
     }
 
     /// Off a link, `gf` says so rather than guessing at the word under the
