@@ -49,9 +49,13 @@ pub fn scan(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     let chars: Vec<char> = line.chars().collect();
     let len = chars.len();
     let mut spans = Vec::new();
+    let mut memo = Memo {
+        links: if chars.contains(&'[') { bracket_links(&chars) } else { Vec::new() },
+        wiki_close: None,
+    };
     let mut i = 0;
     while i < len {
-        match match_at(&chars, i, cfg) {
+        match match_at(&chars, i, cfg, &mut memo) {
             // A match always starts at `i` and ends past it, so `i` advances and
             // the emitted spans stay ordered and non-overlapping.
             Some(span) => {
@@ -220,14 +224,27 @@ fn unescape(chars: &[char]) -> String {
     out
 }
 
+/// What one `scan` works out once for the whole line, so that trying a
+/// construct at every `[` does not walk the rest of the line each time: on a
+/// line of 100,000 `[` that took seconds.
+struct Memo {
+    /// Every `[text](url)` and `![alt](url)` on the line, by the index of its
+    /// `[`. See `bracket_links`.
+    links: Vec<(usize, InlineSpan)>,
+    /// The first `]]` at or after where `wiki_at` last looked (the line's
+    /// length when there is none). The scan only moves right, so the answer
+    /// holds until it passes it.
+    wiki_close: Option<usize>,
+}
+
 /// Try every construct that can begin at `i`, in priority order.
-fn match_at(chars: &[char], i: usize, cfg: &MarkdownConfig) -> Option<InlineSpan> {
+fn match_at(chars: &[char], i: usize, cfg: &MarkdownConfig, memo: &mut Memo) -> Option<InlineSpan> {
     match chars[i] {
         '\\' => escape_at(chars, i),
         '`' => code_at(chars, i),
-        '!' if chars.get(i + 1) == Some(&'[') => bracket_link(chars, i, true),
-        '[' if cfg.wiki_links && chars.get(i + 1) == Some(&'[') => wiki_at(chars, i),
-        '[' => bracket_link(chars, i, false),
+        '!' if chars.get(i + 1) == Some(&'[') => bracket_link(i, true, memo),
+        '[' if cfg.wiki_links && chars.get(i + 1) == Some(&'[') => wiki_at(chars, i, memo),
+        '[' => bracket_link(i, false, memo),
         '*' | '_' => emphasis_at(chars, i, chars[i]),
         '~' => pair_at(chars, i, '~', Inline::Strikethrough),
         '=' if cfg.highlight => pair_at(chars, i, '=', Inline::Highlight),
@@ -447,30 +464,115 @@ fn pair_at(chars: &[char], i: usize, ch: char, kind: Inline) -> Option<InlineSpa
     })
 }
 
-/// `[text](url)` and `![text](url)`. The rendered body is the text; the URL and
-/// brackets are markers. Naive: the first `]` closes the text.
+/// `[text](url)` or `![text](url)` opening at `i`, as `bracket_links` found
+/// it. The rendered body is the text; the URL and brackets are markers.
+fn bracket_link(i: usize, image: bool, memo: &Memo) -> Option<InlineSpan> {
+    let open = if image { i + 1 } else { i };
+    let k = memo.links.binary_search_by_key(&open, |(o, _)| *o).ok()?;
+    let sp = &memo.links[k].1;
+    // The scan read the `!` before this `[` differently from `bracket_links`
+    // (it took it into another construct), so this is not that link.
+    if (sp.kind == Inline::Image) != image {
+        return None;
+    }
+    Some(InlineSpan {
+        kind: sp.kind,
+        outer: sp.outer.clone(),
+        inner: sp.inner.clone(),
+    })
+}
+
+/// Every link and image on the line, found as CommonMark finds them, in one
+/// pass.
+///
+/// A link's text may hold brackets as long as they balance (`[a [b] c](u)`,
+/// the badge `[![alt](img)](url)`, `[see [[note]]](u)`), so the `]` that
+/// closes it is the one that brings the count back to zero. An escaped
+/// bracket does not count, nor does one in a code span, which binds tighter
+/// than a link. Each `[` waits on a stack; a `]` takes the nearest one, and
+/// the two make a link when a `(…)` follows.
+///
+/// Links do not nest: once a link forms inside another's text, the outer `[`
+/// is plain text (`[a [b](c) d](e)` links only `b`). An image's alt text may
+/// hold a link, and a `[[wiki link]]` is not a CommonMark link, so neither
+/// stops the link around it.
 ///
 /// The `)` that closes the construct is found as CommonMark finds it: the
 /// address may hold balanced parentheses (`wiki/Rust_(language)`), may be
 /// written `<…>`, and may be followed by a `"title"`. When the `(…)` does not
 /// have that shape — `[a](my note.md)`, an unbalanced `(` — the first
 /// balancing `)`, then simply the first `)`, closes it, so a link still
-/// forms wherever it formed before.
-fn bracket_link(chars: &[char], i: usize, image: bool) -> Option<InlineSpan> {
-    let text_start = if image { i + 2 } else { i + 1 };
-    let text_end = find_char(chars, text_start, ']')?;
-    if chars.get(text_end + 1) != Some(&'(') {
-        return None;
+/// forms wherever it formed before. The pass resumes after it: a bracket in
+/// an address is not a bracket.
+fn bracket_links(chars: &[char]) -> Vec<(usize, InlineSpan)> {
+    let mut links = Vec::new();
+    // Each waiting `[`, and whether a `!` before it makes it an image.
+    let mut stack: Vec<(usize, bool)> = Vec::new();
+    // The `[` of the last link formed. A `[` before it that is still waiting
+    // was open around that link, so it can no longer make one.
+    let mut last_link: Option<usize> = None;
+    // A backtick run this long or longer has no closer from here on, so
+    // `code_at` need not look again: what keeps a line of `` [` `` linear.
+    let mut no_code = usize::MAX;
+    let mut j = 0;
+    while j < chars.len() {
+        match chars[j] {
+            '\\' if chars.get(j + 1).is_some_and(|c| c.is_ascii_punctuation()) => {
+                j += 2;
+                continue;
+            }
+            '`' => {
+                let run = run_len(chars, j, '`');
+                if run < no_code {
+                    match code_at(chars, j) {
+                        Some(code) => {
+                            j = code.outer.end;
+                            continue;
+                        }
+                        None => no_code = run,
+                    }
+                }
+                j += run;
+                continue;
+            }
+            '[' => {
+                let image = j > 0 && chars[j - 1] == '!' && !is_escaped(chars, j - 1);
+                stack.push((j, image));
+            }
+            ']' => {
+                if let Some((open, image)) = stack.pop() {
+                    let active = image || last_link.is_none_or(|l| l < open);
+                    let from = j + 2;
+                    let close = (active && chars.get(j + 1) == Some(&'(')).then(|| {
+                        link_close(chars, from)
+                            .or_else(|| balanced_close(chars, from))
+                            .or_else(|| find_char(chars, from, ')'))
+                    });
+                    if let Some(Some(close)) = close {
+                        links.push((
+                            open,
+                            InlineSpan {
+                                kind: if image { Inline::Image } else { Inline::Link },
+                                outer: if image { open - 1 } else { open }..close + 1,
+                                inner: open + 1..j,
+                            },
+                        ));
+                        if !image {
+                            last_link = Some(open);
+                        }
+                        j = close + 1;
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        j += 1;
     }
-    let from = text_end + 2;
-    let url_end = link_close(chars, from)
-        .or_else(|| balanced_close(chars, from))
-        .or_else(|| find_char(chars, from, ')'))?;
-    Some(InlineSpan {
-        kind: if image { Inline::Image } else { Inline::Link },
-        outer: i..url_end + 1,
-        inner: text_start..text_end,
-    })
+    // A link closes before the one around it, so they come out of order; the
+    // scan looks them up by their `[`.
+    links.sort_by_key(|(open, _)| *open);
+    links
 }
 
 /// The closing `)` of a well-formed `(url "title")` starting at `from`.
@@ -507,21 +609,26 @@ fn balanced_close(chars: &[char], from: usize) -> Option<usize> {
     None
 }
 
-/// `[[target]]`.
-fn wiki_at(chars: &[char], i: usize) -> Option<InlineSpan> {
+/// `[[target]]`, up to the first `]]`.
+fn wiki_at(chars: &[char], i: usize, memo: &mut Memo) -> Option<InlineSpan> {
     let text_start = i + 2;
-    let mut j = text_start;
-    while j + 1 < chars.len() {
-        if chars[j] == ']' && chars[j + 1] == ']' {
-            return Some(InlineSpan {
-                kind: Inline::WikiLink,
-                outer: i..j + 2,
-                inner: text_start..j,
-            });
+    let close = match memo.wiki_close {
+        Some(c) if c >= text_start => c,
+        _ => {
+            let mut j = text_start;
+            while j + 1 < chars.len() && !(chars[j] == ']' && chars[j + 1] == ']') {
+                j += 1;
+            }
+            let c = if j + 1 < chars.len() { j } else { chars.len() };
+            memo.wiki_close = Some(c);
+            c
         }
-        j += 1;
-    }
-    None
+    };
+    (close < chars.len()).then(|| InlineSpan {
+        kind: Inline::WikiLink,
+        outer: i..close + 2,
+        inner: text_start..close,
+    })
 }
 
 /// `#tag` at a word boundary. A purely numeric tag (`#123`) is rejected, as in
@@ -867,6 +974,82 @@ mod tests {
         let w = only("a [[Note Name]] b");
         assert_eq!(w.kind, Inline::WikiLink);
         assert_eq!(text("a [[Note Name]] b", &w.inner), "Note Name");
+    }
+
+    /// The kinds and texts of a line's spans, for whole-line assertions.
+    fn kinds(line: &str, cfg: &MarkdownConfig) -> Vec<(Inline, String)> {
+        scan(line, cfg).iter().map(|s| (s.kind, text(line, &s.outer))).collect()
+    }
+
+    /// A link's text may hold brackets, as CommonMark allows: an image (the
+    /// README badge), a `[[wiki link]]`, balanced or escaped brackets, and a
+    /// `]` inside a code span. The closing `]` is the one that balances.
+    #[test]
+    fn link_text_may_hold_brackets() {
+        let cases = [
+            ("[![badge](x.png)](https://ci.example/b)", "![badge](x.png)", "https://ci.example/b"),
+            ("[a [[wiki]] b](url)", "a [[wiki]] b", "url"),
+            ("[a [b] c](u)", "a [b] c", "u"),
+            ("[a [b [c] d] e](u)", "a [b [c] d] e", "u"),
+            ("[a \\] b](u)", "a \\] b", "u"),
+            ("[a \\[ b](u)", "a \\[ b", "u"),
+            ("[a `]` b](u)", "a `]` b", "u"),
+            ("[a ``x]`` b](u)", "a ``x]`` b", "u"),
+            ("![a [b] c](p.png)", "a [b] c", "p.png"),
+        ];
+        for (line, body, url) in cases {
+            let spans = scan(line, &md());
+            assert_eq!(spans.len(), 1, "{line}");
+            let s = &spans[0];
+            assert!(matches!(s.kind, Inline::Link | Inline::Image), "{line}");
+            assert_eq!(s.outer, 0..line.chars().count(), "{line}");
+            assert_eq!(text(line, &s.inner), body, "{line}");
+            assert_eq!(target_of(s, line).as_deref(), Some(url), "{line}");
+        }
+        // The same with wiki links off: `[[w]]` is only brackets then.
+        let cfg = MarkdownConfig { wiki_links: false, ..md() };
+        assert_eq!(kinds("[a [[w]] b](u)", &cfg), [(Inline::Link, "[a [[w]] b](u)".into())]);
+    }
+
+    /// A bracket that does not balance stays text, and a link inside a
+    /// link's text wins over the outer one (CommonMark: links do not nest).
+    #[test]
+    fn unbalanced_or_nested_link_brackets() {
+        let cfg = md();
+        // An extra `[` before a link: only the link is one.
+        assert_eq!(kinds("[a [b](u)", &cfg), [(Inline::Link, "[b](u)".into())]);
+        // An extra `]` closes the text early, and `] b](u)` is no link.
+        assert!(kinds("[a ] b](u)", &cfg).is_empty());
+        // An escaped bracket does not count toward the balance.
+        assert!(kinds("[a \\[ b] c](u)", &cfg).iter().all(|k| k.0 != Inline::Link));
+        // A `]` in a code span does not close the text, so nothing does.
+        assert_eq!(kinds("[a `]`(u)", &cfg), [(Inline::Code, "`]`".into())]);
+        // Never closed.
+        assert!(kinds("[a [b] c", &cfg).is_empty());
+        // A link in a link's text: the inner one is the link.
+        assert_eq!(kinds("[a [b](c) d](e)", &cfg), [(Inline::Link, "[b](c)".into())]);
+        assert_eq!(kinds("[[a](u)]", &cfg), [(Inline::Link, "[a](u)".into())]);
+        // An image may hold a link in its alt text.
+        assert_eq!(kinds("![a [b](c)](d)", &cfg), [(Inline::Image, "![a [b](c)](d)".into())]);
+        // A wiki link is not a CommonMark link: the outer link keeps it.
+        assert_eq!(kinds("[x [[w]]](u)", &cfg), [(Inline::Link, "[x [[w]]](u)".into())]);
+        // Where a `[[` opens both, the wiki link is read first, as before.
+        assert_eq!(kinds("[[a]](u)", &cfg), [(Inline::WikiLink, "[[a]]".into())]);
+    }
+
+    /// Bracket matching stays linear: a long line of openers that never
+    /// close must not be walked to its end once per opener.
+    #[test]
+    fn a_long_line_of_brackets_scans_fast() {
+        let off = MarkdownConfig { wiki_links: false, ..md() };
+        for line in ["[".repeat(100_000), "![".repeat(50_000), "[a]".repeat(33_000), "[`".repeat(50_000)] {
+            for cfg in [md(), off.clone()] {
+                let t = std::time::Instant::now();
+                let _ = scan(&line, &cfg);
+                let took = t.elapsed();
+                assert!(took < std::time::Duration::from_secs(1), "{:?}…: {took:?}", &line[..4]);
+            }
+        }
     }
 
     #[test]
