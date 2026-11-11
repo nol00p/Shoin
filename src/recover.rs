@@ -30,7 +30,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::AtomicI32;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use ropey::Rope;
@@ -261,15 +261,23 @@ fn write(target: &Path, s: &Snapshot) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut out = std::io::BufWriter::new(opts.open(target)?);
-    for chunk in s.rope.chunks() {
-        if s.crlf {
-            out.write_all(chunk.replace('\n', "\r\n").as_bytes())?;
-        } else {
-            out.write_all(chunk.as_bytes())?;
+    let file = opts.open(target)?;
+    let fill = || -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(file);
+        for chunk in s.rope.chunks() {
+            if s.crlf {
+                out.write_all(chunk.replace('\n', "\r\n").as_bytes())?;
+            } else {
+                out.write_all(chunk.as_bytes())?;
+            }
         }
-    }
-    out.into_inner().map_err(|e| e.into_error())?.sync_all()
+        out.into_inner().map_err(|e| e.into_error())?.sync_all()
+    };
+    // A half-written file would never be overwritten now, and its name would
+    // keep being reported as holding the text: take it away.
+    fill().inspect_err(|_| {
+        let _ = std::fs::remove_file(target);
+    })
 }
 
 /// Print where the text went, after the terminal is back to normal. Not
@@ -287,79 +295,119 @@ pub fn report(written: &[PathBuf]) {
 // The signal thread ends the editor while the event loop may be halfway
 // through a frame. Restoring the terminal under a frame lands the rest of that
 // frame on the user's shell, and a frame drawn after it does the same. So the
-// loop writes to the terminal only while it holds [`frame`], and the signal
-// thread, through [`stop`], keeps any new frame from starting and waits for the
-// one in flight before it touches the terminal. The same claim makes the
-// ending happen once: whichever of the signal thread and the loop's own exit
-// claims it first dumps and restores; the other stands aside.
+// loop writes to the terminal only while it holds [`frame`]; the signal thread,
+// through [`stop`], keeps any new frame from starting, writes the recovery
+// files, and then, through [`settle`], waits for the frame in flight before it
+// touches the terminal. The dump comes before the wait: the text is what
+// cannot be lost, and a frame can take a while (a clipboard program gets a
+// second).
+//
+// One claim says who ends the editor, so the recovery files are written once
+// and the terminal restored once: the loop's own exit, a signal, or a panic,
+// whichever comes first.
 
 const RUNNING: u8 = 0;
 const QUITTING: u8 = 1;
 const SIGNALLED: u8 = 2;
+const PANICKED: u8 = 3;
 
-/// Who is ending the editor, and the lock a frame holds while it is written.
+/// The name of the thread [`catch_signals`] starts.
+const SIGNAL_THREAD: &str = "signals";
+
+/// Who is ending the editor, whether frames may still start, and the lock a
+/// frame holds while it is written.
 struct Gate {
     ending: AtomicU8,
+    stopping: AtomicBool,
     frame: Mutex<()>,
 }
 
 impl Gate {
     const fn new() -> Gate {
-        Gate { ending: AtomicU8::new(RUNNING), frame: Mutex::new(()) }
+        Gate { ending: AtomicU8::new(RUNNING), stopping: AtomicBool::new(false), frame: Mutex::new(()) }
     }
 
     fn frame(&self) -> Option<MutexGuard<'_, ()>> {
         let guard = self.frame.lock().unwrap_or_else(|e| e.into_inner());
-        // Read under the lock: `stop` sets the state before it takes the lock,
-        // so a frame that gets the lock after `stop` has waited sees it.
-        (self.ending.load(Ordering::SeqCst) != SIGNALLED).then_some(guard)
+        // Read under the lock: `stop` sets the flag before `settle` takes the
+        // lock, so a frame that gets the lock after that sees it.
+        (!self.stopping.load(Ordering::SeqCst)).then_some(guard)
     }
 
     fn claim(&self, by: u8) -> bool {
         self.ending.compare_exchange(RUNNING, by, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
+    fn is(&self, by: u8) -> bool {
+        self.ending.load(Ordering::SeqCst) == by
+    }
+
+    /// Frames stop whoever owns the ending: a signal means the terminal is
+    /// about to be restored either way.
     fn stop(&self) -> bool {
-        if !self.claim(SIGNALLED) {
-            return false;
-        }
-        // Bounded, like `dump`: a frame stuck on a terminal that stopped
-        // reading must not keep the unsaved text from its file.
-        for _ in 0..50 {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.claim(SIGNALLED)
+    }
+
+    fn settle(&self) {
+        // Bounded: a frame stuck on a terminal that stopped reading must not
+        // keep the editor from ending.
+        for _ in 0..200 {
             match self.frame.try_lock() {
-                Ok(_) | Err(TryLockError::Poisoned(_)) => break,
+                Ok(_) | Err(TryLockError::Poisoned(_)) => return,
                 Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
         }
-        true
     }
 }
 
 static GATE: Gate = Gate::new();
 
-/// Held by the event loop while it writes to the terminal. `None`
-/// once a signal is ending the editor: the loop must then stop writing and
-/// return, and leave the terminal to the signal thread.
+/// Held by the event loop while it writes to the terminal. `None` once a
+/// signal is ending the editor: the loop must then stop writing and return,
+/// and leave the terminal to the signal thread.
 pub fn frame() -> Option<MutexGuard<'static, ()>> {
     GATE.frame()
 }
 
-/// For the signal thread: claim the ending, keep frames from starting and wait
-/// (briefly) for the one being written. `false` when the loop's own exit got
-/// there first; that path dumps and restores, so the signal thread does not.
+/// For the signal thread: keep frames from starting, and claim the ending.
+/// `false` when the loop's exit or a panic got there first; that path writes
+/// the recovery files.
 pub fn stop() -> bool {
     GATE.stop()
 }
 
-/// For the event loop's own exit: claim the ending. `false` when a signal got
-/// there first; its thread then dumps, restores and exits the process.
+/// For the signal thread, after [`stop`]: wait (up to two seconds) for the
+/// frame being written to finish, so the terminal can be restored.
+pub fn settle() {
+    GATE.settle()
+}
+
+/// For the event loop's own exit: claim the ending. `false` when a signal or
+/// a panic got there first.
 pub fn quit() -> bool {
     GATE.claim(QUITTING)
 }
 
-/// Whether a signal is ending the editor.
+/// For the panic hook: claim the ending. `false` when the loop's exit or a
+/// signal got there first.
+pub fn panicked() -> bool {
+    GATE.claim(PANICKED)
+}
+
+/// Whether a signal is ending the editor; its thread then exits the process.
 pub fn signalled() -> bool {
-    GATE.ending.load(Ordering::SeqCst) == SIGNALLED
+    GATE.is(SIGNALLED)
+}
+
+/// Whether the event loop's own exit is ending the editor.
+pub fn quitting() -> bool {
+    GATE.is(QUITTING)
+}
+
+/// Whether this is the thread [`catch_signals`] runs `on_stop` on.
+pub fn on_signal_thread() -> bool {
+    std::thread::current().name() == Some(SIGNAL_THREAD)
 }
 
 // ------------------------------------------------------------------ signals
@@ -418,7 +466,7 @@ pub fn catch_signals(on_stop: impl FnOnce(i32) + Send + 'static) {
         let Ok((mut rx, tx)) = UnixStream::pair() else { return };
         // Never closed: the handler may write to it until the process ends.
         WAKE.store(tx.into_raw_fd(), Ordering::Relaxed);
-        let spawned = std::thread::Builder::new().name("signals".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name(SIGNAL_THREAD.into()).spawn(move || {
             let mut sig = [0u8];
             if rx.read_exact(&mut sig).is_ok() {
                 on_stop(i32::from(sig[0]));
@@ -582,13 +630,18 @@ mod tests {
         let gate = Gate::new();
         assert!(gate.frame().is_some(), "frames run until something ends the editor");
         assert!(gate.stop(), "the first to end the editor claims it");
-        assert!(gate.frame().is_none(), "no frame starts once a signal has claimed the ending");
-        assert!(!gate.stop() && !gate.claim(QUITTING), "and it is ended once");
+        assert!(gate.frame().is_none(), "no frame starts once a signal is ending the editor");
+        assert!(!gate.stop() && !gate.claim(QUITTING) && !gate.claim(PANICKED), "and it is ended once");
 
         let gate = Gate::new();
         assert!(gate.claim(QUITTING));
-        assert!(!gate.stop(), "a loop already on its way out restores by itself");
-        assert!(gate.frame().is_some());
+        assert!(!gate.stop(), "a loop already on its way out writes the files itself");
+        assert!(gate.is(QUITTING));
+
+        let gate = Gate::new();
+        assert!(gate.claim(PANICKED));
+        assert!(!gate.stop(), "a panic that already wrote the files is not followed by a second dump");
+        assert!(gate.frame().is_none(), "but frames still stop for the restore");
     }
 
     #[test]
@@ -597,13 +650,14 @@ mod tests {
         let frame = GATE.frame().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let stopper = std::thread::spawn(move || {
-            assert!(GATE.stop());
+            assert!(GATE.stop(), "claiming does not wait for the frame: the dump comes first");
+            GATE.settle();
             tx.send(()).unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(rx.try_recv().is_err(), "stop returned while a frame was still being written");
+        assert!(rx.try_recv().is_err(), "settle returned while a frame was still being written");
         drop(frame);
-        rx.recv_timeout(std::time::Duration::from_secs(2)).expect("stop returns once the frame is done");
+        rx.recv_timeout(std::time::Duration::from_secs(5)).expect("settle returns once the frame is done");
         stopper.join().unwrap();
         assert!(GATE.frame().is_none());
     }

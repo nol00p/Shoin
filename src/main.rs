@@ -298,29 +298,37 @@ fn main() -> Result<()> {
     // crash can lose for good, and nothing after it may get the chance.
     let restore_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // The signal thread is already ending the editor, terminal and
-        // recovery files included, and will exit the process: a second dump
-        // would only duplicate every file.
-        if recover::signalled() {
+        // Recovery files are written once, by whoever ends the editor first.
+        // A signal thread that got here first is writing them and will exit
+        // the process, so any other thread waits for that; if the signal
+        // thread itself panics, it still restores and exits.
+        let owns = recover::panicked();
+        if !owns && recover::signalled() && !recover::on_signal_thread() {
             loop {
                 std::thread::park();
             }
         }
-        let written = recover::dump();
+        let written = if owns { recover::dump() } else { Vec::new() };
         release_terminal_modes();
         restore_hook(info);
         recover::report(&written);
+        if recover::on_signal_thread() {
+            std::process::exit(101);
+        }
     }));
     // SIGTERM and SIGHUP (the window closed) would end the process where it
     // stands, terminal modes and unsaved text with it. Caught, they end it the
-    // way a crash does, from a thread of their own. Frames stop first, so no
-    // part of one is drawn over the restored terminal.
+    // way a crash does, from a thread of their own. Frames stop before the
+    // dump, and the terminal is restored only once the frame being drawn is
+    // done, so no part of one lands on the shell.
     recover::catch_signals(|sig| {
-        if !recover::stop() {
-            // The editor is already on its way out and restores by itself.
+        let owns = recover::stop();
+        if !owns && recover::quitting() {
+            // The loop is already on its way out and restores by itself.
             return;
         }
-        let written = recover::dump();
+        let written = if owns { recover::dump() } else { Vec::new() };
+        recover::settle();
         release_terminal_modes();
         ratatui::restore();
         recover::report(&written);
@@ -329,14 +337,16 @@ fn main() -> Result<()> {
     let result = app.run_loop(&mut terminal);
     // A signal that came first ends the editor from its own thread: restoring
     // here too would do it twice, and race that thread's writes.
-    if !recover::quit() {
+    let owns = recover::quit();
+    if !owns && recover::signalled() {
         loop {
             std::thread::park();
         }
     }
     // An error that ends the loop (a terminal that went away) leaves the
-    // buffers unsaved: the editor is dying, so the text is kept.
-    let written = if result.is_err() { recover::dump() } else { Vec::new() };
+    // buffers unsaved: the editor is dying, so the text is kept, unless a
+    // panic on another thread has written it already.
+    let written = if owns && result.is_err() { recover::dump() } else { Vec::new() };
     release_terminal_modes();
     ratatui::restore();
     recover::report(&written);

@@ -1284,6 +1284,8 @@ impl App {
     /// as long as it takes to compute the next one. See `BATCH_BUDGET`.
     fn step(&mut self) -> Result<()> {
         if self.watcher.as_ref().is_some_and(|w| w.changed()) {
+            // A reload can turn mouse capture on or off on the terminal.
+            let Some(_frame) = crate::recover::frame() else { return Ok(()) };
             self.reload_config();
             self.needs_redraw = true;
         }
