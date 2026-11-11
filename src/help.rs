@@ -626,6 +626,12 @@ d c y x :: operate on the selection
 o :: swap the ends
 > < u U :: indent · outdent · lowercase · uppercase
 i{obj} a{obj} :: select a text object: viw, vap
+p P :: replace the selection with the register; p keeps what it replaced, P keeps the register
+~ r{c} :: toggle the case · replace every selected character with c
+J :: join the selected lines
+D X Y :: delete · delete · yank the selected lines
+C S R :: change the selected lines
+I A :: insert before · append after the selection
 move_lines_down move_lines_up :: move the selected lines down · up and keep them selected; a count moves further. Not on a key: bind them under [keys.visual], as \"J\" = \"move_lines_down\"
 
 ## Lists

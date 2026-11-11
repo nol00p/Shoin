@@ -121,7 +121,9 @@ pub fn normal(key: Key) -> Option<Verb> {
 }
 
 /// Visual mode, first key. Only the differences from Normal are listed; motions
-/// and the shared prefixes fall through to it.
+/// and the shared prefixes fall through to it. Normal-mode edit keys that fall
+/// through (`p`, `~`, `r`, `J`, `D`, …) get their Visual meaning in
+/// `app::visual_key`, which acts on the selection or refuses the key.
 ///
 /// The differences are all about the SELECTION already existing: an operator
 /// fires at once instead of waiting for a range, `i`/`a` open an object with no
@@ -148,6 +150,9 @@ pub fn visual(key: Key) -> Option<Verb> {
         KeyCode::Char('U') => Verb::Operator(Operator::Uppercase),
         KeyCode::Char('i') => Verb::Object { around: false },
         KeyCode::Char('a') => Verb::Object { around: true },
+        // `S` and `R` change the selected LINES, as `C` does (`app::visual_key`
+        // reads `ChangeToEol` linewise in Visual). Normal has no `S`/`R`.
+        KeyCode::Char('S') | KeyCode::Char('R') => Verb::Act(Action::ChangeToEol),
         KeyCode::Char('o') => Verb::Act(Action::SwapSelectionEnds),
         KeyCode::Char('v') => Verb::Act(Action::Visual),
         KeyCode::Char('V') => Verb::Act(Action::VisualLine),

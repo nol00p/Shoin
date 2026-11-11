@@ -124,6 +124,12 @@ and `list_indent` and `list_outdent` (Insert) — see
 | `o` | swap ends |
 | `>` `<` `u` `U` | indent / outdent / lowercase / uppercase |
 | `i{obj}` `a{obj}` | select a text object (`viw`, `vap`) |
+| `p` `P` | replace the selection with the register; `p` puts what it replaced in the register, `P` keeps the register |
+| `~` `r{c}` | toggle the case / replace every selected character with `c` |
+| `J` | join the selected lines |
+| `D` `X` `Y` | delete / delete / yank the selected lines |
+| `C` `S` `R` | change the selected lines |
+| `I` `A` | insert before / append after the selection |
 | `<leader>b` `<leader>i` | toggle bold / italic |
 
 `move_lines_down` and `move_lines_up` move the selected lines down or up a
