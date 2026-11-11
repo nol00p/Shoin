@@ -4,8 +4,9 @@
 //! THE RULE HERE: never destroy something the user did not name. `std::fs`
 //! will happily `rename` one file over another and take the target with it, so
 //! every entry point below refuses a destination that already exists and says
-//! so. Deletion is the one operation that removes, and it only ever removes the
-//! path it was handed.
+//! so — except where that destination is the very entry being renamed, spelled
+//! in another case (see `rename`). Deletion is the one operation that removes,
+//! and it only ever removes the path it was handed.
 
 use std::path::Path;
 
@@ -52,23 +53,27 @@ pub fn remove(path: &Path) -> Result<()> {
 /// Rename or move, creating the destination's parents.
 ///
 /// Same refusal as `create`: an existing destination is a collision to report,
-/// not a file to overwrite. Moving a directory into itself is caught too — the
-/// OS reports it, but not in words worth showing.
+/// not a file to overwrite. The one exception is a respelling — `notes.md` to
+/// `Notes.md` on a filesystem that ignores case, where the new name "exists"
+/// only because it IS the old one. Moving a directory into itself is caught
+/// too — the OS reports it, but not in words worth showing.
 pub fn rename(from: &Path, to: &Path) -> Result<()> {
     if from == to {
         return Ok(());
     }
+    if to.starts_with(from) {
+        bail!("cannot move {} inside itself", name_of(from));
+    }
     if to.exists() {
-        // On a filesystem that ignores case (macOS by default, Windows)
-        // `Notes.md` "exists" as soon as `notes.md` does. That is not a
-        // collision: it is the same file asking for a new spelling.
         if is_respelling(from, to) {
             return respell(from, to);
         }
+        // `m docs/a.md` to `Docs/a.md` where case is ignored: nothing to move,
+        // and "already exists" would read as if another file were in the way.
+        if same_entry(from, to) && same_folder(from, to) && from.file_name() == to.file_name() {
+            bail!("{} is already there", name_of(to));
+        }
         bail!("{} already exists", name_of(to));
-    }
-    if to.starts_with(from) {
-        bail!("cannot move {} inside itself", name_of(from));
     }
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)
@@ -81,32 +86,80 @@ pub fn rename(from: &Path, to: &Path) -> Result<()> {
 /// Whether `to` is `from` under another spelling — `Notes.md` for `notes.md`
 /// where case is ignored — rather than a second entry.
 ///
-/// Two checks, because each alone is fooled. A hard link (or a path through a
-/// symlinked folder) shows the same file identity too, and renaming onto a
-/// hard link of yourself is a silent no-op that keeps both names. So the exact
-/// spelling of `to` must also be missing from its folder's listing: a
-/// case-folding filesystem lists the name as stored, while a real second entry
-/// is listed under its own name.
+/// Every check guards against something the others let through:
+/// - the same folder and a name that differs only in case: a hard link
+///   `alias.md` to the same file must never count, or renaming `alias.md` to
+///   `NOTES.md` would land on `notes.md` — a silent no-op that loses `alias.md`;
+/// - the same file, without following links: a symlink and its target are two
+///   entries, and renaming one over the other replaces the target;
+/// - the exact new spelling missing from the folder's listing: a case-folding
+///   filesystem lists the name as stored, a real second entry (a hard link on
+///   a case-sensitive one) is listed under its own name.
+///
+/// Names that differ only in Unicode normalization (NFC vs NFD) do not count;
+/// they stay refused, which is the safe side.
 fn is_respelling(from: &Path, to: &Path) -> bool {
-    same_entry(from, to) && !listed(to)
+    same_folder(from, to)
+        && same_name_ignoring_case(from, to)
+        && same_entry(from, to)
+        && !listed(to)
 }
 
-/// Whether both paths reach the same file.
+/// Whether two names differ, but only in case.
+fn same_name_ignoring_case(a: &Path, b: &Path) -> bool {
+    match (a.file_name().and_then(|s| s.to_str()), b.file_name().and_then(|s| s.to_str())) {
+        (Some(a), Some(b)) => a != b && a.to_lowercase() == b.to_lowercase(),
+        _ => false,
+    }
+}
+
+/// Whether both paths sit in the same folder — compared as folders on disk,
+/// since `docs` and `Docs` are one folder where case is ignored.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let (Some(a), Some(b)) = (a.parent(), b.parent()) else {
+        return false;
+    };
+    same_dir(dot_if_empty(a), dot_if_empty(b))
+}
+
+/// The folder is where the entry lives, so following links here is right.
+#[cfg(unix)]
+fn same_dir(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether both paths are the same entry, never following a link: renaming a
+/// link moves the link, so a link and the file it points at are two entries.
 #[cfg(unix)]
 fn same_entry(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    // Not following links: renaming a link moves the link, so a link and the
-    // file it points at are two entries.
     match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
         (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
         _ => false,
     }
 }
 
-/// Without inode numbers the resolved path stands in: Windows resolves a case
-/// variant to the spelling on disk.
+/// Without inode numbers the resolved path stands in (Windows resolves a case
+/// variant to the spelling on disk), but resolving follows links, so a link is
+/// never the same entry as anything here.
 #[cfg(not(unix))]
 fn same_entry(a: &Path, b: &Path) -> bool {
+    let is_link = |p: &Path| std::fs::symlink_metadata(p).map_or(true, |m| m.file_type().is_symlink());
+    if is_link(a) || is_link(b) {
+        return false;
+    }
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
@@ -118,35 +171,61 @@ fn listed(path: &Path) -> bool {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return true;
     };
-    let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
     // An unreadable folder answers "listed", which keeps the refusal.
-    let Ok(read) = std::fs::read_dir(parent) else {
+    let Ok(read) = std::fs::read_dir(dot_if_empty(parent)) else {
         return true;
     };
     read.flatten().any(|e| e.file_name() == name)
 }
 
-/// Give an entry a new spelling of its own name, by way of a third name.
+fn dot_if_empty(dir: &Path) -> &Path {
+    if dir.as_os_str().is_empty() { Path::new(".") } else { dir }
+}
+
+/// Give an entry a new spelling of its own name.
 ///
-/// A direct `rename` does it on APFS and NTFS, but some case-insensitive
-/// filesystems (FAT and exFAT drives, some network shares) treat it as a
-/// rename onto itself and change nothing. Two renames through a name that
-/// cannot clash work on all of them. If the second step fails the first is
-/// undone, so the entry is never left under the temporary name.
+/// A direct `rename` does it on APFS and NTFS, in one atomic step — no moment
+/// where the editor, which polls open files every second, finds neither name.
+/// Some case-insensitive filesystems (FAT and exFAT drives, some network
+/// shares) take it as a rename onto itself and change nothing; the listing
+/// shows that, and then the rename goes through a third name instead.
 fn respell(from: &Path, to: &Path) -> Result<()> {
+    std::fs::rename(from, to)
+        .with_context(|| format!("moving {} to {}", name_of(from), to.display()))?;
+    if listed(to) && !listed(from) {
+        return Ok(());
+    }
+    respell_via_temp(from, to)
+}
+
+/// The two-step respelling: `from` to an unused name, then to `to`. If the
+/// second step fails or changes nothing, the first is undone; if even that
+/// fails, the error says where the entry now is.
+fn respell_via_temp(from: &Path, to: &Path) -> Result<()> {
+    let moving = || format!("moving {} to {}", name_of(from), to.display());
+    // Short, and not built from the file's name: a long name plus a suffix
+    // could pass the 255-byte limit on a name.
     let dir = from.parent().unwrap_or(Path::new(""));
-    let base = name_of(from);
     let tmp = (0u32..)
-        .map(|n| dir.join(format!(".{base}.shoin-rename-{}-{n}", std::process::id())))
+        .map(|n| dir.join(format!(".shoin-rename-{}-{n}", std::process::id())))
         .find(|p| std::fs::symlink_metadata(p).is_err())
         .expect("an unused name");
-    let moving = || format!("moving {} to {}", name_of(from), to.display());
     std::fs::rename(from, &tmp).with_context(moving)?;
-    if let Err(e) = std::fs::rename(&tmp, to) {
-        let _ = std::fs::rename(&tmp, from);
-        return Err(e).with_context(moving);
+    let second = std::fs::rename(&tmp, to);
+    if second.is_ok() && listed(to) && !listed(&tmp) {
+        return Ok(());
     }
-    Ok(())
+    if let Err(undo) = std::fs::rename(&tmp, from) {
+        bail!(
+            "{}: stopped half-way, the entry is now {} ({undo})",
+            moving(),
+            tmp.display()
+        );
+    }
+    match second {
+        Err(e) => Err(e).with_context(moving),
+        Ok(()) => bail!("{}: the filesystem kept the old name", moving()),
+    }
 }
 
 /// How many entries `remove` would take, for the confirmation. Capped, because
@@ -302,27 +381,87 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// The two-step move runs the same on any filesystem: the entry ends under
-    /// the new spelling with its content, and no temporary name is left.
+    /// Only a change of case to the name, in the same folder, is a respelling:
+    /// a hard link under another name (`alias.md` to `NOTES.md`) must never
+    /// pass, or the rename would land on the other link and lose `alias.md`.
     #[test]
-    fn respell_goes_through_a_third_name_and_leaves_nothing() {
+    fn a_respelling_is_the_same_name_in_the_same_folder_ignoring_case() {
+        let same = |a: &str, b: &str| same_name_ignoring_case(Path::new(a), Path::new(b));
+        assert!(same("notes.md", "Notes.md"));
+        assert!(same("d/notes.md", "d/NOTES.MD"));
+        assert!(same("Ärger.md", "ärger.md"));
+        assert!(!same("notes.md", "notes.md"), "not a change at all");
+        assert!(!same("alias.md", "NOTES.md"));
+        assert!(!same("notes.md", "notes.markdown"));
+
+        let d = tmp("folder");
+        std::fs::create_dir(d.join("a")).unwrap();
+        std::fs::create_dir(d.join("b")).unwrap();
+        assert!(same_folder(&d.join("a/x.md"), &d.join("a/y.md")));
+        assert!(!same_folder(&d.join("a/x.md"), &d.join("b/x.md")));
+        // Compared as folders on disk, not as bytes.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("a"), d.join("link")).unwrap();
+            assert!(same_folder(&d.join("a/x.md"), &d.join("link/x.md")));
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The direct rename, tried first: the entry ends under the new spelling
+    /// with its content, and nothing else is left in the folder.
+    #[test]
+    fn respell_renames_and_leaves_nothing() {
         let d = tmp("respell");
         std::fs::write(d.join("notes.md"), "body\n").unwrap();
         respell(&d.join("notes.md"), &d.join("Notes.md")).unwrap();
         assert_eq!(names_in(&d), ["Notes.md"]);
         assert_eq!(std::fs::read_to_string(d.join("Notes.md")).unwrap(), "body\n");
 
-        // A folder too, with what is inside it.
         std::fs::create_dir(d.join("docs")).unwrap();
         std::fs::write(d.join("docs/a.md"), "a\n").unwrap();
         respell(&d.join("docs"), &d.join("Docs")).unwrap();
+        assert_eq!(names_in(&d), ["Docs", "Notes.md"]);
+        assert_eq!(std::fs::read_to_string(d.join("Docs/a.md")).unwrap(), "a\n");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The fallback through a third name, for filesystems where the direct
+    /// rename changes nothing. It runs the same on any filesystem.
+    #[test]
+    fn respell_via_temp_goes_through_a_third_name_and_leaves_nothing() {
+        let d = tmp("viatemp");
+        std::fs::write(d.join("notes.md"), "body\n").unwrap();
+        respell_via_temp(&d.join("notes.md"), &d.join("Notes.md")).unwrap();
+        assert_eq!(names_in(&d), ["Notes.md"]);
+        assert_eq!(std::fs::read_to_string(d.join("Notes.md")).unwrap(), "body\n");
+
+        std::fs::create_dir(d.join("docs")).unwrap();
+        std::fs::write(d.join("docs/a.md"), "a\n").unwrap();
+        respell_via_temp(&d.join("docs"), &d.join("Docs")).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("Docs/a.md")).unwrap(), "a\n");
 
         // A failed second step puts the entry back under its old name.
         std::fs::write(d.join("keep.md"), "keep\n").unwrap();
-        assert!(respell(&d.join("keep.md"), &d.join("missing/Keep.md")).is_err());
+        assert!(respell_via_temp(&d.join("keep.md"), &d.join("missing/Keep.md")).is_err());
         assert_eq!(names_in(&d), ["Docs", "Notes.md", "keep.md"]);
 
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A name near the 255-byte limit still respells: the temporary name is
+    /// not built from it.
+    #[test]
+    fn respell_handles_a_name_at_the_length_limit() {
+        let d = tmp("long");
+        let lower = format!("{}.md", "a".repeat(250));
+        let upper = format!("{}.md", "A".repeat(250));
+        std::fs::write(d.join(&lower), "body\n").unwrap();
+        respell_via_temp(&d.join(&lower), &d.join(&upper)).unwrap();
+        assert_eq!(names_in(&d), [upper.as_str()]);
+        respell(&d.join(&upper), &d.join(&lower)).unwrap();
+        assert_eq!(names_in(&d), [lower]);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -351,6 +490,18 @@ mod tests {
         let err = rename(&d.join("Notes.md"), &d.join("OTHER.md")).unwrap_err().to_string();
         assert!(err.contains("already exists"), "got: {err}");
         assert_eq!(std::fs::read_to_string(d.join("other.md")).unwrap(), "other\n");
+
+        // A hard link to Notes.md, renamed to a case variant of Notes.md: the
+        // same file, but not the same name, so refused — and both names stay.
+        std::fs::hard_link(d.join("Notes.md"), d.join("alias.md")).unwrap();
+        let err = rename(&d.join("alias.md"), &d.join("NOTES.md")).unwrap_err().to_string();
+        assert!(err.contains("already exists"), "got: {err}");
+        assert_eq!(names_in(&d), ["Docs", "Notes.md", "alias.md", "other.md"]);
+
+        // Only the folder's case differs: nothing to move, and said so.
+        let err = rename(&d.join("Docs/a.md"), &d.join("docs/a.md")).unwrap_err().to_string();
+        assert!(err.contains("already there"), "got: {err}");
+        assert_eq!(names_in(&d.join("Docs")), ["a.md"]);
 
         std::fs::remove_dir_all(&d).ok();
     }
