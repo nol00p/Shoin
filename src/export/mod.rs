@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::config::schema::{MarkdownConfig, TranscludeConfig};
-use crate::render::markdown::block::{classify, BlockKind, Carry};
+use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry};
+use crate::transclude::same_file;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -86,29 +87,20 @@ pub fn write(
     // writing onto any of them would destroy the document: the source, an
     // embedded note, an embedded picture. `sources` starts with the source.
     let (flat, sources) = crate::transclude::compile::compile_with_sources(source, cfg)?;
-    if let Some(i) = sources.iter().position(|s| is_same_file(dest, s)) {
+    if let Some(i) = sources.iter().position(|s| same_file(dest, s)) {
         match i {
             0 => bail!("that would overwrite the document you are exporting"),
             _ => bail!("that would overwrite {}, which the document embeds", short(&sources[i])),
         }
     }
-    // HTML reads the pictures the document links to as well, to carry them
-    // inside the page, so it is rendered before anything is written and
-    // those pictures are refused the same way.
-    let page_html = match format {
-        Format::Html => {
-            let title = source
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "document".into());
-            let (out, pictures) = html::render_with_pictures(&flat, &title, page);
-            if let Some(p) = pictures.iter().find(|p| is_same_file(dest, p)) {
-                bail!("that would overwrite {}, which the document shows", short(p));
-            }
-            Some(out)
+    // HTML reads the pictures the document links to, to carry them inside
+    // the page, and pandoc reads them to lay them out: for those two, a
+    // linked picture is as much part of the document as an embedded one.
+    if matches!(format, Format::Html | Format::Pdf) {
+        if let Some(p) = linked_pictures(&flat, &page.base, &page.md).iter().find(|p| same_file(dest, p)) {
+            bail!("that would overwrite {}, which the document shows", short(p));
         }
-        _ => None,
-    };
+    }
     // The destination is typed into a dialog, so a folder that does not exist
     // yet is a reasonable thing to ask for rather than a mistake to report.
     if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -124,13 +116,132 @@ pub fn write(
             std::fs::write(dest, plain::render(&flat, page.measure, page.justify, &page.md))
                 .with_context(|| short(dest))?
         }
-        Format::Html => std::fs::write(dest, page_html.unwrap_or_default()).with_context(|| short(dest))?,
+        Format::Html => {
+            let title = source
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "document".into());
+            std::fs::write(dest, html::render(&flat, &title, page)).with_context(|| short(dest))?
+        }
         Format::Pdf => {
             let flat = rebase_images(&flat, source, None, &page.md);
             write_pdf(&flat, source, dest, page.md.math)?
         }
     }
     Ok(())
+}
+
+/// Every local picture file `markdown` links to (`![alt](img/p.png)`),
+/// found from `base` the way HTML export finds them to carry them inside
+/// the page (`html::local_file`). Code, fenced blocks, front matter and math
+/// are not read, as in `rebase_images`; a remote address names no file.
+fn linked_pictures(markdown: &str, base: &Path, md: &MarkdownConfig) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut carry = Carry::default();
+    for (i, line) in markdown.lines().enumerate() {
+        let (kind, next) = classify(line, &carry, i == 0, md.math);
+        carry = next;
+        if !matches!(
+            kind,
+            BlockKind::FenceOpen(_)
+                | BlockKind::FenceBody { .. }
+                | BlockKind::FenceClose
+                | BlockKind::FrontMatter
+                | BlockKind::MathBlock
+        ) {
+            pictures_in(line, base, md, &mut out);
+        }
+    }
+    out
+}
+
+/// One line of `linked_pictures`, reaching into emphasis and link text.
+fn pictures_in(line: &str, base: &Path, md: &MarkdownConfig, out: &mut Vec<PathBuf>) {
+    use crate::render::markdown::inline::{self, Inline};
+    let chars: Vec<char> = line.chars().collect();
+    for sp in inline::scan(line, md) {
+        let inner: String = chars[sp.inner.clone()].iter().collect();
+        match sp.kind {
+            Inline::Bold
+            | Inline::Italic
+            | Inline::BoldItalic
+            | Inline::Strikethrough
+            | Inline::Highlight
+            | Inline::Link => pictures_in(&inner, base, md, out),
+            Inline::Image => {
+                if let Some(file) = inline::destination(&sp, line).and_then(|(url, _)| html::local_file(&url, base)) {
+                    out.push(file);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a paragraph left open by the lines so far is: whether it sits in a
+/// quote and how deep, whether that quote's line was paragraph text, and
+/// the quote's own block state (a quoted fence is code, not text).
+///
+/// One rule for what carries a paragraph on, used by HTML to group lines
+/// into `<p>` and by plain text to decide whether a hard break's marker is
+/// a break: the two exports must not read a document differently.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Held {
+    quote: u8,
+    prose: bool,
+    inner: Carry,
+}
+
+impl Held {
+    /// The state after `line`, of kind `kind`.
+    pub(crate) fn next(&self, line: &str, kind: &BlockKind, math: bool) -> Held {
+        match kind {
+            BlockKind::Quote(depth) => {
+                let depth = (*depth).max(1);
+                let inner = match depth == self.quote {
+                    true => self.inner.clone(),
+                    false => Carry::default(),
+                };
+                let body = quote_body(line);
+                let (k, inner) = classify(body, &inner, false, math);
+                // A quoted list item, heading, fence, rule or table row keeps
+                // its own line; only quoted text runs on into the next.
+                let prose = k == BlockKind::Paragraph && !has_cell_separator(body);
+                Held { quote: depth, prose, inner }
+            }
+            // An unmarked line goes on with whatever it continues, a quote
+            // included: CommonMark's lazy continuation.
+            BlockKind::Paragraph => self.clone(),
+            _ => Held::default(),
+        }
+    }
+
+    /// Whether `next` (of kind `next_kind`, followed by a line of kind
+    /// `then`) carries on the paragraph held. A paragraph line does, unless
+    /// it is a table's header row, which the delimiter row after it takes;
+    /// a quote line does when it is text at the same depth as quoted text.
+    pub(crate) fn joins(
+        &self,
+        next: &str,
+        next_kind: &BlockKind,
+        then: Option<&BlockKind>,
+        md: &MarkdownConfig,
+    ) -> bool {
+        let table = |k: Option<&BlockKind>| md.tables && k == Some(&BlockKind::Table);
+        match next_kind {
+            BlockKind::Paragraph => !(has_cell_separator(next) && table(then)),
+            BlockKind::Quote(_) => {
+                let after = self.next(next, next_kind, md.math);
+                self.prose && after.prose && after.quote == self.quote
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A quote line's text, past its `>` markers.
+pub(crate) fn quote_body(line: &str) -> &str {
+    line.trim_start().trim_start_matches(['>', ' '])
 }
 
 /// `markdown` with every relative image path, written against `source`'s
@@ -276,20 +387,6 @@ fn normal(p: &Path) -> PathBuf {
         }
     }
     out
-}
-
-/// Whether writing to `dest` would write to `file`. A hard link is a second
-/// name for the same file, which only the inode shows; elsewhere the resolved
-/// paths are compared. A `dest` that does not exist yet is no file at all.
-fn is_same_file(dest: &Path, file: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(a), Ok(b)) = (std::fs::metadata(dest), std::fs::metadata(file)) {
-            return a.dev() == b.dev() && a.ino() == b.ino();
-        }
-    }
-    dest.exists() && crate::transclude::same_file(dest, file)
 }
 
 /// A path as an error message should name it. The status line is one row and
@@ -823,6 +920,53 @@ mod tests {
         write(&src, &d.join("p.png"), Format::Html, &TranscludeConfig::default(), &page).unwrap();
         assert!(std::fs::read_to_string(d.join("p.png")).unwrap().starts_with("<!doctype html>"));
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// pandoc reads a linked picture to lay it out, so PDF refuses it the
+    /// same way. The refusal comes before pandoc is looked for.
+    #[test]
+    fn pdf_refuses_to_write_over_a_linked_picture() {
+        let d = vault("clobber-linked-pdf");
+        std::fs::create_dir_all(d.join("img")).unwrap();
+        std::fs::write(d.join("img/p.png"), PNG).unwrap();
+        let src = d.join("note.md");
+        std::fs::write(&src, "# Note\n\n*see ![alt](img/p.png)*\n").unwrap();
+        let page = html::Page { base: d.clone(), ..html::Page::default() };
+        let err = write(&src, &d.join("img/p.png"), Format::Pdf, &TranscludeConfig::default(), &page)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overwrite p.png"), "got: {err}");
+        assert_eq!(std::fs::read(d.join("img/p.png")).unwrap(), PNG);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Plain text and HTML read a document's paragraphs the same way: a
+    /// line ending in a backslash is a hard break in one exactly when it
+    /// is in the other (the backslash goes from `txt`, `<br>` in `html`).
+    #[test]
+    fn text_and_html_agree_on_what_continues_a_paragraph() {
+        let md = MarkdownConfig::default();
+        for (doc, joins) in [
+            ("x\\\nnext\n", true),
+            ("x\\\n\nnext\n", false),
+            ("x\\\n# Heading\n", false),
+            ("> x\\\n> next\n", true),
+            ("> x\\\n>\n> next\n", false),
+            ("> x\\\n> > next\n", false),
+            ("> x\\\nlazy\n", true),
+            ("> a\nx\\\n> next\n", true),
+            ("x\\\n> next\n", false),
+            ("> - x\\\n> - next\n", false),
+            ("> x\\\n> # next\n", false),
+            ("x\\\n| a | b |\n|---|---|\n| 1 | 2 |\n", false),
+            ("x\\\n| a | b |\nnext\n", true),
+            ("- x\\\n  next\n", true),
+        ] {
+            let txt = plain::render(doc, 72, false, &md);
+            let page = html::render(doc, "t", &html::Page::default());
+            assert_eq!(!txt.contains("x\\"), joins, "txt {doc:?}: {txt:?}");
+            assert_eq!(page.contains("x<br>"), joins, "html {doc:?}: {page}");
+        }
     }
 
     /// An embedded note or picture is as much the document as its own file:

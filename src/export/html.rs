@@ -56,23 +56,6 @@ impl Default for Page {
     }
 }
 
-thread_local! {
-    /// The pictures `inline_src` read, while `render_with_pictures` is
-    /// listening. Collected where they are read so the list can never miss
-    /// one the page carries; a separate walk could disagree with this one.
-    static PICTURES_READ: std::cell::RefCell<Option<Vec<std::path::PathBuf>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// [`render`], and every local picture file it read to put inside the page.
-/// Export needs them to refuse writing the page over one of them.
-pub fn render_with_pictures(text: &str, fallback_title: &str, page: &Page) -> (String, Vec<std::path::PathBuf>) {
-    PICTURES_READ.with(|r| *r.borrow_mut() = Some(Vec::new()));
-    let html = render(text, fallback_title, page);
-    let read = PICTURES_READ.with(|r| r.borrow_mut().take()).unwrap_or_default();
-    (html, read)
-}
-
 /// Convert a Markdown document to a complete HTML page.
 ///
 /// `fallback_title` names the page when the document has no `# Heading` of its
@@ -146,6 +129,9 @@ struct Body<'a> {
     /// loose list one list rather than two.
     lazy: bool,
     quote: u8,
+    /// What the paragraph being accumulated continues, for deciding whether
+    /// a quote line joins it.
+    held: super::Held,
     /// Raw lines of the table being accumulated.
     table: Vec<String>,
     /// Raw lines of the display math block being accumulated.
@@ -192,6 +178,7 @@ impl<'a> Body<'a> {
             item_filled: false,
             lazy: false,
             quote: 0,
+            held: super::Held::default(),
             table: Vec::new(),
             math_block: Vec::new(),
             fence: None,
@@ -219,6 +206,8 @@ impl<'a> Body<'a> {
     }
 
     fn line(&mut self, line: &str, kind: &BlockKind, math_continues: bool) {
+        let held = std::mem::take(&mut self.held);
+        self.held = held.next(line, kind, self.md.math);
         match kind {
             // Front matter is metadata for tools, not text for readers — the
             // same call plain text makes.
@@ -288,12 +277,11 @@ impl<'a> Body<'a> {
             }
 
             BlockKind::Quote(depth) => {
-                let body = line.trim_start().trim_start_matches(['>', ' ']);
-                // Consecutive `>` lines at one depth are one paragraph, as
-                // CommonMark reads them. A bare `>` ends it, and so does a
-                // new depth or anything held from outside the quote.
-                let same = self.quote == (*depth).max(1) && self.lists.is_empty();
-                if !same || body.trim().is_empty() {
+                let body = super::quote_body(line);
+                // Quoted text runs on from quoted text at the same depth, as
+                // CommonMark reads it; anything else starts afresh. The rule
+                // is shared with plain text (`Held::joins`).
+                if !held.joins(line, kind, None, self.md) {
                     self.flush_para();
                 }
                 self.flush_table();
@@ -912,6 +900,22 @@ fn escape_chars(chars: &[char]) -> String {
 /// to `~/notes/photo.png` is not — it breaks the moment it is sent to anyone.
 /// A URL, or a file that cannot be read, is left exactly as written: those are
 /// the cases where the author meant a reference.
+/// The file a local picture address names: against the document's folder
+/// `base` first, then the working directory (see `inline_src` for why both).
+/// `None` for an address, a `data:` URI, or a file that is not there.
+/// Export checks the same files through this, to refuse writing over one.
+pub(crate) fn local_file(url: &str, base: &std::path::Path) -> Option<std::path::PathBuf> {
+    if url.is_empty() || url.contains("://") || url.starts_with("data:") {
+        return None;
+    }
+    let path = std::path::Path::new(url);
+    let candidates = match path.is_absolute() {
+        true => vec![path.to_path_buf()],
+        false => vec![base.join(path), path.to_path_buf()],
+    };
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 fn inline_src(url: &str, base: &std::path::Path) -> String {
     if url.is_empty() || url.contains("://") || url.starts_with("data:") {
         return url.to_string();
@@ -930,18 +934,9 @@ fn inline_src(url: &str, base: &std::path::Path) -> String {
     //
     // Document first, because that is the one the author controls. A src that
     // answers to neither is left exactly as written.
-    let candidates = match path.is_absolute() {
-        true => vec![path.to_path_buf()],
-        false => vec![base.join(path), path.to_path_buf()],
-    };
-    let Some((read, bytes)) = candidates.into_iter().find_map(|p| std::fs::read(&p).ok().map(|b| (p, b))) else {
+    let Some(bytes) = local_file(url, base).and_then(|p| std::fs::read(p).ok()) else {
         return url.to_string();
     };
-    PICTURES_READ.with(|r| {
-        if let Some(list) = r.borrow_mut().as_mut() {
-            list.push(read);
-        }
-    });
     let mime = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
@@ -1208,6 +1203,25 @@ mod tests {
         // A paragraph before the quote is not swallowed by it.
         let got = body("para\n> one\n");
         assert!(got.contains("<p>para</p>\n<blockquote>\n<p>one</p>"), "{got}");
+    }
+
+    /// Only quoted TEXT runs on: a quoted list item, heading, fence, table
+    /// row or rule keeps its own line, as it did before quotes were joined.
+    #[test]
+    fn quoted_blocks_are_not_joined_into_one_paragraph() {
+        for (md, want) in [
+            ("> - milk\n> - eggs\n", "<p>- milk</p>\n<p>- eggs</p>"),
+            ("> # Title\n> text\n", "<p># Title</p>\n<p>text</p>"),
+            ("> text\n> # Title\n", "<p>text</p>\n<p># Title</p>"),
+            ("> ```\n> a\n> b\n> ```\n", "<p>```</p>\n<p>a</p>\n<p>b</p>\n<p>```</p>"),
+            ("> | a | b |\n> |---|---|\n", "<p>| a | b |</p>\n<p>|---|---|</p>"),
+            ("> text\n> ---\n> more\n", "<p>text</p>\n<p>---</p>\n<p>more</p>"),
+            ("> 1. one\n> text\n", "<p>1. one</p>\n<p>text</p>"),
+        ] {
+            let got = body(md);
+            assert!(got.contains(want), "{md:?}: {got}");
+            well_formed(&got).unwrap();
+        }
     }
 
     /// Two trailing spaces or a backslash end a line with `<br>`.
