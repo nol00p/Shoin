@@ -34,7 +34,8 @@ collapses, and `q` closes the tree.
 ## Fuzzy finder
 
 Type to narrow the list. `Ctrl-n` and `Ctrl-p` (or the arrows) move,
-`Enter` opens, `Esc` closes, and `Ctrl-u` clears the query.
+`Enter` opens, `Esc` closes, `Ctrl-u` clears the query, `Ctrl-w` deletes its
+last word and `Ctrl-h` is a backspace.
 
 ## Buffers and splits
 
@@ -48,7 +49,8 @@ panes.
 
 - Deleting asks first, and says how much a folder holds.
 - Renaming or moving a file you have open carries the buffer with it.
-- In a tree prompt, `Ctrl-u` clears it and `Esc` abandons it.
+- In a tree prompt, `Ctrl-u` clears it, `Ctrl-w` deletes a word, `Ctrl-h` is a
+  backspace, and `Esc` or `Ctrl-c` abandons it.
 - Dotfile visibility is remembered; the default is `tree.show_hidden`.
 - Opening a file hands focus back to the editor and leaves the tree open for
   the next one. `tree.close_on_open = true` closes it instead.

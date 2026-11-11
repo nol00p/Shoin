@@ -478,6 +478,81 @@ enum Dest {
     Url(String),
 }
 
+/// What a key did to a one-line text field: the `:` line, the `/` `?`
+/// search line, or a panel's prompt.
+#[derive(Debug, PartialEq, Eq)]
+enum FieldKey {
+    /// `Esc`, `Ctrl-C`, or a backspace with nothing left to delete.
+    Cancel,
+    /// `Enter`.
+    Submit,
+    /// The text changed, or the key was ignored: stay in the field.
+    Stay,
+}
+
+/// The keys every one-line field shares, applied to `text`. A control or
+/// Alt chord is never typed as its letter: `Ctrl-U` clears, `Ctrl-W` (and
+/// `Alt-`/`Ctrl-Backspace`) deletes the last word, `Ctrl-H` is a backspace,
+/// and the rest are ignored, as Insert mode ignores them. The finder's query
+/// takes the same keys (`on_key_finder`).
+fn field_key(key: KeyEvent, text: &mut String) -> FieldKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // A terminal reporting alternate keys sends Ctrl-Shift-W as `W` with
+    // Control: the same chord as Ctrl-W here.
+    let code = match key.code {
+        KeyCode::Char(c) if ctrl => KeyCode::Char(c.to_ascii_lowercase()),
+        code => code,
+    };
+    match code {
+        KeyCode::Esc => FieldKey::Cancel,
+        KeyCode::Backspace if ctrl || alt => {
+            delete_last_word(text);
+            FieldKey::Stay
+        }
+        KeyCode::Char('c') | KeyCode::Char('[') if ctrl => FieldKey::Cancel,
+        KeyCode::Enter => FieldKey::Submit,
+        KeyCode::Backspace => backspace_field(text),
+        KeyCode::Char('h') if ctrl => backspace_field(text),
+        KeyCode::Char('u') if ctrl => {
+            text.clear();
+            FieldKey::Stay
+        }
+        KeyCode::Char('w') if ctrl => {
+            delete_last_word(text);
+            FieldKey::Stay
+        }
+        KeyCode::Char(c) if !ctrl && !alt => {
+            text.push(c);
+            FieldKey::Stay
+        }
+        _ => FieldKey::Stay,
+    }
+}
+
+/// Backspace on an empty field closes it, as in vim's `:` line.
+fn backspace_field(text: &mut String) -> FieldKey {
+    match text.pop() {
+        Some(_) => FieldKey::Stay,
+        None => FieldKey::Cancel,
+    }
+}
+
+/// `Ctrl-W` in a text field, as vim's command line has it: the spaces before
+/// the end, then a run of word characters or a run of other symbols.
+fn delete_last_word(text: &mut String) {
+    let trimmed = text.trim_end_matches(char::is_whitespace).len();
+    text.truncate(trimmed);
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let Some(last) = text.chars().next_back() else { return };
+    let keep = if word(last) {
+        text.trim_end_matches(word).len()
+    } else {
+        text.trim_end_matches(|c: char| !word(c) && !c.is_whitespace()).len()
+    };
+    text.truncate(keep);
+}
+
 /// Destinations `gx` will hand to the desktop, and the only ones `[text](…)`
 /// reads as a URL rather than as a path.
 ///
@@ -3270,16 +3345,20 @@ impl App {
                     }
                     close = true;
                 }
-                KeyCode::Char('u') if ctrl => finder.clear_query(),
                 KeyCode::Char('n') | KeyCode::Char('j') if ctrl => finder.down(),
                 KeyCode::Char('p') | KeyCode::Char('k') if ctrl => finder.up(),
                 KeyCode::Down | KeyCode::Tab => finder.down(),
                 KeyCode::Up | KeyCode::BackTab => finder.up(),
-                KeyCode::Backspace => finder.pop_char(),
-                KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                    finder.push_char(c)
+                // Unlike the `:` line, an empty query stays open: the list
+                // under it is still worth looking at.
+                KeyCode::Backspace if finder.query.is_empty() => {}
+                KeyCode::Char('h') if ctrl && finder.query.is_empty() => {}
+                // The editing keys every field shares.
+                _ => {
+                    let mut outcome = FieldKey::Stay;
+                    finder.edit_query(|q| outcome = field_key(key, q));
+                    close = outcome == FieldKey::Cancel;
                 }
-                _ => {}
             }
         }
         if close {
@@ -5070,27 +5149,16 @@ impl App {
     // ---------------------------------------------------------------- command
 
     fn on_key_command(&mut self, key: KeyEvent, mut buf: String) {
-        match key.code {
-            KeyCode::Esc => {
+        match field_key(key, &mut buf) {
+            FieldKey::Cancel => {
                 self.mode = Mode::Normal;
                 self.flash = None;
             }
-            KeyCode::Enter => {
+            FieldKey::Submit => {
                 self.mode = Mode::Normal;
                 self.run_command(&buf);
             }
-            KeyCode::Backspace => {
-                if buf.pop().is_none() {
-                    self.mode = Mode::Normal;
-                } else {
-                    self.mode = Mode::Command(buf);
-                }
-            }
-            KeyCode::Char(c) => {
-                buf.push(c);
-                self.mode = Mode::Command(buf);
-            }
-            _ => {}
+            FieldKey::Stay => self.mode = Mode::Command(buf),
         }
     }
 
@@ -5100,8 +5168,10 @@ impl App {
     /// an open prompt is a text field, so `a` would otherwise re-open it.
     fn on_key_prompt(&mut self, key: KeyEvent, mut p: Prompt) {
         if p.kind.is_confirm() {
+            // A plain `y` only: `Ctrl-y` is not a yes.
+            let chord = key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                KeyCode::Char('y') | KeyCode::Char('Y') if !chord => {
                     self.mode = Mode::Normal;
                     self.finish_prompt(p);
                 }
@@ -5114,31 +5184,18 @@ impl App {
             }
             return;
         }
-        match key.code {
-            KeyCode::Esc => {
+        // `Ctrl-U` matters most here: `r` and `m` open PRE-FILLED, so
+        // replacing the name outright needs to be one key.
+        match field_key(key, &mut p.input) {
+            FieldKey::Cancel => {
                 self.mode = Mode::Normal;
                 self.flash = None;
             }
-            KeyCode::Enter => {
+            FieldKey::Submit => {
                 self.mode = Mode::Normal;
                 self.finish_prompt(p);
             }
-            // Backspace on an empty field cancels, matching the `:` box.
-            KeyCode::Backspace => match p.input.pop() {
-                Some(_) => self.mode = Mode::Prompt(p),
-                None => self.mode = Mode::Normal,
-            },
-            // Clear the field, as the finder's query does. `r` and `m` open
-            // PRE-FILLED, so replacing outright needs to be one key.
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                p.input.clear();
-                self.mode = Mode::Prompt(p);
-            }
-            KeyCode::Char(c) => {
-                p.input.push(c);
-                self.mode = Mode::Prompt(p);
-            }
-            _ => {}
+            FieldKey::Stay => self.mode = Mode::Prompt(p),
         }
     }
 
@@ -5400,27 +5457,19 @@ impl App {
     // ----------------------------------------------------------------- search
 
     fn on_key_search(&mut self, key: KeyEvent, mut query: String, reverse: bool) {
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Enter => {
+        match field_key(key, &mut query) {
+            FieldKey::Cancel => {
+                self.mode = Mode::Normal;
+                self.flash = None;
+            }
+            FieldKey::Submit => {
                 self.mode = Mode::Normal;
                 if !query.is_empty() {
                     self.search = Some(Search { pattern: query, reverse });
                     self.search_move(reverse);
                 }
             }
-            KeyCode::Backspace => {
-                if query.pop().is_none() {
-                    self.mode = Mode::Normal;
-                } else {
-                    self.mode = Mode::Search { query, reverse };
-                }
-            }
-            KeyCode::Char(c) => {
-                query.push(c);
-                self.mode = Mode::Search { query, reverse };
-            }
-            _ => {}
+            FieldKey::Stay => self.mode = Mode::Search { query, reverse },
         }
     }
 
@@ -10546,6 +10595,115 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("two.md")).unwrap(), "file two\n");
         let msg = app.flash.as_ref().and_then(|f| f.text.clone()).unwrap_or_default();
         assert!(msg.contains("already exists"), "got: {msg:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F17: `Ctrl-W` deletes like vim's command line: the trailing spaces,
+    /// then one run of word characters or one run of symbols.
+    #[test]
+    fn ctrl_w_deletes_the_last_word() {
+        for (from, want) in [
+            ("ab cd", "ab "),
+            ("ab cd  ", "ab "),
+            ("one.md", "one."),
+            ("one..", "one"),
+            ("wq", ""),
+            ("", ""),
+            ("   ", ""),
+            ("été ça", "été "),
+        ] {
+            let mut s = from.to_string();
+            delete_last_word(&mut s);
+            assert_eq!(s, want, "{from:?}");
+        }
+    }
+
+    /// F17: in the `:` and `/` `?` lines a control chord is never typed as
+    /// its letter. `Ctrl-C` cancels, `Ctrl-U` clears, `Ctrl-W` deletes a
+    /// word, `Ctrl-H` is a backspace, and anything else is ignored.
+    #[test]
+    fn control_keys_in_the_command_and_search_lines() {
+        let field = |app: &App| match &app.mode {
+            Mode::Command(s) => Some(s.clone()),
+            Mode::Search { query, .. } => Some(query.clone()),
+            _ => None,
+        };
+        for open in [":", "/", "?"] {
+            let mut app = app_with("text\n");
+            feed(&mut app, open);
+            feed(&mut app, "ab cd");
+            ctrl(&mut app, 'w');
+            assert_eq!(field(&app).as_deref(), Some("ab "), "{open} Ctrl-W");
+            ctrl(&mut app, 'h');
+            assert_eq!(field(&app).as_deref(), Some("ab"), "{open} Ctrl-H");
+            ctrl(&mut app, 'x');
+            alt(&mut app, 'q');
+            assert_eq!(field(&app).as_deref(), Some("ab"), "{open} other chords ignored");
+            ctrl(&mut app, 'u');
+            assert_eq!(field(&app).as_deref(), Some(""), "{open} Ctrl-U");
+            feed(&mut app, "zz");
+            ctrl(&mut app, 'c');
+            assert_eq!(app.mode, Mode::Normal, "{open} Ctrl-C cancels");
+            assert_eq!(text(&app), "text\n");
+        }
+        // Ctrl-Shift-W is Ctrl-W; Alt- and Ctrl-Backspace delete a word.
+        let mut app = app_with("text\n");
+        feed(&mut app, ":ab cd ef");
+        key(&mut app, KeyCode::Char('W'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        key(&mut app, KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(app.mode, Mode::Command("ab ".into()));
+        key(&mut app, KeyCode::Backspace, KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Backspace, KeyModifiers::CONTROL);
+        assert_eq!(app.mode, Mode::Command("".into()), "a word delete never cancels");
+
+        // Ctrl-C cancels: the command typed so far does not run.
+        let mut app = app_with("text\n");
+        feed(&mut app, ":d");
+        ctrl(&mut app, 'c');
+        assert_eq!(text(&app), "text\n");
+        assert!(app.search.is_none());
+    }
+
+    /// F17: the finder's query takes the same editing keys, but an empty
+    /// query stays open on Backspace.
+    #[test]
+    fn control_keys_in_the_finder() {
+        let dir = two_files();
+        let mut app = app_with("text\n");
+        app.open_finder(dir.clone());
+        feed(&mut app, "ab cd");
+        ctrl(&mut app, 'w');
+        assert_eq!(app.finder.as_ref().unwrap().query, "ab ");
+        ctrl(&mut app, 'h');
+        ctrl(&mut app, 'x');
+        assert_eq!(app.finder.as_ref().unwrap().query, "ab");
+        ctrl(&mut app, 'u');
+        key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(app.finder.is_some(), "an empty query stays open");
+        ctrl(&mut app, 'c');
+        assert!(app.finder.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F17: the tree's prompts take the same keys. `Ctrl-y` is not a yes.
+    #[test]
+    fn control_keys_in_a_tree_prompt() {
+        let dir = two_files();
+        let mut app = tree_on(&dir);
+        feed(&mut app, "r"); // opens pre-filled with "one.md"
+        ctrl(&mut app, 'w');
+        assert!(matches!(&app.mode, Mode::Prompt(p) if p.input == "one."), "{:?}", app.mode);
+        ctrl(&mut app, 'h');
+        ctrl(&mut app, 'x');
+        assert!(matches!(&app.mode, Mode::Prompt(p) if p.input == "one"), "{:?}", app.mode);
+        ctrl(&mut app, 'c');
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(dir.join("one.md").exists(), "nothing renamed");
+
+        feed(&mut app, "d");
+        ctrl(&mut app, 'y');
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(dir.join("one.md").exists(), "Ctrl-y did not delete");
         std::fs::remove_dir_all(&dir).ok();
     }
 
