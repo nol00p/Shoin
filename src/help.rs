@@ -706,7 +706,8 @@ i :: switch to editing
 
 const FILES: &str = "
 ## Saving and quitting
-:w :write [path] :: save, or save to a path
+:w :write [path] :: save; with a path, write a copy there and keep editing this file. An unnamed buffer takes the name
+:saveas :sav <path> :: save to a path and edit that file from now on
 :w! :: save over a file that changed on disk, or over one :w <path> won't touch
 :wq :x :: save and quit; :wq! even if the file changed
 :q :q! :: close this buffer — the last one quits · the same, discarding changes

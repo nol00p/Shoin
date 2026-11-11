@@ -102,7 +102,13 @@ version and then the file's, in the order shown on screen.
 - A file opens in one buffer however it is named: `n.md`, `./n.md`,
   `sub/../n.md`, the tree's path and a symlink to it all switch to the same
   buffer. Renaming or moving it in the tree takes the buffer along.
-- `:w other.md` won't overwrite an existing file without `!`.
+- `:w other.md` writes a copy and keeps you on this file, as in Vim: the next
+  `:w` still saves here. `:saveas other.md` moves the buffer to the new file,
+  and its styling follows the new extension. Neither overwrites an existing
+  file without `!`.
+- A typed path starting with `~/` is in your home folder, in `:e`, `:w`,
+  `:saveas`, `:export` and the tree's create and move prompts.
+- `:wq other.md` saves the buffer as `other.md` and quits, like `:saveas`.
 - Text piped in (`git show HEAD:notes.md | shoin`) opens with no filename
   until `:w name.md` gives it one. See [Reading](reading.md#from-a-pipe).
 - A buffer with no filename yet is skipped by autosave, and the autosave clock
