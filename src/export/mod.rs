@@ -82,10 +82,16 @@ pub fn write(
     cfg: &TranscludeConfig,
     page: &html::Page,
 ) -> Result<()> {
-    if crate::transclude::same_file(dest, source) {
-        bail!("that would overwrite the document you are exporting");
+    // Every file the compile read is part of what is being exported, so
+    // writing onto any of them would destroy the document: the source, an
+    // embedded note, an embedded picture. `sources` starts with the source.
+    let (flat, sources) = crate::transclude::compile::compile_with_sources(source, cfg)?;
+    if let Some(i) = sources.iter().position(|s| is_same_file(dest, s)) {
+        match i {
+            0 => bail!("that would overwrite the document you are exporting"),
+            _ => bail!("that would overwrite {}, which the document embeds", short(&sources[i])),
+        }
     }
-    let flat = crate::transclude::compile::compile(source, cfg)?;
     // The destination is typed into a dialog, so a folder that does not exist
     // yet is a reasonable thing to ask for rather than a mistake to report.
     if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -259,6 +265,20 @@ fn normal(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Whether writing to `dest` would write to `file`. A hard link is a second
+/// name for the same file, which only the inode shows; elsewhere the resolved
+/// paths are compared. A `dest` that does not exist yet is no file at all.
+fn is_same_file(dest: &Path, file: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(dest), std::fs::metadata(file)) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
+    }
+    dest.exists() && crate::transclude::same_file(dest, file)
 }
 
 /// A path as an error message should name it. The status line is one row and
@@ -767,6 +787,44 @@ mod tests {
             .to_string();
         assert!(err.contains("overwrite"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&src).unwrap(), "# Note\n");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// An embedded note or picture is as much the document as its own file:
+    /// exporting onto one would overwrite it. The check is by file, not by
+    /// spelling, so a path through `..`, a symlink or a hard link is caught.
+    #[test]
+    fn refuses_to_write_over_anything_the_document_embeds() {
+        let d = vault("clobber-embeds");
+        std::fs::create_dir_all(d.join("parts")).unwrap();
+        std::fs::write(d.join("parts/frag.md"), "Fragment.\n").unwrap();
+        std::fs::write(d.join("pic.png"), PNG).unwrap();
+        let src = d.join("note.md");
+        std::fs::write(&src, "# Note\n\n![[parts/frag]]\n\n![[pic.png]]\n").unwrap();
+        let mut dests = vec![
+            (d.join("parts/frag.md"), Format::Markdown),
+            (d.join("parts/../parts/frag.md"), Format::Text),
+            (d.join("pic.png"), Format::Html),
+        ];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("parts/frag.md"), d.join("link.md")).unwrap();
+            std::fs::hard_link(&src, d.join("hard.md")).unwrap();
+            dests.push((d.join("link.md"), Format::Markdown));
+            dests.push((d.join("hard.md"), Format::Markdown));
+        }
+        for (dest, format) in dests {
+            let err = write(&src, &dest, format, &TranscludeConfig::default(), &html::Page::default())
+                .expect_err(&format!("{}", dest.display()))
+                .to_string();
+            assert!(err.contains("overwrite"), "{}: {err}", dest.display());
+        }
+        assert_eq!(std::fs::read_to_string(d.join("parts/frag.md")).unwrap(), "Fragment.\n");
+        assert_eq!(std::fs::read(d.join("pic.png")).unwrap(), PNG);
+        assert!(std::fs::read_to_string(&src).unwrap().starts_with("# Note"));
+        // A file beside them that the document does not read is fine.
+        write(&src, &d.join("parts/out.md"), Format::Markdown, &TranscludeConfig::default(), &html::Page::default())
+            .unwrap();
         std::fs::remove_dir_all(&d).ok();
     }
 }

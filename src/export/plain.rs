@@ -29,11 +29,27 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
     let mut carry = Carry::default();
     let mut in_fence = false;
 
-    for (i, line) in text.lines().enumerate() {
-        let (kind, next) = classify(line, &carry, i == 0, md.math);
-        carry = next;
+    // Classified up front: whether a line ends in a hard break depends on
+    // whether the next one carries its paragraph on.
+    let lines: Vec<(&str, BlockKind)> = text
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let (kind, next) = classify(line, &carry, i == 0, md.math);
+            carry = next;
+            (line, kind)
+        })
+        .collect();
 
-        match &kind {
+    for (i, (line, kind)) in lines.iter().enumerate() {
+        let line = match kind {
+            BlockKind::Paragraph | BlockKind::Quote(_) | BlockKind::ListItem { .. } => {
+                without_break(line, lines.get(i + 1).is_some_and(|(l, k)| continues(kind, l, k)))
+            }
+            _ => line,
+        };
+
+        match kind {
             // The fence delimiters go; the code between them is indented, which
             // is how plain text has always marked a block as verbatim.
             BlockKind::FenceOpen(_) => {
@@ -63,7 +79,7 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
             continue;
         }
 
-        match &kind {
+        match kind {
             BlockKind::Heading(level) => {
                 let title = strip_inline(line.trim_start().trim_start_matches('#').trim(), md);
                 out.push(title.clone());
@@ -110,6 +126,38 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
         joined.push('\n');
     }
     joined
+}
+
+/// `line` without its hard-break marker. Plain text breaks a line by breaking
+/// it, so the two trailing spaces or the backslash that say so in Markdown
+/// are noise here. Trailing whitespace goes always; a backslash only when
+/// the next line `continues` the paragraph, since one that ends a paragraph
+/// breaks nothing and is the author's text. An even run of backslashes is
+/// escaped backslashes, not a break — as `html::ParaLine` reads it.
+fn without_break(line: &str, continues: bool) -> &str {
+    let text = line.trim_end();
+    if text.len() < line.len() || !continues {
+        return text;
+    }
+    let slashes = text.len() - text.trim_end_matches('\\').len();
+    match slashes % 2 {
+        1 => &text[..text.len() - 1],
+        _ => text,
+    }
+}
+
+/// Whether `next`, of kind `next_kind`, carries on the paragraph that a
+/// line of kind `kind` is in: a plain line always does (it continues a
+/// paragraph or an item lazily, or a quote), and a quote line at the same
+/// depth with text continues a quote. A bare `>` ends it.
+fn continues(kind: &BlockKind, next: &str, next_kind: &BlockKind) -> bool {
+    match (kind, next_kind) {
+        (_, BlockKind::Paragraph) => true,
+        (BlockKind::Quote(a), BlockKind::Quote(b)) => {
+            a == b && !next.trim_start().trim_start_matches(['>', ' ']).trim().is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// `12.` from `  12. text`.
@@ -283,6 +331,22 @@ mod tests {
         assert_eq!(render("1.\tone two\n", 72, false, &md), "1. one two\n");
         assert_eq!(render("- [x]\tdone\n", 72, false, &md), "[x] done\n");
         assert_eq!(render("*\t[ ]\tto do\n", 72, false, &md), "[ ] to do\n");
+    }
+
+    /// Plain text has line breaks of its own: a hard break's two spaces or
+    /// backslash are Markdown for one, and go. A backslash that ends the
+    /// paragraph breaks nothing and is text.
+    #[test]
+    fn hard_break_markers_go() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("one  \ntwo\n", 72, false, &md), "one\ntwo\n");
+        assert_eq!(render("one\\\ntwo\n", 72, false, &md), "one\ntwo\n");
+        assert_eq!(render("> one\\\n> two\n", 72, false, &md), "> one\n> two\n");
+        assert_eq!(render("> one  \n> two\n", 72, false, &md), "> one\n> two\n");
+        assert_eq!(render("- one\\\n  two\n", 72, false, &md), "- one\n  two\n");
+        assert_eq!(render("one\\\n", 72, false, &md), "one\\\n");
+        assert_eq!(render("one\\\n\ntwo\n", 72, false, &md), "one\\\n\ntwo\n");
+        assert_eq!(render("> one\\\n>\n> two\n", 72, false, &md), "> one\\\n> \n> two\n");
     }
 
     #[test]

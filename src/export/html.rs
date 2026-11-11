@@ -271,12 +271,18 @@ impl<'a> Body<'a> {
             }
 
             BlockKind::Quote(depth) => {
-                self.flush_para();
+                let body = line.trim_start().trim_start_matches(['>', ' ']);
+                // Consecutive `>` lines at one depth are one paragraph, as
+                // CommonMark reads them. A bare `>` ends it, and so does a
+                // new depth or anything held from outside the quote.
+                let same = self.quote == (*depth).max(1) && self.lists.is_empty();
+                if !same || body.trim().is_empty() {
+                    self.flush_para();
+                }
                 self.flush_table();
                 self.flush_math_block();
                 self.close_lists();
                 self.open_quote(*depth);
-                let body = line.trim_start().trim_start_matches(['>', ' ']);
                 // A bare `>` only separates the quote's paragraphs.
                 if !body.trim().is_empty() {
                     self.para.push(ParaLine::new(body));
@@ -1159,6 +1165,28 @@ mod tests {
         let got = body(">\n> one\n>\n");
         assert!(!got.contains("<p></p>"), "{got}");
         well_formed(&got).unwrap();
+    }
+
+    /// Consecutive `>` lines are one paragraph of the quote, as CommonMark
+    /// reads them; a bare `>`, a change of depth or a blank line splits it.
+    #[test]
+    fn consecutive_quote_lines_are_one_paragraph() {
+        let got = body("> one\n> two\n");
+        assert!(got.contains("<blockquote>\n<p>one two</p>\n</blockquote>"), "{got}");
+        // Lazy continuation: an unmarked line goes on with the quote.
+        let got = body("> one\ntwo\n");
+        assert!(got.contains("<blockquote>\n<p>one two</p>\n</blockquote>"), "{got}");
+        // A hard break inside the quote stays a `<br>`.
+        let got = body("> one  \n> two\n");
+        assert!(got.contains("<p>one<br>\ntwo</p>"), "{got}");
+        let got = body("> one\n>\n> two\n");
+        assert!(got.contains("<p>one</p>\n<p>two</p>"), "{got}");
+        let got = body("> one\n> > two\n");
+        assert!(got.contains("<p>one</p>\n<blockquote>\n<p>two</p>"), "{got}");
+        well_formed(&got).unwrap();
+        // A paragraph before the quote is not swallowed by it.
+        let got = body("para\n> one\n");
+        assert!(got.contains("<p>para</p>\n<blockquote>\n<p>one</p>"), "{got}");
     }
 
     /// Two trailing spaces or a backslash end a line with `<br>`.
