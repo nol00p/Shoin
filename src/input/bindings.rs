@@ -110,8 +110,6 @@ pub fn normal(key: Key) -> Option<Verb> {
         (KeyCode::Char('?'), false) => Verb::Act(Action::SearchBackward),
         (KeyCode::Char('n'), false) => Verb::Act(Action::SearchNext { reverse: false }),
         (KeyCode::Char('N'), false) => Verb::Act(Action::SearchNext { reverse: true }),
-        (KeyCode::Char(';'), false) => Verb::Act(Action::RepeatFind { reverse: false }),
-        (KeyCode::Char(','), false) => Verb::Act(Action::RepeatFind { reverse: true }),
         (KeyCode::Char('*'), false) => Verb::Act(Action::SearchWordUnderCursor),
         (KeyCode::Char(':'), false) => Verb::Act(Action::Command),
         (KeyCode::Char('.'), false) => Verb::Act(Action::Repeat),
@@ -216,6 +214,8 @@ fn motion(key: Key) -> Option<Motion> {
         (Char('H'), false) => Motion::ScreenTop,
         (Char('M'), false) => Motion::ScreenMiddle,
         (Char('L'), false) => Motion::ScreenBottom,
+        (Char(';'), false) => Motion::RepeatFind { reverse: false },
+        (Char(','), false) => Motion::RepeatFind { reverse: true },
         (Char('d'), true) => Motion::HalfPageDown,
         (Char('u'), true) => Motion::HalfPageUp,
         (Char('f'), true) => Motion::PageDown,
@@ -279,6 +279,8 @@ fn motion_by_name(name: &str) -> Option<Motion> {
         "screen_top" => Motion::ScreenTop,
         "screen_middle" => Motion::ScreenMiddle,
         "screen_bottom" => Motion::ScreenBottom,
+        "repeat_find" => Motion::RepeatFind { reverse: false },
+        "repeat_find_back" => Motion::RepeatFind { reverse: true },
         _ => return None,
     })
 }

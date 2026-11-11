@@ -43,6 +43,11 @@ pub enum Motion {
         forward: bool,
         till: bool,
     },
+
+    /// `;` / `,` — the last `f`/`t`, again or reversed. A motion rather than
+    /// an action so an operator takes it (`d;`); only the app knows the last
+    /// find, so it turns this into a `FindChar` (`App::find_again`).
+    RepeatFind { reverse: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,13 +264,28 @@ pub fn resolve(
             } else {
                 found
             };
-            (Cursor::new(cur.line, col), Inclusive)
+            // A `t` or `T` to the very next character stays put, and as a
+            // plain motion that is no move at all. Under an operator it still
+            // answers: forward with the character under the cursor (`dt)` on
+            // the `a` of `(a)` is `()`), backward with an empty range, which
+            // `c` still turns into Insert (`cT(`).
+            if operator && col == cur.col {
+                let target = Cursor::new(cur.line, col);
+                let kind = if forward { Inclusive } else { Exclusive };
+                return Some(MotionResult { target, kind });
+            }
+            // `f` and `t` are inclusive; `F` and `T` are exclusive, so the
+            // character under the cursor is not part of the range (vim's
+            // `:help F`): `dFx` keeps it.
+            (Cursor::new(cur.line, col), if forward { Inclusive } else { Exclusive })
         }
 
         // Deliberately unanswerable here: `H`/`M`/`L` are about the VIEWPORT,
         // which this module cannot see. `App::resolve_screen_motion` turns them
         // into a `GotoLine` before a motion is ever asked for one.
         ScreenTop | ScreenMiddle | ScreenBottom => return None,
+        // The same for `;`/`,`: the last find lives in the app.
+        RepeatFind { .. } => return None,
     };
 
     let mut target = target;
