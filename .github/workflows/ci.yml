@@ -44,6 +44,12 @@ jobs:
       # is no terminal to allocate and nothing to install.
       - run: cargo test
 
+      # Random-session test (src/app_fuzz.rs): random keys, pastes, mouse
+      # events, commands and resizes against a real App. It is #[ignore]d in
+      # the normal run because it changes the working directory and HOME, so
+      # it runs here on its own, in one thread.
+      - run: cargo test -- --ignored --test-threads=1 fuzz
+
       # THE BAR THIS PROJECT HOLDS: build and clippy at zero warnings.
       #
       # `cargo fmt --check` is deliberately NOT run. This codebase hand-formats
