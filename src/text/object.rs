@@ -37,8 +37,8 @@ impl ObjectRange {
 /// Resolve the object named by `key` around the cursor. `around` is the `a`
 /// form (include the delimiters/trailing space); otherwise it is `i` (inside).
 ///
-/// Counts are not applied: `d2iw` behaves as `diw`. Vim's counted objects are
-/// rare in prose and the grammar has nowhere to put the count today.
+/// One object: a count (`d2aw`) is applied by the caller, which resolves the
+/// word objects again from just past the last (`App::operate_object`).
 ///
 /// `lists` is only read by the list objects, `l` and `L`.
 pub fn resolve(buffer: &Buffer, lists: &Lists, key: char, around: bool) -> Option<ObjectRange> {

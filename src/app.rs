@@ -320,6 +320,15 @@ pub struct App {
     dot_rev: u64,
     /// True while replaying `dot`, so the replay is not itself recorded.
     replaying: bool,
+    /// A counted `3i`/`2o`: how many copies, whether each copy is a new
+    /// line, and the keys typed so far. `leave_insert` replays them
+    /// `count - 1` more times, as vim does.
+    insert_repeat: Option<InsertRepeat>,
+    /// True while `repeat_insert` replays: the escape alias stays out of it.
+    replaying_insert: bool,
+    /// The line `cc` left its indent on, so an `Esc` with nothing typed takes
+    /// the unused indent back (vim's 'autoindent').
+    cc_indent_line: Option<usize>,
 
     /// User `[keys.*]` bindings overlaid on the built-in grammar.
     keymap: Keymap,
@@ -477,6 +486,70 @@ enum Dest {
     /// A URL. Nothing in the editor can open it.
     Url(String),
 }
+
+/// A recorded change with its count replaced by `n`: `"a3dw` → `"a5dw` for
+/// `5.`, `d2w` → `5dw`, `A;…` → `5A;…`. A count is the digits after an
+/// optional register, the first of them not `0` (a leading `0` is a
+/// motion), and the digits straight after an operator. A Visual change or a
+/// paste is replayed as it was: a count there would land on the `v`.
+fn with_count(keys: &[Replay], n: usize) -> Vec<Replay> {
+    let plain = |r: &Replay| match r {
+        Replay::Key(k) if k.modifiers.difference(KeyModifiers::SHIFT).is_empty() => match k.code {
+            KeyCode::Char(c) => Some(c),
+            _ => None,
+        },
+        _ => None,
+    };
+    let at = if keys.first().and_then(plain) == Some('"') { 2.min(keys.len()) } else { 0 };
+    // Where a run of count digits starting at `from` ends.
+    let digits_end = |from: usize| {
+        let mut end = from;
+        while let Some(c) = keys.get(end).and_then(plain) {
+            let digit = if end == from { ('1'..='9').contains(&c) } else { c.is_ascii_digit() };
+            if !digit {
+                break;
+            }
+            end += 1;
+        }
+        end
+    };
+    let end = digits_end(at);
+    match keys.get(end) {
+        Some(Replay::Paste(_)) | None => return keys.to_vec(),
+        Some(k) if matches!(plain(k), Some('v' | 'V')) => return keys.to_vec(),
+        _ => {}
+    }
+    let mut out: Vec<Replay> = keys[..at].to_vec();
+    let n = n.to_string();
+    out.extend(n.chars().map(|c| Replay::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+    // An operator's own count goes too: `d2w` then `3.` is three words.
+    let op_len = match (keys.get(end).and_then(plain), keys.get(end + 1).and_then(plain)) {
+        (Some('d' | 'c' | 'y' | '<' | '>'), _) => 1,
+        (Some('g'), Some('u' | 'U')) => 2,
+        _ => 0,
+    };
+    out.extend(keys[end..end + op_len].iter().cloned());
+    out.extend(keys[digits_end(end + op_len)..].iter().cloned());
+    out
+}
+
+/// See `App::insert_repeat`.
+#[derive(Clone, Debug)]
+struct InsertRepeat {
+    count: usize,
+    line: bool,
+    keys: Vec<KeyEvent>,
+    /// Where the session began (a char index) and the document's length
+    /// then: what the first copy produced is the span from `start` as long
+    /// as the document grew, and each later copy goes after the one before,
+    /// past any closer auto-pair left behind the cursor.
+    start: usize,
+    len_before: usize,
+}
+
+/// The most keys a counted insert replays in all: past it the count is a
+/// typo, as `PASTE_LIMIT` reads a counted paste.
+const INSERT_REPEAT_LIMIT: usize = 1 << 20;
 
 /// What a key did to a one-line text field: the `:` line, the `/` `?`
 /// search line, or a panel's prompt.
@@ -846,6 +919,9 @@ impl App {
             in_key: false,
             dot_rev: 0,
             replaying: false,
+            insert_repeat: None,
+            replaying_insert: false,
+            cc_indent_line: None,
             keymap,
             image_protocol: crate::image::detect(),
             images: std::cell::RefCell::new(Vec::new()),
@@ -2059,6 +2135,23 @@ impl App {
                 }
             }
             Action::OnlyPane => self.only_pane(),
+            // `3.` replaces the count the change was made with (vim's rule).
+            Action::Repeat => self.repeat_dot_with((count > 1).then_some(count)),
+            action @ (Action::Insert
+            | Action::Append
+            | Action::InsertLineStart
+            | Action::AppendLineEnd
+            | Action::OpenBelow
+            | Action::OpenAbove) => {
+                let line = matches!(action, Action::OpenBelow | Action::OpenAbove);
+                self.apply_action(action);
+                if count > 1 && self.mode == Mode::Insert {
+                    let start = self.buffer.char_index(self.buffer.cursor);
+                    let len_before = self.buffer.rope.len_chars();
+                    self.insert_repeat =
+                        Some(InsertRepeat { count, line, keys: Vec::new(), start, len_before });
+                }
+            }
             action => self.apply_action(action),
         }
         self.pending_register = None;
@@ -2110,7 +2203,7 @@ impl App {
                 let m = self.resolve_screen_motion(m);
                 self.apply_operator(op, m, count);
             }
-            Target::Object { key, around } => self.operate_object(op, key, around),
+            Target::Object { key, around } => self.operate_object(op, key, around, count),
             Target::Line => {
                 let l1 = self.buffer.cursor.line;
                 let last = self.buffer.last_line();
@@ -2367,6 +2460,8 @@ impl App {
     /// prevent. A one-line field takes the first line only, since a newline
     /// there would be Enter.
     fn on_paste(&mut self, text: String) {
+        // A paste is not typing a count can repeat.
+        self.insert_repeat = None;
         let text = crate::clipboard::normalize(&text);
         let first_line = || text.split('\n').next().unwrap_or("").to_string();
         if self.help.is_some() || self.diff.is_some() {
@@ -3441,10 +3536,20 @@ impl App {
     }
 
     fn repeat_dot(&mut self) {
-        // A `.` that ended up inside `dot` (typed after a count, or in
-        // Visual) must not replay itself forever.
+        self.repeat_dot_with(None);
+    }
+
+    /// `.`, or `3.`: with a count, the change is replayed with that count in
+    /// place of the one it was made with, and is remembered that way, so a
+    /// later `.` repeats it with the new count too.
+    fn repeat_dot_with(&mut self, count: Option<usize>) {
+        // A `.` that ended up inside `dot` (in Visual) must not replay itself
+        // forever.
         if self.dot.is_empty() || self.replaying {
             return;
+        }
+        if let Some(n) = count {
+            self.dot = with_count(&self.dot, n);
         }
         self.replaying = true;
         for input in self.dot.clone() {
@@ -3454,6 +3559,10 @@ impl App {
             }
         }
         self.replaying = false;
+        // Reached through `run` (`3.`, `1.`, `".`, a bound key), the keys
+        // that asked for the repeat are not the change to repeat next: the
+        // replayed one is. Marking the revision as seen keeps them out.
+        self.dot_rev = self.buffer.revision;
     }
 
     // ----------------------------------------------------------------- normal
@@ -3658,10 +3767,32 @@ impl App {
     /// helpers as motions do — an object is just another way of naming a range,
     /// so `diw` and `dw` share every line of their edit, register and undo
     /// behavior.
-    fn operate_object(&mut self, op: Operator, obj: char, around: bool) {
-        let Some((first, last, linewise)) = self.object_bounds(obj, around) else {
+    fn operate_object(&mut self, op: Operator, obj: char, around: bool, count: usize) {
+        let Some((first, mut last, linewise)) = self.object_bounds(obj, around) else {
             return;
         };
+        // `d2aw`: a count takes that many words, each one resolved from just
+        // past the last. Only the word objects count; the rest are one thing.
+        if matches!(obj, 'w' | 'W') && count > 1 {
+            // `object_bounds` is cheap to call again: the block refresh is a
+            // no-op at the same revision, and `Lists` is lazy.
+            let home = self.buffer.cursor;
+            let mut end = self.buffer.char_index(last) + 1;
+            for _ in 1..count {
+                if end >= self.buffer.rope.len_chars() {
+                    break;
+                }
+                self.buffer.cursor = self.idx_to_cursor(end);
+                match self.object_bounds(obj, around) {
+                    Some((_, l, _)) if self.buffer.char_index(l) + 1 > end => {
+                        end = self.buffer.char_index(l) + 1
+                    }
+                    _ => break,
+                }
+            }
+            self.buffer.cursor = home;
+            last = self.idx_to_cursor(end - 1);
+        }
         if matches!(op, Operator::Indent | Operator::Outdent) && matches!(obj, 'l' | 'L') {
             return self.shift_list(op == Operator::Outdent, obj == 'L', first.line, last.line);
         }
@@ -3959,6 +4090,8 @@ impl App {
     }
 
     fn enter_insert(&mut self) {
+        self.insert_repeat = None;
+        self.cc_indent_line = None;
         self.mode = Mode::Insert;
         self.touch_status();
     }
@@ -4221,7 +4354,13 @@ impl App {
         match op {
             Operator::Yank => {
                 self.store_register(text, true, false);
-                self.buffer.cursor = Cursor::new(a, 0);
+                // `yy` and `yj` leave the cursor where it was; a range that
+                // starts above it (`yk`, `yip`) takes it to its first line.
+                let cur = self.buffer.cursor;
+                if a < cur.line {
+                    let col = cur.col.min(self.buffer.line_len(a).saturating_sub(1));
+                    self.buffer.cursor = Cursor::new(a, col);
+                }
             }
             Operator::Delete => {
                 self.buffer.delete_chars(start, end);
@@ -4230,13 +4369,24 @@ impl App {
                 self.buffer.cursor = Cursor::new(a.min(nl), 0);
             }
             Operator::Change => {
+                // With `auto_indent`, the line to type into keeps the first
+                // line's indent, as vim's `cc` does with 'autoindent'.
+                let indent: String = if self.config.editor.auto_indent {
+                    text.chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+                } else {
+                    String::new()
+                };
                 self.buffer.delete_chars(start, end);
                 self.store_register(text, true, true);
-                // Leave one empty line to type into.
+                // Leave one line to type into.
                 let at = Cursor::new(a.min(self.buffer.line_count().saturating_sub(1)), 0);
-                self.buffer.insert_str(at, "\n");
-                self.buffer.cursor = Cursor::new(a.min(self.buffer.line_count().saturating_sub(1)), 0);
+                self.buffer.insert_str(at, &format!("{indent}\n"));
+                let line = a.min(self.buffer.line_count().saturating_sub(1));
+                self.buffer.cursor = Cursor::new(line, indent.chars().count());
                 self.enter_insert();
+                if !indent.is_empty() {
+                    self.cc_indent_line = Some(line);
+                }
             }
             Operator::Lowercase | Operator::Uppercase => {
                 self.recase(start, end, op == Operator::Uppercase);
@@ -4835,6 +4985,9 @@ impl App {
     // ----------------------------------------------------------------- visual
 
     fn enter_visual(&mut self, mode: Mode) {
+        // A selection dragged out of a counted insert ends the count: what
+        // follows is no longer the text the count was for.
+        self.insert_repeat = None;
         self.anchor = Some(self.buffer.cursor);
         self.mode = mode;
         self.visual_owner = Some((self.focus_pane, self.current()));
@@ -5225,7 +5378,7 @@ impl App {
     /// and must stay two letters.
     fn feed_escape_alias(&mut self, typed: char) {
         let alias: Vec<char> = self.config.input.escape_alias.chars().collect();
-        if alias.is_empty() {
+        if alias.is_empty() || self.replaying_insert {
             return;
         }
         let timeout = Duration::from_millis(self.config.input.sequence_timeout_ms);
@@ -5258,6 +5411,11 @@ impl App {
         if at.col < n {
             return;
         }
+        // The alias's keys were recorded as typing; they are not text to repeat.
+        if let Some(r) = self.insert_repeat.as_mut() {
+            let keep = r.keys.len().saturating_sub(n);
+            r.keys.truncate(keep);
+        }
         let end = self.buffer.char_index(at);
         if self.buffer.delete_chars(end - n, end).is_some() {
             self.buffer.cursor.set_col(at.col - n);
@@ -5271,6 +5429,18 @@ impl App {
         self.mode = Mode::Normal;
         self.escape_run = 0;
         self.escape_since = None;
+        self.repeat_insert();
+        // `cc` then `Esc` with nothing typed: the indent it laid down was
+        // never used, so it goes, as vim's 'autoindent' takes it back.
+        if let Some(line) = self.cc_indent_line.take() {
+            let text = self.buffer.line_text(line);
+            if line == self.buffer.cursor.line && !text.is_empty() && text.trim().is_empty() {
+                let start = self.buffer.rope.line_to_char(line);
+                let n = text.chars().count();
+                self.buffer.delete_chars(start, start + n);
+                self.buffer.cursor = Cursor::new(line, 0);
+            }
+        }
         if self.buffer.cursor.col > 0 {
             let col = self.buffer.cursor.col - 1;
             self.buffer.cursor.set_col(col);
@@ -5279,7 +5449,56 @@ impl App {
         self.touch_status();
     }
 
+    /// `3ix<Esc>` is `xxx`, `2otext<Esc>` two lines: the keys this insert
+    /// session typed are replayed `count - 1` more times (each after a new
+    /// line, for `o`/`O`), so auto-pair, Backspace and list continuation
+    /// come out as they did the first time. A session that did anything but
+    /// type (an arrow, a paste, a drag) dropped its count on the way.
+    fn repeat_insert(&mut self) {
+        let Some(r) = self.insert_repeat.take() else { return };
+        let copies = r.count - 1;
+        if r.keys.is_empty() || copies.saturating_mul(r.keys.len()) > INSERT_REPEAT_LIMIT {
+            return;
+        }
+        // Typing that went back past where it began (Backspace over older
+        // text) has no first copy to follow: nothing is repeated.
+        let grown = self.buffer.rope.len_chars().checked_sub(r.len_before);
+        let end = self.buffer.char_index(self.buffer.cursor);
+        let Some(grown) = grown.filter(|_| r.line || end >= r.start) else { return };
+        self.replaying_insert = true;
+        for k in 1..=copies {
+            if r.line {
+                self.open_line(false);
+            } else {
+                self.buffer.cursor = self.idx_to_cursor(r.start + k * grown);
+            }
+            for &key in &r.keys {
+                self.on_key_insert(key);
+            }
+        }
+        self.replaying_insert = false;
+        self.mode = Mode::Normal;
+    }
+
+    /// Keep a counted insert's typing for `repeat_insert`; anything that is
+    /// not typing ends the count.
+    fn record_insert_key(&mut self, key: KeyEvent) {
+        if self.replaying_insert {
+            return;
+        }
+        let Some(r) = self.insert_repeat.as_mut() else { return };
+        let chord = key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace | KeyCode::Tab if !chord => {
+                r.keys.push(key)
+            }
+            _ => self.insert_repeat = None,
+        }
+    }
+
     fn on_key_insert(&mut self, key: KeyEvent) {
+        self.record_insert_key(key);
         // `[keys.insert]` first — the same "config overrides, built-ins remain"
         // rule Normal and Visual follow. Single keys only (`Keymap::insert_key`
         // says why), and only `Act` verbs: a motion or an operator has no
@@ -5300,7 +5519,9 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => self.leave_insert(),
+            // Ctrl-C leaves without the count's copies, as in vim.
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_repeat = None;
                 self.mode = Mode::Normal;
                 self.escape_run = 0;
                 self.escape_since = None;
@@ -10479,6 +10700,143 @@ mod tests {
         let mut app = app_with("aBc\n");
         feed(&mut app, "3~"); // flip all three
         assert_eq!(text(&app), "AbC\n");
+    }
+
+    /// F27: a count on `i`, `a`, `A` and `o`/`O` repeats what was typed, in
+    /// one undo step; `Ctrl-C` leaves without the copies.
+    #[test]
+    fn insert_counts_repeat_the_typed_text() {
+        for (start, keys, want) in [
+            ("\n", "3ix", "xxx\n"),
+            ("ab\n", "2aXY", "aXYXYb\n"),
+            ("ab\n", "3A;", "ab;;;\n"),
+            ("one\n", "2otext", "one\ntext\ntext\n"),
+            ("one\n", "2Otext", "text\ntext\none\n"),
+        ] {
+            let mut app = app_with(start);
+            feed(&mut app, keys);
+            esc(&mut app);
+            assert_eq!(text(&app), want, "{keys}");
+            assert_eq!(app.mode, Mode::Normal);
+            feed(&mut app, "u");
+            assert_eq!(text(&app), start, "{keys}: one undo step");
+        }
+        let mut app = app_with("\n");
+        feed(&mut app, "3ix");
+        ctrl(&mut app, 'c');
+        assert_eq!(text(&app), "x\n", "Ctrl-C drops the copies");
+        // Backspace and auto-pair replay as typed.
+        let mut app = app_with("\n");
+        feed(&mut app, "3iab");
+        key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        feed(&mut app, "c");
+        esc(&mut app);
+        assert_eq!(text(&app), "acacac\n");
+        let mut app = app_with("\n");
+        app.config.editor.auto_pair = true;
+        feed(&mut app, "2i(x");
+        esc(&mut app);
+        assert_eq!(text(&app), "(x)(x)\n");
+        // An arrow key ends the count.
+        let mut app = app_with("ab\n");
+        feed(&mut app, "3ix");
+        key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        esc(&mut app);
+        assert_eq!(text(&app), "xab\n");
+        // The count is part of the change `.` repeats.
+        let mut app = app_with("\n");
+        feed(&mut app, "2ix");
+        esc(&mut app);
+        feed(&mut app, ".");
+        assert_eq!(text(&app), "xxxx\n");
+    }
+
+    /// F27: `3.` replays the change with 3 in place of its own count, and a
+    /// later `.` keeps the 3.
+    #[test]
+    fn a_count_on_dot_replaces_the_changes_count() {
+        let mut app = app_with("ab\n");
+        feed(&mut app, "A;");
+        esc(&mut app);
+        feed(&mut app, "3.");
+        assert_eq!(text(&app), "ab;;;;\n");
+        feed(&mut app, ".");
+        assert_eq!(text(&app), "ab;;;;;;;\n", "the 3 sticks");
+
+        let mut app = app_with("a b c d e f g\n");
+        feed(&mut app, "2dw");
+        assert_eq!(text(&app), "c d e f g\n");
+        feed(&mut app, "3.");
+        assert_eq!(text(&app), "f g\n", "3 words, not 2 times 3");
+
+        // An operator's own count is replaced too.
+        let mut app = app_with("a b c d e f g h\n");
+        feed(&mut app, "d2w3.");
+        assert_eq!(text(&app), "f g h\n", "d2w then 3. is three words");
+        // `1.` does not break `.` afterwards.
+        let mut app = app_with("a b c d e\n");
+        feed(&mut app, "dw1..");
+        assert_eq!(text(&app), "d e\n");
+        // A Visual change ignores the count rather than counting the `v`.
+        let mut app = app_with("abcdef\n");
+        feed(&mut app, "vld3.");
+        assert_eq!(text(&app), "ef\n");
+
+        let mut app = app_with("a b c d e f g\n");
+        feed(&mut app, "\"qdw");
+        feed(&mut app, "2.");
+        assert_eq!(text(&app), "d e f g\n", "after a register");
+        assert_eq!(app.registers.get(&'q').map(|r| r.text.as_str()), Some("b c "));
+    }
+
+    /// F27: a count on the word objects takes that many words.
+    #[test]
+    fn counted_word_objects() {
+        for (keys, want) in [
+            ("d2aw", "c d e\n"),
+            ("d3aw", "d e\n"),
+            ("d2iw", "b c d e\n"),
+            ("d3iw", " c d e\n"),
+            ("wwd9aw", "a b \n"),
+            ("daw", "b c d e\n"),
+        ] {
+            let mut app = app_with("a b c d e\n");
+            feed(&mut app, keys);
+            assert_eq!(text(&app), want, "{keys}");
+        }
+    }
+
+    /// F27: `cc` keeps the indent with `auto_indent`, and `yy` leaves the
+    /// cursor where it was; `yk` and `yip` take it up to where they start.
+    #[test]
+    fn cc_keeps_the_indent_and_yy_keeps_the_cursor() {
+        let mut app = app_with("  indented\n");
+        app.config.editor.auto_indent = true;
+        feed(&mut app, "wccX");
+        esc(&mut app);
+        assert_eq!(text(&app), "  X\n");
+        // Nothing typed: the unused indent goes.
+        let mut app = app_with("  indented\n");
+        app.config.editor.auto_indent = true;
+        feed(&mut app, "cc");
+        esc(&mut app);
+        assert_eq!(text(&app), "\n");
+        let mut app = app_with("  indented\n");
+        app.config.editor.auto_indent = false;
+        feed(&mut app, "ccX");
+        esc(&mut app);
+        assert_eq!(text(&app), "X\n");
+
+        let mut app = app_with("one two three\nfour five six\n");
+        feed(&mut app, "wwyy");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 8));
+        feed(&mut app, "yj");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 8));
+        feed(&mut app, "jyk");
+        assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (0, 8));
+        let mut app = app_with("p one\np two long line\n\nnext\n");
+        feed(&mut app, "jwwyip");
+        assert_eq!(app.buffer.cursor.line, 0, "yip goes to the paragraph's first line");
     }
 
     /// F16: `F` and `T` are exclusive under an operator, so the character
