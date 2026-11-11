@@ -1,7 +1,7 @@
 # Files
 
-Shoin saves atomically, never autosaves unless you ask, and never quietly
-overwrites changes made by something else. If it crashes or is killed with
+Shoin saves atomically where it can, never autosaves unless you ask, and
+never quietly overwrites changes made by something else. If it crashes or is killed with
 unsaved work, that work goes to a recovery file. When a file changes on disk while
 you have unsaved work, `:diff` lets you merge the two.
 
@@ -11,6 +11,11 @@ you have unsaved work, `:diff` lets you merge the two.
 fsynced, and is renamed over it, so a crash mid-save leaves the original
 intact. If the file changed on disk since Shoin read it, the write is refused —
 `:w!` is how you say you meant it.
+
+A few files are written in place instead, because a rename would harm them or
+cannot reach them: a file with several hard links, someone else's file, and a
+file in a folder you cannot write to. Where the folder allows it, a backup of
+the original sits beside the file until the new text is safely written.
 
 ## Autosave
 
@@ -121,11 +126,12 @@ version and then the file's, in the order shown on screen.
 - In read-only mode, outside changes and `:revert!` still come in, and
   `:diff` still shows the two versions, but its `w` writes nothing: `:view`
   to edit first.
-- A file Shoin cannot replace atomically is written in place instead: one
-  in a folder you cannot write to, one whose name is too long for the
-  temporary name, one with other hard links (they all keep seeing the same
-  text) or one owned by someone else (it keeps its owner and group). A file
-  you cannot write is still replaced when its folder allows it.
+- Written in place, every hard link sees the new text, and someone else's
+  file keeps its owner. A file you cannot write is still replaced when its
+  folder allows it. If an in-place write fails, the error names the backup
+  (`.<name>.<n>.swbak`) that holds the original; in a folder you cannot
+  write to there is no backup, and a crash mid-write can leave the file
+  half written.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
 - A recovery file is written on a crash, `SIGTERM` or `SIGHUP` only. A
