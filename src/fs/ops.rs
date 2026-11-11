@@ -17,26 +17,27 @@ use anyhow::{bail, Context, Result};
 /// Refuses an existing path rather than truncating it — `a` is for making
 /// something new, and a name collision is a question, not a decision.
 pub fn create(path: &Path, dir: bool) -> Result<()> {
-    if taken(path) {
+    if taken(path)? {
         bail!("{} already exists", name_of(path));
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    if dir {
-        std::fs::create_dir(path).with_context(|| format!("creating {}", path.display()))?;
+    // `create_new`, not `File::create`: it never opens what is already there,
+    // so a file or link that appeared since the check above is refused rather
+    // than truncated or written through. `create_dir` refuses one the same way.
+    let made = if dir {
+        std::fs::create_dir(path)
     } else {
-        // `create_new`, not `File::create`: it never opens what is already
-        // there, so a file or link that appeared since the check above is
-        // refused rather than truncated or written through.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path).map(drop)
+    };
+    match made {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("{} already exists", name_of(path))
+        }
+        made => made.with_context(|| format!("creating {}", path.display())),
     }
-    Ok(())
 }
 
 /// Delete a file, or a directory and everything under it.
@@ -71,7 +72,9 @@ pub fn rename(from: &Path, to: &Path) -> Result<()> {
     if to.starts_with(from) {
         bail!("cannot move {} inside itself", name_of(from));
     }
-    if taken(to) {
+    // Checked, then renamed: an entry that appears in between is replaced.
+    // std has no portable rename that refuses an existing destination.
+    if taken(to)? {
         if is_respelling(from, to) {
             return respell(from, to);
         }
@@ -93,8 +96,16 @@ pub fn rename(from: &Path, to: &Path) -> Result<()> {
 /// Whether a directory entry already has this name. Never follows a link:
 /// `Path::exists` does, so a link to a missing file read as free, and the
 /// rename replaced the link or the create made the file at its far end.
-fn taken(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
+///
+/// Only "not found" means free. Any other failure (a folder that can't be
+/// searched, a loop of links on the way, an I/O error) means the answer is
+/// unknown, and an unknown destination is refused, with the reason.
+pub(crate) fn taken(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("checking {}", path.display())),
+    }
 }
 
 /// Whether `to` is `from` under another spelling — `Notes.md` for `notes.md`
@@ -556,6 +567,32 @@ mod tests {
         rename(&d.join("link.md"), &d.join("moved.md")).unwrap();
         assert_eq!(names_in(&d), ["a.md", "folder", "moved.md"]);
 
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A link to itself is taken like any entry. A path THROUGH it can't be
+    /// looked up at all (ELOOP), and a name that can't be checked is refused,
+    /// not read as free.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_cannot_be_checked_is_refused() {
+        let d = tmp("loop");
+        std::os::unix::fs::symlink("self.md", d.join("self.md")).unwrap();
+        std::fs::write(d.join("a.md"), "body\n").unwrap();
+
+        let err = create(&d.join("self.md"), false).unwrap_err().to_string();
+        assert!(err.contains("already exists"), "got: {err}");
+        let err = rename(&d.join("a.md"), &d.join("self.md")).unwrap_err().to_string();
+        assert!(err.contains("already exists"), "got: {err}");
+
+        assert!(taken(&d.join("self.md/x.md")).is_err());
+        let err = format!("{:#}", create(&d.join("self.md/x.md"), false).unwrap_err());
+        assert!(err.contains("checking"), "got: {err}");
+        let err = format!("{:#}", rename(&d.join("a.md"), &d.join("self.md/x.md")).unwrap_err());
+        assert!(err.contains("checking"), "got: {err}");
+
+        assert_eq!(names_in(&d), ["a.md", "self.md"]);
+        assert_eq!(std::fs::read_link(d.join("self.md")).unwrap(), Path::new("self.md"));
         std::fs::remove_dir_all(&d).ok();
     }
 

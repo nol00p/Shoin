@@ -12,7 +12,7 @@ use ropey::Rope;
 
 use super::cursor::Cursor;
 use super::history::History;
-use crate::fs::open;
+use crate::fs::{open, ops};
 use crate::fs::save::{self, SavePolicy, SaveOptions};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -227,7 +227,9 @@ impl Buffer {
         }
         // Nor one that is not ours at all: `:w notes.md` over an existing
         // notes.md would destroy it. vim's E13, and `:w!` the same way past.
-        if !force && !same_file && path.exists() {
+        // `taken`, not `exists`: a link to a missing file is still a name in
+        // use, and the save's rename would replace the link itself.
+        if !force && !same_file && ops::taken(path)? {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
         let opts = self.save_options(path, policy);
@@ -337,7 +339,7 @@ impl Buffer {
     ///
     /// An existing file is refused without `force`, as `write_to` refuses it.
     pub fn write_copy(&self, path: &Path, policy: SavePolicy, force: bool) -> Result<()> {
-        if !force && path.exists() {
+        if !force && ops::taken(path)? {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
         // No line kept for the cursor: the buffer does not follow a copy.
@@ -1254,6 +1256,28 @@ mod tests {
         assert_eq!(std::fs::read_to_string(d.join("notes.md")).unwrap(), "a  \nb\n");
         b.save_as(d.join("plain.txt"), trim, false).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("plain.txt")).unwrap(), "a\nb\n");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `:w other.md` and `:saveas other.md` onto a link to a missing file are
+    /// refused like any taken name: the save's rename would replace the link.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_not_written_over_without_bang() {
+        let d = dir("dangling");
+        let link = d.join("other.md");
+        std::os::unix::fs::symlink(d.join("gone.md"), &link).unwrap();
+        let mut b = Buffer::open(d.join("n.md"), &[]).unwrap();
+        b.replace_all("text\n");
+        b.save(policy(), false).unwrap();
+
+        let err = b.write_copy(&link, policy(), false).unwrap_err().to_string();
+        assert!(err.contains("exists — :w! to overwrite"), "got: {err}");
+        let err = b.save_as(link.clone(), policy(), false).unwrap_err().to_string();
+        assert!(err.contains("exists — :w! to overwrite"), "got: {err}");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(d.join("gone.md")).is_err());
+        assert_eq!(b.path.as_deref(), Some(d.join("n.md").as_path()));
         std::fs::remove_dir_all(&d).ok();
     }
 
