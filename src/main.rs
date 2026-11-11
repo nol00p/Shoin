@@ -298,6 +298,14 @@ fn main() -> Result<()> {
     // crash can lose for good, and nothing after it may get the chance.
     let restore_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // The signal thread is already ending the editor, terminal and
+        // recovery files included, and will exit the process: a second dump
+        // would only duplicate every file.
+        if recover::signalled() {
+            loop {
+                std::thread::park();
+            }
+        }
         let written = recover::dump();
         release_terminal_modes();
         restore_hook(info);
@@ -305,8 +313,13 @@ fn main() -> Result<()> {
     }));
     // SIGTERM and SIGHUP (the window closed) would end the process where it
     // stands, terminal modes and unsaved text with it. Caught, they end it the
-    // way a crash does, from a thread of their own.
+    // way a crash does, from a thread of their own. Frames stop first, so no
+    // part of one is drawn over the restored terminal.
     recover::catch_signals(|sig| {
+        if !recover::stop() {
+            // The editor is already on its way out and restores by itself.
+            return;
+        }
         let written = recover::dump();
         release_terminal_modes();
         ratatui::restore();
@@ -314,6 +327,13 @@ fn main() -> Result<()> {
         std::process::exit(128 + sig);
     });
     let result = app.run_loop(&mut terminal);
+    // A signal that came first ends the editor from its own thread: restoring
+    // here too would do it twice, and race that thread's writes.
+    if !recover::quit() {
+        loop {
+            std::thread::park();
+        }
+    }
     // An error that ends the loop (a terminal that went away) leaves the
     // buffers unsaved: the editor is dying, so the text is kept.
     let written = if result.is_err() { recover::dump() } else { Vec::new() };

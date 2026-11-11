@@ -934,6 +934,8 @@ impl App {
             self.term_size = (size.width, size.height);
         }
         while !self.quit {
+            // A signal is ending the editor: its thread owns the terminal now.
+            let Some(frame) = crate::recover::frame() else { return Ok(()) };
             // Keep the crash-recovery copy of the unsaved buffers current, and
             // say so when an open file has a recovery file beside it.
             if let Some(text) = crate::recover::tick(self.docs.iter().map(|d| &d.buffer)) {
@@ -979,11 +981,14 @@ impl App {
                 self.paint_images(places);
                 self.needs_redraw = false;
             }
+            drop(frame);
             self.step()?;
         }
         // Hand the caret back to the terminal's own default on the way out.
-        let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
-        set_cursor_color(None);
+        if let Some(_frame) = crate::recover::frame() {
+            let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
+            set_cursor_color(None);
+        }
         Ok(())
     }
 
@@ -1293,6 +1298,8 @@ impl App {
         // arrived too. ZERO, not TICK — waiting here would hold a finished
         // frame back for input that may never come.
         let mut first = Some(event::read()?);
+        // Keys can write to the terminal too (mouse mode, OSC 52).
+        let Some(_frame) = crate::recover::frame() else { return Ok(()) };
         self.absorb_batch(&mut || match first.take() {
             Some(event) => Ok(Some(event)),
             None => match event::poll(Duration::ZERO)? {
