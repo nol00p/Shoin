@@ -141,6 +141,11 @@ impl History {
         self.grouping
     }
 
+    /// Whether there is anything to redo, which any new change would drop.
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
     pub fn end_group(&mut self) {
         self.grouping = false;
         self.seal();

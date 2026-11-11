@@ -82,6 +82,9 @@ impl FinalNewline {
 pub struct SavePolicy {
     pub trim_trailing_whitespace: bool,
     pub final_newline: FinalNewline,
+    /// The save lands mid-insert (an autosave): the line being typed keeps
+    /// its trailing spaces when the cursor is in or after them.
+    pub insert_mode: bool,
 }
 
 impl SavePolicy {
@@ -91,6 +94,7 @@ impl SavePolicy {
             // An unrecognised spelling falls back to the default here; startup
             // has already flagged it through `config::validate`.
             final_newline: FinalNewline::parse(&cfg.final_newline).unwrap_or_default(),
+            insert_mode: false,
         }
     }
 }
@@ -169,56 +173,109 @@ impl Autosave {
 ///
 /// Only ever shortens lines and adds or removes the one final newline, which
 /// is what lets `Buffer` replay the result as a few small edits.
-pub fn outgoing(text: &str, opts: &SaveOptions) -> String {
-    let mut text = if opts.trim_trailing_whitespace {
-        trim_lines(text, opts)
+pub fn outgoing(text: String, opts: &SaveOptions) -> Outgoing {
+    let mut out = if opts.trim_trailing_whitespace {
+        trim_lines(&text, opts)
     } else {
-        text.to_string()
+        Outgoing { text, ..Outgoing::default() }
     };
 
     if opts.final_newline {
-        if !text.ends_with('\n') {
-            text.push('\n');
+        if !out.text.ends_with('\n') {
+            out.text.push('\n');
+            out.added_newline = true;
         }
-    } else if text.ends_with('\n') {
+    } else if out.text.ends_with('\n') {
         // One newline, not all of them: blank lines at the end are text the
         // writer put there. And none while the cursor sits on the empty line
         // after it, where Insert mode is about to type.
-        let last = text.matches('\n').count();
-        if opts.keep_line != Some(last) {
-            text.pop();
+        let last_line = out.text.matches('\n').count();
+        if opts.keep_line != Some(last_line) {
+            out.text.pop();
+            // The newline dropped is the one before the INPUT's last line,
+            // which may have held spaces that trimming took (`foo\n  `): it
+            // sits just before that line's start, in the input's positions.
+            let start = match opts.trim_trailing_whitespace {
+                true => out.last_start,
+                false => out.text.chars().count() + 1,
+            };
+            match out.cuts.last_mut() {
+                Some(c) if c.start == start => c.start -= 1,
+                _ => out.cuts.push(start - 1..start),
+            }
         }
     }
-    text
+    out.cuts.reverse();
+    out
+}
+
+/// What a save writes, and the edits that turn the text it was given into
+/// that, so the buffer can take exactly the same ones.
+#[derive(Debug, Default, PartialEq)]
+pub struct Outgoing {
+    /// The text, still with `\n` endings.
+    pub text: String,
+    /// Char ranges of the input that were dropped, last first, so each can be
+    /// cut without moving the next.
+    pub cuts: Vec<std::ops::Range<usize>>,
+    /// Whether a newline was added at the end of the input.
+    pub added_newline: bool,
+    /// Where the input's last line starts, in chars (set by trimming).
+    last_start: usize,
+}
+
+impl Outgoing {
+    /// `text` written as it stands, with no edits.
+    pub fn unchanged(text: String) -> Outgoing {
+        Outgoing { text, ..Outgoing::default() }
+    }
 }
 
 /// `trim_on_save`, minus what only looks like trailing whitespace: lines of
 /// fenced code (literal, and a trailing space there may be the point), the
-/// two spaces of a Markdown hard break, and the cursor's line.
-fn trim_lines(text: &str, opts: &SaveOptions) -> String {
+/// two spaces of a Markdown hard break, and the line being typed.
+fn trim_lines(text: &str, opts: &SaveOptions) -> Outgoing {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut fences = crate::transclude::Fences::default();
-    let mut out = String::with_capacity(text.len());
+    let mut out = Outgoing { text: String::with_capacity(text.len()), ..Outgoing::default() };
+    let mut at = 0; // chars into the input
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
-            out.push('\n');
+            out.text.push('\n');
+            at += 1;
         }
+        out.last_start = at;
+        let chars = line.chars().count();
         // Fences are Markdown's: in a plain file a stray ``` is just text,
         // and must not stop trimming for the rest of it.
         let literal = opts.markdown && fences.literal(line);
-        let keep = literal
-            || opts.keep_line == Some(i)
-            || (opts.markdown && hard_break(line, lines.get(i + 1).copied()));
-        out.push_str(if keep { line } else { line.trim_end() });
+        let kept = if literal || opts.keep_line == Some(i) {
+            line.len()
+        } else if opts.markdown && hard_break(line, lines.get(i + 1).copied()) {
+            // Two spaces are the break; any more are whitespace.
+            line.trim_end().len() + 2
+        } else {
+            line.trim_end().len()
+        };
+        out.text.push_str(&line[..kept]);
+        if kept < line.len() {
+            let gone = line[kept..].chars().count();
+            out.cuts.push(at + chars - gone..at + chars);
+        }
+        at += chars;
     }
     out
 }
 
-/// Exactly two trailing spaces after text, with a line of text after it.
+/// Two or more trailing spaces after text, with a line of text after it:
+/// CommonMark's hard line break. Spaces only, so that keeping the first two
+/// keeps exactly what makes the break.
 fn hard_break(line: &str, next: Option<&str>) -> bool {
     let body = line.trim_end();
+    let tail = &line[body.len()..];
     !body.is_empty()
-        && &line[body.len()..] == "  "
+        && tail.len() >= 2
+        && tail.bytes().all(|b| b == b' ')
         && next.is_some_and(|n| !n.trim().is_empty())
 }
 
@@ -227,7 +284,7 @@ fn hard_break(line: &str, next: Option<&str>) -> bool {
 /// A symlink is written through to the file it names: renaming over the link
 /// itself would swap it for a regular file and leave the real one unedited.
 pub fn write_atomic(path: &Path, rope: &Rope, opts: &SaveOptions) -> Result<SystemTime> {
-    let text = outgoing(&rope.chunks().collect::<String>(), opts);
+    let text = outgoing(rope.chunks().collect(), opts).text;
     write_text(path, &text, opts.line_ending)
 }
 
@@ -689,9 +746,42 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// `outgoing`'s text, after checking that its edits, replayed on the
+    /// input as the buffer replays them, give that same text.
+    fn out(text: &str, o: &SaveOptions) -> String {
+        let got = outgoing(text.to_string(), o);
+        let mut replayed: Vec<char> = text.chars().collect();
+        if got.added_newline {
+            replayed.push('\n');
+        }
+        let mut last = usize::MAX;
+        for c in &got.cuts {
+            assert!(c.end <= last, "cuts run last first: {:?}", got.cuts);
+            last = c.start;
+            replayed.drain(c.clone());
+        }
+        assert_eq!(replayed.into_iter().collect::<String>(), got.text, "edits for {text:?}");
+        got.text
+    }
+
     fn trimmed(text: &str, markdown: bool, keep_line: Option<usize>) -> String {
-        let o = SaveOptions { markdown, keep_line, ..opts(true, true) };
-        outgoing(text, &o)
+        out(text, &SaveOptions { markdown, keep_line, ..opts(true, true) })
+    }
+
+    /// The final newline dropped after trimming is the one before a last line
+    /// that held only spaces, not the input's last character. The buffer once
+    /// kept `foo\n ` while the file got `foo`.
+    #[test]
+    fn the_edits_follow_a_trimmed_last_line() {
+        let never = SaveOptions { markdown: true, ..opts(false, true) };
+        assert_eq!(out("foo\n  ", &never), "foo");
+        assert_eq!(out("a\n\n ", &never), "a\n");
+        assert_eq!(out("a \n\n\n", &never), "a\n\n");
+        assert_eq!(out("a\n", &opts(false, false)), "a");
+        assert_eq!(out("é\n", &opts(false, false)), "é");
+        assert_eq!(out("a ", &opts(true, true)), "a\n");
+        assert_eq!(out("", &opts(true, true)), "\n");
+        assert_eq!(out("", &opts(false, true)), "");
     }
 
     /// Code is literal: a trailing space inside a fence may be the point.
@@ -706,13 +796,15 @@ mod tests {
         assert_eq!(trimmed("```\nx \n", false, None), "```\nx\n");
     }
 
-    /// Two trailing spaces before a line of text are a hard line break in
-    /// Markdown. Anything else at the end of a line is whitespace.
+    /// Two or more trailing spaces before a line of text are a hard line
+    /// break in Markdown, kept as two. Anything else is whitespace.
     #[test]
     fn trimming_keeps_a_markdown_hard_break() {
         assert_eq!(trimmed("one  \ntwo\n", true, None), "one  \ntwo\n");
         assert_eq!(trimmed("one  \ntwo\n", false, None), "one\ntwo\n", "not in plain text");
-        assert_eq!(trimmed("one   \ntwo\n", true, None), "one\ntwo\n", "three is not two");
+        assert_eq!(trimmed("one     \ntwo\n", true, None), "one  \ntwo\n", "more is two");
+        assert_eq!(trimmed("one\t  \ntwo\n", true, None), "one\ntwo\n", "spaces only");
+        assert_eq!(trimmed("one \ntwo\n", true, None), "one\ntwo\n", "one is not a break");
         assert_eq!(trimmed("one  \n\ntwo\n", true, None), "one\n\ntwo\n", "nothing to break to");
         assert_eq!(trimmed("one  \n", true, None), "one\n", "last line");
         assert_eq!(trimmed("  \ntwo\n", true, None), "\ntwo\n", "a blank line");
@@ -725,9 +817,9 @@ mod tests {
     fn the_cursor_line_is_left_alone() {
         assert_eq!(trimmed("a \nb \n", true, Some(1)), "a\nb \n");
         let never = SaveOptions { keep_line: Some(1), ..opts(false, false) };
-        assert_eq!(outgoing("a\n", &never), "a\n");
+        assert_eq!(out("a\n", &never), "a\n");
         let never = SaveOptions { keep_line: Some(0), ..opts(false, false) };
-        assert_eq!(outgoing("a\n", &never), "a");
+        assert_eq!(out("a\n", &never), "a");
     }
 
     /// The rope holds `\n` only; the file gets whatever the original used.
