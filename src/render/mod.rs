@@ -16,6 +16,8 @@ pub mod print;
 pub mod splash;
 pub mod markdown;
 pub mod theme;
+#[cfg(test)]
+mod perf_long_line;
 
 use std::ops::Range;
 

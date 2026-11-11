@@ -21,6 +21,7 @@ use std::path::Path;
 use super::link::Link;
 use super::Mode;
 use crate::config::schema::TranscludeConfig;
+use crate::render::layout::{char_window, wrap_chars};
 use crate::render::markdown::block::{classify, BlockKind, Carry};
 
 /// A picture an embed reserved room for. The bytes ride along already
@@ -118,9 +119,11 @@ pub fn expand(
         carry = next;
         // Wrapped here rather than at draw time: each wrapped row has to be a
         // row the cache can count, or the scroll arithmetic goes wrong.
-        for (a, b) in crate::render::layout::wrap_line(line, inner) {
-            let piece: String = line.chars().skip(a).take(b - a).collect();
-            rows.push(Row::Body(piece, kind.clone()));
+        // Sliced from one char vector: skipping to each row's start from the
+        // line's beginning walked a long line once per row it wraps to.
+        let chars: Vec<char> = line.chars().collect();
+        for (a, b) in wrap_chars(&chars, inner) {
+            rows.push(Row::Body(char_window(&chars, a, b), kind.clone()));
         }
     }
     if rows.is_empty() || matches!(rows.last(), Some(Row::Top(_))) {
@@ -173,9 +176,10 @@ fn picture(path: &Path, label: String, cfg: &TranscludeConfig, measure: u16) -> 
 /// where the message is cut off.
 fn one_error(label: String, why: String, measure: u16) -> Expansion {
     let msg = format!("![[{label}]] — {why}");
-    let rows = crate::render::layout::wrap_line(&msg, measure.max(8))
+    let chars: Vec<char> = msg.chars().collect();
+    let rows = wrap_chars(&chars, measure.max(8))
         .into_iter()
-        .map(|(a, b)| Row::Error(msg.chars().skip(a).take(b - a).collect()))
+        .map(|(a, b)| Row::Error(char_window(&chars, a, b)))
         .collect();
     Expansion { rows }
 }

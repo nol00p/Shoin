@@ -19,7 +19,7 @@ use crate::render::cache::RenderCache;
 use crate::render::markdown::block::BlockKind;
 use crate::render::splash;
 use crate::render::focus::FocusRegion;
-use crate::render::layout::{display_width, scroll_offset, Layout, VisualRow};
+use crate::render::layout::{char_window, display_width, scroll_offset, Layout, VisualRow};
 use crate::render::numbers::NumberMode;
 use crate::render::theme::Color as ThemeColor;
 use crate::render::theme::Style as ThemeStyle;
@@ -308,7 +308,19 @@ fn render_pane(
     // Rows of one line are contiguous, so one materialized DisplayLine serves
     // every row it wrapped into. Each row is drawn on its own so the active
     // line can hang its revealed markers into the reserved gutter.
-    let mut current: Option<(usize, DisplayLine)> = None;
+    // Its chars are collected once too: each row is a window into them, and a
+    // long line wraps to many rows.
+    let mut current: Option<(usize, DisplayLine, Vec<char>)> = None;
+    // The cursor line's chars, kept when the loop moves past it, for placing
+    // the caret below without collecting the line a second time.
+    let mut cursor_chars: Option<Vec<char>> = None;
+    let mut leave = |current: &mut Option<(usize, DisplayLine, Vec<char>)>| {
+        if let Some((l, _, chars)) = current.take() {
+            if l == cursor.line {
+                cursor_chars = Some(chars);
+            }
+        }
+    };
     for (i, row) in (top..top + lay.height as usize)
         .filter_map(|r| cache.row(r))
         .enumerate()
@@ -321,7 +333,7 @@ fn render_pane(
         if row.is_spacer() {
             let r = Rect { x: text_area.x, y: text_area.y + i as u16, width: lay.measure, height: 1 };
             frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), r);
-            current = None;
+            leave(&mut current);
             continue;
         }
 
@@ -335,15 +347,18 @@ fn render_pane(
                 height: 1,
             };
             render_embed_row(frame, app, &cache, row.line(), index, r, bg);
-            current = None;
+            leave(&mut current);
             continue;
         }
-        let is_first_row = current.as_ref().is_none_or(|(l, _)| *l != row.line());
+        let is_first_row = current.as_ref().is_none_or(|(l, _, _)| *l != row.line());
         if is_first_row {
-            current = Some((row.line(), display_line_of(app, doc, &cache, row.line(), focused)));
+            leave(&mut current);
+            let d = display_line_of(app, doc, &cache, row.line(), focused);
+            let chars = d.text.chars().collect();
+            current = Some((row.line(), d, chars));
         }
-        let d = &current.as_ref().unwrap().1;
-        let mut spans = window_spans(&d.text, &d.spans, row.start_col, row.end_col);
+        let (_, d, chars) = current.as_ref().unwrap();
+        let mut spans = window_spans(chars, &d.spans, row.start_col, row.end_col);
         let shift = gutter_shift(app, &cache, &lay, row.line(), row.start_col);
         // A wrapped list continuation is pushed right to sit under the item's
         // content; the cache already wrapped it at the narrower width (SPEC §6).
@@ -366,7 +381,7 @@ fn render_pane(
         // code row (columns are code) or a table row (its `|`s are the
         // author's own layout, already left as `no_wrap`).
         let table = matches!(doc.blocks.kinds.get(row.line()), Some(BlockKind::Table));
-        let is_last_row = row.end_col >= d.text.chars().count();
+        let is_last_row = row.end_col >= chars.len();
         let align = row_align(app.text_align, fenced || table, is_last_row);
         let mut alignment = None;
         match align {
@@ -374,8 +389,7 @@ fn render_pane(
             TextAlign::Center => alignment = Some(Alignment::Center),
             TextAlign::Right => alignment = Some(Alignment::Right),
             TextAlign::Justified => {
-                let row_text: String =
-                    d.text.chars().skip(row.start_col).take(row.end_col - row.start_col).collect();
+                let row_text = char_window(chars, row.start_col, row.end_col);
                 let gaps = align::justify_gaps(&row_text, r.width);
                 if !gaps.is_empty() {
                     spans = stretch_spans(spans, &gaps);
@@ -408,6 +422,7 @@ fn render_pane(
         }
     }
 
+    leave(&mut current);
     render_scroll_hint(frame, app, rect, &text_area, top, cache.total_rows());
 
     // Read-only mode has no caret: every line is concealed, so a column in
@@ -423,8 +438,11 @@ fn render_pane(
     let row_start = vr.map(|r| r.start_col).unwrap_or(0);
     let row_end = vr.map(|r| r.end_col).unwrap_or(0);
     let hang = vr.map(|r| hang_x(app, &cache, &lay, &r)).unwrap_or(0);
-    let line_text = doc.buffer.line_text(cursor.line);
-    let prefix: String = line_text.chars().skip(row_start).take(cursor_offset).collect();
+    // The cursor line is drawn raw, so the chars the loop drew it from are its
+    // source; it was drawn whenever its row is on screen, as it is here.
+    let line_text =
+        cursor_chars.unwrap_or_else(|| doc.buffer.line_text(cursor.line).chars().collect());
+    let prefix = char_window(&line_text, row_start, row_start + cursor_offset);
     let shift = gutter_shift(app, &cache, &lay, cursor.line, row_start);
 
     // The same alignment the render loop drew this row with, so the caret
@@ -433,17 +451,17 @@ fn render_pane(
     // above is exactly what that loop windowed for this row.
     let table = matches!(doc.blocks.kinds.get(cursor.line), Some(BlockKind::Table));
     let fenced = in_fence(&cache, cursor.line);
-    let is_last_row = row_end >= line_text.chars().count();
+    let is_last_row = row_end >= line_text.len();
     let align = row_align(app.text_align, fenced || table, is_last_row);
     let row_width = lay.measure + shift - hang;
     let extra = match align {
         TextAlign::Left => 0,
         TextAlign::Center | TextAlign::Right => {
-            let row_text: String = line_text.chars().skip(row_start).take(row_end - row_start).collect();
+            let row_text = char_window(&line_text, row_start, row_end);
             align::align_offset(align, display_width(&row_text), row_width)
         }
         TextAlign::Justified => {
-            let row_text: String = line_text.chars().skip(row_start).take(row_end - row_start).collect();
+            let row_text = char_window(&line_text, row_start, row_end);
             let gaps = align::justify_gaps(&row_text, row_width);
             align::justify_offset(&gaps, cursor_offset)
         }
@@ -583,7 +601,8 @@ fn render_embed_row(
             } else {
                 Vec::new()
             };
-            out.extend(window_spans(&shown, &spans, 0, shown.chars().count()));
+            let chars: Vec<char> = shown.chars().collect();
+            out.extend(window_spans(&chars, &spans, 0, chars.len()));
             // Pad to the closing bar so the box has a straight right edge. The
             // content was wrapped to fit between the bars, so this only ever
             // adds space — but it is measured in display cells, not chars, so a
@@ -1350,19 +1369,18 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
     let table = matches!(app.blocks.kinds.get(line), Some(BlockKind::Table));
     let fenced = in_fence(&cache, line);
     let display_text = if concealed { entry.cmap.display_text(&entry.source) } else { entry.source.clone() };
-    let is_last_row = vr.end_col >= display_text.chars().count();
+    let display_text: Vec<char> = display_text.chars().collect();
+    let is_last_row = vr.end_col >= display_text.len();
     let align = row_align(app.text_align, fenced || table, is_last_row);
     let row_width = lay.measure + shift - hang;
     let click_x = match align {
         TextAlign::Left => raw_click_x,
         TextAlign::Center | TextAlign::Right => {
-            let row_text: String =
-                display_text.chars().skip(vr.start_col).take(vr.end_col - vr.start_col).collect();
+            let row_text = char_window(&display_text, vr.start_col, vr.end_col);
             raw_click_x.saturating_sub(align::align_offset(align, display_width(&row_text), row_width))
         }
         TextAlign::Justified => {
-            let row_text: String =
-                display_text.chars().skip(vr.start_col).take(vr.end_col - vr.start_col).collect();
+            let row_text = char_window(&display_text, vr.start_col, vr.end_col);
             let gaps = align::justify_gaps(&row_text, row_width);
             align::unstretch_col(&gaps, raw_click_x)
         }
@@ -1666,32 +1684,33 @@ fn display_line_of(
     };
     let source = &entry.source;
     let mut styled = entry.styled.clone();
+    // Counted once: a long line is not cheap to count, and every overlay
+    // below wants its length.
+    let len = source.chars().count();
 
     // Focus mode dims everything outside the current paragraph/sentence. It
     // follows the CURSOR, so it belongs to the focused pane only. Applied in
     // SOURCE coordinates so concealment's remap carries it through, and to both
     // active and concealed lines alike. SPEC.md §6.
     if let Some(region) = app.focus_region.as_ref().filter(|_| focused) {
-        apply_focus_dim(&mut styled, source.chars().count(), region, line);
+        apply_focus_dim(&mut styled, len, region, line);
     }
 
     // While a spotlight box is open — command, search, or the finder — dim the
     // whole buffer behind it so the box reads as the focus of attention.
     if matches!(app.mode, Mode::Command(_) | Mode::Search { .. }) || app.finder.is_some() {
-        overlay_dim(&mut styled, 0..source.chars().count());
+        overlay_dim(&mut styled, 0..len);
     }
 
     // A search match is a property of the TEXT, so it lights up in every pane
     // showing this document.
     // Highlight every search match on this line (source coords, pre-conceal).
+    // All of a line's matches are painted in one pass: one pass per match
+    // rebuilt the line's spans thousands of times on a long line.
     if let Some(search) = &app.search {
-        let needle: Vec<char> = search.pattern.chars().collect();
-        let hay: Vec<char> = source.chars().collect();
-        let mut i = 0;
-        while let Some(pos) = find_sub(&hay, &needle, i) {
-            overlay_bg(&mut styled, pos..pos + needle.len(), app.theme.search_match);
-            i = pos + needle.len();
-        }
+        let matches = match_cols(source, &search.pattern);
+        let bg = app.theme.search_match;
+        overlay_all(&mut styled, &matches, |style| style.bg = bg);
     }
 
     // Raw 1:1 when the line is active, when the user turned concealment off, or
@@ -1699,7 +1718,7 @@ fn display_line_of(
     // The cache settled that when it built this frame's row index.
     if !cache.is_concealed(line) {
         // A Visual selection paints its background over the raw text.
-        if let Some((s, e)) = selection_cols(app, line, source.chars().count()).filter(|_| focused) {
+        if let Some((s, e)) = selection_cols(app, line, len).filter(|_| focused) {
             overlay_bg(&mut styled, s..e, app.theme.selection);
         }
         return DisplayLine {
@@ -1755,38 +1774,87 @@ fn overlay(
     range: std::ops::Range<usize>,
     tweak: impl Fn(&mut crate::render::theme::Style),
 ) {
-    if range.start >= range.end {
+    overlay_all(spans, std::slice::from_ref(&range), tweak);
+}
+
+/// `overlay` for many ranges at once, sorted and disjoint, in one pass over
+/// the spans: both lists are in column order, so each range is met once, in
+/// step with the span it starts in.
+fn overlay_all(
+    spans: &mut Vec<StyledSpan>,
+    ranges: &[std::ops::Range<usize>],
+    tweak: impl Fn(&mut crate::render::theme::Style),
+) {
+    debug_assert!(ranges.windows(2).all(|w| w[0].end <= w[1].start), "ranges out of order");
+    if ranges.iter().all(|r| r.is_empty()) {
         return;
     }
-    let mut out = Vec::with_capacity(spans.len() + 2);
+    let mut out = Vec::with_capacity(spans.len() + 2 * ranges.len());
+    let mut next = 0usize;
     for sp in spans.drain(..) {
-        let (s, e) = (sp.range.start, sp.range.end);
-        let a = range.start.max(s);
-        let b = range.end.min(e);
-        if a >= b {
+        let (mut s, e) = (sp.range.start, sp.range.end);
+        // A range that ended before this span cannot touch any later span,
+        // and an empty one touches none.
+        while next < ranges.len() && (ranges[next].end <= s || ranges[next].is_empty()) {
+            next += 1;
+        }
+        if s >= e || ranges.get(next).is_none_or(|r| r.start >= e) {
             out.push(sp);
             continue;
         }
-        if s < a {
-            out.push(StyledSpan { range: s..a, style: sp.style });
-        }
-        let mut mid = sp.style;
-        tweak(&mut mid);
-        out.push(StyledSpan { range: a..b, style: mid });
-        if b < e {
-            out.push(StyledSpan { range: b..e, style: sp.style });
+        while s < e {
+            while ranges.get(next).is_some_and(|r| r.is_empty()) {
+                next += 1;
+            }
+            match ranges.get(next) {
+                Some(r) if r.start < e => {
+                    let a = r.start.max(s);
+                    let b = r.end.min(e);
+                    if s < a {
+                        out.push(StyledSpan { range: s..a, style: sp.style });
+                    }
+                    let mut mid = sp.style;
+                    tweak(&mut mid);
+                    out.push(StyledSpan { range: a..b, style: mid });
+                    s = b;
+                    // A range running on past this span is still needed by
+                    // the next one.
+                    if r.end <= e {
+                        next += 1;
+                    }
+                }
+                _ => {
+                    out.push(StyledSpan { range: s..e, style: sp.style });
+                    s = e;
+                }
+            }
         }
     }
     *spans = out;
 }
 
-/// First index at or after `from` where `needle` occurs in `hay` (empty needle
-/// never matches).
-fn find_sub(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() || from > hay.len() - needle.len() {
-        return None;
+/// The char columns to highlight for `pattern` in `line`: every match, left
+/// to right, each starting past the end of the one before, so `aa` in `aaaa`
+/// lights 0..2 and 2..4. (`n` steps one char at a time and also stops at the
+/// overlapping match at 1; only the highlight skips it.) An empty pattern
+/// matches nothing.
+///
+/// Found with `str::match_indices`, which is fast on a long line, and turned
+/// from byte offsets into char columns by counting forward from the previous
+/// match, so the line is walked once whatever the number of matches.
+fn match_cols(line: &str, pattern: &str) -> Vec<std::ops::Range<usize>> {
+    if pattern.is_empty() {
+        return Vec::new();
     }
-    (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
+    let width = pattern.chars().count();
+    let (mut byte, mut col) = (0usize, 0usize);
+    line.match_indices(pattern)
+        .map(|(at, _)| {
+            col += line[byte..at].chars().count();
+            byte = at;
+            col..col + width
+        })
+        .collect()
 }
 
 /// Faintly de-emphasize the source columns of `line` that fall outside the
@@ -1796,19 +1864,13 @@ fn apply_focus_dim(spans: &mut Vec<StyledSpan>, len: usize, region: &FocusRegion
         overlay_dim(spans, 0..len);
         return;
     }
-    let keep_start = if line == region.start.line { region.start.col } else { 0 };
+    let keep_start = if line == region.start.line { region.start.col.min(len) } else { 0 };
     let keep_end = if line == region.end.line { region.end.col.min(len) } else { len };
-    if keep_start > 0 {
-        overlay_dim(spans, 0..keep_start.min(len));
-    }
-    if keep_end < len {
-        overlay_dim(spans, keep_end..len);
-    }
+    // Both sides in one pass; an empty side is skipped by `overlay_all`.
+    let sides = [0..keep_start, keep_end.max(keep_start)..len];
+    overlay_all(spans, &sides, |style| style.attrs.dim = true);
 }
 
-/// Clip a line's styled spans to one visual row's char window and lower them to
-/// ratatui spans, pulling display text from the source. Spans arrive ordered,
-/// gap-free, and non-overlapping, so the clip preserves those properties.
 /// The alignment a row actually draws with: `Left` when it is not eligible —
 /// a fenced code line (its columns are code) or a table row (its `|`s are the
 /// author's own layout, already left as `no_wrap`) — or when `Justified`
@@ -1847,20 +1909,26 @@ fn stretch_spans(spans: Vec<Span<'static>>, gaps: &[(usize, u16)]) -> Vec<Span<'
     out
 }
 
-fn window_spans(source: &str, styled: &[StyledSpan], start: usize, end: usize) -> Vec<Span<'static>> {
-    let chars: Vec<char> = source.chars().collect();
+/// Clip a line's styled spans to one visual row's char window and lower them to
+/// ratatui spans, pulling display text from the line's chars. Spans arrive
+/// ordered, gap-free, and non-overlapping, so the clip preserves those
+/// properties.
+///
+/// The ordering is also what keeps a row cheap: the first span the row needs
+/// is found by binary search and the walk stops past the row's end, so a long
+/// line's later rows do not rescan the spans of the rows above them.
+fn window_spans(chars: &[char], styled: &[StyledSpan], start: usize, end: usize) -> Vec<Span<'static>> {
     let end = end.min(chars.len());
-    let mut out = Vec::new();
-    for sp in styled {
-        let s = sp.range.start.max(start);
-        let e = sp.range.end.min(end);
-        if s >= e {
-            continue;
-        }
-        let text: String = chars[s..e].iter().collect();
-        out.push(Span::styled(text, sp.style.to_ratatui()));
-    }
-    out
+    let first = styled.partition_point(|sp| sp.range.end <= start);
+    styled[first..]
+        .iter()
+        .take_while(|sp| sp.range.start < end)
+        .filter_map(|sp| {
+            let s = sp.range.start.max(start);
+            let e = sp.range.end.min(end);
+            (s < e).then(|| Span::styled(chars[s..e].iter().collect::<String>(), sp.style.to_ratatui()))
+        })
+        .collect()
 }
 
 /// The status line is hidden by default and appears only transiently — after a
@@ -1920,6 +1988,91 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// Highlighted matches are char columns, counted past multi-byte chars,
+    /// left to right, each starting past the end of the one before.
+    #[test]
+    fn search_matches_are_char_columns() {
+        assert_eq!(match_cols("aaaa", "aa"), vec![0..2, 2..4]);
+        assert_eq!(match_cols("é aa é aaa", "aa"), vec![2..4, 7..9]);
+        assert_eq!(match_cols("ééé", "é"), vec![0..1, 1..2, 2..3]);
+        assert_eq!(match_cols("abc", ""), Vec::<std::ops::Range<usize>>::new());
+        assert_eq!(match_cols("abc", "abcd"), Vec::<std::ops::Range<usize>>::new());
+    }
+
+    /// Painting many ranges in one pass gives exactly the spans that painting
+    /// them one at a time does: the same splits, the same styles.
+    #[test]
+    fn overlaying_all_ranges_at_once_matches_one_at_a_time() {
+        use crate::render::theme::Style as S;
+        // The one-range-per-pass overlay this replaced, kept as the reference.
+        fn one(spans: &mut Vec<StyledSpan>, range: std::ops::Range<usize>) {
+            if range.start >= range.end {
+                return;
+            }
+            let mut out = Vec::new();
+            for sp in spans.drain(..) {
+                let (s, e) = (sp.range.start, sp.range.end);
+                let (a, b) = (range.start.max(s), range.end.min(e));
+                if a >= b {
+                    out.push(sp);
+                    continue;
+                }
+                if s < a {
+                    out.push(StyledSpan { range: s..a, style: sp.style });
+                }
+                let mut mid = sp.style;
+                mid.attrs.dim = true;
+                out.push(StyledSpan { range: a..b, style: mid });
+                if b < e {
+                    out.push(StyledSpan { range: b..e, style: sp.style });
+                }
+            }
+            *spans = out;
+        }
+        let spans: Vec<StyledSpan> = [0..3, 3..3, 3..4, 4..10, 10..12, 12..20]
+            .into_iter()
+            .enumerate()
+            .map(|(i, range)| StyledSpan { range, style: S::fg(Color::Indexed(i as u8)) })
+            .collect();
+        let cases: [&[std::ops::Range<usize>]; 5] = [
+            &[1..2, 2..5, 6..6, 8..15, 19..25],
+            &[0..10, 10..20],
+            &[3..4, 10..12],
+            &[],
+            &[25..30, 30..31],
+        ];
+        for ranges in cases {
+            let mut want = spans.clone();
+            for r in ranges {
+                one(&mut want, r.clone());
+            }
+            let mut got = spans.clone();
+            overlay_all(&mut got, ranges, |s| s.attrs.dim = true);
+            assert_eq!(got, want, "{ranges:?}");
+        }
+    }
+
+    /// A row's window holds exactly the parts of the spans inside it, however
+    /// far into the line the row starts.
+    #[test]
+    fn window_spans_clip_each_row() {
+        use crate::render::theme::Style as S;
+        let chars: Vec<char> = "abcdefghijklmnop".chars().collect();
+        let spans: Vec<StyledSpan> = [0..2, 2..2, 2..7, 7..16]
+            .into_iter()
+            .enumerate()
+            .map(|(i, range)| StyledSpan { range, style: S::fg(Color::Indexed(i as u8)) })
+            .collect();
+        let texts = |start, end| -> Vec<String> {
+            window_spans(&chars, &spans, start, end).into_iter().map(|s| s.content.into_owned()).collect()
+        };
+        assert_eq!(texts(0, 5), ["ab", "cde"]);
+        assert_eq!(texts(5, 10), ["fg", "hij"]);
+        assert_eq!(texts(7, 16), ["hijklmnop"]);
+        assert_eq!(texts(14, 99), ["op"]);
+        assert!(texts(16, 20).is_empty());
+    }
+
     fn app_with(text: &str) -> App {
         let mut app = App::new(Config::default(), None, None).unwrap();
         pin_theme(&mut app);
@@ -1947,6 +2100,25 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| render(f, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// The caret sits on the char under the cursor, on a wrapped row of its
+    /// line, whether that line is the last one drawn or lines follow it.
+    #[test]
+    fn the_caret_sits_on_the_cursor_char_in_a_wrapped_line() {
+        let long: String = (0..60).map(|i| format!("w{i:02} ")).collect();
+        for doc in [format!("intro\n{long}\nafter\n"), format!("intro\n{long}")] {
+            let mut app = app_with(&doc);
+            for col in [0, 41, 150, 237] {
+                app.buffer.cursor = Cursor::new(1, col);
+                let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+                terminal.draw(|f| render(f, &app)).unwrap();
+                let at = terminal.get_cursor_position().unwrap();
+                let want = long.chars().nth(col).unwrap().to_string();
+                let buf = terminal.backend().buffer();
+                assert_eq!(buf[(at.x, at.y)].symbol(), want, "col {col} in {doc:?}");
+            }
+        }
     }
 
     /// The rows of a drawn frame, trimmed — what the reader actually sees.
