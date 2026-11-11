@@ -12,13 +12,14 @@
 
 use std::ops::Range;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::schema::GlyphConfig;
 use crate::input::mode::Mode;
 use crate::text::cursor::Cursor;
 
 use super::indent;
+use super::layout::cell_width;
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
 use super::theme::{Attrs, Color, Style, Theme};
@@ -176,7 +177,7 @@ impl ConcealMap {
     /// should, not one column per char.
     pub fn source_col(&self, source: &str, display_col: u16) -> usize {
         let chars: Vec<char> = source.chars().collect();
-        let cell = |c: char| UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+        let cell = |c: char| cell_width(c) as u16;
 
         let mut disp: u16 = 0;
         let mut src = 0usize;
@@ -300,7 +301,7 @@ impl ConcealMap {
     /// character, which is where the body text begins.
     pub fn leading_shift(&self, source: &str) -> u16 {
         let chars: Vec<char> = source.chars().collect();
-        let width_of = |c: &char| UnicodeWidthChar::width(*c).unwrap_or(0);
+        let width_of = |c: &char| cell_width(*c);
 
         let mut shift = 0usize;
         let mut src = 0usize;
