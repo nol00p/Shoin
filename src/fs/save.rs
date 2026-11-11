@@ -1,8 +1,14 @@
 //! Saving files. SPEC.md §10.
 //!
-//! Atomic: write `.<file>.swtmp` in the SAME directory (so `rename` stays on
-//! one filesystem), fsync, then rename over the target. A crash mid-save leaves
-//! the original intact. Original mode bits are preserved.
+//! Atomic: write `.<file>.<pid>-<n>.swtmp` in the SAME directory (so `rename`
+//! stays on one filesystem), fsync, then rename over the target. A crash
+//! mid-save leaves the original intact. Original mode bits and group are
+//! preserved.
+//!
+//! When a rename would do harm or cannot be done, the file is written in place
+//! instead: a file with other hard links, one owned by someone else, or one in
+//! a folder the user cannot write to. Where the folder allows it, a synced
+//! backup sits beside the file while it is written.
 //!
 //! No swap files, and autosave is OFF unless `[editor] autosave` asks for it —
 //! a writing tool should not surprise the user with writes they did not ask
@@ -12,7 +18,7 @@
 //! included, so a timer can never clobber what `:w` would have refused to.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -190,43 +196,271 @@ pub fn write_atomic(path: &Path, rope: &Rope, opts: &SaveOptions) -> Result<Syst
 
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = dir.unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "unnamed".to_string());
-    let tmp = dir.join(format!(".{stem}.swtmp"));
 
-    // Everything from here can fail, and a failure must not leave `.a.md.swtmp`
-    // sitting beside the file — a dotfile the editor hides and the reader never
-    // asked for. One closure so there is a single place to clean up from.
+    // One look at the file answers every question below: whether it exists,
+    // its links, owner, group and mode.
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file());
+
+    // A rename gives the path a new inode. When other names share the old one
+    // (hard links), only this name would see the new text: write into the
+    // inode itself so they all do. A file the user may not write keeps the
+    // rename, which the folder's permission allows: refusing a save that used
+    // to work is no fix.
+    if meta.as_ref().is_some_and(shares_its_inode) {
+        if let Ok(written) = write_in_place(path, dir, &text, true) {
+            return written;
+        }
+    }
+
+    let (tmp, created) = match create_beside(path, dir, "swtmp") {
+        Ok(made) => made,
+        // A folder the user cannot write to may still hold a file they can (a
+        // shared folder, group write on the file alone). That does not stop an
+        // ordinary write, so do that rather than refuse the save. No backup
+        // either: the folder that refused the temp file refuses a backup too.
+        Err(e) if meta.is_some() && e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return write_in_place(path, dir, &text, false)
+                .unwrap_or_else(|e| Err(e).with_context(|| format!("writing {}", path.display())));
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("creating a temp file in {}", dir.display()));
+        }
+    };
+
+    // A rename hands the file to whoever created the temp file: someone
+    // else's file, writable here through its group, would become ours and lose
+    // its extended attributes and ACLs on the way. A group can be handed back;
+    // an owner cannot, without privileges, so that file is written in place.
+    if let Some(m) = &meta {
+        if !keeps_owner_and_group(&created, m) {
+            drop(created);
+            let _ = std::fs::remove_file(&tmp);
+            if let Ok(written) = write_in_place(path, dir, &text, true) {
+                return written;
+            }
+            // Not writable in place either: the rename the folder allows is
+            // still better than refusing, as it was before.
+            return write_atomic_in(path, dir, &text, meta.as_ref());
+        }
+    }
+
+    finish_rename(path, dir, &tmp, created, &text, meta.as_ref())
+}
+
+/// The rename route from scratch, for the one case that gave up its first
+/// temp file to look at the owner.
+fn write_atomic_in(
+    path: &Path,
+    dir: &Path,
+    text: &str,
+    meta: Option<&std::fs::Metadata>,
+) -> Result<SystemTime> {
+    let (tmp, created) = create_beside(path, dir, "swtmp")
+        .with_context(|| format!("creating a temp file in {}", dir.display()))?;
+    finish_rename(path, dir, &tmp, created, text, meta)
+}
+
+/// Write the temp file, give it the original's mode, rename it over `path`.
+fn finish_rename(
+    path: &Path,
+    dir: &Path,
+    tmp: &Path,
+    created: std::fs::File,
+    text: &str,
+    meta: Option<&std::fs::Metadata>,
+) -> Result<SystemTime> {
+    // Everything from here can fail, and a failure must not leave a temp file
+    // sitting beside the file — a dotfile the editor hides and the reader
+    // never asked for. One closure so there is a single place to clean up from.
     let attempt = || -> Result<SystemTime> {
         {
-            let mut f = std::fs::File::create(&tmp)
-                .with_context(|| format!("creating temp file {}", tmp.display()))?;
+            let mut f = created;
             f.write_all(text.as_bytes())?;
+            // Mode after any group change: a chown may clear set-id bits.
+            if let Some(m) = meta {
+                let _ = f.set_permissions(m.permissions());
+            }
             f.sync_all()?;
         }
 
-        // Preserve the original's mode bits if it already existed.
-        if let Ok(meta) = std::fs::metadata(path) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
-        }
-
-        std::fs::rename(&tmp, path)
+        std::fs::rename(tmp, path)
             .with_context(|| format!("replacing {} with {}", path.display(), tmp.display()))?;
 
-        Ok(std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .unwrap_or_else(|_| SystemTime::now()))
+        // The rename lives in the folder's entry list, which has buffers of its
+        // own: without this a power cut can bring back the old file although
+        // the new one was synced. Best effort, since not every system lets a
+        // folder be opened and synced, and the save itself has succeeded.
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+
+        Ok(mtime_of(path))
     };
 
     let result = attempt();
     if result.is_err() {
         // Best effort: if this fails too there is nothing further to try, and
         // the error worth reporting is the one from the save itself.
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(tmp);
     }
     result
+}
+
+/// A new file beside `path`, named `.<name>.<pid>-<n>.<ext>`: unique, so a
+/// leftover from another run or another user is never truncated or mistaken
+/// for ours, and cut to fit the 255-byte name limit, so a long name can still
+/// be saved by rename (and a NEW file with a long name created at all).
+fn create_beside(path: &Path, dir: &Path, ext: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unnamed".to_string());
+    let pid = std::process::id();
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let suffix = format!(".{pid}-{n}.{ext}");
+        let mut base = name.as_str();
+        while 1 + base.len() + suffix.len() > NAME_MAX {
+            let mut cut = base.len() - 1;
+            while !base.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            base = &base[..cut];
+        }
+        let candidate = dir.join(format!(".{base}{suffix}"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(f) => return Ok((candidate, f)),
+            // Someone else's file under the same name: take the next number.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 100 => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The longest file name most filesystems take, in bytes.
+const NAME_MAX: usize = 255;
+
+/// The fallback for a file a rename would damage or cannot reach: write over
+/// the file itself. `Err` (outer) when the file cannot be opened for writing,
+/// so the caller can choose the rename instead.
+///
+/// Not atomic, so where the folder allows it (`backup`) a copy of the original
+/// is written and synced beside it first, and removed once the new text is
+/// synced; a failed write leaves it, and the error names it. A folder the user
+/// cannot write to allows no backup: there a crash mid-write can leave the
+/// file half old, half new.
+///
+/// The old bytes are overwritten first and the length cut after, rather than
+/// truncating up front: a full disk then fails while the original is still
+/// mostly there, not after it has been emptied.
+fn write_in_place(
+    path: &Path,
+    dir: &Path,
+    text: &str,
+    backup: bool,
+) -> std::io::Result<Result<SystemTime>> {
+    let mut f = std::fs::OpenOptions::new().write(true).open(path)?;
+    let kept = match backup {
+        true => match back_up(path, dir) {
+            Ok(b) => Some(b),
+            // The folder refused it after all: the same case as above.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => None,
+            Err(e) => {
+                return Ok(Err(e).with_context(|| {
+                    format!("backing up {} before writing it in place", path.display())
+                }));
+            }
+        },
+        false => None,
+    };
+
+    let written = fail_in_place_for_tests()
+        .and_then(|_| f.write_all(text.as_bytes()))
+        .and_then(|_| f.set_len(text.len() as u64))
+        .and_then(|_| f.sync_all());
+    Ok(match (written, kept) {
+        (Ok(()), kept) => {
+            if let Some(b) = kept {
+                let _ = std::fs::remove_file(b);
+            }
+            Ok(mtime_of(path))
+        }
+        (Err(e), Some(b)) => Err(e).with_context(|| {
+            format!("writing {} (the original is kept in {})", path.display(), b.display())
+        }),
+        (Err(e), None) => Err(e).with_context(|| format!("writing {}", path.display())),
+    })
+}
+
+/// A synced copy of `path` beside it, for an in-place write to fall back on.
+fn back_up(path: &Path, dir: &Path) -> std::io::Result<PathBuf> {
+    let (bak, mut out) = create_beside(path, dir, "swbak")?;
+    let copied = std::fs::File::open(path)
+        .and_then(|mut src| std::io::copy(&mut src, &mut out))
+        .and_then(|_| out.sync_all());
+    match copied {
+        Ok(()) => Ok(bak),
+        Err(e) => {
+            let _ = std::fs::remove_file(&bak);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes the next in-place write fail after its backup, for the test
+    /// that the backup is left behind. No real error is easy to provoke there.
+    static FAIL_IN_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn fail_in_place_for_tests() -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_IN_PLACE.with(|f| f.replace(false)) {
+        return Err(std::io::Error::other("injected failure"));
+    }
+    Ok(())
+}
+
+fn mtime_of(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or_else(|_| SystemTime::now())
+}
+
+#[cfg(unix)]
+fn shares_its_inode(m: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    m.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn shares_its_inode(_: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Whether the temp file, once renamed, would carry the original's owner and
+/// group. A different group is handed over first; only a different owner (or
+/// a group the user cannot give) means no.
+#[cfg(unix)]
+fn keeps_owner_and_group(tmp: &std::fs::File, original: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(ours) = tmp.metadata() else { return true };
+    if ours.uid() != original.uid() {
+        return false;
+    }
+    ours.gid() == original.gid()
+        || std::os::unix::fs::fchown(tmp, None, Some(original.gid())).is_ok()
+}
+
+#[cfg(not(unix))]
+fn keeps_owner_and_group(_: &std::fs::File, _: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// Compare the recorded mtime against the file on disk. `true` means someone
@@ -479,6 +713,167 @@ mod tests {
         write_atomic(&link, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
         assert!(link.is_symlink(), "the link is still a link");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A writable file in a folder the user cannot write to: no temp file can
+    /// go beside it, but the file itself can still be written.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_in_a_read_only_folder_still_saves() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("rofolder");
+        let p = d.join("a.md");
+        std::fs::write(&p, "old\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Root writes anywhere, so the folder would not stop it and the test
+        // would prove nothing.
+        let root = std::fs::File::create(d.join("probe")).is_ok();
+        let result = (!root).then(|| write_atomic(&p, &Rope::from_str("new\n"), &opts(true, false)));
+
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if let Some(result) = result {
+            result.expect("saves in place");
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "new\n");
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A rename would give one name a new inode and leave the other names on
+    /// the old text.
+    #[cfg(unix)]
+    #[test]
+    fn every_hard_link_sees_the_saved_text() {
+        let d = dir("hardlink");
+        let p = d.join("a.md");
+        let other = d.join("b.md");
+        // Longer than the new text, so the old tail has to be cut off.
+        std::fs::write(&p, "old text, longer than the new\n").unwrap();
+        std::fs::hard_link(&p, &other).unwrap();
+
+        write_atomic(&p, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new\n");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "new\n", "the other name");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(unix)]
+    fn inode(p: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).unwrap().ino()
+    }
+
+    /// Root opens any file for writing and writes into any folder, so tests
+    /// about what a user may not write prove nothing as root.
+    #[cfg(unix)]
+    fn running_as_root(d: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let probe = d.join("probe-owner");
+        std::fs::write(&probe, "").unwrap();
+        let root = std::fs::metadata(&probe).unwrap().uid() == 0;
+        std::fs::remove_file(&probe).unwrap();
+        root
+    }
+
+    fn leftovers(d: &Path, ext: &str) -> Vec<String> {
+        std::fs::read_dir(d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(ext))
+            .collect()
+    }
+
+    /// A hard-linked file the user may not write, in a folder they may: the
+    /// rename still works there, so the save must not fail where it used to.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_hard_linked_file_still_saves_by_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("rolink");
+        if running_as_root(&d) {
+            return;
+        }
+        let p = d.join("a.md");
+        std::fs::write(&p, "old\n").unwrap();
+        std::fs::hard_link(&p, d.join("b.md")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let before = inode(&p);
+
+        write_atomic(&p, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new\n");
+        assert_ne!(inode(&p), before, "renamed, not written in place");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A name with no room left for `.` and `.swtmp` around it still saves by
+    /// rename, and a NEW file with such a name can be created at all: the temp
+    /// name is cut to fit.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_near_the_length_limit_saves_by_rename() {
+        let d = dir("longname");
+        let p = d.join(format!("{}.md", "n".repeat(250)));
+        write_atomic(&p, &Rope::from_str("first\n"), &opts(true, false)).expect("a new file");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "first\n");
+
+        let before = inode(&p);
+        write_atomic(&p, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new\n");
+        assert_ne!(inode(&p), before, "renamed, not written in place");
+
+        // A name cut inside a multi-byte character must not split it.
+        let p = d.join(format!("{}.md", "é".repeat(125)));
+        write_atomic(&p, &Rope::from_str("x\n"), &opts(true, false)).expect("cut on a boundary");
+        assert!(leftovers(&d, ".swtmp").is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A temp file left by another run (or user) under the old fixed name is
+    /// neither truncated nor in the way: the save is still a rename.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_temp_file_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("stale");
+        let p = d.join("a.md");
+        std::fs::write(&p, "old\n").unwrap();
+        let stale = d.join(".a.md.swtmp");
+        std::fs::write(&stale, "someone else's\n").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let before = inode(&p);
+
+        write_atomic(&p, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new\n");
+        assert_ne!(inode(&p), before, "renamed, not written in place");
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "someone else's\n");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// An in-place write that fails leaves the backup of the original, and
+    /// the error says where it is. One that succeeds leaves nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_in_place_write_leaves_its_backup() {
+        let d = dir("backup");
+        let p = d.join("a.md");
+        std::fs::write(&p, "original\n").unwrap();
+        std::fs::hard_link(&p, d.join("b.md")).unwrap();
+
+        FAIL_IN_PLACE.with(|f| f.set(true));
+        let err = write_atomic(&p, &Rope::from_str("new\n"), &opts(true, false))
+            .expect_err("the injected failure");
+        let left = leftovers(&d, ".swbak");
+        assert_eq!(left.len(), 1, "one backup: {left:?}");
+        assert_eq!(std::fs::read_to_string(d.join(&left[0])).unwrap(), "original\n");
+        assert!(format!("{err:#}").contains(&left[0]), "named in the error: {err:#}");
+
+        std::fs::remove_file(d.join(&left[0])).unwrap();
+        write_atomic(&p, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
+        assert!(leftovers(&d, ".swbak").is_empty(), "removed after a good write");
+        assert!(leftovers(&d, ".swtmp").is_empty());
         std::fs::remove_dir_all(&d).ok();
     }
 }
