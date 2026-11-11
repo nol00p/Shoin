@@ -219,7 +219,12 @@ pub fn content_column(text: &str, tab_width: u16) -> u16 {
 /// true width. Always returns at least one range, so an empty line still
 /// produces a row.
 pub fn wrap_line(text: &str, measure: u16) -> Vec<(usize, usize)> {
-    let chars: Vec<char> = text.chars().collect();
+    wrap_chars(&text.chars().collect::<Vec<_>>(), measure)
+}
+
+/// `wrap_line` for a line whose chars the caller already has, so a long line
+/// is not collected twice when its rows are then cut with `char_window`.
+pub fn wrap_chars(chars: &[char], measure: u16) -> Vec<(usize, usize)> {
     if chars.is_empty() {
         return vec![(0, 0)];
     }
@@ -255,6 +260,13 @@ pub fn wrap_line(text: &str, measure: u16) -> Vec<(usize, usize)> {
     }
     out.push((start, chars.len()));
     out
+}
+
+/// The chars in columns `start..end` of a line, clamped to its length: the
+/// text of one row `wrap_line` returned, or of any window into a line.
+pub fn char_window(chars: &[char], start: usize, end: usize) -> String {
+    let end = end.min(chars.len());
+    chars[start.min(end)..end].iter().collect()
 }
 
 /// A line that never wraps: one range, covering the whole line.

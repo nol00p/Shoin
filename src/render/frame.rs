@@ -19,7 +19,7 @@ use crate::render::cache::RenderCache;
 use crate::render::markdown::block::BlockKind;
 use crate::render::splash;
 use crate::render::focus::FocusRegion;
-use crate::render::layout::{display_width, scroll_offset, Layout, VisualRow};
+use crate::render::layout::{char_window, display_width, scroll_offset, Layout, VisualRow};
 use crate::render::numbers::NumberMode;
 use crate::render::theme::Color as ThemeColor;
 use crate::render::theme::Style as ThemeStyle;
@@ -311,6 +311,16 @@ fn render_pane(
     // Its chars are collected once too: each row is a window into them, and a
     // long line wraps to many rows.
     let mut current: Option<(usize, DisplayLine, Vec<char>)> = None;
+    // The cursor line's chars, kept when the loop moves past it, for placing
+    // the caret below without collecting the line a second time.
+    let mut cursor_chars: Option<Vec<char>> = None;
+    let mut leave = |current: &mut Option<(usize, DisplayLine, Vec<char>)>| {
+        if let Some((l, _, chars)) = current.take() {
+            if l == cursor.line {
+                cursor_chars = Some(chars);
+            }
+        }
+    };
     for (i, row) in (top..top + lay.height as usize)
         .filter_map(|r| cache.row(r))
         .enumerate()
@@ -323,7 +333,7 @@ fn render_pane(
         if row.is_spacer() {
             let r = Rect { x: text_area.x, y: text_area.y + i as u16, width: lay.measure, height: 1 };
             frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), r);
-            current = None;
+            leave(&mut current);
             continue;
         }
 
@@ -337,11 +347,12 @@ fn render_pane(
                 height: 1,
             };
             render_embed_row(frame, app, &cache, row.line(), index, r, bg);
-            current = None;
+            leave(&mut current);
             continue;
         }
         let is_first_row = current.as_ref().is_none_or(|(l, _, _)| *l != row.line());
         if is_first_row {
+            leave(&mut current);
             let d = display_line_of(app, doc, &cache, row.line(), focused);
             let chars = d.text.chars().collect();
             current = Some((row.line(), d, chars));
@@ -411,6 +422,7 @@ fn render_pane(
         }
     }
 
+    leave(&mut current);
     render_scroll_hint(frame, app, rect, &text_area, top, cache.total_rows());
 
     // Read-only mode has no caret: every line is concealed, so a column in
@@ -426,7 +438,10 @@ fn render_pane(
     let row_start = vr.map(|r| r.start_col).unwrap_or(0);
     let row_end = vr.map(|r| r.end_col).unwrap_or(0);
     let hang = vr.map(|r| hang_x(app, &cache, &lay, &r)).unwrap_or(0);
-    let line_text: Vec<char> = doc.buffer.line_text(cursor.line).chars().collect();
+    // The cursor line is drawn raw, so the chars the loop drew it from are its
+    // source; it was drawn whenever its row is on screen, as it is here.
+    let line_text =
+        cursor_chars.unwrap_or_else(|| doc.buffer.line_text(cursor.line).chars().collect());
     let prefix = char_window(&line_text, row_start, row_start + cursor_offset);
     let shift = gutter_shift(app, &cache, &lay, cursor.line, row_start);
 
@@ -1771,16 +1786,16 @@ fn overlay_all(
     tweak: impl Fn(&mut crate::render::theme::Style),
 ) {
     debug_assert!(ranges.windows(2).all(|w| w[0].end <= w[1].start), "ranges out of order");
-    let ranges: Vec<_> = ranges.iter().filter(|r| r.start < r.end).collect();
-    if ranges.is_empty() {
+    if ranges.iter().all(|r| r.is_empty()) {
         return;
     }
     let mut out = Vec::with_capacity(spans.len() + 2 * ranges.len());
     let mut next = 0usize;
     for sp in spans.drain(..) {
         let (mut s, e) = (sp.range.start, sp.range.end);
-        // A range that ended before this span cannot touch any later span.
-        while next < ranges.len() && ranges[next].end <= s {
+        // A range that ended before this span cannot touch any later span,
+        // and an empty one touches none.
+        while next < ranges.len() && (ranges[next].end <= s || ranges[next].is_empty()) {
             next += 1;
         }
         if s >= e || ranges.get(next).is_none_or(|r| r.start >= e) {
@@ -1788,6 +1803,9 @@ fn overlay_all(
             continue;
         }
         while s < e {
+            while ranges.get(next).is_some_and(|r| r.is_empty()) {
+                next += 1;
+            }
             match ranges.get(next) {
                 Some(r) if r.start < e => {
                     let a = r.start.max(s);
@@ -1815,9 +1833,11 @@ fn overlay_all(
     *spans = out;
 }
 
-/// The char columns of every match of `pattern` in `line`, left to right and
-/// not overlapping, as `n` steps through them. An empty pattern matches
-/// nothing.
+/// The char columns to highlight for `pattern` in `line`: every match, left
+/// to right, each starting past the end of the one before, so `aa` in `aaaa`
+/// lights 0..2 and 2..4. (`n` steps one char at a time and also stops at the
+/// overlapping match at 1; only the highlight skips it.) An empty pattern
+/// matches nothing.
 ///
 /// Found with `str::match_indices`, which is fast on a long line, and turned
 /// from byte offsets into char columns by counting forward from the previous
@@ -1844,14 +1864,11 @@ fn apply_focus_dim(spans: &mut Vec<StyledSpan>, len: usize, region: &FocusRegion
         overlay_dim(spans, 0..len);
         return;
     }
-    let keep_start = if line == region.start.line { region.start.col } else { 0 };
+    let keep_start = if line == region.start.line { region.start.col.min(len) } else { 0 };
     let keep_end = if line == region.end.line { region.end.col.min(len) } else { len };
-    if keep_start > 0 {
-        overlay_dim(spans, 0..keep_start.min(len));
-    }
-    if keep_end < len {
-        overlay_dim(spans, keep_end..len);
-    }
+    // Both sides in one pass; an empty side is skipped by `overlay_all`.
+    let sides = [0..keep_start, keep_end.max(keep_start)..len];
+    overlay_all(spans, &sides, |style| style.attrs.dim = true);
 }
 
 /// The alignment a row actually draws with: `Left` when it is not eligible —
@@ -1914,12 +1931,6 @@ fn window_spans(chars: &[char], styled: &[StyledSpan], start: usize, end: usize)
         .collect()
 }
 
-/// The chars in columns `start..end` of a line, clamped to its length.
-fn char_window(chars: &[char], start: usize, end: usize) -> String {
-    let end = end.min(chars.len());
-    chars[start.min(end)..end].iter().collect()
-}
-
 /// The status line is hidden by default and appears only transiently — after a
 /// save, a mode change, or an error — then fades. Command entry has its own
 /// spotlight box (`render_command_box`), so it is not echoed here. SPEC.md §6.
@@ -1977,10 +1988,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    /// Matches are char columns, counted past multi-byte chars, left to
-    /// right and never overlapping — the same ones `n` steps through.
+    /// Highlighted matches are char columns, counted past multi-byte chars,
+    /// left to right, each starting past the end of the one before.
     #[test]
     fn search_matches_are_char_columns() {
+        assert_eq!(match_cols("aaaa", "aa"), vec![0..2, 2..4]);
         assert_eq!(match_cols("é aa é aaa", "aa"), vec![2..4, 7..9]);
         assert_eq!(match_cols("ééé", "é"), vec![0..1, 1..2, 2..3]);
         assert_eq!(match_cols("abc", ""), Vec::<std::ops::Range<usize>>::new());
@@ -2088,6 +2100,25 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| render(f, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// The caret sits on the char under the cursor, on a wrapped row of its
+    /// line, whether that line is the last one drawn or lines follow it.
+    #[test]
+    fn the_caret_sits_on_the_cursor_char_in_a_wrapped_line() {
+        let long: String = (0..60).map(|i| format!("w{i:02} ")).collect();
+        for doc in [format!("intro\n{long}\nafter\n"), format!("intro\n{long}")] {
+            let mut app = app_with(&doc);
+            for col in [0, 41, 150, 237] {
+                app.buffer.cursor = Cursor::new(1, col);
+                let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+                terminal.draw(|f| render(f, &app)).unwrap();
+                let at = terminal.get_cursor_position().unwrap();
+                let want = long.chars().nth(col).unwrap().to_string();
+                let buf = terminal.backend().buffer();
+                assert_eq!(buf[(at.x, at.y)].symbol(), want, "col {col} in {doc:?}");
+            }
+        }
     }
 
     /// The rows of a drawn frame, trimmed — what the reader actually sees.
