@@ -630,6 +630,20 @@ fn creatable(path: &Path, name: bool) -> bool {
     }
 }
 
+/// A typed path with `~` or `~/…` at its start read as `$HOME`, as a shell
+/// reads it, for `:e`, `:w`, `:saveas`, the export prompt and the tree's
+/// prompts. `~user` and a `~` anywhere else are left as typed, and so is
+/// everything when there is no `$HOME`.
+fn expand_home(typed: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+    match (typed.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            PathBuf::from(home).join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(typed),
+    }
+}
+
 /// A buffer path in the one form every buffer keeps: absolute (joined onto
 /// `base`, the working directory, when relative) with `.` dropped and `..`
 /// resolved lexically. Nothing has to exist — a new file has a path too.
@@ -2521,6 +2535,12 @@ impl App {
     /// finder's paths, which always are.
     fn absolute(&self, p: &Path) -> PathBuf {
         clean_path(&self.cwd(), p)
+    }
+
+    /// A path the reader TYPED (`:e`, `:w`, `:saveas`, `:export`): `~/`
+    /// expanded, then made absolute and clean like every buffer path.
+    fn typed_path(&self, typed: &str) -> PathBuf {
+        self.absolute(&expand_home(typed))
     }
 
     /// A path as a message names it: relative to the working directory when
@@ -5463,7 +5483,7 @@ impl App {
                 // Neo-tree's convention: a trailing `/` means a directory. It
                 // reads as one, which is the whole reason to use it.
                 let is_dir = raw.ends_with('/');
-                let path = p.target.join(raw.trim_end_matches('/'));
+                let path = p.target.join(expand_home(raw.trim_end_matches('/')));
                 ops::create(&path, is_dir).map(|()| Some(path))
             }
             PromptKind::Rename => {
@@ -5485,11 +5505,12 @@ impl App {
                 if raw.is_empty() {
                     return;
                 }
-                let mut dest = self
-                    .tree
-                    .as_ref()
-                    .map(|t| t.resolve(raw))
-                    .unwrap_or_else(|| root.join(raw));
+                let typed = expand_home(raw);
+                let mut dest = if typed.is_absolute() {
+                    typed
+                } else {
+                    self.tree.as_ref().map(|t| t.resolve(raw)).unwrap_or_else(|| root.join(raw))
+                };
                 // Moving ONTO a directory means "into it", the way `mv` does.
                 if dest.is_dir() {
                     if let Some(name) = p.target.file_name() {
@@ -5591,14 +5612,7 @@ impl App {
         if dest.is_empty() {
             return;
         }
-        let dest = {
-            let p = Path::new(dest);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                self.cwd().join(p)
-            }
-        };
+        let dest = self.typed_path(dest);
         // HTML is drawn from the theme AS AUTHORED, not from the running one:
         // `self.theme` has been adapted to this terminal's color depth, and a
         // page has no such limit to be adapted to.
@@ -5760,6 +5774,15 @@ impl App {
             "w!" | "write!" => {
                 self.write(if arg.is_empty() { None } else { Some(arg) }, true);
             }
+            // `:saveas` switches the buffer to the new file; `:w <path>` only
+            // writes a copy there.
+            "sav" | "saveas" | "sav!" | "saveas!" => {
+                if arg.is_empty() {
+                    self.notify("usage: :saveas <path>", FlashKind::Error);
+                } else {
+                    self.save_as(arg, name.ends_with('!'));
+                }
+            }
             "q" => self.try_quit(false),
             // Capital Q leaves outright — the whole session, every buffer.
             // `qa`/`qall` are vim's spelling of the same thing.
@@ -5790,19 +5813,30 @@ impl App {
                 if arg.is_empty() {
                     self.notify("usage: :e <path>", FlashKind::Error);
                 } else {
-                    let path = PathBuf::from(arg);
-                    self.open_file(path);
+                    self.open_file(self.typed_path(arg));
                 }
             }
             "q!" => self.try_quit(true),
+            // With a path, `:wq` saves the buffer AS that file and then
+            // quits: a copy (what `:w <path>` writes) would leave this file's
+            // edits unsaved, and `:wq!` would then throw them away.
             "wq" | "x" => {
-                self.write(if arg.is_empty() { None } else { Some(arg) }, false);
+                if arg.is_empty() {
+                    self.write(None, false);
+                } else {
+                    self.save_as(arg, false);
+                }
                 self.try_quit(false);
             }
             // The `!` forces the WRITE, not the quit: a write that fails
             // still keeps the editor open, or the unsaved text would be lost.
             "wq!" | "x!" => {
-                if self.write(if arg.is_empty() { None } else { Some(arg) }, true) {
+                let written = if arg.is_empty() {
+                    self.write(None, true)
+                } else {
+                    self.save_as(arg, true)
+                };
+                if written {
                     self.try_quit(true);
                 }
             }
@@ -6104,15 +6138,69 @@ impl App {
     }
 
     /// `:w`. True when the file was written.
+    ///
+    /// `:w <path>` on a buffer that already has a file writes a COPY and keeps
+    /// editing the original, as vim does: `:w backup.md` is a checkpoint, not
+    /// a move. An unnamed buffer takes the name instead, which is how it gets
+    /// one (`:saveas` switches a named buffer).
     fn write(&mut self, path: Option<&str>, force: bool) -> bool {
-        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
-        let result = match path {
-            Some(p) => {
-                let p = self.absolute(Path::new(p));
-                self.buffer.save_as(p, policy, force)
+        if let Some(typed) = path {
+            if self.buffer.path.is_none() {
+                return self.save_as(typed, force);
             }
-            None => self.buffer.save(policy, force),
-        };
+            let p = self.typed_path(typed);
+            if !self.buffer.is_own_file(&p) {
+                return self.write_copy(&p, force);
+            }
+        }
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        let result = self.buffer.save(policy, force);
+        self.after_write(result)
+    }
+
+    /// `:saveas <path>`, and `:w <path>` on an unnamed buffer: write there and
+    /// make it this buffer's file, styled by its new extension.
+    fn save_as(&mut self, typed: &str, force: bool) -> bool {
+        let p = self.typed_path(typed);
+        // A file is edited in ONE buffer (`open_file` holds to that); taking
+        // over another buffer's file would leave two copies racing to save.
+        let current = self.current();
+        if self.docs.iter().enumerate().any(|(i, d)| i != current && d.buffer.is_own_file(&p)) {
+            self.notify(format!("{} is open in another buffer", self.shown(&p)), FlashKind::Error);
+            return false;
+        }
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        let result = self.buffer.save_as(p.clone(), policy, force);
+        if result.is_ok() {
+            let exts = &self.config.markdown.plain_text_extensions;
+            self.buffer.syntax = crate::fs::open::syntax_for(&p, exts);
+        }
+        self.after_write(result)
+    }
+
+    /// `:w <path>` from a buffer with its own file: the text goes to `path`,
+    /// and the buffer stays what it was.
+    fn write_copy(&mut self, path: &Path, force: bool) -> bool {
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        match self.buffer.write_copy(path, policy, force) {
+            Ok(()) => {
+                self.disk_changed();
+                let mine = self.buffer.display_name();
+                self.notify(
+                    format!("{} written (still editing {mine})", self.shown(path)),
+                    FlashKind::Info,
+                );
+                true
+            }
+            Err(e) => {
+                self.notify(format!("{e}"), FlashKind::Error);
+                false
+            }
+        }
+    }
+
+    /// Report a write of this buffer's own file.
+    fn after_write(&mut self, result: anyhow::Result<()>) -> bool {
         match result {
             Ok(()) => {
                 self.disk_changed();
@@ -7702,6 +7790,111 @@ mod tests {
     }
 
     // ------------------------------------------------------------- autosave
+
+    /// F18: `:w <other>` on a buffer with its own file writes a copy and
+    /// keeps editing the original; the next `:w` goes to the original.
+    #[test]
+    fn w_to_another_name_writes_a_copy() {
+        let mut app = app_with("one\n");
+        let orig = saved_file(&mut app, "copy-orig");
+        let copy = orig.with_extension("copy.md");
+        app.run_command(&format!("w {}", copy.display()));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "one\n");
+        assert_eq!(app.buffer.path.as_deref(), Some(orig.as_path()), "still the original");
+        assert!(flash_text(&app).contains("still editing"), "got: {}", flash_text(&app));
+
+        feed(&mut app, "ccTWO");
+        esc(&mut app);
+        assert!(app.buffer.modified, "a copy is not a save of this file");
+        app.run_command("w");
+        assert_eq!(std::fs::read_to_string(&orig).unwrap(), "TWO\n", "the edit went home");
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "one\n", "the copy kept its text");
+
+        // An existing file is refused without `!`.
+        app.run_command(&format!("w {}", copy.display()));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "one\n");
+        app.run_command(&format!("w! {}", copy.display()));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "TWO\n");
+
+        // Its own name, however spelled, is an ordinary save.
+        feed(&mut app, "ccthree");
+        esc(&mut app);
+        app.run_command(&format!("w {}", orig.display()));
+        assert!(!app.buffer.modified);
+        let _ = std::fs::remove_file(orig);
+        let _ = std::fs::remove_file(copy);
+    }
+
+    /// F18: `:saveas` switches the buffer to the new file and restyles it by
+    /// the new extension; an unnamed buffer's `:w <name>` does the same.
+    #[test]
+    fn saveas_switches_the_buffer_and_its_syntax() {
+        let mut app = app_with("text\n");
+        let orig = saved_file(&mut app, "saveas-orig");
+        let txt = orig.with_extension("txt");
+        assert_eq!(app.buffer.syntax, crate::text::buffer::Syntax::Markdown);
+        app.run_command(&format!("saveas {}", txt.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(txt.as_path()));
+        assert_eq!(app.buffer.syntax, crate::text::buffer::Syntax::PlainProse);
+        assert!(!app.buffer.modified);
+
+        let mut app = app_with("text\n");
+        let named = txt.with_extension("other.md");
+        app.run_command(&format!("w {}", named.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(named.as_path()), "unnamed adopts it");
+        assert_eq!(app.buffer.syntax, crate::text::buffer::Syntax::Markdown);
+        for p in [orig, txt, named] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// F18: `:saveas` will not take over a file another buffer has open, and
+    /// `:wq <path>` saves the buffer as that file (not a copy) before quitting.
+    #[test]
+    fn saveas_refuses_an_open_file_and_wq_path_saves_as() {
+        let mut app = app_with("a\n");
+        let a = saved_file(&mut app, "saveas-a");
+        let b = a.with_extension("b.md");
+        std::fs::write(&b, "b\n").unwrap();
+        assert!(app.open_file(b.clone()));
+        app.run_command(&format!("b {}", a.file_name().unwrap().to_string_lossy()));
+        assert_eq!(app.buffer.path.as_deref(), Some(a.as_path()));
+        app.run_command(&format!("saveas! {}", b.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(a.as_path()), "refused");
+        assert!(flash_text(&app).contains("another buffer"), "got: {}", flash_text(&app));
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b\n");
+
+        let mut app = app_with("x\n");
+        let orig = saved_file(&mut app, "wq-orig");
+        let out = orig.with_extension("out.md");
+        feed(&mut app, "ccedited");
+        esc(&mut app);
+        app.run_command(&format!("wq {}", out.display()));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "edited\n");
+        assert!(!app.buffer.modified, "saved, so the quit is not refused");
+        for p in [a, b, orig, out] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// F18: `~` and `~/…` at the start of a typed path are `$HOME`.
+    #[test]
+    fn a_typed_tilde_is_home() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else { return };
+        let home = PathBuf::from(home);
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/notes/x.md"), home.join("notes/x.md"));
+        assert_eq!(expand_home("~user/x.md"), PathBuf::from("~user/x.md"));
+        assert_eq!(expand_home("a/~/x.md"), PathBuf::from("a/~/x.md"));
+
+        // `:e` on a file that is not there opens an empty buffer for it and
+        // writes nothing, so this touches no real file.
+        let name = "shoin-tilde-test-not-a-real-file-7f3a.md";
+        let mut app = app_with("");
+        app.run_command(&format!("e ~/{name}"));
+        assert_eq!(app.buffer.path.as_deref(), Some(home.join(name).as_path()));
+        assert!(!home.join(name).exists());
+    }
 
     /// A named scratch file with `text` in it, already saved so the buffer is
     /// clean and `disk_mtime` is recorded — the state autosave has to start in.
