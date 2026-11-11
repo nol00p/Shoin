@@ -7,14 +7,17 @@
 //!
 //! THE VALIDITY RULE, in order of cost:
 //!   1. Same buffer revision, style key and measure → nothing to check at all.
-//!   2. Otherwise every entry is VERIFIED against its source line by comparing
-//!      chars straight off the rope (no allocation). Verification is what makes
-//!      the cache correct; the splice below only makes it fast.
-//!   3. Before verifying, entries are SPLICED to follow the edit: an edit that
-//!      added or removed lines at line `d` shifts every later entry by the same
-//!      delta, so moving them keeps them matching their (renumbered) source
-//!      instead of re-parsing the rest of the document. If the splice guesses
-//!      wrong, step 2 catches it — the entries simply miss and get rebuilt.
+//!   2. Otherwise the text the entries were built from (a clone of the rope,
+//!      which shares its chunks) is compared with the buffer's by chunk, which
+//!      finds the lines an edit touched without reading the rest. Entries
+//!      below them are SPLICED to follow the edit's line shift, so they keep
+//!      matching their (renumbered) source instead of re-parsing the rest of
+//!      the document.
+//!   3. Every entry is then checked against its block kind, and those inside
+//!      the touched lines are VERIFIED against their source line by comparing
+//!      chars straight off the rope (no allocation). A line outside them is
+//!      known to hold the same text, so reading it again would only confirm
+//!      that — and at 100,000 lines that confirmation was ~20 ms a keystroke.
 //!
 //! What is NOT cached here is anything frame-local: focus dim, the search
 //! highlight, the Visual selection, the command-box dim. Those are overlays
@@ -30,7 +33,7 @@ use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
 use crate::transclude::preview::Expansion;
 use crate::render::StyledSpan;
-use crate::text::buffer::{Buffer, Syntax};
+use crate::text::buffer::{shared_ends, shares_chunks, Buffer, Syntax};
 
 /// One line's cached parse: everything that survives between frames.
 pub struct LineEntry {
@@ -151,7 +154,12 @@ impl StyleKey {
 
 #[derive(Default)]
 pub struct RenderCache {
-    entries: Vec<Option<LineEntry>>,
+    /// Boxed so the splice that follows a line-count change moves pointers,
+    /// not whole entries, along the rest of the document.
+    entries: Vec<Option<Box<LineEntry>>>,
+    /// The text `entries` were last brought in step with: what the next
+    /// revision is compared against to find the lines it touched.
+    seen: Option<ropey::Rope>,
     key: Option<StyleKey>,
     measure: u16,
     revision: u64,
@@ -224,10 +232,18 @@ impl RenderCache {
             self.disk_epoch = app.disk_epoch;
         }
 
+        // Lines whose text may differ from what their entry was built from.
+        // At an unchanged revision there are none, unless the line count says
+        // the buffer itself was swapped for one at the same revision (piped
+        // text replacing the blank buffer starts at 0 too): then all of them.
+        let mut suspect = 0..0;
         if self.revision != doc.buffer.revision {
-            self.splice(doc, n);
+            suspect = self.splice(doc);
             self.revision = doc.buffer.revision;
             self.verified = None;
+        } else if self.entries.len() != n {
+            suspect = 0..n;
+            self.seen = None;
         }
 
         // RULE 1, and it is worth stating why it is safe rather than only that
@@ -251,57 +267,65 @@ impl RenderCache {
             static PARAGRAPH: BlockKind = BlockKind::Paragraph;
             for line in 0..n {
                 let block = doc.blocks.kinds.get(line).unwrap_or(&PARAGRAPH);
-                let valid = self.entries[line]
-                    .as_ref()
-                    .is_some_and(|e| e.matches(&doc.buffer, line, block));
+                // Outside the suspect lines only the block kind can have moved
+                // (an opened fence restyles everything below it).
+                let valid = self.entries[line].as_ref().is_some_and(|e| {
+                    if suspect.contains(&line) {
+                        e.matches(&doc.buffer, line, block)
+                    } else {
+                        &e.block == block
+                    }
+                });
                 if !valid {
                     self.entries[line] =
-                        Some(build(app, doc, line, block.clone(), measure));
+                        Some(Box::new(build(app, doc, line, block.clone(), measure)));
                     self.builds += 1;
                 }
             }
             self.verified = Some(doc.buffer.revision);
             self.verifications += 1;
         }
+        // Taken by the splice whenever the revision moves, so it is put back
+        // here, as the text the entries now match.
+        if self.seen.is_none() {
+            self.seen = Some(doc.buffer.rope.clone());
+        }
 
         self.index(app, doc, n);
     }
 
-    /// Move entries to follow an edit's line shift, so the lines below an
-    /// inserted or deleted line stay cached. `App::take_render_dirty` reports
-    /// the lowest line touched since the last sync; without it (a wholesale
-    /// change) nothing is spliced and verification re-parses what moved.
-    fn splice(&mut self, doc: &BufferState, new_len: usize) {
-        let Some(from) = doc.take_render_dirty() else {
-            return;
+    /// Find the lines an edit touched by comparing the buffer with the text
+    /// the entries were built from, move the entries below them to follow the
+    /// edit's line shift, and return the touched lines (in the new numbering):
+    /// the only ones whose text has to be verified. Without a text to compare
+    /// against, every line is suspect.
+    fn splice(&mut self, doc: &BufferState) -> std::ops::Range<usize> {
+        let new = &doc.buffer.rope;
+        let n = new.len_lines();
+        let old = match self.seen.take() {
+            // Text replaced whole (a reload) shares no chunks: every line is
+            // verified, which is quicker than finding that out byte by byte.
+            Some(old) if old.len_lines() == self.entries.len() && shares_chunks(&old, new) => old,
+            _ => return 0..n,
         };
-        let old_len = self.entries.len();
-        if from >= old_len || old_len == 0 {
-            return;
+        let (head, tail) = shared_ends(&old, new);
+        // Lines before the one holding `head` are in the shared start. Lines
+        // after the one holding the shared end's first byte begin after a
+        // newline inside it, so they are the shared end's own lines, the same
+        // number of them in both texts.
+        let first = new.byte_to_line(head);
+        let old_end = old.byte_to_line(old.len_bytes() - tail) + 1;
+        let new_end = new.byte_to_line(new.len_bytes() - tail) + 1;
+        // Lines are added or removed at the top of the touched span; whatever
+        // that guesses wrong inside it, verification catches.
+        let (was, is) = (old_end - first, new_end - first);
+        if is > was {
+            self.entries
+                .splice(first..first, std::iter::repeat_with(|| None).take(is - was));
+        } else {
+            self.entries.drain(first..first + (was - is));
         }
-        match new_len.cmp(&old_len) {
-            std::cmp::Ordering::Greater => {
-                let added = new_len - old_len;
-                self.entries
-                    .splice(from..from, std::iter::repeat_with(|| None).take(added));
-                // The edited line itself, and every line it grew into, are new.
-                for slot in self.entries.iter_mut().skip(from).take(added + 1) {
-                    *slot = None;
-                }
-            }
-            std::cmp::Ordering::Less => {
-                let removed = (old_len - new_len).min(old_len - from);
-                self.entries.drain(from..from + removed);
-                if let Some(slot) = self.entries.get_mut(from) {
-                    *slot = None;
-                }
-            }
-            std::cmp::Ordering::Equal => {
-                if let Some(slot) = self.entries.get_mut(from) {
-                    *slot = None;
-                }
-            }
-        }
+        first..new_end
     }
 
     /// Rebuild the line → first-row index for this frame's active set. Integer
@@ -328,7 +352,7 @@ impl RenderCache {
             // An embed expands only when it is NOT the active line — SPEC §2's
             // rule, applied to embeds exactly as it applies to `**bold**`.
             // That is also what keeps the cursor from ever being inside one.
-            rows += content_rows(self.entries[line].as_ref(), concealed);
+            rows += content_rows(self.entries[line].as_deref(), concealed);
             rows += spacer_rows(spacing, doc, line, n);
         }
         self.row_starts.push(rows);
@@ -340,7 +364,7 @@ impl RenderCache {
     }
 
     pub fn entry(&self, line: usize) -> Option<&LineEntry> {
-        self.entries.get(line).and_then(|e| e.as_ref())
+        self.entries.get(line).and_then(|e| e.as_deref())
     }
 
     /// Whether concealment applies at all this frame. With it off there is no
@@ -632,6 +656,37 @@ mod tests {
         assert_eq!(sync(&mut app) - before, 1);
     }
 
+    /// Only the lines an edit touched are compared with their text; the rest
+    /// are checked against their block kind alone. Opening a fence far above
+    /// still restyles every line below it, through the kind, and every entry
+    /// still holds its own line's text after edits that add, remove and undo
+    /// lines.
+    #[test]
+    fn lines_outside_an_edit_follow_their_block_kind_and_text() {
+        let mut app = app_with(&doc());
+        sync(&mut app);
+        app.buffer.insert_str(Cursor::new(10, 0), "```\n");
+        sync(&mut app);
+        {
+            let cache = app.cache.borrow();
+            for line in 11..app.buffer.line_count() {
+                assert_eq!(cache.entry(line).unwrap().block, app.blocks.kinds[line], "line {line}");
+            }
+        }
+        let start = app.buffer.char_index(Cursor::new(30, 3));
+        app.buffer.delete_chars(start, start + 60);
+        app.buffer.insert_str(Cursor::new(150, 0), "a\nb\n");
+        sync(&mut app);
+        app.buffer.undo();
+        sync(&mut app);
+        let cache = app.cache.borrow();
+        for line in 0..app.buffer.line_count() {
+            let entry = cache.entry(line).unwrap();
+            assert_eq!(entry.source, app.buffer.line_text(line), "line {line}");
+            assert_eq!(entry.block, app.blocks.kinds[line], "line {line}");
+        }
+    }
+
     /// Splitting a line shifts every line below it. The splice moves their
     /// entries along instead of re-parsing the rest of the document.
     #[test]
@@ -655,14 +710,14 @@ mod tests {
         assert!(parsed <= 2, "expected one merged line, got {parsed}");
     }
 
-    /// The splice is only a guess; verification is what guarantees the cache is
-    /// right. Feed it a deliberately wrong hint and the content still matches.
+    /// Where the splice adds or removes entries inside the touched span is only
+    /// a guess; verification is what guarantees the cache is right there. Two
+    /// edits whose line-count changes cancel out make that guess wrong for
+    /// every line between them, and the content still matches.
     #[test]
-    fn verification_survives_a_wrong_splice_hint() {
+    fn verification_survives_a_wrong_splice_guess() {
         let mut app = app_with("alpha\nbravo\ncharlie\ndelta\n");
         sync(&mut app);
-        // Two edits far apart whose line-count changes cancel out — the single
-        // "lowest dirty line" hint cannot describe both.
         let start = app.buffer.char_index(Cursor::new(0, 5));
         app.buffer.delete_chars(start, start + 1); // join lines 0 and 1
         app.buffer.insert_str(Cursor::new(2, 0), "echo\n");

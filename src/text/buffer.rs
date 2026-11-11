@@ -59,14 +59,17 @@ pub struct Buffer {
     /// Bumped on every mutation. All render caches key off this.
     pub revision: u64,
 
-    /// The last word count taken, and the revision it was taken at.
+    /// The last word count taken, the revision it was taken at, and the text
+    /// it counted.
     ///
     /// `[status] show` lists `words` by DEFAULT, and the status line is drawn
     /// every frame — so without this, moving the cursor one line re-counted
-    /// every word in the document. A `Cell` rather than a field set by the
+    /// every word in the document. A cell rather than a field set by the
     /// edit primitives, because counting is worth doing lazily: a session that
-    /// never shows the segment never pays for it at all.
-    words: std::cell::Cell<Option<(u64, usize)>>,
+    /// never shows the segment never pays for it at all. The text is kept so
+    /// the next count reads only the lines that changed: re-reading the whole
+    /// rope was ~10 ms a keystroke at 4.5 MB.
+    words: std::cell::RefCell<Option<WordMemo>>,
 
     /// Lowest line touched since a consumer last cleared it — the seam that
     /// lets `BlockCache::invalidate_from` rescan from the edit instead of
@@ -141,7 +144,7 @@ impl Buffer {
             readonly_ranges: Vec::new(),
             save_revisions: 0,
             read_only: false,
-            words: std::cell::Cell::new(None),
+            words: std::cell::RefCell::new(None),
         }
     }
 
@@ -178,7 +181,7 @@ impl Buffer {
             readonly_ranges: Vec::new(),
             save_revisions: 0,
             read_only: false,
-            words: std::cell::Cell::new(None),
+            words: std::cell::RefCell::new(None),
         })
     }
 
@@ -514,24 +517,32 @@ impl Buffer {
         (base + at.col.min(self.line_len(line))).min(self.rope.len_chars())
     }
 
-    /// Word count over the whole buffer, for the status line.
+    /// Word count over the whole buffer, for the status line. Exact on every
+    /// call: the count kept from the last revision is corrected by the lines
+    /// between the two texts' shared start and shared end, which for a
+    /// keystroke is the line it was typed on.
     pub fn word_count(&self) -> usize {
-        if let Some((rev, n)) = self.words.get() {
-            if rev == self.revision {
-                return n;
+        let mut memo = self.words.borrow_mut();
+        let n = match memo.as_ref() {
+            Some(m) if m.revision == self.revision => return m.count,
+            // A reload or a merged diff replaces the text whole: nothing is
+            // shared, and one count of the new text beats comparing both.
+            Some(m) if shares_chunks(&m.rope, &self.rope) => {
+                let (head, tail) = shared_ends(&m.rope, &self.rope);
+                // Widened to whole lines on both sides: a word never runs across
+                // a newline, so what lies outside the span counts the same in
+                // both texts, and only the span itself has to be read twice.
+                let words = |r: &Rope| {
+                    let start = r.line_to_byte(r.byte_to_line(head));
+                    let next = r.byte_to_line(r.len_bytes() - tail) + 1;
+                    let end = if next < r.len_lines() { r.line_to_byte(next) } else { r.len_bytes() };
+                    count_words(r.byte_slice(start..end))
+                };
+                m.count + words(&self.rope) - words(&m.rope)
             }
-        }
-        let mut n = 0;
-        let mut in_word = false;
-        for c in self.rope.chars() {
-            if c.is_whitespace() {
-                in_word = false;
-            } else if !in_word {
-                in_word = true;
-                n += 1;
-            }
-        }
-        self.words.set(Some((self.revision, n)));
+            _ => count_words(self.rope.slice(..)),
+        };
+        *memo = Some(WordMemo { revision: self.revision, rope: self.rope.clone(), count: n });
         n
     }
 
@@ -561,6 +572,90 @@ fn same_path(a: &Path, b: &Path) -> bool {
         )
 }
 
+
+/// A word count and the text it was taken from. Cloning a rope shares its
+/// chunks, so keeping the text costs only the chunks an edit later replaces.
+struct WordMemo {
+    revision: u64,
+    rope: Rope,
+    count: usize,
+}
+
+/// Words as runs of non-whitespace.
+fn count_words(text: ropey::RopeSlice) -> usize {
+    let mut n = 0;
+    let mut in_word = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Whether `new` still shares its first or its last chunk with `old`, an
+/// earlier clone of the rope it was edited from. An ordinary edit leaves one of
+/// the two in place in any rope bigger than a chunk or two; text replaced
+/// whole (`replace_all`, behind a reload and a merged diff) shares neither,
+/// and then `shared_ends` would only compare the two texts byte by byte to
+/// find what a caller can assume outright: that everything changed.
+pub(crate) fn shares_chunks(old: &Rope, new: &Rope) -> bool {
+    let same = |a: Option<&str>, b: Option<&str>| match (a, b) {
+        (Some(a), Some(b)) => a.as_ptr() == b.as_ptr() && a.len() == b.len(),
+        _ => false,
+    };
+    fn last(r: &Rope) -> Option<&str> {
+        r.chunks_at_byte(r.len_bytes()).0.prev()
+    }
+    same(old.chunks().next(), new.chunks().next()) || same(last(old), last(new))
+}
+
+/// How many bytes two texts share at the start, and how many at the end after
+/// that, in that order (so the two never overlap).
+///
+/// `old` is an earlier clone of the rope `new` was edited from. An edit copies
+/// only the chunks it touches, so every chunk the two still share is the SAME
+/// chunk in memory: comparing chunk addresses skips everything an edit did not
+/// reach without reading it, and only the chunks around the edit are compared
+/// byte by byte. Two unrelated ropes share no chunks and are compared whole,
+/// which is slow but still exact.
+pub(crate) fn shared_ends(old: &Rope, new: &Rope) -> (usize, usize) {
+    // A live chunk of `old` cannot share an address with a chunk `new` made
+    // later, since `old` keeps its own alive: the same address means the same
+    // text.
+    let same = |a: &str, b: &str| a.as_ptr() == b.as_ptr() && a.len() == b.len();
+    let shortest = old.len_bytes().min(new.len_bytes());
+
+    let mut head = 0;
+    for (a, b) in old.chunks().zip(new.chunks()) {
+        if !same(a, b) {
+            break;
+        }
+        head += a.len();
+    }
+    let (mut a, mut b) = (old.bytes_at(head), new.bytes_at(head));
+    while head < shortest && a.next() == b.next() {
+        head += 1;
+    }
+
+    let room = shortest - head;
+    let mut tail = 0;
+    let (mut a, mut b) = (old.chunks_at_byte(old.len_bytes()).0, new.chunks_at_byte(new.len_bytes()).0);
+    while let (Some(x), Some(y)) = (a.prev(), b.prev()) {
+        if !same(x, y) || tail + x.len() > room {
+            break;
+        }
+        tail += x.len();
+    }
+    let (mut a, mut b) = (old.bytes_at(old.len_bytes() - tail), new.bytes_at(new.len_bytes() - tail));
+    while tail < room && a.prev() == b.prev() {
+        tail += 1;
+    }
+    (head, tail)
+}
 
 #[cfg(test)]
 mod tests {
@@ -704,6 +799,85 @@ mod tests {
         let idx = b.rope.len_chars();
         b.delete_chars(idx.saturating_sub(6), idx);
         assert_eq!(b.word_count(), 2);
+    }
+
+    /// The count is corrected from the lines an edit touched, not re-read; it
+    /// has to come out exactly as a full count would, wherever the edit falls:
+    /// inside a word, across a line break, joining two words, at either end,
+    /// in multi-byte text, and through undo.
+    #[test]
+    fn the_corrected_count_matches_a_full_count() {
+        let full = |b: &Buffer| count_words(b.rope.slice(..));
+        let mut b = Buffer::empty();
+        let text: String = (0..3000).map(|i| format!("wörd {i} two\tthree  \n")).collect();
+        b.insert_str(Cursor::new(0, 0), &text);
+        assert_eq!(b.word_count(), full(&b));
+        let mut seed = 7u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for step in 0..400 {
+            let len = b.rope.len_chars();
+            match next(5) {
+                0 => {
+                    let piece = ["x", " ", "\n", "a b", "é\n\nz", ""][next(6)];
+                    let at = next(len + 1);
+                    let line = b.rope.char_to_line(at);
+                    let col = at - b.rope.line_to_char(line);
+                    b.insert_str(Cursor::new(line, col), piece);
+                }
+                1 if len > 0 => {
+                    let from = next(len);
+                    let to = (from + 1 + next(40)).min(len);
+                    b.delete_chars(from, to);
+                }
+                2 => {
+                    b.undo();
+                }
+                3 if step % 50 == 0 => {
+                    // A reload: the text replaced whole, sharing no chunks.
+                    let text = b.rope.to_string().replacen("two", "two more", 3);
+                    b.replace_all(&text);
+                }
+                _ => {}
+            }
+            assert_eq!(b.word_count(), full(&b), "step {step}");
+        }
+    }
+
+    /// The shared start and end are exact, never overlap, and do not depend on
+    /// the two ropes sharing chunks.
+    #[test]
+    fn shared_ends_are_exact() {
+        let check = |a: &str, b: &str| {
+            let (old, new) = (Rope::from_str(a), Rope::from_str(b));
+            let (head, tail) = shared_ends(&old, &new);
+            let common = |x: &mut dyn Iterator<Item = (u8, u8)>| x.take_while(|(p, q)| p == q).count();
+            let want_head = common(&mut a.bytes().zip(b.bytes()));
+            let room = a.len().min(b.len()) - want_head;
+            let want_tail = common(&mut a.bytes().rev().zip(b.bytes().rev())).min(room);
+            assert_eq!((head, tail), (want_head, want_tail), "{a:?} → {b:?}");
+        };
+        check("", "");
+        check("abc", "abc");
+        check("abc", "abxc");
+        check("aaaa", "aa");
+        check("one\ntwo\n", "one\n\ntwo\n");
+        check("x", "");
+        check("ab", "ba");
+
+        // Through the chunk path: an edit in the middle of a large rope.
+        let text: String = (0..5000).map(|i| format!("line {i}\n")).collect();
+        let old = Rope::from_str(&text);
+        let mut new = old.clone();
+        let at = new.line_to_char(2500);
+        new.insert(at, "new\n");
+        let (head, tail) = shared_ends(&old, &new);
+        assert_eq!(head, new.line_to_byte(2500));
+        assert_eq!(head + tail + 4, new.len_bytes());
     }
 
     /// `line_len` and `line_text` agree, and both drop the terminator — the
