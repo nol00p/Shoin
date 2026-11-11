@@ -33,7 +33,7 @@ use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
 use crate::transclude::preview::Expansion;
 use crate::render::StyledSpan;
-use crate::text::buffer::{shared_ends, Buffer, Syntax};
+use crate::text::buffer::{shared_ends, shares_chunks, Buffer, Syntax};
 
 /// One line's cached parse: everything that survives between frames.
 pub struct LineEntry {
@@ -303,7 +303,9 @@ impl RenderCache {
         let new = &doc.buffer.rope;
         let n = new.len_lines();
         let old = match self.seen.take() {
-            Some(old) if old.len_lines() == self.entries.len() => old,
+            // Text replaced whole (a reload) shares no chunks: every line is
+            // verified, which is quicker than finding that out byte by byte.
+            Some(old) if old.len_lines() == self.entries.len() && shares_chunks(&old, new) => old,
             _ => return 0..n,
         };
         let (head, tail) = shared_ends(&old, new);

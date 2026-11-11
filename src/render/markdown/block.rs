@@ -285,20 +285,29 @@ impl BlockCache {
         let edited = edited.min(n.saturating_sub(1));
         // Resume ONE LINE EARLIER than the edit: a table header is classified
         // by the delimiter row beneath it, so deleting that row has to revisit
-        // the header to demote it again.
+        // the header to demote it again. Line 0 resumes from its own entering
+        // state like any other line (the scan knows it is the file's head);
+        // rebuilding there made every edit to a note's title cost the whole
+        // document.
         let start = edited.saturating_sub(1);
 
         // No valid entering state to resume from — rebuild wholesale.
-        if start == 0 || start >= self.carry.len() {
+        if start >= self.carry.len() {
             *self = Self::build(buffer, self.math);
             return n.saturating_sub(1);
         }
+        // Read before the shift below, which may move entries at `start`
+        // when the edit is on line 0.
+        let mut cur = self.carry[start].clone();
 
         // Lines past `edited_last` are as they were (`Buffer::take_dirty`), so
         // shifting the entries at `edited` — inside what the scan revisits —
         // puts each of them back beside its own line. An added count that
         // does not fit inside the edited lines means the bracket is not what
         // it claims, and then nothing is compared: the scan runs to the end.
+        // A removal has no such check to make: any bracket can hold what is
+        // left of the removed lines (one line, after a join), so it rests on
+        // `take_dirty`'s bracket, as an edit that keeps the count always has.
         let old_n = self.kinds.len().min(self.carry.len());
         let can_early_stop = match n.cmp(&old_n) {
             std::cmp::Ordering::Equal => true,
@@ -314,15 +323,11 @@ impl BlockCache {
             std::cmp::Ordering::Less => {
                 // `edited < n`, so the drain stays inside the old entries.
                 let removed = old_n - n;
-                let fits = edited <= edited_last + 1;
-                if fits {
-                    self.kinds.drain(edited..edited + removed);
-                    self.carry.drain(edited..edited + removed);
-                }
-                fits
+                self.kinds.drain(edited..edited + removed);
+                self.carry.drain(edited..edited + removed);
+                true
             }
         };
-        let mut cur = self.carry[start].clone();
 
         self.kinds.resize(n, BlockKind::Paragraph);
         self.carry.resize(n, Carry::default());
@@ -1172,6 +1177,47 @@ mod tests {
                 assert_eq!(cache.kinds, fresh.kinds, "{}", b.rope);
                 assert_eq!(cache.carry, fresh.carry, "{}", b.rope);
             }
+        }
+    }
+
+    /// An edit on the first lines resumes from the head of the file rather than
+    /// rebuilding it, and stops as soon as the state settles.
+    #[test]
+    fn an_edit_on_the_first_line_rescans_only_near_it() {
+        let mut b = buf(&"para\n\n".repeat(500));
+        let mut cache = BlockCache::build(&b, true);
+        b.clear_dirty();
+        for (line, text) in [(0, "# "), (0, "\n"), (1, "x")] {
+            b.insert_str(Cursor::new(line, 0), text);
+            let (first, last) = b.take_dirty().unwrap();
+            let stop = cache.invalidate_from(&b, first, last);
+            assert!(stop < 10, "{text:?} on line {line} rescanned to line {stop}");
+            assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
+            assert_eq!(cache.carry, BlockCache::build(&b, true).carry);
+        }
+        // What the head of the file opens still reaches as far as it goes.
+        b.insert_str(Cursor::new(0, 0), "```\n");
+        let (first, last) = b.take_dirty().unwrap();
+        cache.invalidate_from(&b, first, last);
+        assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
+    }
+
+    /// Deleting several lines leaves a bracket of one line — the join — and
+    /// that is enough: the lines below it are the old ones, shifted.
+    #[test]
+    fn a_multi_line_delete_with_a_one_line_bracket_matches_a_full_build() {
+        let text = "intro\n```\ncode\n```\n- a\n  b\n| x | y |\n|---|---|\n| 1 | 2 |\n\nend\n".repeat(20);
+        for (from, lines) in [(3, 5), (1, 2), (0, 7), (40, 30), (100, 3)] {
+            let mut b = buf(&text);
+            let mut cache = BlockCache::build(&b, true);
+            b.clear_dirty();
+            let start = b.rope.line_to_char(from);
+            let end = b.rope.line_to_char(from + lines);
+            b.delete_chars(start, end);
+            cache.invalidate_from(&b, from, from);
+            let fresh = BlockCache::build(&b, true);
+            assert_eq!(cache.kinds, fresh.kinds, "deleting {lines} at {from}");
+            assert_eq!(cache.carry, fresh.carry, "deleting {lines} at {from}");
         }
     }
 

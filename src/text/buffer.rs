@@ -441,7 +441,9 @@ impl Buffer {
         let mut memo = self.words.borrow_mut();
         let n = match memo.as_ref() {
             Some(m) if m.revision == self.revision => return m.count,
-            Some(m) => {
+            // A reload or a merged diff replaces the text whole: nothing is
+            // shared, and one count of the new text beats comparing both.
+            Some(m) if shares_chunks(&m.rope, &self.rope) => {
                 let (head, tail) = shared_ends(&m.rope, &self.rope);
                 // Widened to whole lines on both sides: a word never runs across
                 // a newline, so what lies outside the span counts the same in
@@ -454,7 +456,7 @@ impl Buffer {
                 };
                 m.count + words(&self.rope) - words(&m.rope)
             }
-            None => count_words(self.rope.slice(..)),
+            _ => count_words(self.rope.slice(..)),
         };
         *memo = Some(WordMemo { revision: self.revision, rope: self.rope.clone(), count: n });
         n
@@ -508,6 +510,23 @@ fn count_words(text: ropey::RopeSlice) -> usize {
         }
     }
     n
+}
+
+/// Whether `new` still shares its first or its last chunk with `old`, an
+/// earlier clone of the rope it was edited from. An ordinary edit leaves one of
+/// the two in place in any rope bigger than a chunk or two; text replaced
+/// whole (`replace_all`, behind a reload and a merged diff) shares neither,
+/// and then `shared_ends` would only compare the two texts byte by byte to
+/// find what a caller can assume outright: that everything changed.
+pub(crate) fn shares_chunks(old: &Rope, new: &Rope) -> bool {
+    let same = |a: Option<&str>, b: Option<&str>| match (a, b) {
+        (Some(a), Some(b)) => a.as_ptr() == b.as_ptr() && a.len() == b.len(),
+        _ => false,
+    };
+    fn last(r: &Rope) -> Option<&str> {
+        r.chunks_at_byte(r.len_bytes()).0.prev()
+    }
+    same(old.chunks().next(), new.chunks().next()) || same(last(old), last(new))
 }
 
 /// How many bytes two texts share at the start, and how many at the end after
@@ -718,7 +737,7 @@ mod tests {
         };
         for step in 0..400 {
             let len = b.rope.len_chars();
-            match next(4) {
+            match next(5) {
                 0 => {
                     let piece = ["x", " ", "\n", "a b", "é\n\nz", ""][next(6)];
                     let at = next(len + 1);
@@ -733,6 +752,11 @@ mod tests {
                 }
                 2 => {
                     b.undo();
+                }
+                3 if step % 50 == 0 => {
+                    // A reload: the text replaced whole, sharing no chunks.
+                    let text = b.rope.to_string().replacen("two", "two more", 3);
+                    b.replace_all(&text);
                 }
                 _ => {}
             }
