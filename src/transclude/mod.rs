@@ -89,7 +89,7 @@ impl Fences {
     /// for content.
     ///
     /// CommonMark's rules, as far as a line at a time can follow them: a fence
-    /// is three or more of one character, indented at most three spaces; a
+    /// is three or more of one character, at any indent (list items nest it); a
     /// backtick fence's info string has no backtick (so "```js``` is the
     /// syntax" is a line of text with code in it); and a closing fence uses
     /// the opener's character, is at least as long, and has nothing after it.
@@ -118,11 +118,9 @@ impl Fences {
 /// A fence run at the start of `line`: its character, its length and what
 /// follows it. `None` when the line does not start with one.
 fn fence(line: &str) -> Option<(char, usize, &str)> {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    if indent > 3 {
-        return None;
-    }
-    let t = &line[indent..];
+    // Any indent: a line at a time cannot tell a fence nested in a list item
+    // (often four spaces or more) from an indented code block.
+    let t = line.trim_start();
     let c = t.chars().next().filter(|c| *c == '`' || *c == '~')?;
     let len = t.len() - t.trim_start_matches(c).len();
     (len >= 3).then(|| (c, len, &t[len..]))
@@ -170,10 +168,12 @@ mod tests {
         assert_eq!(literal(&["~~~ a`b", "x", "~~~"]), [true, true, true], "tildes may");
     }
 
-    /// Four spaces is an indented code block, not a fence.
+    /// A fence under a nested list item is indented four spaces or more, and
+    /// is still a fence: what is inside it stays literal.
     #[test]
-    fn a_fence_is_indented_three_spaces_at_most() {
-        assert_eq!(literal(&["    ```", "b"]), [false, false]);
+    fn an_indented_fence_under_a_list_item_is_a_fence() {
+        let lines = ["- a", "  - b", "    ```", "    ![[x]]", "    ```", "c"];
+        assert_eq!(literal(&lines), [false, false, true, true, true, false]);
     }
 
     /// Only the same character, at least as long, with nothing after it,

@@ -638,6 +638,18 @@ mod tests {
     /// A fence is literal. Documenting the embed syntax inside a code block
     /// must not embed the file — the same rule `demote` and `strip_block_ids`
     /// already follow.
+    /// A fence nested under a list item is indented four spaces or more, and
+    /// its example embed stays literal all the same.
+    #[test]
+    fn an_embed_in_a_fence_under_a_list_item_is_literal() {
+        let d = vault("listfence");
+        write(&d, "frag.md", "SECRET BODY\n");
+        let comp = write(&d, "comp.md", "- a\n  - b\n    ```\n    ![[frag]]\n    ```\n");
+        let out = compile(&comp, &cfg()).unwrap();
+        assert!(!out.contains("SECRET BODY"), "not expanded: {out:?}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     #[test]
     fn a_fenced_embed_is_literal() {
         let d = vault("fence");
