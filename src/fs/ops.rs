@@ -257,27 +257,28 @@ mod tests {
         names
     }
 
-    /// The parts of the "same file, other spelling" decision a case-sensitive
-    /// filesystem can show: a hard link has the same identity but is listed
-    /// under its own name, so it is a second entry, not a respelling — and
-    /// renaming onto it would be a silent no-op.
+    /// The parts of the "same file, other spelling" decision any filesystem can
+    /// show: a hard link has the same identity but is listed under its own
+    /// name, so it is a second entry, not a respelling — and renaming onto it
+    /// would be a silent no-op. On a case-sensitive filesystem the link could
+    /// be `Notes.md` itself; `alias.md` makes the same point on both kinds.
     #[test]
     fn a_hard_link_is_not_a_respelling() {
         let d = tmp("hardlink");
         std::fs::write(d.join("notes.md"), "body\n").unwrap();
-        std::fs::hard_link(d.join("notes.md"), d.join("Notes.md")).unwrap();
+        std::fs::hard_link(d.join("notes.md"), d.join("alias.md")).unwrap();
         std::fs::write(d.join("other.md"), "other\n").unwrap();
 
-        assert!(same_entry(&d.join("notes.md"), &d.join("Notes.md")));
+        assert!(same_entry(&d.join("notes.md"), &d.join("alias.md")));
         assert!(!same_entry(&d.join("notes.md"), &d.join("other.md")));
         assert!(!same_entry(&d.join("notes.md"), &d.join("missing.md")));
-        assert!(listed(&d.join("Notes.md")));
+        assert!(listed(&d.join("alias.md")));
         assert!(!listed(&d.join("NOTES.md")));
-        assert!(!is_respelling(&d.join("notes.md"), &d.join("Notes.md")));
+        assert!(!is_respelling(&d.join("notes.md"), &d.join("alias.md")));
 
-        let err = rename(&d.join("notes.md"), &d.join("Notes.md")).unwrap_err().to_string();
+        let err = rename(&d.join("notes.md"), &d.join("alias.md")).unwrap_err().to_string();
         assert!(err.contains("already exists"), "got: {err}");
-        assert_eq!(names_in(&d), ["Notes.md", "notes.md", "other.md"]);
+        assert_eq!(names_in(&d), ["alias.md", "notes.md", "other.md"]);
 
         std::fs::remove_dir_all(&d).ok();
     }
