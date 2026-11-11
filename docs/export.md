@@ -57,6 +57,8 @@ instead: it prints the page as the editor shows it, styled, with pictures.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
 - Export refuses a destination that is the document itself or any note or
   picture it embeds, under any name: through `..`, a symlink or a hard link.
+  `html` also refuses a picture the document links to (`![alt](img/p.png)`),
+  since it reads it to carry it inside the page.
 - In `html`, a wiki link becomes a link to `<note>.html`. A wiki link whose
   target has a scheme (`[[https://…]]`) or starts with `//` exports as plain
   text: it names an address, not a note. In `txt` a wiki link is its label.

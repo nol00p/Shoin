@@ -92,6 +92,23 @@ pub fn write(
             _ => bail!("that would overwrite {}, which the document embeds", short(&sources[i])),
         }
     }
+    // HTML reads the pictures the document links to as well, to carry them
+    // inside the page, so it is rendered before anything is written and
+    // those pictures are refused the same way.
+    let page_html = match format {
+        Format::Html => {
+            let title = source
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "document".into());
+            let (out, pictures) = html::render_with_pictures(&flat, &title, page);
+            if let Some(p) = pictures.iter().find(|p| is_same_file(dest, p)) {
+                bail!("that would overwrite {}, which the document shows", short(p));
+            }
+            Some(out)
+        }
+        _ => None,
+    };
     // The destination is typed into a dialog, so a folder that does not exist
     // yet is a reasonable thing to ask for rather than a mistake to report.
     if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -107,13 +124,7 @@ pub fn write(
             std::fs::write(dest, plain::render(&flat, page.measure, page.justify, &page.md))
                 .with_context(|| short(dest))?
         }
-        Format::Html => {
-            let title = source
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "document".into());
-            std::fs::write(dest, html::render(&flat, &title, page)).with_context(|| short(dest))?
-        }
+        Format::Html => std::fs::write(dest, page_html.unwrap_or_default()).with_context(|| short(dest))?,
         Format::Pdf => {
             let flat = rebase_images(&flat, source, None, &page.md);
             write_pdf(&flat, source, dest, page.md.math)?
@@ -787,6 +798,30 @@ mod tests {
             .to_string();
         assert!(err.contains("overwrite"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&src).unwrap(), "# Note\n");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// HTML carries the pictures a document links to inside the page, so it
+    /// reads them; writing the page over one would destroy it. A picture
+    /// named only by a remote address is never read, and nothing local is
+    /// refused because of it.
+    #[test]
+    fn html_refuses_to_write_over_a_linked_picture() {
+        let d = vault("clobber-linked");
+        std::fs::create_dir_all(d.join("img")).unwrap();
+        std::fs::write(d.join("img/p.png"), PNG).unwrap();
+        std::fs::write(d.join("p.png"), PNG).unwrap();
+        let src = d.join("note.md");
+        std::fs::write(&src, "# Note\n\n![alt](img/p.png) ![web](https://example.com/p.png)\n").unwrap();
+        let page = html::Page { base: d.clone(), ..html::Page::default() };
+        let err = write(&src, &d.join("img/p.png"), Format::Html, &TranscludeConfig::default(), &page)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overwrite p.png"), "got: {err}");
+        assert_eq!(std::fs::read(d.join("img/p.png")).unwrap(), PNG);
+        // `p.png` beside the note shares the remote picture's name only.
+        write(&src, &d.join("p.png"), Format::Html, &TranscludeConfig::default(), &page).unwrap();
+        assert!(std::fs::read_to_string(d.join("p.png")).unwrap().starts_with("<!doctype html>"));
         std::fs::remove_dir_all(&d).ok();
     }
 

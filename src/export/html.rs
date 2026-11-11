@@ -56,6 +56,23 @@ impl Default for Page {
     }
 }
 
+thread_local! {
+    /// The pictures `inline_src` read, while `render_with_pictures` is
+    /// listening. Collected where they are read so the list can never miss
+    /// one the page carries; a separate walk could disagree with this one.
+    static PICTURES_READ: std::cell::RefCell<Option<Vec<std::path::PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// [`render`], and every local picture file it read to put inside the page.
+/// Export needs them to refuse writing the page over one of them.
+pub fn render_with_pictures(text: &str, fallback_title: &str, page: &Page) -> (String, Vec<std::path::PathBuf>) {
+    PICTURES_READ.with(|r| *r.borrow_mut() = Some(Vec::new()));
+    let html = render(text, fallback_title, page);
+    let read = PICTURES_READ.with(|r| r.borrow_mut().take()).unwrap_or_default();
+    (html, read)
+}
+
 /// Convert a Markdown document to a complete HTML page.
 ///
 /// `fallback_title` names the page when the document has no `# Heading` of its
@@ -913,14 +930,18 @@ fn inline_src(url: &str, base: &std::path::Path) -> String {
     //
     // Document first, because that is the one the author controls. A src that
     // answers to neither is left exactly as written.
-    let bytes = if path.is_absolute() {
-        std::fs::read(path)
-    } else {
-        std::fs::read(base.join(path)).or_else(|_| std::fs::read(path))
+    let candidates = match path.is_absolute() {
+        true => vec![path.to_path_buf()],
+        false => vec![base.join(path), path.to_path_buf()],
     };
-    let Ok(bytes) = bytes else {
+    let Some((read, bytes)) = candidates.into_iter().find_map(|p| std::fs::read(&p).ok().map(|b| (p, b))) else {
         return url.to_string();
     };
+    PICTURES_READ.with(|r| {
+        if let Some(list) = r.borrow_mut().as_mut() {
+            list.push(read);
+        }
+    });
     let mime = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
