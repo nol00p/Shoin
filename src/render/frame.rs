@@ -965,11 +965,28 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
     let side = (inner.width as usize - 1) / 2;
     let right_w = inner.width as usize - 1 - side;
     let head = Rect { height: 1, ..inner };
-    let body = Rect {
+    let mut body = Rect {
         y: inner.y + 1,
         height: inner.height - 1,
         ..inner
     };
+
+    // The view covers the status line, so its messages — a refused `w` above
+    // all, which leaves the view open — take the bottom row here instead.
+    // Only while one is up: the rest of the time that row is the documents'.
+    let message = app.flash.as_ref().and_then(|f| Some((f.text.as_ref()?, &f.kind)));
+    if let Some((text, kind)) = message {
+        if body.height > 1 {
+            body.height -= 1;
+            let style = match kind {
+                FlashKind::Error => Style::default().fg(theme.error.to_ratatui()),
+                FlashKind::Info => Style::default().fg(dim),
+            };
+            let row = Rect { y: body.y + body.height, height: 1, ..inner };
+            let text = elide(&format!(" {text}"), inner.width as usize);
+            frame.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), row);
+        }
+    }
 
     let pad = |s: String, w: usize| -> String {
         let mut out = elide(&s, w);
@@ -2399,6 +2416,36 @@ mod tests {
 
         // Nothing of the document underneath leaks through the takeover.
         assert!(!screen.contains("words"), "no status line behind it:\n{screen}");
+    }
+
+    /// The view covers the status line, so a message about it — a refused
+    /// `w`, which leaves it open — has to be drawn inside it or not at all.
+    #[test]
+    fn the_diff_view_shows_a_message_inside_it() {
+        let mut app = app_with("x\n");
+        app.diff = Some(crate::diff::DiffView::new(
+            0,
+            "notes.md".into(),
+            vec!["mine".into()],
+            vec!["theirs".into()],
+            None,
+        ));
+        let screen = |app: &App| {
+            let buf = render_to(app, 70, 12);
+            (0..12).map(|y| row_text(&buf, y)).collect::<Vec<_>>()
+        };
+        assert!(!screen(&app).join("\n").contains("read-only"));
+
+        app.flash = Some(crate::app::Flash {
+            text: Some("read-only — nothing written".into()),
+            kind: crate::app::FlashKind::Error,
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        });
+        let rows = screen(&app);
+        let all = rows.join("\n");
+        assert!(all.contains("read-only — nothing written"), "drawn in the view:\n{all}");
+        assert!(all.contains("mine") && all.contains("theirs"), "over nothing it shows:\n{all}");
+        assert!(all.contains("w commit"), "the keys stay up:\n{all}");
     }
 
     /// The merge selection has to be VISIBLE, or the reader is committing a

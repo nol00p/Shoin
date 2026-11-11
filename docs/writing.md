@@ -24,7 +24,8 @@ walks it — see [Notes](notes.md). In Visual mode, `<leader>b` and `<leader>i` 
 toggle bold and italic.
 
 Emphasis can be written with `*` or `_`: `*italic*` and `_italic_`,
-`**bold**` and `__bold__`. `gb` and `gi` write the `*` forms.
+`**bold**` and `__bold__`. `gb` and `gi` write the `*` forms, and remove
+either form.
 
 `ga` pads every cell of a table to its column's width, in the file itself,
 so the `|`s line up in any editor. The delimiter row is redrawn to match and

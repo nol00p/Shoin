@@ -125,7 +125,8 @@ version and then the file's, in the order shown on screen.
   still does it on request.
 - In read-only mode, outside changes and `:revert!` still come in, and
   `:diff` still shows the two versions, but its `w` writes nothing: `:view`
-  to edit first.
+  to edit first. The view stays open after that refused `w`, with your
+  choices still set, and says why inside it.
 - Written in place, every hard link sees the new text, and someone else's
   file keeps its owner. A file you cannot write is still replaced when its
   folder allows it. If an in-place write fails, the error names the backup

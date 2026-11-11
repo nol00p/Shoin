@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -442,21 +443,117 @@ pub struct Search {
     pub reverse: bool,
 }
 
-/// First index at or after `from` where `needle` occurs in `hay`.
-fn char_find(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
-        return None;
-    }
-    (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
+// Search runs per keypress (`/`, `n`, `N`), so it reads the rope a line at a
+// time with `str::find` rather than copying the document into a `Vec<char>`
+// and comparing at every position. Positions are CHAR indexes into the rope;
+// bytes are only ever an offset inside one line's text.
+
+/// The byte offset of char `col` in `s`, or `s.len()` past its end.
+fn byte_of(s: &str, col: usize) -> usize {
+    s.char_indices().nth(col).map_or(s.len(), |(b, _)| b)
 }
 
-/// Last index at or before `before` where `needle` occurs in `hay`.
-fn char_rfind(hay: &[char], needle: &[char], before: usize) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
+/// First char index at or after `from` where `needle` starts in `hay`.
+fn str_find(hay: &str, needle: &str, from: usize) -> Option<usize> {
+    let at = byte_of(hay, from);
+    let found = hay[at..].find(needle)?;
+    Some(from + hay[at..at + found].chars().count())
+}
+
+/// Last char index at or before `before` where `needle` starts in `hay`. The
+/// match may run past `before`, so the text searched ends a needle's length
+/// after it: no match starting later fits in that.
+fn str_rfind(hay: &str, needle: &str, before: usize) -> Option<usize> {
+    let end = byte_of(hay, before.saturating_add(needle.chars().count()));
+    let found = hay[..end].rfind(needle)?;
+    Some(hay[..found].chars().count())
+}
+
+/// One line's text: borrowed when the rope holds it in one chunk, as it does
+/// for all but the rare line that straddles two.
+fn line_str(rope: &ropey::Rope, line: usize) -> std::borrow::Cow<'_, str> {
+    let slice = rope.line(line);
+    match slice.as_str() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(slice.to_string()),
+    }
+}
+
+/// First char index at or after `from` where `needle` occurs in `rope`.
+fn rope_find(rope: &ropey::Rope, needle: &str, from: usize) -> Option<usize> {
+    if needle.is_empty() || from >= rope.len_chars() {
         return None;
     }
-    let max = before.min(hay.len() - needle.len());
-    (0..=max).rev().find(|&i| hay[i..i + needle.len()] == needle[..])
+    // Only `\n` ends a rope line here (ropey is built without `unicode_lines`
+    // and `cr_lines`), so a needle without one lies inside a single line. One
+    // with it — it would have to be pasted into the search line — is looked
+    // for in the whole text.
+    if needle.contains('\n') {
+        return str_find(&rope.to_string(), needle, from);
+    }
+    let first = rope.char_to_line(from);
+    (first..rope.len_lines()).find_map(|line| {
+        let base = rope.line_to_char(line);
+        str_find(&line_str(rope, line), needle, from.max(base) - base).map(|i| base + i)
+    })
+}
+
+/// Last char index at or before `before` where `needle` occurs in `rope`.
+fn rope_rfind(rope: &ropey::Rope, needle: &str, before: usize) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let before = before.min(rope.len_chars());
+    if needle.contains('\n') {
+        return str_rfind(&rope.to_string(), needle, before);
+    }
+    let last = rope.char_to_line(before);
+    (0..=last).rev().find_map(|line| {
+        let base = rope.line_to_char(line);
+        let limit = if line == last { before - base } else { usize::MAX };
+        str_rfind(&line_str(rope, line), needle, limit).map(|i| base + i)
+    })
+}
+
+/// An emphasis span the bold and italic toggles can strip, in char indexes
+/// into the rope (`inline::InlineSpan` counts from the start of its line).
+struct EmphasisSpan {
+    kind: Inline,
+    outer: Range<usize>,
+    inner: Range<usize>,
+}
+
+/// Narrow `[start, end)` to the text inside a span's markers where its ends
+/// ARE those markers, so the toggle sees the text the markers hold.
+///
+/// A range that is exactly one span — a Visual selection of `*word*` or
+/// `_word_`, markers and all — narrows at both ends, whatever the marker.
+/// Otherwise only an underscore run narrows, one end at a time: `_` is a word
+/// character, so the word under the cursor in `_word_` is all six characters,
+/// and in `_two words_` the word `_two` becomes `two`.
+fn inside_emphasis(
+    spans: &[EmphasisSpan],
+    rope: &ropey::Rope,
+    start: usize,
+    end: usize,
+) -> (usize, usize) {
+    if let Some(span) = spans.iter().find(|s| s.outer == (start..end)) {
+        return (span.inner.start, span.inner.end);
+    }
+    let (mut s, mut e) = (start, end);
+    for span in spans.iter().filter(|s| rope.char(s.outer.start) == '_') {
+        if span.outer.start == start && span.inner.start < end {
+            s = span.inner.start;
+        }
+        if span.outer.end == end && span.inner.end > start {
+            e = span.inner.end;
+        }
+    }
+    if s < e {
+        (s, e)
+    } else {
+        (start, end)
+    }
 }
 
 /// Where the link under the cursor points.
@@ -1637,6 +1734,9 @@ impl App {
         if let Some(first) = view.align.hunks.first().map(|h| h.start) {
             view.reveal(first, self.term_size.1.saturating_sub(4).max(4) as usize);
         }
+        // The view draws the flash inside it, so one left from before it
+        // opened (a failed save, say) would read as being about the merge.
+        self.flash = None;
         if view.align.coarse {
             self.notify("the two versions share little — showing one block", FlashKind::Info);
         }
@@ -1674,20 +1774,25 @@ impl App {
             );
         }
 
-        self.diff = None;
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let doc = &mut self.docs[doc];
         // The merge has to land in the buffer before it is written. A buffer
         // that refuses it (read-only mode, a read-only range) must not be
         // written either: that would put the UNMERGED text over the file.
+        //
+        // The view stays OPEN on a refusal, with every choice in it: closing
+        // would throw away the reader's per-difference work over something
+        // they cannot fix from inside it. `render_diff` draws the message.
         if !doc.buffer.replace_all(&merged) {
             let msg = if doc.buffer.read_only {
-                "read-only — nothing written; :view to edit, then :diff".to_string()
+                "read-only — nothing written; q, then :view to edit".to_string()
             } else {
                 format!("part of {name} refuses edits — nothing written")
             };
+            self.needs_redraw = true;
             return self.notify(msg, FlashKind::Error);
         }
+        self.diff = None;
         // Forced, and safe to force: the guard exists to catch a change nobody
         // has looked at, and the check above just proved there is none.
         match doc.buffer.save(policy, true) {
@@ -3918,7 +4023,83 @@ impl App {
                 None => return,
             }
         };
-        self.toggle_inline(marker, start, end);
+        // Emphasis has two spellings, `*x*` and `_x_`, and a span can hold
+        // another (`**_x_**`), so the bold and italic toggles read the line
+        // with the renderer's own scanner rather than looking at raw
+        // characters: they strip exactly what the reader sees styled, and
+        // `snake_case` or `a_b_c` open nothing. `==` and `` ` `` keep the
+        // plain check, as does a line that is not Markdown prose.
+        let italic = match marker {
+            "*" => true,
+            "**" => false,
+            _ => return self.toggle_inline(marker, start, end),
+        };
+        let Some(spans) = self.emphasis_spans(start, end) else {
+            return self.toggle_inline(marker, start, end);
+        };
+        let (start, end) = inside_emphasis(&spans, &self.buffer.rope, start, end);
+        let n = marker.len();
+        let on = spans.iter().find(|s| {
+            s.inner == (start..end)
+                && match s.kind {
+                    Inline::Italic => italic,
+                    Inline::Bold => !italic,
+                    _ => true,
+                }
+        });
+        match on {
+            // Strip `n` of the span's own delimiter, star or underscore: one
+            // from `***x***` leaves `**x**`, as the toggle-off of italic.
+            Some(span) => {
+                let delim = self.buffer.rope.char(span.outer.start).to_string().repeat(n);
+                self.toggle_inline(&delim, start, end);
+            }
+            None => self.wrap_inline(marker, start, end),
+        }
+    }
+
+    /// The emphasis spans on the line `[start, end)` sits on, nested ones
+    /// included, as char indexes into the rope. `None` where the line is not
+    /// prose (a fence, front matter, a math block: the scanner would find
+    /// "emphasis" the renderer never draws) or the range crosses a line.
+    fn emphasis_spans(&mut self, start: usize, end: usize) -> Option<Vec<EmphasisSpan>> {
+        self.refresh_blocks();
+        let rope = &self.buffer.rope;
+        let line = rope.char_to_line(start);
+        if end > start && rope.char_to_line(end - 1) != line {
+            return None;
+        }
+        if matches!(
+            self.blocks.kinds.get(line),
+            Some(
+                BlockKind::FenceOpen(_)
+                    | BlockKind::FenceBody { .. }
+                    | BlockKind::FenceClose
+                    | BlockKind::FrontMatter
+                    | BlockKind::MathBlock
+            )
+        ) {
+            return None;
+        }
+        let chars: Vec<char> = self.buffer.line_text(line).chars().collect();
+        let mut out = Vec::new();
+        let mut todo = vec![(rope.line_to_char(line), 0..chars.len())];
+        while let Some((base, range)) = todo.pop() {
+            let text: String = chars[range.clone()].iter().collect();
+            for s in inline::scan(&text, &self.config.markdown) {
+                if !matches!(s.kind, Inline::Italic | Inline::Bold | Inline::BoldItalic) {
+                    continue;
+                }
+                let at = base + range.start;
+                todo.push((base, s.inner.start + range.start..s.inner.end + range.start));
+                out.push(EmphasisSpan {
+                    kind: s.kind,
+                    outer: s.outer.start + at..s.outer.end + at,
+                    inner: s.inner.start + at..s.inner.end + at,
+                });
+            }
+        }
+        Some(out)
     }
 
     /// The word (alphanumeric/`_` run) under `col`, as a `[start, end)` column
@@ -3968,12 +4149,20 @@ impl App {
             self.buffer.delete_chars(start - mlen, start);
             self.buffer.cursor = self.idx_to_cursor(start - mlen);
         } else {
-            // Wrap: insert at the end first, then the start.
-            let (at_end, at_start) = (self.idx_to_cursor(end), self.idx_to_cursor(start));
-            self.buffer.insert_str(at_end, marker);
-            self.buffer.insert_str(at_start, marker);
-            self.buffer.cursor = self.idx_to_cursor(start + mlen);
+            self.wrap_inline(marker, start, end);
         }
+    }
+
+    /// Wrap `[start, end)` in `marker`, whatever is around it already.
+    fn wrap_inline(&mut self, marker: &str, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        // Insert at the end first, then the start, so `start` stays valid.
+        let (at_end, at_start) = (self.idx_to_cursor(end), self.idx_to_cursor(start));
+        self.buffer.insert_str(at_end, marker);
+        self.buffer.insert_str(at_start, marker);
+        self.buffer.cursor = self.idx_to_cursor(start + marker.chars().count());
     }
 
     /// `gt`: flip a task checkbox, or add one to a plain list item.
@@ -5960,16 +6149,15 @@ impl App {
             Some(s) if !s.pattern.is_empty() => s.pattern.clone(),
             _ => return,
         };
-        let needle: Vec<char> = pattern.chars().collect();
-        let hay: Vec<char> = self.buffer.rope.chars().collect();
+        let rope = &self.buffer.rope;
         let cur = self.buffer.char_index(self.buffer.cursor);
         let found = if backward {
             // Strictly before the cursor, else wrap to the end.
             cur.checked_sub(1)
-                .and_then(|before| char_rfind(&hay, &needle, before))
-                .or_else(|| char_rfind(&hay, &needle, hay.len()))
+                .and_then(|before| rope_rfind(rope, &pattern, before))
+                .or_else(|| rope_rfind(rope, &pattern, rope.len_chars()))
         } else {
-            char_find(&hay, &needle, cur + 1).or_else(|| char_find(&hay, &needle, 0))
+            rope_find(rope, &pattern, cur + 1).or_else(|| rope_find(rope, &pattern, 0))
         };
         match found {
             Some(idx) => {
@@ -7436,6 +7624,10 @@ mod tests {
     /// `w` in the diff view writes nothing in read-only mode. The merge
     /// cannot go into a buffer that refuses edits, and writing the buffer
     /// as it stands would put the unmerged text over the file's.
+    ///
+    /// The view stays open with every choice the reader made: closing it
+    /// would throw those away for a refusal they can do nothing about inside
+    /// it. The refusal is drawn in the view (see `render_diff`).
     #[test]
     fn read_only_diff_commit_writes_nothing() {
         let (mut app, path) = app_on_disk("ro-diff", "mine\n");
@@ -7445,13 +7637,24 @@ mod tests {
         app.set_view(true);
         app.open_diff();
         assert!(app.diff.is_some(), "a read-only buffer can still be compared");
+        // `:view` flashed a message; the view would show it as its own.
+        assert!(app.flash.is_none(), "an older message does not follow it in");
         diff_key(&mut app, 'f');
         diff_key(&mut app, 'w');
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "the file is untouched");
         assert_eq!(text(&app), "mine edited\n", "so is the buffer");
         assert!(app.buffer.modified, "and its changes are still unsaved");
-        assert!(app.diff.is_none(), "closed, so the message can be seen");
+        let view = app.diff.as_ref().expect("the view stays open");
+        assert!(
+            view.sides.iter().all(|s| *s == crate::diff::Side::File),
+            "with the choices made in it: {:?}",
+            view.sides
+        );
         assert!(flash_text(&app).contains("read-only"), "got: {}", flash_text(&app));
+        // `q` still leaves it, and nothing was written on the way out.
+        diff_key(&mut app, 'q');
+        assert!(app.diff.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
         let _ = std::fs::remove_file(path);
     }
 
@@ -10346,6 +10549,85 @@ mod tests {
         assert_eq!(text(&app), "`word`\n");
     }
 
+    /// `_word_` and `__word__` are emphasis too (F14), and `_` is a word
+    /// character, so the word under the cursor INCLUDES the underscores. The
+    /// toggles have to see through them and strip, not wrap them in stars.
+    #[test]
+    fn gi_and_gb_strip_underscore_emphasis() {
+        let cases = [
+            ("gi", "_word_\n", "word\n"),
+            ("gb", "__word__\n", "word\n"),
+            ("gi", "say _hi_ now\n", "say hi now\n"),
+            ("gb", "say __hi__ now\n", "say hi now\n"),
+            ("gi", "_snake_case_\n", "snake_case\n"),
+            // The other emphasis is ADDED, inside the underscores.
+            ("gb", "_word_\n", "_**word**_\n"),
+            // Not emphasis: an underscore inside a word is plain text.
+            ("gi", "snake_case\n", "*snake_case*\n"),
+            ("gi", "_private\n", "*_private*\n"),
+            // A span inside another is read too, and only its markers go.
+            ("gi", "**_word_**\n", "**word**\n"),
+            ("gb", "_**word**_\n", "_word_\n"),
+            // Italic on bold ADDS italic; it does not turn bold into italic.
+            ("gi", "**word**\n", "***word***\n"),
+            ("gi", "__word__\n", "__*word*__\n"),
+            ("gi", "***word***\n", "**word**\n"),
+            ("gb", "___word___\n", "_word_\n"),
+        ];
+        for (keys, before, after) in cases {
+            let mut app = app_with(before);
+            // On the first letter after the first underscore, if any.
+            let from = before.find('_').unwrap_or(0);
+            let col = from + before[from..].find(char::is_alphanumeric).unwrap();
+            app.buffer.cursor = Cursor::new(0, col);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), after, "{keys} on {before:?}");
+        }
+    }
+
+    /// In a fence the scanner's "emphasis" is code nobody sees styled, so the
+    /// toggles there do what they always did: look only at the characters.
+    #[test]
+    fn gi_in_a_fence_reads_no_emphasis() {
+        let mut app = app_with("```\n_word_\n*code*\n```\n");
+        app.buffer.cursor = Cursor::new(1, 1);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "```\n*_word_*\n*code*\n```\n");
+        app.buffer.cursor = Cursor::new(2, 1);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "```\n*_word_*\ncode\n```\n");
+    }
+
+    /// The same in Visual, whether the selection is the text between the
+    /// underscores or includes them — and the stars still toggle as before.
+    #[test]
+    fn visual_gi_and_gb_strip_underscore_emphasis() {
+        let cases = [
+            ("gi", "a _word_ b\n", (3, 6), "a word b\n"),
+            ("gi", "a _word_ b\n", (2, 7), "a word b\n"),
+            ("gb", "a __word__ b\n", (4, 7), "a word b\n"),
+            ("gb", "a __word__ b\n", (2, 9), "a word b\n"),
+            ("gi", "a *word* b\n", (3, 6), "a word b\n"),
+            ("gi", "a *word* b\n", (2, 7), "a word b\n"),
+            ("gb", "a **word** b\n", (2, 9), "a word b\n"),
+            // Underscores inside a word open nothing: wrap, do not strip.
+            ("gi", "a_b_c\n", (2, 2), "a_*b*_c\n"),
+            // Two spans selected together are not one span to strip.
+            ("gi", "*a* *b*\n", (0, 6), "**a* *b**\n"),
+            ("gi", "a **word** b\n", (2, 9), "a ***word*** b\n"),
+            ("gb", "a _word_ b\n", (2, 7), "a _**word**_ b\n"),
+        ];
+        for (keys, before, (lo, hi), after) in cases {
+            let mut app = app_with(before);
+            app.buffer.cursor = Cursor::new(0, lo);
+            feed(&mut app, "v");
+            app.buffer.cursor = Cursor::new(0, hi);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), after, "{keys} on {before:?} {lo}..={hi}");
+            assert_eq!(app.mode, Mode::Normal);
+        }
+    }
+
     #[test]
     fn gb_wraps_the_visual_selection() {
         let mut app = app_with("alpha beta gamma\n");
@@ -10500,6 +10782,109 @@ mod tests {
         enter_key(&mut app);
         assert_eq!(app.buffer.cursor.line, 1);
         assert_eq!(app.buffer.cursor.col, 5);
+    }
+
+    fn search_for(app: &mut App, sigil: char, pattern: &str) {
+        feed(app, &format!("{sigil}{pattern}"));
+        enter_key(app);
+    }
+
+    /// `/` starts AFTER the cursor and wraps to the top, where a match AT the
+    /// cursor counts: it is the only one, so the cursor stays on it.
+    #[test]
+    fn search_wraps_to_a_match_at_the_cursor() {
+        let mut app = app_with("foo bar\n");
+        search_for(&mut app, '/', "foo");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
+        assert!(!flash_text(&app).contains("not found"), "{}", flash_text(&app));
+        let mut app = app_with("one\ntwo foo\nthree\n");
+        app.buffer.cursor = Cursor::new(2, 2);
+        search_for(&mut app, '/', "foo");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 4), "wrapped past the end");
+    }
+
+    /// `?` finds the last match that STARTS strictly before the cursor, even
+    /// one that runs over it, and wraps to the last match of the document.
+    #[test]
+    fn search_backward_is_strictly_before_the_cursor() {
+        let mut app = app_with("aaaa\n");
+        app.buffer.cursor = Cursor::new(0, 2);
+        search_for(&mut app, '?', "aa");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 1), "overlaps the cursor");
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 2), "wrapped to the last match");
+
+        let mut app = app_with("foo\nbar foo\nbaz\n");
+        app.buffer.cursor = Cursor::new(1, 4);
+        search_for(&mut app, '?', "foo");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 0), "the match AT the cursor is skipped");
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 4), "wrapped to the end");
+    }
+
+    /// Positions are characters, not bytes: a search past accented letters,
+    /// CJK and an emoji lands on the character the match starts at.
+    #[test]
+    fn search_counts_multibyte_characters() {
+        let mut app = app_with("é 日本 🎉 café\ncafé ü\n");
+        search_for(&mut app, '/', "café");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 7));
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 0));
+        feed(&mut app, "N");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 7));
+        search_for(&mut app, '/', "ü");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 5));
+        search_for(&mut app, '?', "日本");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 2));
+    }
+
+    /// The rope search against the obvious one over a `Vec<char>`, on random
+    /// text built from few letters (so matches overlap and repeat), multi-byte
+    /// characters and line breaks, at every start position.
+    #[test]
+    fn rope_search_matches_the_naive_search() {
+        fn naive_find(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
+            if needle.is_empty() || needle.len() > hay.len() {
+                return None;
+            }
+            (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
+        }
+        fn naive_rfind(hay: &[char], needle: &[char], before: usize) -> Option<usize> {
+            if needle.is_empty() || needle.len() > hay.len() {
+                return None;
+            }
+            let max = before.min(hay.len() - needle.len());
+            (0..=max).rev().find(|&i| hay[i..i + needle.len()] == needle[..])
+        }
+        let alphabet = ['a', 'b', 'é', '日', '\n', '\r', '\u{2028}'];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..400 {
+            let hay: String = (0..next(30)).map(|_| alphabet[next(alphabet.len())]).collect();
+            let needle: String = (0..next(4)).map(|_| alphabet[next(alphabet.len())]).collect();
+            let rope = ropey::Rope::from_str(&hay);
+            let (h, n): (Vec<char>, Vec<char>) = (hay.chars().collect(), needle.chars().collect());
+            for at in 0..=h.len() + 1 {
+                assert_eq!(
+                    rope_find(&rope, &needle, at),
+                    naive_find(&h, &n, at),
+                    "find {needle:?} in {hay:?} from {at}"
+                );
+                assert_eq!(
+                    rope_rfind(&rope, &needle, at),
+                    naive_rfind(&h, &n, at),
+                    "rfind {needle:?} in {hay:?} before {at}"
+                );
+            }
+        }
     }
 
     #[test]
