@@ -312,10 +312,14 @@ impl BlockCache {
                 fits
             }
             std::cmp::Ordering::Less => {
+                // `edited < n`, so the drain stays inside the old entries.
                 let removed = old_n - n;
-                self.kinds.drain(edited..edited + removed);
-                self.carry.drain(edited..edited + removed);
-                true
+                let fits = edited <= edited_last + 1;
+                if fits {
+                    self.kinds.drain(edited..edited + removed);
+                    self.carry.drain(edited..edited + removed);
+                }
+                fits
             }
         };
         let mut cur = self.carry[start].clone();

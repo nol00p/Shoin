@@ -81,9 +81,14 @@ fn perf_large_doc() {
     let j = median((0..9).map(|_| keystroke(&mut app, &mut term, KeyCode::Char('j'))).collect());
     eprintln!("100,000 lines: typed char {typed:?}, Enter {enter:?}, dd {dd:?}, u {u:?}, j {j:?}");
 
+    // A debug build is ~20x slower throughout, so `cargo test -- --ignored`
+    // without `--release` reports the numbers without holding them to it.
+    if cfg!(debug_assertions) {
+        return;
+    }
     // The target is 5 ms a keystroke; the margin covers a slow or busy machine.
     let limit = Duration::from_millis(10);
-    for (what, took) in [("typed char", typed), ("Enter", enter), ("dd", dd), ("u", u)] {
+    for (what, took) in [("typed char", typed), ("Enter", enter), ("dd", dd), ("u", u), ("j", j)] {
         assert!(took < limit, "{what} took {took:?} at 100,000 lines");
     }
 }

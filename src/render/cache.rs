@@ -233,12 +233,17 @@ impl RenderCache {
         }
 
         // Lines whose text may differ from what their entry was built from.
-        // At an unchanged revision there are none: the text has not moved.
+        // At an unchanged revision there are none, unless the line count says
+        // the buffer itself was swapped for one at the same revision (piped
+        // text replacing the blank buffer starts at 0 too): then all of them.
         let mut suspect = 0..0;
         if self.revision != doc.buffer.revision {
             suspect = self.splice(doc);
             self.revision = doc.buffer.revision;
             self.verified = None;
+        } else if self.entries.len() != n {
+            suspect = 0..n;
+            self.seen = None;
         }
 
         // RULE 1, and it is worth stating why it is safe rather than only that
