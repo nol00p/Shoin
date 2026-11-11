@@ -286,6 +286,8 @@ gives `ss`, `siw` and `2s3w`.
 | `find_char_back` | | `F` | to the previous given character |
 | `till_char` | | `t` | to just before the next given character |
 | `till_char_back` | | `T` | to just after the previous given character |
+| `repeat_find` | | `;` | the last `f` `F` `t` `T` again (`d;` too) |
+| `repeat_find_back` | | `,` | the last `f` `F` `t` `T` the other way |
 | `goto_line` | | `G` | the last line, or line N with a count |
 | `goto_line_first` | | `gg` | the first line, or line N with a count |
 

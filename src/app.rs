@@ -1954,6 +1954,11 @@ impl App {
         }
 
         match cmd.action {
+            Action::Move(Motion::RepeatFind { reverse }) => {
+                if let Some((m, n)) = self.find_again(reverse, count) {
+                    self.move_by(m, n);
+                }
+            }
             Action::Move(m) => {
                 self.remember_find(m);
                 let m = self.resolve_screen_motion(m);
@@ -1998,7 +2003,6 @@ impl App {
                 };
                 self.search_move(backward);
             }
-            Action::RepeatFind { reverse } => self.repeat_find(reverse, count),
             Action::PasteAfter => self.paste(true, count),
             Action::PasteBefore => self.paste(false, count),
             Action::SearchWordUnderCursor => self.search_word_under_cursor(),
@@ -2067,6 +2071,12 @@ impl App {
     /// Apply an operator to whatever the grammar resolved as its range.
     fn operate(&mut self, op: Operator, target: Target, count: usize) {
         match target {
+            // `d;`: the last find, with the count `;` itself would use.
+            Target::Motion(Motion::RepeatFind { reverse }) => {
+                if let Some((m, n)) = self.find_again(reverse, count) {
+                    self.apply_operator(op, m, n);
+                }
+            }
             Target::Motion(m) => {
                 let m = self.resolve_screen_motion(m);
                 self.apply_operator(op, m, count);
@@ -2187,7 +2197,6 @@ impl App {
             | Action::ChangeToEol
             | Action::YankLine
             | Action::SearchNext { .. }
-            | Action::RepeatFind { .. }
             | Action::SearchWordUnderCursor
             | Action::ScrollView { .. }
             | Action::AppendParagraph
@@ -4027,16 +4036,13 @@ impl App {
     /// A repeated till that would stay put goes on to the match after, as
     /// vim's does: `t` stops just short of its match, so searching again from
     /// there finds the same match and would never move.
-    fn repeat_find(&mut self, reverse: bool, count: usize) {
-        let Some((target, forward, till)) = self.last_find else {
-            return;
-        };
+    /// The find `;` (`,` with `reverse`) stands for, and the count to give
+    /// it: one more when a till would otherwise stay where it is.
+    fn find_again(&self, reverse: bool, count: usize) -> Option<(Motion, usize)> {
+        let (target, forward, till) = self.last_find?;
         let m = Motion::FindChar { target, forward: forward ^ reverse, till };
-        let before = self.buffer.cursor;
-        self.move_by(m, count);
-        if till && self.buffer.cursor == before {
-            self.move_by(m, count + 1);
-        }
+        let stays = till && motion::resolve(&self.buffer, m, count, 1, false).is_none();
+        Some((m, if stays { count + 1 } else { count }))
     }
 
     /// `*`: search forward for the word under the cursor.
@@ -4130,6 +4136,12 @@ impl App {
         }
         end = end.min(self.buffer.rope.len_chars());
         if start >= end {
+            // An empty range changes nothing, but `c` still starts typing
+            // there, as vim's `cT(` next to the `(` does.
+            if op == Operator::Change {
+                self.buffer.cursor = lo;
+                self.enter_insert();
+            }
             return;
         }
         let text = self.buffer.rope.slice(start..end).to_string();
@@ -10218,6 +10230,54 @@ mod tests {
         let mut app = app_with("aBc\n");
         feed(&mut app, "3~"); // flip all three
         assert_eq!(text(&app), "AbC\n");
+    }
+
+    /// F16: `F` and `T` are exclusive under an operator, so the character
+    /// under the cursor stays; a forward `t` to the very next character
+    /// still gives the operator that one character; `;` and `,` take an
+    /// operator too.
+    #[test]
+    fn find_motions_under_an_operator() {
+        for (start, keys, want) in [
+            ("abcxdef\n", "$dFx", "abcf\n"),
+            ("abcxdef\n", "$dTx", "abcxf\n"),
+            ("(a)\n", "ldt)", "()\n"),
+            ("(a)\n", "lct)Z\x1b", "(Z)\n"),
+            ("abcxdef\n", "$cTxZ\x1b", "abcxZf\n"),
+            ("a.b.c.d\n", "f.0d;", "b.c.d\n"),
+            ("a.b.c.d\n", "f.d;", "ac.d\n"),
+            ("a.b.c.d\n", "f.;d,", "a.c.d\n"),
+            ("a-b-c\n", "t-d;", "-c\n"),
+            ("abcxdef\n", "dtx", "xdef\n"),
+            ("(abc\n", "lcT(Z\x1b", "(Zabc\n"),
+            ("(abc\n", "ldT(", "(abc\n"),
+            ("abcxdef\n", "dfx", "def\n"),
+        ] {
+            let mut app = app_with(start);
+            for c in keys.chars() {
+                if c == '\x1b' {
+                    esc(&mut app);
+                } else {
+                    feed(&mut app, &c.to_string());
+                }
+            }
+            assert_eq!(text(&app), want, "{keys} on {start:?}");
+        }
+        let mut app = app_with("abcxdef\n");
+        feed(&mut app, "$yFx");
+        assert_eq!(app.registers.get(&'"').map(|r| r.text.as_str()), Some("xde"));
+        assert_eq!(app.buffer.cursor.col, 3, "y leaves the cursor at the start");
+    }
+
+    /// F16: as plain motions the finds land where they always did.
+    #[test]
+    fn find_motions_alone_are_unchanged() {
+        for (keys, col) in [("$Fx", 3), ("$Tx", 4), ("tx", 2), ("ltx", 2), ("lltx", 2), ("fx", 3)] {
+            let mut app = app_with("abcxdef\n");
+            feed(&mut app, keys);
+            assert_eq!(app.buffer.cursor.col, col, "{keys}");
+            assert_eq!(text(&app), "abcxdef\n");
+        }
     }
 
     #[test]
