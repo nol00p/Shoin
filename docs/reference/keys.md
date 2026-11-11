@@ -124,6 +124,12 @@ and `list_indent` and `list_outdent` (Insert) — see
 | `o` | swap ends |
 | `>` `<` `u` `U` | indent / outdent / lowercase / uppercase |
 | `i{obj}` `a{obj}` | select a text object (`viw`, `vap`) |
+| `p` `P` | replace the selection with the register; `p` puts what it replaced in the register, `P` keeps the register |
+| `~` `r{c}` | toggle the case / replace every selected character with `c` |
+| `J` | join the selected lines |
+| `D` `X` `Y` | delete / delete / yank the selected lines |
+| `C` `S` `R` | change the selected lines |
+| `I` `A` | insert before / append after the selection |
 | `<leader>b` `<leader>i` | toggle bold / italic |
 
 `move_lines_down` and `move_lines_up` move the selected lines down or up a
@@ -147,6 +153,22 @@ line. They have no key until you give them one:
 | `/` `?` `n` `N` | search forward / back, repeat / reverse |
 | `:` | the command line — see [Commands](commands.md) |
 | `Ctrl-^` `Ctrl-6` | back to the previous buffer |
+
+## Command line, search and prompts
+
+The same keys in the `:` line, the `/` `?` search line, the finder's query
+and the tree's rename, move and new prompts. A delete's `(y/N)` takes only
+`y` as a yes; any other key is a no.
+
+| Key | Does |
+|---|---|
+| `Enter` | run, search, or answer |
+| `Esc` `Ctrl-c` | cancel; so does `Backspace` on an empty line |
+| `Ctrl-u` | clear the line |
+| `Ctrl-w` `Alt-Backspace` | delete the last word |
+| `Ctrl-h` | backspace |
+
+Other control and Alt chords are ignored, never typed as their letter.
 
 ## Read-only
 
@@ -221,7 +243,7 @@ remove it.
 |---|---|
 | type | narrow the list |
 | `Ctrl-n` `Ctrl-p`, arrows | next / previous match |
-| `Ctrl-u` | clear the query |
+| `Ctrl-u` `Ctrl-w` `Ctrl-h` | clear the query / delete its last word / backspace |
 | `Enter` `Esc` | open / close |
 
 ## :diff view
@@ -264,6 +286,8 @@ gives `ss`, `siw` and `2s3w`.
 | `find_char_back` | | `F` | to the previous given character |
 | `till_char` | | `t` | to just before the next given character |
 | `till_char_back` | | `T` | to just after the previous given character |
+| `repeat_find` | | `;` | the last `f` `F` `t` `T` again (`d;` too) |
+| `repeat_find_back` | | `,` | the last `f` `F` `t` `T` the other way |
 | `goto_line` | | `G` | the last line, or line N with a count |
 | `goto_line_first` | | `gg` | the first line, or line N with a count |
 

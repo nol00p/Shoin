@@ -6,13 +6,14 @@ Type `:` and the command, then `Enter`.
 
 | Command | Does |
 |---|---|
-| `:w` `:write [path]` | save, optionally to a path |
+| `:w` `:write [path]` | save; with a path, write a copy there and keep editing this file (an unnamed buffer takes the name) |
+| `:saveas <path>` `:sav` | save to a path and edit that file from now on |
 | `:w!` | save over a file that changed on disk, or an existing file `:w <path>` refuses |
 | `:wq` `:x` | save and quit; `:wq!` even if the file changed |
 | `:q` | close this buffer; the last one quits |
 | `:q!` | the same, discarding changes |
 | `:Q` `:qa` | quit every buffer at once; `:Q!` `:qa!` discard changes |
-| `:e <path>` | open a file in a new buffer |
+| `:e <path>` | open a file in a new buffer; `~/` is your home folder |
 | `:diff` | merge against the file on disk — see [Files](../files.md#merging-with-diff) |
 | `:revert` `:revert!` | re-read the file from disk; `!` discards unsaved changes |
 | `:export [md\|txt\|html\|pdf] [justify]` | write the finished document — see [Export](../export.md) |

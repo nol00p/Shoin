@@ -82,8 +82,6 @@ pub enum Action {
     YankLine,
     /// `n` / `N`.
     SearchNext { reverse: bool },
-    /// `;` / `,`.
-    RepeatFind { reverse: bool },
     /// `*`.
     SearchWordUnderCursor,
     /// `Ctrl-e` / `Ctrl-y` — scroll the page a row, leaving the cursor where

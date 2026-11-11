@@ -93,6 +93,12 @@ pub struct Buffer {
     /// can say which wins" — `:w!` keeps yours, `:revert!` takes theirs.
     pub conflict: bool,
 
+    /// The file's mtime when an automatic reload last FAILED (not UTF-8,
+    /// unreadable). `App::check_disk` reports a failure once per mtime: the
+    /// poll keeps retrying, so a fixed file still reloads on its own, but the
+    /// same broken file is not announced again every second.
+    pub reload_failed: Option<SystemTime>,
+
     /// Char ranges that refuse edits. Always EMPTY, and deliberately kept.
     ///
     /// It was built for transclusion, which then did not need it: an embed
@@ -126,6 +132,7 @@ impl Buffer {
             dirty_line: None,
             dirty_tail: None,
             conflict: false,
+            reload_failed: None,
             readonly_ranges: Vec::new(),
             read_only: false,
             words: std::cell::Cell::new(None),
@@ -161,6 +168,7 @@ impl Buffer {
             dirty_line: None,
             dirty_tail: None,
             conflict: false,
+            reload_failed: None,
             readonly_ranges: Vec::new(),
             read_only: false,
             words: std::cell::Cell::new(None),
@@ -212,14 +220,7 @@ impl Buffer {
         if !force && !same_file && path.exists() {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
-        let opts = SaveOptions {
-            line_ending: self.line_ending,
-            // `preserve` answers with what the file arrived with; the other two
-            // overrule it. This is the only place that distinction is made.
-            final_newline: policy.final_newline.resolve(self.final_newline),
-            trim_trailing_whitespace: policy.trim_trailing_whitespace,
-        };
-        let mtime = save::write_atomic(path, &self.rope, &opts)?;
+        let mtime = save::write_atomic(path, &self.rope, &self.save_options(policy))?;
         self.disk_mtime = Some(mtime);
         // Close any in-flight step first, so what was written corresponds to a
         // sealed position and the next keystroke starts a new one.
@@ -231,6 +232,36 @@ impl Buffer {
         // to come down here rather than needing its own command.
         self.conflict = false;
         Ok(())
+    }
+
+    /// How this buffer's text goes to disk under `policy`.
+    fn save_options(&self, policy: SavePolicy) -> SaveOptions {
+        SaveOptions {
+            line_ending: self.line_ending,
+            // `preserve` answers with what the file arrived with; the other two
+            // overrule it. This is the only place that distinction is made.
+            final_newline: policy.final_newline.resolve(self.final_newline),
+            trim_trailing_whitespace: policy.trim_trailing_whitespace,
+        }
+    }
+
+    /// `:w other.md` on a buffer that has a file: write the text there as a
+    /// COPY, and change nothing about the buffer — its path, `modified`, the
+    /// saved state and the mtime all still describe its own file, as vim's
+    /// `:w {file}` leaves them. `:saveas` is the command that switches.
+    ///
+    /// An existing file is refused without `force`, as `write_to` refuses it.
+    pub fn write_copy(&self, path: &Path, policy: SavePolicy, force: bool) -> Result<()> {
+        if !force && path.exists() {
+            anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
+        }
+        save::write_atomic(path, &self.rope, &self.save_options(policy))?;
+        Ok(())
+    }
+
+    /// Whether `path` is this buffer's own file, by any spelling.
+    pub fn is_own_file(&self, path: &Path) -> bool {
+        self.path.as_deref().is_some_and(|ours| same_path(ours, path))
     }
 
     /// Re-read the file from disk, replacing the buffer's text.

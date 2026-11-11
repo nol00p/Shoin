@@ -110,8 +110,6 @@ pub fn normal(key: Key) -> Option<Verb> {
         (KeyCode::Char('?'), false) => Verb::Act(Action::SearchBackward),
         (KeyCode::Char('n'), false) => Verb::Act(Action::SearchNext { reverse: false }),
         (KeyCode::Char('N'), false) => Verb::Act(Action::SearchNext { reverse: true }),
-        (KeyCode::Char(';'), false) => Verb::Act(Action::RepeatFind { reverse: false }),
-        (KeyCode::Char(','), false) => Verb::Act(Action::RepeatFind { reverse: true }),
         (KeyCode::Char('*'), false) => Verb::Act(Action::SearchWordUnderCursor),
         (KeyCode::Char(':'), false) => Verb::Act(Action::Command),
         (KeyCode::Char('.'), false) => Verb::Act(Action::Repeat),
@@ -121,7 +119,9 @@ pub fn normal(key: Key) -> Option<Verb> {
 }
 
 /// Visual mode, first key. Only the differences from Normal are listed; motions
-/// and the shared prefixes fall through to it.
+/// and the shared prefixes fall through to it. Normal-mode edit keys that fall
+/// through (`p`, `~`, `r`, `J`, `D`, …) get their Visual meaning in
+/// `app::visual_key`, which acts on the selection or refuses the key.
 ///
 /// The differences are all about the SELECTION already existing: an operator
 /// fires at once instead of waiting for a range, `i`/`a` open an object with no
@@ -148,6 +148,9 @@ pub fn visual(key: Key) -> Option<Verb> {
         KeyCode::Char('U') => Verb::Operator(Operator::Uppercase),
         KeyCode::Char('i') => Verb::Object { around: false },
         KeyCode::Char('a') => Verb::Object { around: true },
+        // `S` and `R` change the selected LINES, as `C` does (`app::visual_key`
+        // reads `ChangeToEol` linewise in Visual). Normal has no `S`/`R`.
+        KeyCode::Char('S') | KeyCode::Char('R') => Verb::Act(Action::ChangeToEol),
         KeyCode::Char('o') => Verb::Act(Action::SwapSelectionEnds),
         KeyCode::Char('v') => Verb::Act(Action::Visual),
         KeyCode::Char('V') => Verb::Act(Action::VisualLine),
@@ -216,6 +219,8 @@ fn motion(key: Key) -> Option<Motion> {
         (Char('H'), false) => Motion::ScreenTop,
         (Char('M'), false) => Motion::ScreenMiddle,
         (Char('L'), false) => Motion::ScreenBottom,
+        (Char(';'), false) => Motion::RepeatFind { reverse: false },
+        (Char(','), false) => Motion::RepeatFind { reverse: true },
         (Char('d'), true) => Motion::HalfPageDown,
         (Char('u'), true) => Motion::HalfPageUp,
         (Char('f'), true) => Motion::PageDown,
@@ -279,6 +284,8 @@ fn motion_by_name(name: &str) -> Option<Motion> {
         "screen_top" => Motion::ScreenTop,
         "screen_middle" => Motion::ScreenMiddle,
         "screen_bottom" => Motion::ScreenBottom,
+        "repeat_find" => Motion::RepeatFind { reverse: false },
+        "repeat_find_back" => Motion::RepeatFind { reverse: true },
         _ => return None,
     })
 }

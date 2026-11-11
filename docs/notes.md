@@ -85,8 +85,8 @@ See [Reading](reading.md#print-a-note).
 - An embed on the cursor's line shows its raw source, as `**bold**` does.
   Embedded text belongs to another file, so it can't be edited from here.
 - An embed shows its note as last saved, including a note `gf` just created.
-- Only notes are created by `gf`. A dead `[chart](out/chart.pdf)` is reported,
-  not invented.
+- Only notes are created by `gf`. A dead `[chart](out/chart.pdf)` or
+  `[[report.pdf]]` is reported, not invented.
 - A bare `![[diagram]]` finds `diagram.png`, but prefers `diagram.md` if both
   exist, since that's the one you can edit.
 - A link looks beside the note first, then by name anywhere under the search

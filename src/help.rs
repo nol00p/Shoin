@@ -576,6 +576,7 @@ mouse wheel :: scrolls the page, three lines a notch
 / ? :: search forward · backward
 n N :: next · previous match
 * :: search the word under the cursor
+> In the : / ? lines, the finder and the tree's rename, move and new prompts, Ctrl-u clears, Ctrl-w deletes a word, Ctrl-h is a backspace, and Esc or Ctrl-c cancels.
 
 ## Links
 gf :: follow the link under the cursor: [[note]], ![[note]], or the path in [text](note.md). A #Heading or #^block lands on it. A note that doesn't exist yet is created empty, so a link can come before its note; a name several notes answer to opens the finder
@@ -626,6 +627,12 @@ d c y x :: operate on the selection
 o :: swap the ends
 > < u U :: indent · outdent · lowercase · uppercase
 i{obj} a{obj} :: select a text object: viw, vap
+p P :: replace the selection with the register; p keeps what it replaced, P keeps the register
+~ r{c} :: toggle the case · replace every selected character with c
+J :: join the selected lines
+D X Y :: delete · delete · yank the selected lines
+C S R :: change the selected lines
+I A :: insert before · append after the selection
 move_lines_down move_lines_up :: move the selected lines down · up and keep them selected; a count moves further. Not on a key: bind them under [keys.visual], as \"J\" = \"move_lines_down\"
 
 ## Lists
@@ -706,7 +713,8 @@ i :: switch to editing
 
 const FILES: &str = "
 ## Saving and quitting
-:w :write [path] :: save, or save to a path
+:w :write [path] :: save; with a path, write a copy there and keep editing this file. An unnamed buffer takes the name
+:saveas :sav <path> :: save to a path and edit that file from now on
 :w! :: save over a file that changed on disk, or over one :w <path> won't touch
 :wq :x :: save and quit; :wq! even if the file changed
 :q :q! :: close this buffer — the last one quits · the same, discarding changes
@@ -735,13 +743,13 @@ r m d :: rename · move · delete. Delete asks first, and says how much a folder
 Ctrl-w h l :: between the tree and the editor
 <leader>hl :: these keys, here in help — the leader keys work from the tree too
 q :: close the tree
-> A prompt takes Ctrl-u to clear it and Esc to abandon it. Renaming or moving a file you have open carries the buffer with it.
+> A prompt takes Ctrl-u to clear it, Ctrl-w to delete a word, and Esc or Ctrl-c to abandon it. Renaming or moving a file you have open carries the buffer with it.
 
 ## Fuzzy finder
 <leader>ff <leader>fF :: find a file in this file's folder · over $HOME
 type :: narrow the list
 Ctrl-n Ctrl-p :: next · previous match; the arrows too
-Ctrl-u :: clear the query
+Ctrl-u Ctrl-w Ctrl-h :: clear the query · delete its last word · backspace
 Enter Esc :: open · close
 
 ## Buffers — several files open at once

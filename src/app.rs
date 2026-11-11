@@ -551,6 +551,81 @@ struct InsertRepeat {
 /// typo, as `PASTE_LIMIT` reads a counted paste.
 const INSERT_REPEAT_LIMIT: usize = 1 << 20;
 
+/// What a key did to a one-line text field: the `:` line, the `/` `?`
+/// search line, or a panel's prompt.
+#[derive(Debug, PartialEq, Eq)]
+enum FieldKey {
+    /// `Esc`, `Ctrl-C`, or a backspace with nothing left to delete.
+    Cancel,
+    /// `Enter`.
+    Submit,
+    /// The text changed, or the key was ignored: stay in the field.
+    Stay,
+}
+
+/// The keys every one-line field shares, applied to `text`. A control or
+/// Alt chord is never typed as its letter: `Ctrl-U` clears, `Ctrl-W` (and
+/// `Alt-`/`Ctrl-Backspace`) deletes the last word, `Ctrl-H` is a backspace,
+/// and the rest are ignored, as Insert mode ignores them. The finder's query
+/// takes the same keys (`on_key_finder`).
+fn field_key(key: KeyEvent, text: &mut String) -> FieldKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // A terminal reporting alternate keys sends Ctrl-Shift-W as `W` with
+    // Control: the same chord as Ctrl-W here.
+    let code = match key.code {
+        KeyCode::Char(c) if ctrl => KeyCode::Char(c.to_ascii_lowercase()),
+        code => code,
+    };
+    match code {
+        KeyCode::Esc => FieldKey::Cancel,
+        KeyCode::Backspace if ctrl || alt => {
+            delete_last_word(text);
+            FieldKey::Stay
+        }
+        KeyCode::Char('c') | KeyCode::Char('[') if ctrl => FieldKey::Cancel,
+        KeyCode::Enter => FieldKey::Submit,
+        KeyCode::Backspace => backspace_field(text),
+        KeyCode::Char('h') if ctrl => backspace_field(text),
+        KeyCode::Char('u') if ctrl => {
+            text.clear();
+            FieldKey::Stay
+        }
+        KeyCode::Char('w') if ctrl => {
+            delete_last_word(text);
+            FieldKey::Stay
+        }
+        KeyCode::Char(c) if !ctrl && !alt => {
+            text.push(c);
+            FieldKey::Stay
+        }
+        _ => FieldKey::Stay,
+    }
+}
+
+/// Backspace on an empty field closes it, as in vim's `:` line.
+fn backspace_field(text: &mut String) -> FieldKey {
+    match text.pop() {
+        Some(_) => FieldKey::Stay,
+        None => FieldKey::Cancel,
+    }
+}
+
+/// `Ctrl-W` in a text field, as vim's command line has it: the spaces before
+/// the end, then a run of word characters or a run of other symbols.
+fn delete_last_word(text: &mut String) {
+    let trimmed = text.trim_end_matches(char::is_whitespace).len();
+    text.truncate(trimmed);
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let Some(last) = text.chars().next_back() else { return };
+    let keep = if word(last) {
+        text.trim_end_matches(word).len()
+    } else {
+        text.trim_end_matches(|c: char| !word(c) && !c.is_whitespace()).len()
+    };
+    text.truncate(keep);
+}
+
 /// Destinations `gx` will hand to the desktop, and the only ones `[text](…)`
 /// reads as a URL rather than as a path.
 ///
@@ -575,19 +650,32 @@ const PASTE_LIMIT: usize = 16 << 20;
 /// place would answer a question nobody asked.
 const CREATABLE: &[&str] = &["md", "markdown", "txt"];
 
+/// Common file types that are not notes. In a wiki link's NAME these still
+/// read as an extension, so `[[report.pdf]]` is a missing PDF (refused), not
+/// a note called `report.pdf` (which would create `report.pdf.md`). Kept to
+/// documents, data, media and archives: a name like `[[Dr.Who]]` must not
+/// stop being a note because its tail happens to be a file type.
+const FILE_TYPES: &[&str] = &[
+    "pdf", "doc", "docx", "odt", "rtf", "epub", "xls", "xlsx", "ods", "csv", "ppt",
+    "pptx", "odp", "json", "xml", "html", "htm", "zip", "gz", "tgz", "tar", "7z", "rar",
+    "mp3", "wav", "flac", "ogg", "m4a", "mp4", "mov", "mkv", "avi", "webm",
+];
+
 /// The extension a dead link's target names, lowercased, or `None` when its
 /// last dot is part of the name.
 ///
 /// A wiki link's target is a NAME (`name` true): only a linkable extension (a
-/// note's or a picture's, the ones `link::resolve` reads) is an extension, so
-/// `[[2024.01.16 meeting]]` and `[[Dr.Who]]` are notes to write, exactly the
-/// files the link resolves to once they exist. A markdown link's target is a
-/// PATH, and any extension it has is the file's type: `paper.pdf` is a PDF.
+/// note's or a picture's, the ones `link::resolve` reads) or a common file
+/// type (`FILE_TYPES`) is an extension, so `[[2024.01.16 meeting]]` and
+/// `[[Dr.Who]]` are notes to write, exactly the files the link resolves to
+/// once they exist, while `[[report.pdf]]` is a PDF. A markdown link's target
+/// is a PATH, and any extension it has is the file's type.
 fn named_ext(path: &Path, name: bool) -> Option<String> {
     let e = path.extension()?.to_string_lossy().to_lowercase();
-    let linkable = CREATABLE.contains(&e.as_str())
-        || crate::image::IMAGE_EXTENSIONS.contains(&e.as_str());
-    (linkable || !name).then_some(e)
+    let known = CREATABLE.contains(&e.as_str())
+        || crate::image::IMAGE_EXTENSIONS.contains(&e.as_str())
+        || FILE_TYPES.contains(&e.as_str());
+    (known || !name).then_some(e)
 }
 
 /// A link target with no extension means a note — the same default
@@ -612,6 +700,20 @@ fn creatable(path: &Path, name: bool) -> bool {
     match named_ext(path, name) {
         None => true,
         Some(e) => CREATABLE.contains(&e.as_str()),
+    }
+}
+
+/// A typed path with `~` or `~/…` at its start read as `$HOME`, as a shell
+/// reads it, for `:e`, `:w`, `:saveas`, the export prompt and the tree's
+/// prompts. `~user` and a `~` anywhere else are left as typed, and so is
+/// everything when there is no `$HOME`.
+fn expand_home(typed: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+    match (typed.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            PathBuf::from(home).join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(typed),
     }
 }
 
@@ -1459,8 +1561,11 @@ impl App {
             // disagrees with the filesystem (mtime in the future, which NFS
             // does) — act rather than wait forever on a comparison that will
             // never come true.
-            let settled = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
+            //
+            // Read BEFORE the load below, so a failed load is tied to the
+            // version it failed on, not to one written a moment after.
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let settled = mtime
                 .map(|m| now.duration_since(m).map(|age| age >= DISK_SETTLE).unwrap_or(true))
                 .unwrap_or(true);
             if !settled {
@@ -1478,12 +1583,24 @@ impl App {
             }
 
             match doc.buffer.reload(&exts) {
-                Ok(true) => reloaded.push(doc.buffer.display_name()),
+                Ok(true) => {
+                    doc.buffer.reload_failed = None;
+                    reloaded.push(doc.buffer.display_name());
+                }
                 // The mtime moved but the bytes did not. Absorbed in silence:
                 // there is nothing to tell the reader about a `touch`.
-                Ok(false) => {}
-                Err(e) if failed.is_none() => failed = Some(e.to_string()),
-                Err(_) => {}
+                Ok(false) => doc.buffer.reload_failed = None,
+                // A file that cannot be loaded (not UTF-8, unreadable) leaves
+                // the text and the old mtime, so the next poll tries again and
+                // a fixed file — rewritten, or `chmod`ed — still reloads. But
+                // each broken version is announced ONCE: re-flashing it every
+                // second would bury everything else.
+                Err(e) => {
+                    if doc.buffer.reload_failed != mtime {
+                        doc.buffer.reload_failed = mtime;
+                        failed.get_or_insert_with(|| e.to_string());
+                    }
+                }
             }
         }
 
@@ -1492,19 +1609,19 @@ impl App {
         }
         // A conflict outranks a reload in the report: one of them needs a
         // decision and the other is already finished.
-        match (failed, conflicted.len(), reloaded.len()) {
-            (Some(why), _, _) => self.notify(format!("reload: {why}"), FlashKind::Error),
-            (None, 1, _) => self.notify(
-                format!("{} changed on disk — :revert! or :w!", conflicted[0]),
-                FlashKind::Error,
-            ),
-            (None, n, _) if n > 1 => self.notify(
-                format!("{n} files changed on disk — see :ls"),
-                FlashKind::Error,
-            ),
-            (None, _, 0) => return false,
-            (None, _, 1) => self.notify(format!("reloaded {}", reloaded[0]), FlashKind::Info),
-            (None, _, n) => self.notify(format!("reloaded {n} files"), FlashKind::Info),
+        let conflict = match conflicted.len() {
+            0 => None,
+            1 => Some(format!("{} changed on disk — :revert! or :w!", conflicted[0])),
+            n => Some(format!("{n} files changed on disk — see :ls")),
+        };
+        // Both are announced only once, so neither may hide the other.
+        let failed = failed.map(|why| format!("reload: {why} — the text here is kept"));
+        match (conflict, failed, reloaded.len()) {
+            (Some(c), Some(f), _) => self.notify(format!("{c} · {f}"), FlashKind::Error),
+            (Some(msg), None, _) | (None, Some(msg), _) => self.notify(msg, FlashKind::Error),
+            (None, None, 0) => return false,
+            (None, None, 1) => self.notify(format!("reloaded {}", reloaded[0]), FlashKind::Info),
+            (None, None, n) => self.notify(format!("reloaded {n} files"), FlashKind::Info),
         }
         true
     }
@@ -1936,7 +2053,17 @@ impl App {
         self.pending_register = cmd.register;
         let count = cmd.count.max(1);
 
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) && self.visual_key(&cmd.action, count) {
+            self.pending_register = None;
+            return;
+        }
+
         match cmd.action {
+            Action::Move(Motion::RepeatFind { reverse }) => {
+                if let Some((m, n)) = self.find_again(reverse, count) {
+                    self.move_by(m, n);
+                }
+            }
             Action::Move(m) => {
                 self.remember_find(m);
                 let m = self.resolve_screen_motion(m);
@@ -1981,7 +2108,6 @@ impl App {
                 };
                 self.search_move(backward);
             }
-            Action::RepeatFind { reverse } => self.repeat_find(reverse, count),
             Action::PasteAfter => self.paste(true, count),
             Action::PasteBefore => self.paste(false, count),
             Action::SearchWordUnderCursor => self.search_word_under_cursor(),
@@ -2067,6 +2193,12 @@ impl App {
     /// Apply an operator to whatever the grammar resolved as its range.
     fn operate(&mut self, op: Operator, target: Target, count: usize) {
         match target {
+            // `d;`: the last find, with the count `;` itself would use.
+            Target::Motion(Motion::RepeatFind { reverse }) => {
+                if let Some((m, n)) = self.find_again(reverse, count) {
+                    self.apply_operator(op, m, n);
+                }
+            }
             Target::Motion(m) => {
                 let m = self.resolve_screen_motion(m);
                 self.apply_operator(op, m, count);
@@ -2187,7 +2319,6 @@ impl App {
             | Action::ChangeToEol
             | Action::YankLine
             | Action::SearchNext { .. }
-            | Action::RepeatFind { .. }
             | Action::SearchWordUnderCursor
             | Action::ScrollView { .. }
             | Action::AppendParagraph
@@ -2499,6 +2630,12 @@ impl App {
     /// finder's paths, which always are.
     fn absolute(&self, p: &Path) -> PathBuf {
         clean_path(&self.cwd(), p)
+    }
+
+    /// A path the reader TYPED (`:e`, `:w`, `:saveas`, `:export`): `~/`
+    /// expanded, then made absolute and clean like every buffer path.
+    fn typed_path(&self, typed: &str) -> PathBuf {
+        self.absolute(&expand_home(typed))
     }
 
     /// A path as a message names it: relative to the working directory when
@@ -3365,16 +3502,20 @@ impl App {
                     }
                     close = true;
                 }
-                KeyCode::Char('u') if ctrl => finder.clear_query(),
                 KeyCode::Char('n') | KeyCode::Char('j') if ctrl => finder.down(),
                 KeyCode::Char('p') | KeyCode::Char('k') if ctrl => finder.up(),
                 KeyCode::Down | KeyCode::Tab => finder.down(),
                 KeyCode::Up | KeyCode::BackTab => finder.up(),
-                KeyCode::Backspace => finder.pop_char(),
-                KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                    finder.push_char(c)
+                // Unlike the `:` line, an empty query stays open: the list
+                // under it is still worth looking at.
+                KeyCode::Backspace if finder.query.is_empty() => {}
+                KeyCode::Char('h') if ctrl && finder.query.is_empty() => {}
+                // The editing keys every field shares.
+                _ => {
+                    let mut outcome = FieldKey::Stay;
+                    finder.edit_query(|q| outcome = field_key(key, q));
+                    close = outcome == FieldKey::Cancel;
                 }
-                _ => {}
             }
         }
         if close {
@@ -4063,16 +4204,13 @@ impl App {
     /// A repeated till that would stay put goes on to the match after, as
     /// vim's does: `t` stops just short of its match, so searching again from
     /// there finds the same match and would never move.
-    fn repeat_find(&mut self, reverse: bool, count: usize) {
-        let Some((target, forward, till)) = self.last_find else {
-            return;
-        };
+    /// The find `;` (`,` with `reverse`) stands for, and the count to give
+    /// it: one more when a till would otherwise stay where it is.
+    fn find_again(&self, reverse: bool, count: usize) -> Option<(Motion, usize)> {
+        let (target, forward, till) = self.last_find?;
         let m = Motion::FindChar { target, forward: forward ^ reverse, till };
-        let before = self.buffer.cursor;
-        self.move_by(m, count);
-        if till && self.buffer.cursor == before {
-            self.move_by(m, count + 1);
-        }
+        let stays = till && motion::resolve(&self.buffer, m, count, 1, false).is_none();
+        Some((m, if stays { count + 1 } else { count }))
     }
 
     /// `*`: search forward for the word under the cursor.
@@ -4166,6 +4304,12 @@ impl App {
         }
         end = end.min(self.buffer.rope.len_chars());
         if start >= end {
+            // An empty range changes nothing, but `c` still starts typing
+            // there, as vim's `cT(` next to the `(` does.
+            if op == Operator::Change {
+                self.buffer.cursor = lo;
+                self.enter_insert();
+            }
             return;
         }
         let text = self.buffer.rope.slice(start..end).to_string();
@@ -4897,6 +5041,204 @@ impl App {
         }
     }
 
+    /// The Visual meaning of a Normal-mode edit key, which the Visual table
+    /// passes through unchanged (`bindings::visual`). Returns true when the
+    /// key is handled here, and `run` goes no further.
+    ///
+    /// Without this, `p`, `~`, `r`, `J` and `D` ran their Normal action at
+    /// the cursor and left Visual on, ignoring the selection.
+    fn visual_key(&mut self, action: &Action, count: usize) -> bool {
+        match action {
+            Action::PasteAfter => self.visual_paste(true, count),
+            Action::PasteBefore => self.visual_paste(false, count),
+            Action::ToggleCase => self.visual_map_chars(|c, out| {
+                if c.is_uppercase() {
+                    out.extend(c.to_lowercase());
+                } else if c.is_lowercase() {
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.push(c);
+                }
+            }),
+            Action::ReplaceChar(r) => {
+                let r = *r;
+                self.visual_map_chars(move |_, out| out.push(r));
+            }
+            Action::JoinLines => {
+                let (a, b) = self.visual_lines();
+                self.end_visual();
+                self.buffer.cursor = Cursor::new(a, 0);
+                // At least two lines, as vim: `vJ` on one line joins the next.
+                self.join_lines((b - a + 1).max(2));
+            }
+            // The capital letters work on whole LINES in Visual, whatever
+            // kind of selection it is.
+            Action::DeleteToEol | Action::DeleteCharBack => self.visual_lines_operate(Operator::Delete),
+            Action::YankLine => self.visual_lines_operate(Operator::Yank),
+            Action::ChangeToEol => self.visual_lines_operate(Operator::Change),
+            // Insert before the selection's first character, or after its
+            // last (in `V`, at the start of its first line or the end of its
+            // last), as vim's `I`/`A` do outside block mode.
+            Action::InsertLineStart | Action::AppendLineEnd => {
+                let (_, end, lo, linewise) = self.visual_span();
+                let (_, last) = self.visual_lines();
+                self.end_visual();
+                self.buffer.cursor = match (action, linewise) {
+                    (Action::InsertLineStart, _) => lo,
+                    (_, true) => Cursor::new(last, self.buffer.line_len(last)),
+                    // After the last selected character; a selection ending on
+                    // a line break appends at that line's end.
+                    _ => {
+                        let at = self.idx_to_cursor(end);
+                        if end > 0 && self.buffer.rope.char(end - 1) == '\n' {
+                            let l = at.line.saturating_sub(1);
+                            Cursor::new(l, self.buffer.line_len(l))
+                        } else {
+                            at
+                        }
+                    }
+                };
+                self.enter_insert();
+            }
+            // Edits with no Visual meaning do nothing, rather than edit at
+            // the cursor with a selection still showing.
+            Action::OpenAbove
+            | Action::OpenBelow
+            | Action::Insert
+            | Action::Append
+            | Action::DeleteChar
+            | Action::Redo
+            | Action::Repeat => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// The selection's first and last line.
+    fn visual_lines(&self) -> (usize, usize) {
+        let a = self.anchor.unwrap_or(self.buffer.cursor).line;
+        let b = self.buffer.cursor.line;
+        (a.min(b), a.max(b))
+    }
+
+    /// The selection as a char range `start..end`, the first character's
+    /// position, and whether it is linewise. A linewise range takes each line
+    /// whole, its last newline included when there is one.
+    fn visual_span(&self) -> (usize, usize, Cursor, bool) {
+        if matches!(self.mode, Mode::VisualLine) {
+            let (a, b) = self.visual_lines();
+            let start = self.buffer.rope.line_to_char(a);
+            let end = if b < self.buffer.last_line() {
+                self.buffer.rope.line_to_char(b + 1)
+            } else {
+                self.buffer.rope.len_chars()
+            };
+            return (start, end, Cursor::new(a, 0), true);
+        }
+        let anchor = self.anchor.unwrap_or(self.buffer.cursor);
+        let cur = self.buffer.cursor;
+        let lo = if (anchor.line, anchor.col) <= (cur.line, cur.col) { anchor } else { cur };
+        let hi = if lo == anchor { cur } else { anchor };
+        let start = self.buffer.char_index(lo);
+        let end = (self.buffer.char_index(hi) + 1).min(self.buffer.rope.len_chars());
+        (start, end, lo, false)
+    }
+
+    /// `~` and `r{c}` in Visual: rewrite every selected character but the
+    /// line breaks, end Visual, and leave the cursor at the selection's start.
+    fn visual_map_chars(&mut self, f: impl Fn(char, &mut String)) {
+        let (start, end, lo, _) = self.visual_span();
+        self.end_visual();
+        let text = self.buffer.rope.slice(start..end).to_string();
+        let mut mapped = String::with_capacity(text.len());
+        for c in text.chars() {
+            if c == '\n' {
+                mapped.push(c);
+            } else {
+                f(c, &mut mapped);
+            }
+        }
+        if mapped != text {
+            self.buffer.delete_chars(start, end);
+            self.buffer.insert_str(lo, &mapped);
+        }
+        self.buffer.cursor = lo;
+    }
+
+    /// `D`/`X`, `Y` and `C`/`S`/`R` in Visual: the operator on the selected
+    /// lines.
+    fn visual_lines_operate(&mut self, op: Operator) {
+        let (a, b) = self.visual_lines();
+        self.end_visual();
+        self.operate_linewise(op, a, b);
+    }
+
+    /// `p` / `P` in Visual: replace the selection with the register, `count`
+    /// copies of it. `p` puts what it replaced in the unnamed register, so
+    /// the next `p` swaps it back; `P` leaves the registers as they were
+    /// (vim 9), so one yank can replace several selections.
+    fn visual_paste(&mut self, keep_replaced: bool, count: usize) {
+        let Some(reg) = self.take_register() else {
+            self.leave_visual();
+            return;
+        };
+        if count > 1 && count.saturating_mul(reg.text.len()) > PASTE_LIMIT {
+            self.leave_visual();
+            return self.notify("paste: too large", FlashKind::Error);
+        }
+        let (start, mut end, lo, linewise) = self.visual_span();
+        self.end_visual();
+        // A charwise selection that ends on a line break (`vp` on an empty
+        // line, `v$p`) replaces the text, not the break: the next line stays
+        // where it is.
+        if !linewise && end > start && self.buffer.rope.char(end - 1) == '\n' {
+            end -= 1;
+        }
+        let ends_at_eof = end == self.buffer.rope.len_chars();
+        let replaced = self.buffer.rope.slice(start..end).to_string();
+
+        let reg_linewise = reg.linewise;
+        let mut one = reg.text;
+        if reg_linewise && !one.ends_with('\n') {
+            one.push('\n');
+        }
+        let mut text = one.repeat(count.max(1));
+        if reg_linewise && !linewise {
+            // Lines into the middle of a line split it around them.
+            text.insert(0, '\n');
+        } else if !reg_linewise && linewise {
+            // Text in place of lines is a line of its own.
+            text.push('\n');
+        }
+        // Lines replacing the last line of the file must not leave a blank
+        // one after them.
+        if linewise && ends_at_eof && !replaced.ends_with('\n') && text.ends_with('\n') {
+            text.pop();
+        }
+
+        self.buffer.delete_chars(start, end);
+        self.buffer.insert_str(lo, &text);
+        if keep_replaced {
+            let mut replaced = replaced;
+            if linewise && !replaced.ends_with('\n') {
+                replaced.push('\n');
+            }
+            self.store_register(replaced, linewise, true);
+        }
+        self.buffer.cursor = if reg_linewise {
+            let line = if linewise { lo.line } else { lo.line + 1 };
+            let line = line.min(self.buffer.last_line());
+            Cursor::new(line, self.first_non_blank(line))
+        } else if text.trim_end_matches('\n').contains('\n') {
+            // At the start of text that spans lines, as Normal `p` leaves it.
+            lo
+        } else {
+            // On the last character of one line of text.
+            let n = text.trim_end_matches('\n').chars().count();
+            self.idx_to_cursor(start + n.saturating_sub(1))
+        };
+    }
+
     // ----------------------------------------------------------------- insert
 
     /// Enter in Insert mode. With `editor.auto_indent` the new line continues
@@ -5291,27 +5633,16 @@ impl App {
     // ---------------------------------------------------------------- command
 
     fn on_key_command(&mut self, key: KeyEvent, mut buf: String) {
-        match key.code {
-            KeyCode::Esc => {
+        match field_key(key, &mut buf) {
+            FieldKey::Cancel => {
                 self.mode = Mode::Normal;
                 self.flash = None;
             }
-            KeyCode::Enter => {
+            FieldKey::Submit => {
                 self.mode = Mode::Normal;
                 self.run_command(&buf);
             }
-            KeyCode::Backspace => {
-                if buf.pop().is_none() {
-                    self.mode = Mode::Normal;
-                } else {
-                    self.mode = Mode::Command(buf);
-                }
-            }
-            KeyCode::Char(c) => {
-                buf.push(c);
-                self.mode = Mode::Command(buf);
-            }
-            _ => {}
+            FieldKey::Stay => self.mode = Mode::Command(buf),
         }
     }
 
@@ -5321,8 +5652,10 @@ impl App {
     /// an open prompt is a text field, so `a` would otherwise re-open it.
     fn on_key_prompt(&mut self, key: KeyEvent, mut p: Prompt) {
         if p.kind.is_confirm() {
+            // A plain `y` only: `Ctrl-y` is not a yes.
+            let chord = key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                KeyCode::Char('y') | KeyCode::Char('Y') if !chord => {
                     self.mode = Mode::Normal;
                     self.finish_prompt(p);
                 }
@@ -5335,31 +5668,18 @@ impl App {
             }
             return;
         }
-        match key.code {
-            KeyCode::Esc => {
+        // `Ctrl-U` matters most here: `r` and `m` open PRE-FILLED, so
+        // replacing the name outright needs to be one key.
+        match field_key(key, &mut p.input) {
+            FieldKey::Cancel => {
                 self.mode = Mode::Normal;
                 self.flash = None;
             }
-            KeyCode::Enter => {
+            FieldKey::Submit => {
                 self.mode = Mode::Normal;
                 self.finish_prompt(p);
             }
-            // Backspace on an empty field cancels, matching the `:` box.
-            KeyCode::Backspace => match p.input.pop() {
-                Some(_) => self.mode = Mode::Prompt(p),
-                None => self.mode = Mode::Normal,
-            },
-            // Clear the field, as the finder's query does. `r` and `m` open
-            // PRE-FILLED, so replacing outright needs to be one key.
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                p.input.clear();
-                self.mode = Mode::Prompt(p);
-            }
-            KeyCode::Char(c) => {
-                p.input.push(c);
-                self.mode = Mode::Prompt(p);
-            }
-            _ => {}
+            FieldKey::Stay => self.mode = Mode::Prompt(p),
         }
     }
 
@@ -5384,7 +5704,7 @@ impl App {
                 // Neo-tree's convention: a trailing `/` means a directory. It
                 // reads as one, which is the whole reason to use it.
                 let is_dir = raw.ends_with('/');
-                let path = p.target.join(raw.trim_end_matches('/'));
+                let path = p.target.join(expand_home(raw.trim_end_matches('/')));
                 ops::create(&path, is_dir).map(|()| Some(path))
             }
             PromptKind::Rename => {
@@ -5406,11 +5726,12 @@ impl App {
                 if raw.is_empty() {
                     return;
                 }
-                let mut dest = self
-                    .tree
-                    .as_ref()
-                    .map(|t| t.resolve(raw))
-                    .unwrap_or_else(|| root.join(raw));
+                let typed = expand_home(raw);
+                let mut dest = if typed.is_absolute() {
+                    typed
+                } else {
+                    self.tree.as_ref().map(|t| t.resolve(raw)).unwrap_or_else(|| root.join(raw))
+                };
                 // Moving ONTO a directory means "into it", the way `mv` does.
                 if dest.is_dir() {
                     if let Some(name) = p.target.file_name() {
@@ -5512,14 +5833,7 @@ impl App {
         if dest.is_empty() {
             return;
         }
-        let dest = {
-            let p = Path::new(dest);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                self.cwd().join(p)
-            }
-        };
+        let dest = self.typed_path(dest);
         // HTML is drawn from the theme AS AUTHORED, not from the running one:
         // `self.theme` has been adapted to this terminal's color depth, and a
         // page has no such limit to be adapted to.
@@ -5621,27 +5935,19 @@ impl App {
     // ----------------------------------------------------------------- search
 
     fn on_key_search(&mut self, key: KeyEvent, mut query: String, reverse: bool) {
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Enter => {
+        match field_key(key, &mut query) {
+            FieldKey::Cancel => {
+                self.mode = Mode::Normal;
+                self.flash = None;
+            }
+            FieldKey::Submit => {
                 self.mode = Mode::Normal;
                 if !query.is_empty() {
                     self.search = Some(Search { pattern: query, reverse });
                     self.search_move(reverse);
                 }
             }
-            KeyCode::Backspace => {
-                if query.pop().is_none() {
-                    self.mode = Mode::Normal;
-                } else {
-                    self.mode = Mode::Search { query, reverse };
-                }
-            }
-            KeyCode::Char(c) => {
-                query.push(c);
-                self.mode = Mode::Search { query, reverse };
-            }
-            _ => {}
+            FieldKey::Stay => self.mode = Mode::Search { query, reverse },
         }
     }
 
@@ -5689,6 +5995,15 @@ impl App {
             "w!" | "write!" => {
                 self.write(if arg.is_empty() { None } else { Some(arg) }, true);
             }
+            // `:saveas` switches the buffer to the new file; `:w <path>` only
+            // writes a copy there.
+            "sav" | "saveas" | "sav!" | "saveas!" => {
+                if arg.is_empty() {
+                    self.notify("usage: :saveas <path>", FlashKind::Error);
+                } else {
+                    self.save_as(arg, name.ends_with('!'));
+                }
+            }
             "q" => self.try_quit(false),
             // Capital Q leaves outright — the whole session, every buffer.
             // `qa`/`qall` are vim's spelling of the same thing.
@@ -5719,19 +6034,30 @@ impl App {
                 if arg.is_empty() {
                     self.notify("usage: :e <path>", FlashKind::Error);
                 } else {
-                    let path = PathBuf::from(arg);
-                    self.open_file(path);
+                    self.open_file(self.typed_path(arg));
                 }
             }
             "q!" => self.try_quit(true),
+            // With a path, `:wq` saves the buffer AS that file and then
+            // quits: a copy (what `:w <path>` writes) would leave this file's
+            // edits unsaved, and `:wq!` would then throw them away.
             "wq" | "x" => {
-                self.write(if arg.is_empty() { None } else { Some(arg) }, false);
+                if arg.is_empty() {
+                    self.write(None, false);
+                } else {
+                    self.save_as(arg, false);
+                }
                 self.try_quit(false);
             }
             // The `!` forces the WRITE, not the quit: a write that fails
             // still keeps the editor open, or the unsaved text would be lost.
             "wq!" | "x!" => {
-                if self.write(if arg.is_empty() { None } else { Some(arg) }, true) {
+                let written = if arg.is_empty() {
+                    self.write(None, true)
+                } else {
+                    self.save_as(arg, true)
+                };
+                if written {
                     self.try_quit(true);
                 }
             }
@@ -6033,15 +6359,69 @@ impl App {
     }
 
     /// `:w`. True when the file was written.
+    ///
+    /// `:w <path>` on a buffer that already has a file writes a COPY and keeps
+    /// editing the original, as vim does: `:w backup.md` is a checkpoint, not
+    /// a move. An unnamed buffer takes the name instead, which is how it gets
+    /// one (`:saveas` switches a named buffer).
     fn write(&mut self, path: Option<&str>, force: bool) -> bool {
-        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
-        let result = match path {
-            Some(p) => {
-                let p = self.absolute(Path::new(p));
-                self.buffer.save_as(p, policy, force)
+        if let Some(typed) = path {
+            if self.buffer.path.is_none() {
+                return self.save_as(typed, force);
             }
-            None => self.buffer.save(policy, force),
-        };
+            let p = self.typed_path(typed);
+            if !self.buffer.is_own_file(&p) {
+                return self.write_copy(&p, force);
+            }
+        }
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        let result = self.buffer.save(policy, force);
+        self.after_write(result)
+    }
+
+    /// `:saveas <path>`, and `:w <path>` on an unnamed buffer: write there and
+    /// make it this buffer's file, styled by its new extension.
+    fn save_as(&mut self, typed: &str, force: bool) -> bool {
+        let p = self.typed_path(typed);
+        // A file is edited in ONE buffer (`open_file` holds to that); taking
+        // over another buffer's file would leave two copies racing to save.
+        let current = self.current();
+        if self.docs.iter().enumerate().any(|(i, d)| i != current && d.buffer.is_own_file(&p)) {
+            self.notify(format!("{} is open in another buffer", self.shown(&p)), FlashKind::Error);
+            return false;
+        }
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        let result = self.buffer.save_as(p.clone(), policy, force);
+        if result.is_ok() {
+            let exts = &self.config.markdown.plain_text_extensions;
+            self.buffer.syntax = crate::fs::open::syntax_for(&p, exts);
+        }
+        self.after_write(result)
+    }
+
+    /// `:w <path>` from a buffer with its own file: the text goes to `path`,
+    /// and the buffer stays what it was.
+    fn write_copy(&mut self, path: &Path, force: bool) -> bool {
+        let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
+        match self.buffer.write_copy(path, policy, force) {
+            Ok(()) => {
+                self.disk_changed();
+                let mine = self.buffer.display_name();
+                self.notify(
+                    format!("{} written (still editing {mine})", self.shown(path)),
+                    FlashKind::Info,
+                );
+                true
+            }
+            Err(e) => {
+                self.notify(format!("{e}"), FlashKind::Error);
+                false
+            }
+        }
+    }
+
+    /// Report a write of this buffer's own file.
+    fn after_write(&mut self, result: anyhow::Result<()>) -> bool {
         match result {
             Ok(()) => {
                 self.disk_changed();
@@ -6592,6 +6972,22 @@ mod tests {
         feed(&mut app, "gf");
         assert!(!d.join("out/paper.pdf").exists(), "no empty pdf was invented");
         assert_eq!(shown(&app), "note.md");
+    }
+
+    /// The same for a wiki link: `[[report.pdf]]` names a PDF, so a missing
+    /// one is reported, not turned into a note called `report.pdf.md`.
+    #[test]
+    fn a_missing_non_note_wiki_link_is_never_created() {
+        for name in ["report.pdf", "Data.CSV", "song.mp3"] {
+            let (d, mut app) = vault(&format!("see [[{name}]]\n"), &[]);
+            cursor_on(&mut app, 0, name);
+            feed(&mut app, "gf");
+            assert!(!d.join(name).exists(), "{name}: no empty file was invented");
+            assert!(!d.join(format!("{name}.md")).exists(), "{name}: no note either");
+            assert_eq!(shown(&app), "note.md", "{name}: the buffer did not change");
+            let flash = flash_text(&app);
+            assert!(flash.contains(name), "{name}: the miss is reported, got {flash:?}");
+        }
     }
 
     /// Off a link, `gf` says so rather than guessing at the word under the
@@ -7339,6 +7735,47 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// F22: a file that changes into something that cannot be loaded is
+    /// reported once, not every poll. The text stays, the poll keeps trying,
+    /// and a readable version reloads as usual. `:w` still refuses to write
+    /// over the file; `:w!` does.
+    #[test]
+    fn an_unloadable_file_is_reported_once() {
+        let backdate = |path: &std::path::Path, secs: u64| {
+            let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            f.set_modified(std::time::SystemTime::now() - Duration::from_secs(secs)).unwrap();
+        };
+        let (mut app, path) = app_on_disk("unloadable", "mine\n");
+        std::fs::write(&path, [0xff, 0xfe, b'x', b'\n']).unwrap();
+        backdate(&path, 5);
+
+        assert!(app.check_disk(), "the first poll reports it");
+        assert!(flash_text(&app).contains("reload"), "got: {}", flash_text(&app));
+        assert_eq!(text(&app), "mine\n", "the text is untouched");
+        assert!(!app.buffer.conflict, "a clean buffer is not a conflict");
+
+        app.flash = None;
+        assert!(!app.check_disk(), "the next poll stays quiet");
+        assert!(app.flash.is_none());
+        assert!(app.buffer.save(SavePolicy::default(), false).is_err(), ":w refuses");
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff, 0xfe, b'x', b'\n']);
+
+        // Broken again, a different version: announced again, once.
+        std::fs::write(&path, [0xff, b'y', b'\n']).unwrap();
+        backdate(&path, 4);
+        assert!(app.check_disk(), "a new broken version is news");
+        app.flash = None;
+        assert!(!app.check_disk());
+
+        // Readable again: reloaded.
+        write_settled(&path, "theirs\n");
+        backdate(&path, 3);
+        assert!(app.check_disk());
+        assert_eq!(text(&app), "theirs\n");
+        assert!(app.buffer.reload_failed.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
     /// The reload is ONE undo step, which is what makes an automatic reload
     /// reversible rather than merely fast. Undoing it also makes the buffer
     /// modified again — you are once more holding what the file does not.
@@ -7574,6 +8011,111 @@ mod tests {
     }
 
     // ------------------------------------------------------------- autosave
+
+    /// F18: `:w <other>` on a buffer with its own file writes a copy and
+    /// keeps editing the original; the next `:w` goes to the original.
+    #[test]
+    fn w_to_another_name_writes_a_copy() {
+        let mut app = app_with("one\n");
+        let orig = saved_file(&mut app, "copy-orig");
+        let copy = orig.with_extension("copy.md");
+        app.run_command(&format!("w {}", copy.display()));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "one\n");
+        assert_eq!(app.buffer.path.as_deref(), Some(orig.as_path()), "still the original");
+        assert!(flash_text(&app).contains("still editing"), "got: {}", flash_text(&app));
+
+        feed(&mut app, "ccTWO");
+        esc(&mut app);
+        assert!(app.buffer.modified, "a copy is not a save of this file");
+        app.run_command("w");
+        assert_eq!(std::fs::read_to_string(&orig).unwrap(), "TWO\n", "the edit went home");
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "one\n", "the copy kept its text");
+
+        // An existing file is refused without `!`.
+        app.run_command(&format!("w {}", copy.display()));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "one\n");
+        app.run_command(&format!("w! {}", copy.display()));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "TWO\n");
+
+        // Its own name, however spelled, is an ordinary save.
+        feed(&mut app, "ccthree");
+        esc(&mut app);
+        app.run_command(&format!("w {}", orig.display()));
+        assert!(!app.buffer.modified);
+        let _ = std::fs::remove_file(orig);
+        let _ = std::fs::remove_file(copy);
+    }
+
+    /// F18: `:saveas` switches the buffer to the new file and restyles it by
+    /// the new extension; an unnamed buffer's `:w <name>` does the same.
+    #[test]
+    fn saveas_switches_the_buffer_and_its_syntax() {
+        let mut app = app_with("text\n");
+        let orig = saved_file(&mut app, "saveas-orig");
+        let txt = orig.with_extension("txt");
+        assert_eq!(app.buffer.syntax, crate::text::buffer::Syntax::Markdown);
+        app.run_command(&format!("saveas {}", txt.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(txt.as_path()));
+        assert_eq!(app.buffer.syntax, crate::text::buffer::Syntax::PlainProse);
+        assert!(!app.buffer.modified);
+
+        let mut app = app_with("text\n");
+        let named = txt.with_extension("other.md");
+        app.run_command(&format!("w {}", named.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(named.as_path()), "unnamed adopts it");
+        assert_eq!(app.buffer.syntax, crate::text::buffer::Syntax::Markdown);
+        for p in [orig, txt, named] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// F18: `:saveas` will not take over a file another buffer has open, and
+    /// `:wq <path>` saves the buffer as that file (not a copy) before quitting.
+    #[test]
+    fn saveas_refuses_an_open_file_and_wq_path_saves_as() {
+        let mut app = app_with("a\n");
+        let a = saved_file(&mut app, "saveas-a");
+        let b = a.with_extension("b.md");
+        std::fs::write(&b, "b\n").unwrap();
+        assert!(app.open_file(b.clone()));
+        app.run_command(&format!("b {}", a.file_name().unwrap().to_string_lossy()));
+        assert_eq!(app.buffer.path.as_deref(), Some(a.as_path()));
+        app.run_command(&format!("saveas! {}", b.display()));
+        assert_eq!(app.buffer.path.as_deref(), Some(a.as_path()), "refused");
+        assert!(flash_text(&app).contains("another buffer"), "got: {}", flash_text(&app));
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "b\n");
+
+        let mut app = app_with("x\n");
+        let orig = saved_file(&mut app, "wq-orig");
+        let out = orig.with_extension("out.md");
+        feed(&mut app, "ccedited");
+        esc(&mut app);
+        app.run_command(&format!("wq {}", out.display()));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "edited\n");
+        assert!(!app.buffer.modified, "saved, so the quit is not refused");
+        for p in [a, b, orig, out] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// F18: `~` and `~/…` at the start of a typed path are `$HOME`.
+    #[test]
+    fn a_typed_tilde_is_home() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else { return };
+        let home = PathBuf::from(home);
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/notes/x.md"), home.join("notes/x.md"));
+        assert_eq!(expand_home("~user/x.md"), PathBuf::from("~user/x.md"));
+        assert_eq!(expand_home("a/~/x.md"), PathBuf::from("a/~/x.md"));
+
+        // `:e` on a file that is not there opens an empty buffer for it and
+        // writes nothing, so this touches no real file.
+        let name = "shoin-tilde-test-not-a-real-file-7f3a.md";
+        let mut app = app_with("");
+        app.run_command(&format!("e ~/{name}"));
+        assert_eq!(app.buffer.path.as_deref(), Some(home.join(name).as_path()));
+        assert!(!home.join(name).exists());
+    }
 
     /// A named scratch file with `text` in it, already saved so the buffer is
     /// clean and `disk_mtime` is recorded — the state autosave has to start in.
@@ -8608,6 +9150,129 @@ mod tests {
         assert_eq!(text(&app), "- a\n- b");
     }
 
+    /// F15: Normal-mode edit keys act on the Visual selection and end Visual,
+    /// instead of editing at the cursor with the selection still up.
+    #[test]
+    fn visual_edit_keys_act_on_the_selection() {
+        for (start, keys, want) in [
+            ("one two three\n", "yiwwviwp", "one one three\n"),
+            ("abc def\n", "vll~", "ABC def\n"),
+            ("abc def\n", "vllrx", "xxx def\n"),
+            ("a\nb\nc\n", "VjJ", "a b\nc\n"),
+            ("abc def\nnext\n", "vlD", "next\n"),
+            ("abc def\nnext\n", "vlX", "next\n"),
+            ("one\ntwo\nthree\n", "jVp", "one\ntwo\nthree\n"),
+            ("ab\ncd\n", "vjl~", "AB\nCD\n"),
+            ("ab\ncd\n", "Vjrz", "zz\nzz\n"),
+            ("a\nb\n", "vJ", "a b\n"),
+        ] {
+            let mut app = app_with(start);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), want, "{keys} on {start:?}");
+            assert_eq!(app.mode, Mode::Normal, "{keys} ends Visual");
+            assert!(app.anchor.is_none(), "{keys} drops the selection");
+        }
+    }
+
+    /// `p` swaps: the replaced text goes to the unnamed register. `P` keeps
+    /// the register, so one yank replaces several selections. One undo step
+    /// takes the whole `viwp` back.
+    #[test]
+    fn visual_p_replaces_and_undoes_in_one_step() {
+        let mut app = app_with("one two three\n");
+        feed(&mut app, "yiwwviwp");
+        assert_eq!(text(&app), "one one three\n");
+        assert_eq!(app.registers.get(&'"').map(|r| r.text.as_str()), Some("two"));
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "one two three\n");
+
+        let mut app = app_with("aa bb cc\n");
+        feed(&mut app, "yiwwviwPwviwP");
+        assert_eq!(text(&app), "aa aa aa\n");
+        assert_eq!(app.registers.get(&'"').map(|r| r.text.as_str()), Some("aa"));
+    }
+
+    /// A named register works in Visual too, and lines and text mix the way
+    /// vim mixes them.
+    #[test]
+    fn visual_p_takes_a_named_register_and_mixes_lines_and_text() {
+        let mut app = app_with("alpha beta\n");
+        feed(&mut app, "\"ayiwwviw\"ap");
+        assert_eq!(text(&app), "alpha alpha\n");
+
+        // A yanked line in place of a word splits the line around it.
+        let mut app = app_with("top\nx mid y\n");
+        feed(&mut app, "yyjwviwp");
+        assert_eq!(text(&app), "top\nx \ntop\n y\n");
+
+        // A word in place of lines is a line of its own; the last line of the
+        // file gets no blank line after it.
+        let mut app = app_with("word\nl1\nl2\n");
+        feed(&mut app, "yiwjVjp");
+        assert_eq!(text(&app), "word\nword\n");
+        let mut app = app_with("word\nl1\nl2");
+        feed(&mut app, "yiwjVjp");
+        assert_eq!(text(&app), "word\nword");
+        let mut app = app_with("keep\nl1\nl2");
+        feed(&mut app, "yyjVjp");
+        assert_eq!(text(&app), "keep\nkeep");
+
+        // `vp` on an empty line fills it; the next line stays its own.
+        let mut app = app_with("word\n\nnext\n");
+        feed(&mut app, "yiwjvp");
+        assert_eq!(text(&app), "word\nword\nnext\n");
+
+        // Text spanning lines leaves the cursor at its start, as Normal `p`.
+        let mut app = app_with("ab\ncd\nxy zz\n");
+        feed(&mut app, "lvjyjjwviwp");
+        assert_eq!(text(&app), "ab\ncd\nxy b\ncd\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(2, 3));
+    }
+
+    /// `Y` yanks the selected lines, `C`/`S`/`R` change them, `I`/`A` end
+    /// Visual and start Insert, and an edit with no Visual meaning (`O`)
+    /// does nothing.
+    #[test]
+    fn visual_line_keys_and_unbound_edits() {
+        let mut app = app_with("ab\ncd\nef\n");
+        feed(&mut app, "vjY");
+        assert_eq!(app.registers.get(&'"').map(|r| (r.text.as_str(), r.linewise)), Some(("ab\ncd\n", true)));
+        assert_eq!(app.mode, Mode::Normal);
+        for key in ["C", "S", "R"] {
+            let mut app = app_with("ab\ncd\nef\n");
+            feed(&mut app, &format!("vj{key}"));
+            assert_eq!(text(&app), "\nef\n", "{key}");
+            assert_eq!(app.mode, Mode::Insert, "{key}");
+        }
+        // `I` before the selection, `A` after it, whichever end the cursor is on.
+        for (keys, want) in [
+            ("lvjIX", "aXb\ncd\n"),
+            ("jlvkIX", "aXb\ncd\n"),
+            ("vjAX", "ab\ncXd\n"),
+            ("jvkAX", "ab\ncXd\n"),
+            ("VjIX", "Xab\ncd\n"),
+            ("VjAX", "ab\ncdX\n"),
+        ] {
+            let mut app = app_with("ab\ncd\n");
+            feed(&mut app, keys);
+            assert_eq!(app.mode, Mode::Insert, "{keys}");
+            assert!(app.anchor.is_none(), "{keys}");
+            assert_eq!(text(&app), want, "{keys}");
+        }
+        let mut app = app_with("ab\ncd\n");
+        feed(&mut app, "vlO");
+        assert_eq!(text(&app), "ab\ncd\n");
+        assert_eq!(app.mode, Mode::Visual, "O is not an edit here");
+    }
+
+    /// `.` after a Visual edit repeats it on the same span from the cursor.
+    #[test]
+    fn visual_tilde_repeats_with_dot() {
+        let mut app = app_with("abc def\n");
+        feed(&mut app, "vll~w.");
+        assert_eq!(text(&app), "ABC DEF\n");
+    }
+
     /// In Visual, `Alt-j`/`Alt-k` move the items the selection touches, and
     /// the selection rides along for the next press.
     #[test]
@@ -8693,7 +9358,8 @@ mod tests {
             feed(&mut app, leave);
             esc(&mut app);
             assert!(app.anchor.is_none(), "no selection survives {leave}");
-            feed(&mut app, "j");
+            // To line 3 from the top: `I` leaves the cursor on the first line.
+            feed(&mut app, "ggjj");
             assert_eq!(app.mode, Mode::Normal);
             alt(&mut app, 'j');
             assert_eq!(text(&app), "- a\n- b\n- d\n- c\n", "after {leave}");
@@ -10173,6 +10839,54 @@ mod tests {
         assert_eq!(app.buffer.cursor.line, 0, "yip goes to the paragraph's first line");
     }
 
+    /// F16: `F` and `T` are exclusive under an operator, so the character
+    /// under the cursor stays; a forward `t` to the very next character
+    /// still gives the operator that one character; `;` and `,` take an
+    /// operator too.
+    #[test]
+    fn find_motions_under_an_operator() {
+        for (start, keys, want) in [
+            ("abcxdef\n", "$dFx", "abcf\n"),
+            ("abcxdef\n", "$dTx", "abcxf\n"),
+            ("(a)\n", "ldt)", "()\n"),
+            ("(a)\n", "lct)Z\x1b", "(Z)\n"),
+            ("abcxdef\n", "$cTxZ\x1b", "abcxZf\n"),
+            ("a.b.c.d\n", "f.0d;", "b.c.d\n"),
+            ("a.b.c.d\n", "f.d;", "ac.d\n"),
+            ("a.b.c.d\n", "f.;d,", "a.c.d\n"),
+            ("a-b-c\n", "t-d;", "-c\n"),
+            ("abcxdef\n", "dtx", "xdef\n"),
+            ("(abc\n", "lcT(Z\x1b", "(Zabc\n"),
+            ("(abc\n", "ldT(", "(abc\n"),
+            ("abcxdef\n", "dfx", "def\n"),
+        ] {
+            let mut app = app_with(start);
+            for c in keys.chars() {
+                if c == '\x1b' {
+                    esc(&mut app);
+                } else {
+                    feed(&mut app, &c.to_string());
+                }
+            }
+            assert_eq!(text(&app), want, "{keys} on {start:?}");
+        }
+        let mut app = app_with("abcxdef\n");
+        feed(&mut app, "$yFx");
+        assert_eq!(app.registers.get(&'"').map(|r| r.text.as_str()), Some("xde"));
+        assert_eq!(app.buffer.cursor.col, 3, "y leaves the cursor at the start");
+    }
+
+    /// F16: as plain motions the finds land where they always did.
+    #[test]
+    fn find_motions_alone_are_unchanged() {
+        for (keys, col) in [("$Fx", 3), ("$Tx", 4), ("tx", 2), ("ltx", 2), ("lltx", 2), ("fx", 3)] {
+            let mut app = app_with("abcxdef\n");
+            feed(&mut app, keys);
+            assert_eq!(app.buffer.cursor.col, col, "{keys}");
+            assert_eq!(text(&app), "abcxdef\n");
+        }
+    }
+
     #[test]
     fn repeat_find_with_semicolon_and_comma() {
         let mut app = app_with("a.b.c.d\n");
@@ -10904,6 +11618,115 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("two.md")).unwrap(), "file two\n");
         let msg = app.flash.as_ref().and_then(|f| f.text.clone()).unwrap_or_default();
         assert!(msg.contains("already exists"), "got: {msg:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F17: `Ctrl-W` deletes like vim's command line: the trailing spaces,
+    /// then one run of word characters or one run of symbols.
+    #[test]
+    fn ctrl_w_deletes_the_last_word() {
+        for (from, want) in [
+            ("ab cd", "ab "),
+            ("ab cd  ", "ab "),
+            ("one.md", "one."),
+            ("one..", "one"),
+            ("wq", ""),
+            ("", ""),
+            ("   ", ""),
+            ("été ça", "été "),
+        ] {
+            let mut s = from.to_string();
+            delete_last_word(&mut s);
+            assert_eq!(s, want, "{from:?}");
+        }
+    }
+
+    /// F17: in the `:` and `/` `?` lines a control chord is never typed as
+    /// its letter. `Ctrl-C` cancels, `Ctrl-U` clears, `Ctrl-W` deletes a
+    /// word, `Ctrl-H` is a backspace, and anything else is ignored.
+    #[test]
+    fn control_keys_in_the_command_and_search_lines() {
+        let field = |app: &App| match &app.mode {
+            Mode::Command(s) => Some(s.clone()),
+            Mode::Search { query, .. } => Some(query.clone()),
+            _ => None,
+        };
+        for open in [":", "/", "?"] {
+            let mut app = app_with("text\n");
+            feed(&mut app, open);
+            feed(&mut app, "ab cd");
+            ctrl(&mut app, 'w');
+            assert_eq!(field(&app).as_deref(), Some("ab "), "{open} Ctrl-W");
+            ctrl(&mut app, 'h');
+            assert_eq!(field(&app).as_deref(), Some("ab"), "{open} Ctrl-H");
+            ctrl(&mut app, 'x');
+            alt(&mut app, 'q');
+            assert_eq!(field(&app).as_deref(), Some("ab"), "{open} other chords ignored");
+            ctrl(&mut app, 'u');
+            assert_eq!(field(&app).as_deref(), Some(""), "{open} Ctrl-U");
+            feed(&mut app, "zz");
+            ctrl(&mut app, 'c');
+            assert_eq!(app.mode, Mode::Normal, "{open} Ctrl-C cancels");
+            assert_eq!(text(&app), "text\n");
+        }
+        // Ctrl-Shift-W is Ctrl-W; Alt- and Ctrl-Backspace delete a word.
+        let mut app = app_with("text\n");
+        feed(&mut app, ":ab cd ef");
+        key(&mut app, KeyCode::Char('W'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        key(&mut app, KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(app.mode, Mode::Command("ab ".into()));
+        key(&mut app, KeyCode::Backspace, KeyModifiers::CONTROL);
+        key(&mut app, KeyCode::Backspace, KeyModifiers::CONTROL);
+        assert_eq!(app.mode, Mode::Command("".into()), "a word delete never cancels");
+
+        // Ctrl-C cancels: the command typed so far does not run.
+        let mut app = app_with("text\n");
+        feed(&mut app, ":d");
+        ctrl(&mut app, 'c');
+        assert_eq!(text(&app), "text\n");
+        assert!(app.search.is_none());
+    }
+
+    /// F17: the finder's query takes the same editing keys, but an empty
+    /// query stays open on Backspace.
+    #[test]
+    fn control_keys_in_the_finder() {
+        let dir = two_files();
+        let mut app = app_with("text\n");
+        app.open_finder(dir.clone());
+        feed(&mut app, "ab cd");
+        ctrl(&mut app, 'w');
+        assert_eq!(app.finder.as_ref().unwrap().query, "ab ");
+        ctrl(&mut app, 'h');
+        ctrl(&mut app, 'x');
+        assert_eq!(app.finder.as_ref().unwrap().query, "ab");
+        ctrl(&mut app, 'u');
+        key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(app.finder.is_some(), "an empty query stays open");
+        ctrl(&mut app, 'c');
+        assert!(app.finder.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// F17: the tree's prompts take the same keys. `Ctrl-y` is not a yes.
+    #[test]
+    fn control_keys_in_a_tree_prompt() {
+        let dir = two_files();
+        let mut app = tree_on(&dir);
+        feed(&mut app, "r"); // opens pre-filled with "one.md"
+        ctrl(&mut app, 'w');
+        assert!(matches!(&app.mode, Mode::Prompt(p) if p.input == "one."), "{:?}", app.mode);
+        ctrl(&mut app, 'h');
+        ctrl(&mut app, 'x');
+        assert!(matches!(&app.mode, Mode::Prompt(p) if p.input == "one"), "{:?}", app.mode);
+        ctrl(&mut app, 'c');
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(dir.join("one.md").exists(), "nothing renamed");
+
+        feed(&mut app, "d");
+        ctrl(&mut app, 'y');
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(dir.join("one.md").exists(), "Ctrl-y did not delete");
         std::fs::remove_dir_all(&dir).ok();
     }
 
