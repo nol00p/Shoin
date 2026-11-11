@@ -5,7 +5,7 @@
 //! take over in steps 7 and 9 respectively, at which point `on_key` shrinks to
 //! a dispatch into `Action`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -140,27 +140,14 @@ pub struct BufferState {
     /// Per DOCUMENT, so switching buffers does not throw away the parse of the
     /// one you just left.
     pub cache: RefCell<RenderCache>,
-
-    /// Lowest line edited since this document's render cache last synced, so it
-    /// can splice its entries to follow the shift instead of re-parsing what
-    /// moved. Accumulated from `Buffer::dirty_line` in `refresh_blocks`.
-    render_dirty: Cell<Option<usize>>,
 }
 
 impl BufferState {
-    /// Hand the render cache the lowest line edited since it last synced, and
-    /// clear it. Read through `&self` because the cache syncs from the render
-    /// path.
-    pub fn take_render_dirty(&self) -> Option<usize> {
-        self.render_dirty.take()
-    }
-
     fn new(buffer: Buffer, math: bool) -> BufferState {
         BufferState {
             blocks: BlockCache::build(&buffer, math),
             buffer,
             cache: RefCell::new(RenderCache::default()),
-            render_dirty: Cell::new(None),
         }
     }
 
@@ -1168,15 +1155,6 @@ impl App {
     /// line was reported (a wholesale buffer swap, or a cache that never
     /// matched the document's length) does it fall back to a full rebuild.
     pub(crate) fn refresh_blocks(&mut self) {
-        // Both caches want the edited line, but only one can consume it, so it
-        // is forwarded to the render cache here on its way past.
-        if let Some(line) = self.buffer.dirty_line {
-            let merged = match self.render_dirty.get() {
-                Some(prev) => prev.min(line),
-                None => line,
-            };
-            self.render_dirty.set(Some(merged));
-        }
         // `[markdown] math` decides what a `$$` line opens; a cache built
         // under the other value is wrong everywhere, not just at an edit.
         if self.blocks.math != self.config.markdown.math {
@@ -12599,3 +12577,7 @@ mod tests {
 #[cfg(test)]
 #[path = "app_fuzz.rs"]
 mod fuzz;
+
+#[cfg(test)]
+#[path = "app_perf.rs"]
+mod perf;

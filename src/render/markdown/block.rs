@@ -270,10 +270,12 @@ impl BlockCache {
     /// recomputed carry matches the cached one. Returns the last line touched.
     ///
     /// Correctness rests on one fact: lines before the edit were not touched,
-    /// so the state ENTERING the line the scan resumes at is still valid. The early stop only fires when the line
-    /// count is unchanged, because an insertion/deletion shifts every cached
-    /// carry entry and the index-wise comparison would be against the wrong
-    /// source line; there we simply rescan to EOF, which is still correct.
+    /// so the state ENTERING the line the scan resumes at is still valid. An
+    /// insertion or deletion shifts every line below it, so the cached entries
+    /// are shifted the same way first, at the edit; the early stop compares
+    /// only past `edited_last`, where they line up with their own lines again.
+    /// (Until 2026-11 a changed line count rescanned to EOF instead: ~7 ms per
+    /// `Enter` or `dd` at 100,000 lines.)
     ///
     /// `edited_last` is the highest line the edits touched: the scan never stops
     /// before it, since an edit that kept the line count may have changed
@@ -292,7 +294,30 @@ impl BlockCache {
             return n.saturating_sub(1);
         }
 
-        let can_early_stop = n == self.kinds.len();
+        // Lines past `edited_last` are as they were (`Buffer::take_dirty`), so
+        // shifting the entries at `edited` — inside what the scan revisits —
+        // puts each of them back beside its own line. An added count that
+        // does not fit inside the edited lines means the bracket is not what
+        // it claims, and then nothing is compared: the scan runs to the end.
+        let old_n = self.kinds.len().min(self.carry.len());
+        let can_early_stop = match n.cmp(&old_n) {
+            std::cmp::Ordering::Equal => true,
+            std::cmp::Ordering::Greater => {
+                let added = n - old_n;
+                let fits = edited + added <= edited_last + 1 && edited <= old_n;
+                if fits {
+                    self.kinds.splice(edited..edited, std::iter::repeat_n(BlockKind::Paragraph, added));
+                    self.carry.splice(edited..edited, std::iter::repeat_n(Carry::default(), added));
+                }
+                fits
+            }
+            std::cmp::Ordering::Less => {
+                let removed = old_n - n;
+                self.kinds.drain(edited..edited + removed);
+                self.carry.drain(edited..edited + removed);
+                true
+            }
+        };
         let mut cur = self.carry[start].clone();
 
         self.kinds.resize(n, BlockKind::Paragraph);
@@ -1088,6 +1113,57 @@ mod tests {
                 b.delete_chars(start, end);
                 b.insert_str(Cursor::new(at, 0), pool[next(pool.len())]);
                 cache.invalidate_from(&b, at, at);
+                let fresh = BlockCache::build(&b, true);
+                assert_eq!(cache.kinds, fresh.kinds, "{}", b.rope);
+                assert_eq!(cache.carry, fresh.carry, "{}", b.rope);
+            }
+        }
+    }
+
+    /// An edit that adds or removes lines stops rescanning once the state
+    /// settles, as one that keeps the count does — and still agrees with a
+    /// full build, whatever it added or removed, after one edit or several.
+    #[test]
+    fn a_line_count_change_rescans_only_near_the_edit() {
+        let mut b = buf(&"para\n\n".repeat(500));
+        let mut cache = BlockCache::build(&b, true);
+        b.clear_dirty();
+        b.insert_str(Cursor::new(400, 2), "\n");
+        let (first, last) = b.take_dirty().unwrap();
+        let stop = cache.invalidate_from(&b, first, last);
+        assert!(stop < 410, "rescanned to line {stop} of {}", b.line_count());
+        assert_eq!(cache.kinds, BlockCache::build(&b, true).kinds);
+
+        let pool = ["```", "```rust", "$$", "| a | b |", "|---|---|", "- item", "  more", "# h", "", "text", "> q", "a\nb", "\n\n"];
+        let mut seed = 11u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..300 {
+            let lines: Vec<&str> = (0..16).map(|_| pool[next(pool.len())]).collect();
+            let mut b = buf(&(lines.join("\n") + "\n"));
+            let mut cache = BlockCache::build(&b, true);
+            b.clear_dirty();
+            for _ in 0..6 {
+                // One to three edits between rescans, each inserting or
+                // deleting whole or partial lines.
+                for _ in 0..1 + next(3) {
+                    let len = b.rope.len_chars();
+                    if next(2) == 0 && len > 0 {
+                        let from = next(len);
+                        let to = (from + 1 + next(12)).min(len);
+                        b.delete_chars(from, to);
+                    } else {
+                        let line = next(b.line_count());
+                        let piece = format!("{}\n", pool[next(pool.len())]);
+                        b.insert_str(Cursor::new(line, 0), &piece);
+                    }
+                }
+                let Some((first, last)) = b.take_dirty() else { continue };
+                cache.invalidate_from(&b, first, last);
                 let fresh = BlockCache::build(&b, true);
                 assert_eq!(cache.kinds, fresh.kinds, "{}", b.rope);
                 assert_eq!(cache.carry, fresh.carry, "{}", b.rope);
