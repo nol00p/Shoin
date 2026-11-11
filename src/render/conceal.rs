@@ -219,16 +219,34 @@ impl ConcealMap {
     /// Replacement glyphs inherit the style of the source span they sit under.
     pub fn render(&self, source: &str, spans: &[StyledSpan]) -> (String, Vec<StyledSpan>) {
         let chars: Vec<char> = source.chars().collect();
-        let style_at = |src: usize| -> Style {
-            spans
-                .iter()
-                .find(|s| s.range.start <= src && src < s.range.end)
-                .map(|s| s.style)
-                .unwrap_or(Style {
-                    fg: Color::None,
-                    bg: Color::None,
-                    attrs: Attrs::default(),
-                })
+        let plain = Style {
+            fg: Color::None,
+            bg: Color::None,
+            attrs: Attrs::default(),
+        };
+        // The styles are looked up at source columns that only ever grow, so
+        // when the spans are sorted and disjoint — the cache and the overlays
+        // keep them so — one index that moves forward finds each in turn.
+        // Searching from the start for every char made a long line with many
+        // spans quadratic: 625 ms a frame for 200 KB of bold words.
+        let ordered = spans
+            .windows(2)
+            .all(|w| w[0].range.end <= w[1].range.start);
+        let mut next = 0usize;
+        let mut style_at = |src: usize| -> Style {
+            if !ordered {
+                return spans
+                    .iter()
+                    .find(|s| s.range.start <= src && src < s.range.end)
+                    .map_or(plain, |s| s.style);
+            }
+            while next < spans.len() && spans[next].range.end <= src {
+                next += 1;
+            }
+            match spans.get(next) {
+                Some(s) if s.range.start <= src => s.style,
+                _ => plain,
+            }
         };
 
         let mut text = String::new();
@@ -1311,6 +1329,44 @@ mod tests {
         assert_eq!(styled("> quoted")[0].style.fg, theme.quote_bar);
         // The tick is the line's first span now — it replaces `- [x] ` whole.
         assert_eq!(styled("- [x] done")[0].style.fg, theme.task_done);
+    }
+
+    /// Each shown char keeps the style of the span over its source char,
+    /// whichever way `render` finds it: walking sorted spans in step with the
+    /// line, or searching spans that overlap, where the first one listed wins.
+    #[test]
+    fn rendered_chars_keep_their_source_style() {
+        let line = "a **b** c **d** e";
+        let st = |n: u8| Style::fg(Color::Indexed(n));
+        let cases = [
+            // Sorted, with gaps and an empty span, as the cache never makes
+            // but nothing forbids.
+            vec![
+                StyledSpan { range: 0..2, style: st(1) },
+                StyledSpan { range: 3..3, style: st(9) },
+                StyledSpan { range: 3..7, style: st(2) },
+                StyledSpan { range: 10..17, style: st(3) },
+            ],
+            // Out of order and overlapping.
+            vec![
+                StyledSpan { range: 8..17, style: st(4) },
+                StyledSpan { range: 0..12, style: st(5) },
+            ],
+        ];
+        for spans in cases {
+            let (text, out) = map(line).render(line, &spans);
+            assert_eq!(text, "a b c d e");
+            // Display col -> source col, for this line's two hidden `**` pairs.
+            let source = [0, 1, 4, 7, 8, 9, 12, 15, 16];
+            for (disp, &src) in source.iter().enumerate() {
+                let want = spans
+                    .iter()
+                    .find(|s| s.range.start <= src && src < s.range.end)
+                    .map(|s| s.style.fg);
+                let got = out.iter().find(|s| s.range.contains(&disp)).map(|s| s.style.fg);
+                assert_eq!(got, Some(want.unwrap_or(Color::None)), "display col {disp}");
+            }
+        }
     }
 
     /// A list should LOOK like a list: `- ` and `* ` become a bullet, one char

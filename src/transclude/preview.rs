@@ -118,9 +118,11 @@ pub fn expand(
         carry = next;
         // Wrapped here rather than at draw time: each wrapped row has to be a
         // row the cache can count, or the scroll arithmetic goes wrong.
+        // Sliced from one char vector: skipping to each row's start from the
+        // line's beginning walked a long line once per row it wraps to.
+        let chars: Vec<char> = line.chars().collect();
         for (a, b) in crate::render::layout::wrap_line(line, inner) {
-            let piece: String = line.chars().skip(a).take(b - a).collect();
-            rows.push(Row::Body(piece, kind.clone()));
+            rows.push(Row::Body(chars[a..b].iter().collect(), kind.clone()));
         }
     }
     if rows.is_empty() || matches!(rows.last(), Some(Row::Top(_))) {
@@ -173,9 +175,10 @@ fn picture(path: &Path, label: String, cfg: &TranscludeConfig, measure: u16) -> 
 /// where the message is cut off.
 fn one_error(label: String, why: String, measure: u16) -> Expansion {
     let msg = format!("![[{label}]] — {why}");
+    let chars: Vec<char> = msg.chars().collect();
     let rows = crate::render::layout::wrap_line(&msg, measure.max(8))
         .into_iter()
-        .map(|(a, b)| Row::Error(msg.chars().skip(a).take(b - a).collect()))
+        .map(|(a, b)| Row::Error(chars[a..b].iter().collect()))
         .collect();
     Expansion { rows }
 }
