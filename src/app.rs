@@ -1860,6 +1860,11 @@ impl App {
         self.pending_register = cmd.register;
         let count = cmd.count.max(1);
 
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) && self.visual_key(&cmd.action, count) {
+            self.pending_register = None;
+            return;
+        }
+
         match cmd.action {
             Action::Move(m) => {
                 self.remember_find(m);
@@ -4742,6 +4747,204 @@ impl App {
             // Visual selections are inclusive of the cursor character.
             self.operate_charwise(op, anchor, cursor, true);
         }
+    }
+
+    /// The Visual meaning of a Normal-mode edit key, which the Visual table
+    /// passes through unchanged (`bindings::visual`). Returns true when the
+    /// key is handled here, and `run` goes no further.
+    ///
+    /// Without this, `p`, `~`, `r`, `J` and `D` ran their Normal action at
+    /// the cursor and left Visual on, ignoring the selection.
+    fn visual_key(&mut self, action: &Action, count: usize) -> bool {
+        match action {
+            Action::PasteAfter => self.visual_paste(true, count),
+            Action::PasteBefore => self.visual_paste(false, count),
+            Action::ToggleCase => self.visual_map_chars(|c, out| {
+                if c.is_uppercase() {
+                    out.extend(c.to_lowercase());
+                } else if c.is_lowercase() {
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.push(c);
+                }
+            }),
+            Action::ReplaceChar(r) => {
+                let r = *r;
+                self.visual_map_chars(move |_, out| out.push(r));
+            }
+            Action::JoinLines => {
+                let (a, b) = self.visual_lines();
+                self.end_visual();
+                self.buffer.cursor = Cursor::new(a, 0);
+                // At least two lines, as vim: `vJ` on one line joins the next.
+                self.join_lines((b - a + 1).max(2));
+            }
+            // The capital letters work on whole LINES in Visual, whatever
+            // kind of selection it is.
+            Action::DeleteToEol | Action::DeleteCharBack => self.visual_lines_operate(Operator::Delete),
+            Action::YankLine => self.visual_lines_operate(Operator::Yank),
+            Action::ChangeToEol => self.visual_lines_operate(Operator::Change),
+            // Insert before the selection's first character, or after its
+            // last (in `V`, at the start of its first line or the end of its
+            // last), as vim's `I`/`A` do outside block mode.
+            Action::InsertLineStart | Action::AppendLineEnd => {
+                let (_, end, lo, linewise) = self.visual_span();
+                let (_, last) = self.visual_lines();
+                self.end_visual();
+                self.buffer.cursor = match (action, linewise) {
+                    (Action::InsertLineStart, _) => lo,
+                    (_, true) => Cursor::new(last, self.buffer.line_len(last)),
+                    // After the last selected character; a selection ending on
+                    // a line break appends at that line's end.
+                    _ => {
+                        let at = self.idx_to_cursor(end);
+                        if end > 0 && self.buffer.rope.char(end - 1) == '\n' {
+                            let l = at.line.saturating_sub(1);
+                            Cursor::new(l, self.buffer.line_len(l))
+                        } else {
+                            at
+                        }
+                    }
+                };
+                self.enter_insert();
+            }
+            // Edits with no Visual meaning do nothing, rather than edit at
+            // the cursor with a selection still showing.
+            Action::OpenAbove
+            | Action::OpenBelow
+            | Action::Insert
+            | Action::Append
+            | Action::DeleteChar
+            | Action::Redo
+            | Action::Repeat => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// The selection's first and last line.
+    fn visual_lines(&self) -> (usize, usize) {
+        let a = self.anchor.unwrap_or(self.buffer.cursor).line;
+        let b = self.buffer.cursor.line;
+        (a.min(b), a.max(b))
+    }
+
+    /// The selection as a char range `start..end`, the first character's
+    /// position, and whether it is linewise. A linewise range takes each line
+    /// whole, its last newline included when there is one.
+    fn visual_span(&self) -> (usize, usize, Cursor, bool) {
+        if matches!(self.mode, Mode::VisualLine) {
+            let (a, b) = self.visual_lines();
+            let start = self.buffer.rope.line_to_char(a);
+            let end = if b < self.buffer.last_line() {
+                self.buffer.rope.line_to_char(b + 1)
+            } else {
+                self.buffer.rope.len_chars()
+            };
+            return (start, end, Cursor::new(a, 0), true);
+        }
+        let anchor = self.anchor.unwrap_or(self.buffer.cursor);
+        let cur = self.buffer.cursor;
+        let lo = if (anchor.line, anchor.col) <= (cur.line, cur.col) { anchor } else { cur };
+        let hi = if lo == anchor { cur } else { anchor };
+        let start = self.buffer.char_index(lo);
+        let end = (self.buffer.char_index(hi) + 1).min(self.buffer.rope.len_chars());
+        (start, end, lo, false)
+    }
+
+    /// `~` and `r{c}` in Visual: rewrite every selected character but the
+    /// line breaks, end Visual, and leave the cursor at the selection's start.
+    fn visual_map_chars(&mut self, f: impl Fn(char, &mut String)) {
+        let (start, end, lo, _) = self.visual_span();
+        self.end_visual();
+        let text = self.buffer.rope.slice(start..end).to_string();
+        let mut mapped = String::with_capacity(text.len());
+        for c in text.chars() {
+            if c == '\n' {
+                mapped.push(c);
+            } else {
+                f(c, &mut mapped);
+            }
+        }
+        if mapped != text {
+            self.buffer.delete_chars(start, end);
+            self.buffer.insert_str(lo, &mapped);
+        }
+        self.buffer.cursor = lo;
+    }
+
+    /// `D`/`X`, `Y` and `C`/`S`/`R` in Visual: the operator on the selected
+    /// lines.
+    fn visual_lines_operate(&mut self, op: Operator) {
+        let (a, b) = self.visual_lines();
+        self.end_visual();
+        self.operate_linewise(op, a, b);
+    }
+
+    /// `p` / `P` in Visual: replace the selection with the register, `count`
+    /// copies of it. `p` puts what it replaced in the unnamed register, so
+    /// the next `p` swaps it back; `P` leaves the registers as they were
+    /// (vim 9), so one yank can replace several selections.
+    fn visual_paste(&mut self, keep_replaced: bool, count: usize) {
+        let Some(reg) = self.take_register() else {
+            self.leave_visual();
+            return;
+        };
+        if count > 1 && count.saturating_mul(reg.text.len()) > PASTE_LIMIT {
+            self.leave_visual();
+            return self.notify("paste: too large", FlashKind::Error);
+        }
+        let (start, mut end, lo, linewise) = self.visual_span();
+        self.end_visual();
+        // A charwise selection that ends on a line break (`vp` on an empty
+        // line, `v$p`) replaces the text, not the break: the next line stays
+        // where it is.
+        if !linewise && end > start && self.buffer.rope.char(end - 1) == '\n' {
+            end -= 1;
+        }
+        let ends_at_eof = end == self.buffer.rope.len_chars();
+        let replaced = self.buffer.rope.slice(start..end).to_string();
+
+        let reg_linewise = reg.linewise;
+        let mut one = reg.text;
+        if reg_linewise && !one.ends_with('\n') {
+            one.push('\n');
+        }
+        let mut text = one.repeat(count.max(1));
+        if reg_linewise && !linewise {
+            // Lines into the middle of a line split it around them.
+            text.insert(0, '\n');
+        } else if !reg_linewise && linewise {
+            // Text in place of lines is a line of its own.
+            text.push('\n');
+        }
+        // Lines replacing the last line of the file must not leave a blank
+        // one after them.
+        if linewise && ends_at_eof && !replaced.ends_with('\n') && text.ends_with('\n') {
+            text.pop();
+        }
+
+        self.buffer.delete_chars(start, end);
+        self.buffer.insert_str(lo, &text);
+        if keep_replaced {
+            let mut replaced = replaced;
+            if linewise && !replaced.ends_with('\n') {
+                replaced.push('\n');
+            }
+            self.store_register(replaced, linewise, true);
+        }
+        self.buffer.cursor = if reg_linewise {
+            let line = if linewise { lo.line } else { lo.line + 1 };
+            let line = line.min(self.buffer.last_line());
+            Cursor::new(line, self.first_non_blank(line))
+        } else if text.trim_end_matches('\n').contains('\n') {
+            // At the start of text that spans lines, as Normal `p` leaves it.
+            lo
+        } else {
+            // On the last character of one line of text.
+            let n = text.trim_end_matches('\n').chars().count();
+            self.idx_to_cursor(start + n.saturating_sub(1))
+        };
     }
 
     // ----------------------------------------------------------------- insert
@@ -8387,6 +8590,129 @@ mod tests {
         assert_eq!(text(&app), "- a\n- b");
     }
 
+    /// F15: Normal-mode edit keys act on the Visual selection and end Visual,
+    /// instead of editing at the cursor with the selection still up.
+    #[test]
+    fn visual_edit_keys_act_on_the_selection() {
+        for (start, keys, want) in [
+            ("one two three\n", "yiwwviwp", "one one three\n"),
+            ("abc def\n", "vll~", "ABC def\n"),
+            ("abc def\n", "vllrx", "xxx def\n"),
+            ("a\nb\nc\n", "VjJ", "a b\nc\n"),
+            ("abc def\nnext\n", "vlD", "next\n"),
+            ("abc def\nnext\n", "vlX", "next\n"),
+            ("one\ntwo\nthree\n", "jVp", "one\ntwo\nthree\n"),
+            ("ab\ncd\n", "vjl~", "AB\nCD\n"),
+            ("ab\ncd\n", "Vjrz", "zz\nzz\n"),
+            ("a\nb\n", "vJ", "a b\n"),
+        ] {
+            let mut app = app_with(start);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), want, "{keys} on {start:?}");
+            assert_eq!(app.mode, Mode::Normal, "{keys} ends Visual");
+            assert!(app.anchor.is_none(), "{keys} drops the selection");
+        }
+    }
+
+    /// `p` swaps: the replaced text goes to the unnamed register. `P` keeps
+    /// the register, so one yank replaces several selections. One undo step
+    /// takes the whole `viwp` back.
+    #[test]
+    fn visual_p_replaces_and_undoes_in_one_step() {
+        let mut app = app_with("one two three\n");
+        feed(&mut app, "yiwwviwp");
+        assert_eq!(text(&app), "one one three\n");
+        assert_eq!(app.registers.get(&'"').map(|r| r.text.as_str()), Some("two"));
+        feed(&mut app, "u");
+        assert_eq!(text(&app), "one two three\n");
+
+        let mut app = app_with("aa bb cc\n");
+        feed(&mut app, "yiwwviwPwviwP");
+        assert_eq!(text(&app), "aa aa aa\n");
+        assert_eq!(app.registers.get(&'"').map(|r| r.text.as_str()), Some("aa"));
+    }
+
+    /// A named register works in Visual too, and lines and text mix the way
+    /// vim mixes them.
+    #[test]
+    fn visual_p_takes_a_named_register_and_mixes_lines_and_text() {
+        let mut app = app_with("alpha beta\n");
+        feed(&mut app, "\"ayiwwviw\"ap");
+        assert_eq!(text(&app), "alpha alpha\n");
+
+        // A yanked line in place of a word splits the line around it.
+        let mut app = app_with("top\nx mid y\n");
+        feed(&mut app, "yyjwviwp");
+        assert_eq!(text(&app), "top\nx \ntop\n y\n");
+
+        // A word in place of lines is a line of its own; the last line of the
+        // file gets no blank line after it.
+        let mut app = app_with("word\nl1\nl2\n");
+        feed(&mut app, "yiwjVjp");
+        assert_eq!(text(&app), "word\nword\n");
+        let mut app = app_with("word\nl1\nl2");
+        feed(&mut app, "yiwjVjp");
+        assert_eq!(text(&app), "word\nword");
+        let mut app = app_with("keep\nl1\nl2");
+        feed(&mut app, "yyjVjp");
+        assert_eq!(text(&app), "keep\nkeep");
+
+        // `vp` on an empty line fills it; the next line stays its own.
+        let mut app = app_with("word\n\nnext\n");
+        feed(&mut app, "yiwjvp");
+        assert_eq!(text(&app), "word\nword\nnext\n");
+
+        // Text spanning lines leaves the cursor at its start, as Normal `p`.
+        let mut app = app_with("ab\ncd\nxy zz\n");
+        feed(&mut app, "lvjyjjwviwp");
+        assert_eq!(text(&app), "ab\ncd\nxy b\ncd\n");
+        assert_eq!(app.buffer.cursor, Cursor::new(2, 3));
+    }
+
+    /// `Y` yanks the selected lines, `C`/`S`/`R` change them, `I`/`A` end
+    /// Visual and start Insert, and an edit with no Visual meaning (`O`)
+    /// does nothing.
+    #[test]
+    fn visual_line_keys_and_unbound_edits() {
+        let mut app = app_with("ab\ncd\nef\n");
+        feed(&mut app, "vjY");
+        assert_eq!(app.registers.get(&'"').map(|r| (r.text.as_str(), r.linewise)), Some(("ab\ncd\n", true)));
+        assert_eq!(app.mode, Mode::Normal);
+        for key in ["C", "S", "R"] {
+            let mut app = app_with("ab\ncd\nef\n");
+            feed(&mut app, &format!("vj{key}"));
+            assert_eq!(text(&app), "\nef\n", "{key}");
+            assert_eq!(app.mode, Mode::Insert, "{key}");
+        }
+        // `I` before the selection, `A` after it, whichever end the cursor is on.
+        for (keys, want) in [
+            ("lvjIX", "aXb\ncd\n"),
+            ("jlvkIX", "aXb\ncd\n"),
+            ("vjAX", "ab\ncXd\n"),
+            ("jvkAX", "ab\ncXd\n"),
+            ("VjIX", "Xab\ncd\n"),
+            ("VjAX", "ab\ncdX\n"),
+        ] {
+            let mut app = app_with("ab\ncd\n");
+            feed(&mut app, keys);
+            assert_eq!(app.mode, Mode::Insert, "{keys}");
+            assert!(app.anchor.is_none(), "{keys}");
+            assert_eq!(text(&app), want, "{keys}");
+        }
+        let mut app = app_with("ab\ncd\n");
+        feed(&mut app, "vlO");
+        assert_eq!(text(&app), "ab\ncd\n");
+        assert_eq!(app.mode, Mode::Visual, "O is not an edit here");
+    }
+
+    /// `.` after a Visual edit repeats it on the same span from the cursor.
+    #[test]
+    fn visual_tilde_repeats_with_dot() {
+        let mut app = app_with("abc def\n");
+        feed(&mut app, "vll~w.");
+        assert_eq!(text(&app), "ABC DEF\n");
+    }
+
     /// In Visual, `Alt-j`/`Alt-k` move the items the selection touches, and
     /// the selection rides along for the next press.
     #[test]
@@ -8472,7 +8798,8 @@ mod tests {
             feed(&mut app, leave);
             esc(&mut app);
             assert!(app.anchor.is_none(), "no selection survives {leave}");
-            feed(&mut app, "j");
+            // To line 3 from the top: `I` leaves the cursor on the first line.
+            feed(&mut app, "ggjj");
             assert_eq!(app.mode, Mode::Normal);
             alt(&mut app, 'j');
             assert_eq!(text(&app), "- a\n- b\n- d\n- c\n", "after {leave}");
