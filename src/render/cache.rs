@@ -669,8 +669,9 @@ mod tests {
         sync(&mut app);
         {
             let cache = app.cache.borrow();
-            for line in 11..app.buffer.line_count() {
-                assert_eq!(cache.entry(line).unwrap().block, app.blocks.kinds[line], "line {line}");
+            let kinds = &app.blocks.kinds[..app.buffer.line_count()];
+            for (line, kind) in kinds.iter().enumerate().skip(11) {
+                assert_eq!(&cache.entry(line).unwrap().block, kind, "line {line}");
             }
         }
         let start = app.buffer.char_index(Cursor::new(30, 3));
