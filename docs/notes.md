@@ -99,6 +99,9 @@ See [Reading](reading.md#print-a-note).
 - Folders in a link narrow the search: `[[archive/todo]]` matches only a
   `todo.md` inside an `archive` folder.
 - `SHOIN_IMAGE_PROTOCOL=kitty|iterm|none` overrides the terminal detection.
+- With the kitty graphics protocol (kitty, Ghostty) only PNG pictures are
+  drawn; a JPEG or GIF keeps its box and caption. The iTerm2 protocol
+  (iTerm2, WezTerm, VS Code) draws all three.
 - A cycle of embeds is a hard error naming the loop, and an unresolved link
   leaves a visible placeholder rather than a silent hole in your export.
 - In an export, an embedded picture becomes `![name](path)`, with the path

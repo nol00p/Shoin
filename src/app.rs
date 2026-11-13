@@ -3029,6 +3029,19 @@ impl App {
     fn open_or_create(&mut self, path: PathBuf, section: &link::Section, name: bool) {
         let path = if path.exists() { path } else { with_default_ext(path, name) };
         if !path.exists() {
+            // `exists` follows links: a link to a missing note lands here too,
+            // and there is nothing to create, only a link to fix.
+            match ops::taken(&path) {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.notify(format!("{} is a broken link", self.shown(&path)), FlashKind::Error);
+                    return;
+                }
+                Err(e) => {
+                    self.notify(format!("{e:#}"), FlashKind::Error);
+                    return;
+                }
+            }
             if !creatable(&path, name) {
                 self.notify(format!("no {}", self.shown(&path)), FlashKind::Error);
                 return;
@@ -6872,6 +6885,22 @@ mod tests {
             link::resolve(&l, &app.link_from(), &app.link_root()).is_ok(),
             "the link that created the note now finds it"
         );
+    }
+
+    /// A note that is a link to a missing file is not created at the link's
+    /// far end: `gf` says the link is broken and makes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn gf_on_a_broken_link_says_so_and_creates_nothing() {
+        let (d, mut app) = vault("plan: [[tomorrow]]\n", &[]);
+        std::os::unix::fs::symlink(d.join("gone.md"), d.join("tomorrow.md")).unwrap();
+        cursor_on(&mut app, 0, "tomorrow");
+        feed(&mut app, "gf");
+
+        let flash = flash_text(&app);
+        assert!(flash.contains("tomorrow.md is a broken link"), "got {flash:?}");
+        assert!(std::fs::symlink_metadata(d.join("gone.md")).is_err(), "nothing at the far end");
+        assert!(std::fs::symlink_metadata(d.join("tomorrow.md")).unwrap().file_type().is_symlink());
     }
 
     /// `#Heading` lands ON the heading, not at the top of the file.
