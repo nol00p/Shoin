@@ -956,36 +956,35 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    if inner.width < 8 || inner.height < 2 {
+    if inner.width < 8 || inner.height < 3 {
         return;
     }
 
-    // A header row naming the sides, then the rows themselves. The divider
-    // takes one cell, so the two halves split what is left.
+    // A header row naming the sides, then the rows themselves, then a row for
+    // messages. The divider takes one cell, so the two halves split what is
+    // left.
     let side = (inner.width as usize - 1) / 2;
     let right_w = inner.width as usize - 1 - side;
     let head = Rect { height: 1, ..inner };
-    let mut body = Rect {
+    let body = Rect {
         y: inner.y + 1,
-        height: inner.height - 1,
+        height: (crate::diff::DiffView::body_height(area.height) as u16).min(inner.height - 2),
         ..inner
     };
 
     // The view covers the status line, so its messages — a refused `w` above
-    // all, which leaves the view open — take the bottom row here instead.
-    // Only while one is up: the rest of the time that row is the documents'.
+    // all, which leaves the view open — take this row instead. Reserved even
+    // when empty (`DiffView::body_height`): nothing scrolls under it, and the
+    // body does not jump a row when a message comes and goes.
     let message = app.flash.as_ref().and_then(|f| Some((f.text.as_ref()?, &f.kind)));
     if let Some((text, kind)) = message {
-        if body.height > 1 {
-            body.height -= 1;
-            let style = match kind {
-                FlashKind::Error => Style::default().fg(theme.error.to_ratatui()),
-                FlashKind::Info => Style::default().fg(dim),
-            };
-            let row = Rect { y: body.y + body.height, height: 1, ..inner };
-            let text = elide(&format!(" {text}"), inner.width as usize);
-            frame.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), row);
-        }
+        let style = match kind {
+            FlashKind::Error => Style::default().fg(theme.error.to_ratatui()),
+            FlashKind::Info => Style::default().fg(dim),
+        };
+        let row = Rect { y: body.y + body.height, height: 1, ..inner };
+        let text = elide(&format!(" {text}"), inner.width as usize);
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(text, style))), row);
     }
 
     let pad = |s: String, w: usize| -> String {
@@ -2446,6 +2445,45 @@ mod tests {
         assert!(all.contains("read-only — nothing written"), "drawn in the view:\n{all}");
         assert!(all.contains("mine") && all.contains("theirs"), "over nothing it shows:\n{all}");
         assert!(all.contains("w commit"), "the keys stay up:\n{all}");
+    }
+
+    /// The message row is always reserved, and the keys scroll by the same
+    /// body height the drawing uses: at the bottom (`G`), the last row is on
+    /// screen above the message, and a message coming or going moves nothing.
+    #[test]
+    fn the_diff_view_keeps_its_last_row_clear_of_the_message() {
+        let mut app = app_with("x\n");
+        let lines = |p: &str| (0..30).map(|i| format!("{p}{i}")).collect::<Vec<String>>();
+        let mut view = crate::diff::DiffView::new(0, "n.md".into(), lines("mine"), lines("file"), None);
+        view.scroll = view.rows() - crate::diff::DiffView::body_height(12);
+        app.diff = Some(view);
+        let screen = |app: &App| {
+            let buf = render_to(app, 70, 12);
+            (0..12).map(|y| row_text(&buf, y)).collect::<Vec<_>>()
+        };
+        let quiet = screen(&app);
+        assert!(quiet.iter().any(|r| r.contains("mine29")), "{}", quiet.join("\n"));
+
+        app.flash = Some(crate::app::Flash {
+            text: Some("a message".into()),
+            kind: crate::app::FlashKind::Info,
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        });
+        let loud = screen(&app);
+        let changed: Vec<usize> = (0..12).filter(|&y| quiet[y] != loud[y]).collect();
+        assert_eq!(changed.len(), 1, "only the message row:\n{}", loud.join("\n"));
+        assert!(loud[changed[0]].contains("a message"));
+        let last = loud.iter().position(|r| r.contains("mine29")).expect("still on screen");
+        assert!(last < changed[0], "above the message:\n{}", loud.join("\n"));
+
+        // From the top too: the message covers no difference, and without
+        // one the body shows no more rows than the keys scroll by.
+        app.diff.as_mut().unwrap().scroll = 0;
+        let shown = |rows: &[String]| rows.iter().filter(|r| r.contains("mine")).count();
+        let body = crate::diff::DiffView::body_height(12);
+        assert_eq!(shown(&screen(&app)), body);
+        app.flash = None;
+        assert_eq!(shown(&screen(&app)), body);
     }
 
     /// The merge selection has to be VISIBLE, or the reader is committing a

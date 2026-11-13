@@ -523,39 +523,6 @@ struct EmphasisSpan {
     inner: Range<usize>,
 }
 
-/// Narrow `[start, end)` to the text inside a span's markers where its ends
-/// ARE those markers, so the toggle sees the text the markers hold.
-///
-/// A range that is exactly one span — a Visual selection of `*word*` or
-/// `_word_`, markers and all — narrows at both ends, whatever the marker.
-/// Otherwise only an underscore run narrows, one end at a time: `_` is a word
-/// character, so the word under the cursor in `_word_` is all six characters,
-/// and in `_two words_` the word `_two` becomes `two`.
-fn inside_emphasis(
-    spans: &[EmphasisSpan],
-    rope: &ropey::Rope,
-    start: usize,
-    end: usize,
-) -> (usize, usize) {
-    if let Some(span) = spans.iter().find(|s| s.outer == (start..end)) {
-        return (span.inner.start, span.inner.end);
-    }
-    let (mut s, mut e) = (start, end);
-    for span in spans.iter().filter(|s| rope.char(s.outer.start) == '_') {
-        if span.outer.start == start && span.inner.start < end {
-            s = span.inner.start;
-        }
-        if span.outer.end == end && span.inner.end > start {
-            e = span.inner.end;
-        }
-    }
-    if s < e {
-        (s, e)
-    } else {
-        (start, end)
-    }
-}
-
 /// Where the link under the cursor points.
 ///
 /// Three cases because there are three ways to get there, not three syntaxes:
@@ -1732,7 +1699,7 @@ impl App {
         // Open ON the first difference rather than at the top: the reader asked
         // to see what changed, and in a long note that is rarely line 1.
         if let Some(first) = view.align.hunks.first().map(|h| h.start) {
-            view.reveal(first, self.term_size.1.saturating_sub(4).max(4) as usize);
+            view.reveal(first, crate::diff::DiffView::body_height(self.term_size.1));
         }
         // The view draws the flash inside it, so one left from before it
         // opened (a failed save, say) would read as being about the merge.
@@ -1780,16 +1747,20 @@ impl App {
         // that refuses it (read-only mode, a read-only range) must not be
         // written either: that would put the UNMERGED text over the file.
         //
-        // The view stays OPEN on a refusal, with every choice in it: closing
-        // would throw away the reader's per-difference work over something
-        // they cannot fix from inside it. `render_diff` draws the message.
+        // Read-only mode keeps the view OPEN, every choice in it, and says how
+        // to go on from there: `W` leaves read-only and writes those choices.
+        // Closing would throw the reader's per-difference work away over a
+        // mode one key can change. A read-only RANGE is not the reader's to
+        // change, so that refusal closes the view as before: nothing in it
+        // could ever be written.
         if !doc.buffer.replace_all(&merged) {
-            let msg = if doc.buffer.read_only {
-                "read-only — nothing written; q, then :view to edit".to_string()
-            } else {
-                format!("part of {name} refuses edits — nothing written")
-            };
             self.needs_redraw = true;
+            if doc.buffer.read_only {
+                let msg = "read-only — nothing written; W leaves read-only and writes";
+                return self.notify(msg, FlashKind::Error);
+            }
+            self.diff = None;
+            let msg = format!("part of {name} refuses edits — nothing written");
             return self.notify(msg, FlashKind::Error);
         }
         self.diff = None;
@@ -1809,7 +1780,7 @@ impl App {
     /// Keys inside the diff view. It has drawn over everything, so this is the
     /// whole grammar while it is up — deliberately small, and none of it edits.
     fn on_key_diff(&mut self, key: KeyEvent) {
-        let height = self.term_size.1.saturating_sub(4).max(4) as usize;
+        let height = crate::diff::DiffView::body_height(self.term_size.1);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let Some(view) = self.diff.as_mut() else { return };
 
@@ -1864,6 +1835,15 @@ impl App {
                 self.notify("every difference: keep both · w to commit", FlashKind::Info);
             }
             KeyCode::Char('w') => return self.commit_diff(),
+            // The way on from a `w` refused in read-only mode, named in that
+            // refusal: what `:view` would do, without leaving the view and
+            // the choices in it. Elsewhere it is `w`.
+            KeyCode::Char('W') => {
+                if self.view {
+                    self.set_view(false);
+                }
+                return self.commit_diff();
+            }
             _ => {}
         }
         self.needs_redraw = true;
@@ -4023,45 +4003,64 @@ impl App {
                 None => return,
             }
         };
-        // Emphasis has two spellings, `*x*` and `_x_`, and a span can hold
-        // another (`**_x_**`), so the bold and italic toggles read the line
-        // with the renderer's own scanner rather than looking at raw
-        // characters: they strip exactly what the reader sees styled, and
-        // `snake_case` or `a_b_c` open nothing. `==` and `` ` `` keep the
-        // plain check, as does a line that is not Markdown prose.
+        // The bold and italic toggles act on what the RENDERER styles, read
+        // with its own scanner, and nothing else. That makes `_x_` and `__x__`
+        // emphasis like the star forms, and `snake_case` or `a_b_c` plain text.
+        // `==` and `` ` `` have one spelling and keep the plain check.
         let italic = match marker {
             "*" => true,
             "**" => false,
             _ => return self.toggle_inline(marker, start, end),
         };
+        // A line the renderer styles nothing on (a fence, a table row), or a
+        // range over several lines, keeps the plain check too: it only ever
+        // strips the marker it writes, so an underscore the reader sees
+        // literally is never taken for emphasis.
         let Some(spans) = self.emphasis_spans(start, end) else {
             return self.toggle_inline(marker, start, end);
         };
-        let (start, end) = inside_emphasis(&spans, &self.buffer.rope, start, end);
+        // The span the range lies in. Only one that holds ALL of it: a
+        // selection running out of a span (`_a_ b`) is not about that span.
+        let Some(span) = spans.iter().find(|s| s.outer.start <= start && end <= s.outer.end) else {
+            return self.wrap_inline(marker, start, end);
+        };
+        let has = match span.kind {
+            Inline::Italic => italic,
+            Inline::Bold => !italic,
+            _ => true,
+        };
+        // Whichever part of the span the range covers, the toggle is about
+        // the span: it changes the span's own delimiter runs, star or
+        // underscore, by the marker's length.
         let n = marker.len();
-        let on = spans.iter().find(|s| {
-            s.inner == (start..end)
-                && match s.kind {
-                    Inline::Italic => italic,
-                    Inline::Bold => !italic,
-                    _ => true,
-                }
-        });
-        match on {
-            // Strip `n` of the span's own delimiter, star or underscore: one
-            // from `***x***` leaves `**x**`, as the toggle-off of italic.
-            Some(span) => {
-                let delim = self.buffer.rope.char(span.outer.start).to_string().repeat(n);
-                self.toggle_inline(&delim, start, end);
-            }
-            None => self.wrap_inline(marker, start, end),
+        let (s, e) = (span.inner.start, span.inner.end);
+        let at = start.clamp(s, e);
+        if has {
+            // One from `***x***` leaves `**x**`; all of `_x_` leaves `x`.
+            self.buffer.delete_chars(e, e + n);
+            self.buffer.delete_chars(s - n, s);
+            self.buffer.cursor = self.idx_to_cursor(at - n);
+        } else {
+            // Lengthen the runs: `**x**` becomes `***x***`. A marker written
+            // INSIDE the span (`**_x_**`) would show literally, since the
+            // renderer styles no span within another; a run of three is the
+            // one bold-and-italic it draws.
+            let delim = self.buffer.rope.char(span.outer.start).to_string().repeat(n);
+            let (at_e, at_s) = (self.idx_to_cursor(e), self.idx_to_cursor(s));
+            self.buffer.insert_str(at_e, &delim);
+            self.buffer.insert_str(at_s, &delim);
+            self.buffer.cursor = self.idx_to_cursor(at + n);
         }
     }
 
-    /// The emphasis spans on the line `[start, end)` sits on, nested ones
-    /// included, as char indexes into the rope. `None` where the line is not
-    /// prose (a fence, front matter, a math block: the scanner would find
-    /// "emphasis" the renderer never draws) or the range crosses a line.
+    /// The emphasis spans the renderer styles on the line `[start, end)` sits
+    /// on, as char indexes into the rope.
+    ///
+    /// The renderer styles the TOP-LEVEL spans of a line only (`inline::scan`
+    /// then `to_styled`): `_word_` inside `**…**`, a link label or `==…==`
+    /// shows its underscores, so it is not emphasis here either. `None` where
+    /// it styles nothing (`allows_inline`, with the same `[markdown] tables`
+    /// override as `render::cache::build`) or the range crosses a line.
     fn emphasis_spans(&mut self, start: usize, end: usize) -> Option<Vec<EmphasisSpan>> {
         self.refresh_blocks();
         let rope = &self.buffer.rope;
@@ -4069,37 +4068,25 @@ impl App {
         if end > start && rope.char_to_line(end - 1) != line {
             return None;
         }
-        if matches!(
-            self.blocks.kinds.get(line),
-            Some(
-                BlockKind::FenceOpen(_)
-                    | BlockKind::FenceBody { .. }
-                    | BlockKind::FenceClose
-                    | BlockKind::FrontMatter
-                    | BlockKind::MathBlock
-            )
-        ) {
+        let block = match self.blocks.kinds.get(line) {
+            Some(BlockKind::Table) if !self.config.markdown.tables => BlockKind::Paragraph,
+            Some(kind) => kind.clone(),
+            None => BlockKind::Paragraph,
+        };
+        if !block.allows_inline() {
             return None;
         }
-        let chars: Vec<char> = self.buffer.line_text(line).chars().collect();
-        let mut out = Vec::new();
-        let mut todo = vec![(rope.line_to_char(line), 0..chars.len())];
-        while let Some((base, range)) = todo.pop() {
-            let text: String = chars[range.clone()].iter().collect();
-            for s in inline::scan(&text, &self.config.markdown) {
-                if !matches!(s.kind, Inline::Italic | Inline::Bold | Inline::BoldItalic) {
-                    continue;
-                }
-                let at = base + range.start;
-                todo.push((base, s.inner.start + range.start..s.inner.end + range.start));
-                out.push(EmphasisSpan {
-                    kind: s.kind,
-                    outer: s.outer.start + at..s.outer.end + at,
-                    inner: s.inner.start + at..s.inner.end + at,
-                });
-            }
-        }
-        Some(out)
+        let base = rope.line_to_char(line);
+        let spans = inline::scan(&self.buffer.line_text(line), &self.config.markdown)
+            .into_iter()
+            .filter(|s| matches!(s.kind, Inline::Italic | Inline::Bold | Inline::BoldItalic))
+            .map(|s| EmphasisSpan {
+                kind: s.kind,
+                outer: s.outer.start + base..s.outer.end + base,
+                inner: s.inner.start + base..s.inner.end + base,
+            })
+            .collect();
+        Some(spans)
     }
 
     /// The word (alphanumeric/`_` run) under `col`, as a `[start, end)` column
@@ -7651,10 +7638,34 @@ mod tests {
             view.sides
         );
         assert!(flash_text(&app).contains("read-only"), "got: {}", flash_text(&app));
+        assert!(flash_text(&app).contains("W "), "and names the way on: {}", flash_text(&app));
         // `q` still leaves it, and nothing was written on the way out.
         diff_key(&mut app, 'q');
         assert!(app.diff.is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
+        assert!(app.buffer.read_only);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `W` after that refusal is the way on: it leaves read-only mode and
+    /// writes the merge the view's choices add up to.
+    #[test]
+    fn read_only_diff_shift_w_leaves_read_only_and_writes() {
+        let (mut app, path) = app_on_disk("ro-diff-w", "mine\n");
+        feed(&mut app, "A edited");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        app.set_view(true);
+        app.open_diff();
+        diff_key(&mut app, 'b');
+        diff_key(&mut app, 'w');
+        assert!(app.diff.is_some(), "refused, still open");
+        diff_key(&mut app, 'W');
+        assert!(app.diff.is_none(), "written, so closed");
+        assert!(!app.buffer.read_only, "read-only mode is off");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine edited\ntheirs\n");
+        assert_eq!(text(&app), "mine edited\ntheirs\n");
+        assert!(!app.buffer.modified);
         let _ = std::fs::remove_file(path);
     }
 
@@ -10551,7 +10562,8 @@ mod tests {
 
     /// `_word_` and `__word__` are emphasis too (F14), and `_` is a word
     /// character, so the word under the cursor INCLUDES the underscores. The
-    /// toggles have to see through them and strip, not wrap them in stars.
+    /// toggles act on the span the renderer styles, so they strip those
+    /// underscores rather than wrapping them in stars.
     #[test]
     fn gi_and_gb_strip_underscore_emphasis() {
         let cases = [
@@ -10560,35 +10572,60 @@ mod tests {
             ("gi", "say _hi_ now\n", "say hi now\n"),
             ("gb", "say __hi__ now\n", "say hi now\n"),
             ("gi", "_snake_case_\n", "snake_case\n"),
-            // The other emphasis is ADDED, inside the underscores.
-            ("gb", "_word_\n", "_**word**_\n"),
+            // Anywhere in the span: the toggle is about the span.
+            ("gi", "_two words_\n", "two words\n"),
             // Not emphasis: an underscore inside a word is plain text.
             ("gi", "snake_case\n", "*snake_case*\n"),
             ("gi", "_private\n", "*_private*\n"),
-            // A span inside another is read too, and only its markers go.
-            ("gi", "**_word_**\n", "**word**\n"),
-            ("gb", "_**word**_\n", "_word_\n"),
-            // Italic on bold ADDS italic; it does not turn bold into italic.
-            ("gi", "**word**\n", "***word***\n"),
-            ("gi", "__word__\n", "__*word*__\n"),
-            ("gi", "***word***\n", "**word**\n"),
-            ("gb", "___word___\n", "_word_\n"),
         ];
         for (keys, before, after) in cases {
-            let mut app = app_with(before);
-            // On the first letter after the first underscore, if any.
-            let from = before.find('_').unwrap_or(0);
-            let col = from + before[from..].find(char::is_alphanumeric).unwrap();
-            app.buffer.cursor = Cursor::new(0, col);
-            feed(&mut app, keys);
-            assert_eq!(text(&app), after, "{keys} on {before:?}");
+            assert_eq!(toggled(keys, before), after, "{keys} on {before:?}");
         }
     }
 
-    /// In a fence the scanner's "emphasis" is code nobody sees styled, so the
-    /// toggles there do what they always did: look only at the characters.
+    /// Run `keys` with the cursor on the first letter after the first
+    /// underscore (or the first letter, with none), and return the text.
+    fn toggled(keys: &str, before: &str) -> String {
+        let mut app = app_with(before);
+        let from = before.find('_').unwrap_or(0);
+        let col = from + before[from..].find(char::is_alphanumeric).unwrap();
+        app.buffer.cursor = Cursor::new(0, before[..col].chars().count());
+        feed(&mut app, keys);
+        text(&app)
+    }
+
+    /// The renderer styles only the OUTER span of a line: `_word_` inside
+    /// `**…**` shows its underscores, so it is bold text, not italic. The
+    /// toggles follow that: they strip the outer span when it has the
+    /// emphasis, and otherwise lengthen its runs to three, the one
+    /// bold-and-italic the renderer draws.
     #[test]
-    fn gi_in_a_fence_reads_no_emphasis() {
+    fn gi_and_gb_act_on_the_span_the_renderer_styles() {
+        let cases = [
+            ("gb", "**_word_**\n", "_word_\n"),
+            ("gi", "_**word**_\n", "**word**\n"),
+            ("gi", "*__word__*\n", "__word__\n"),
+            ("gb", "__*word*__\n", "*word*\n"),
+            // Not italic, as drawn: italic is added to the bold span.
+            ("gi", "**_word_**\n", "***_word_***\n"),
+            ("gi", "**word**\n", "***word***\n"),
+            ("gi", "__word__\n", "___word___\n"),
+            ("gb", "_word_\n", "___word___\n"),
+            ("gi", "***word***\n", "**word**\n"),
+            ("gb", "___word___\n", "_word_\n"),
+            // A link label is styled as a link, its underscores shown.
+            ("gi", "[_word_](u)\n", "[*_word_*](u)\n"),
+        ];
+        for (keys, before, after) in cases {
+            assert_eq!(toggled(keys, before), after, "{keys} on {before:?}");
+        }
+    }
+
+    /// Where the renderer styles nothing inline — a fence, a table row — the
+    /// toggles look only at the characters, and only for the marker they
+    /// write: an underscore the reader sees literally is never stripped.
+    #[test]
+    fn toggles_read_no_emphasis_where_nothing_is_styled() {
         let mut app = app_with("```\n_word_\n*code*\n```\n");
         app.buffer.cursor = Cursor::new(1, 1);
         feed(&mut app, "gi");
@@ -10596,10 +10633,23 @@ mod tests {
         app.buffer.cursor = Cursor::new(2, 1);
         feed(&mut app, "gi");
         assert_eq!(text(&app), "```\n*_word_*\ncode\n```\n");
+
+        let table = "| x | y |\n| - | - |\n| _a_ | b |\n";
+        let mut app = app_with(table);
+        app.buffer.cursor = Cursor::new(2, 3);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "| x | y |\n| - | - |\n| *_a_* | b |\n");
+        // With `[markdown] tables = false` the row renders as prose, styled.
+        let mut app = app_with(table);
+        app.config.markdown.tables = false;
+        app.buffer.cursor = Cursor::new(2, 3);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "| x | y |\n| - | - |\n| a | b |\n");
     }
 
     /// The same in Visual, whether the selection is the text between the
-    /// underscores or includes them — and the stars still toggle as before.
+    /// markers or includes them. A selection that runs OUT of a span is not
+    /// about that span, and is wrapped whole.
     #[test]
     fn visual_gi_and_gb_strip_underscore_emphasis() {
         let cases = [
@@ -10610,12 +10660,14 @@ mod tests {
             ("gi", "a *word* b\n", (3, 6), "a word b\n"),
             ("gi", "a *word* b\n", (2, 7), "a word b\n"),
             ("gb", "a **word** b\n", (2, 9), "a word b\n"),
+            ("gi", "a _two words_ b\n", (3, 5), "a two words b\n"),
             // Underscores inside a word open nothing: wrap, do not strip.
             ("gi", "a_b_c\n", (2, 2), "a_*b*_c\n"),
             // Two spans selected together are not one span to strip.
             ("gi", "*a* *b*\n", (0, 6), "**a* *b**\n"),
+            ("gb", "_a_ b\n", (0, 4), "**_a_ b**\n"),
             ("gi", "a **word** b\n", (2, 9), "a ***word*** b\n"),
-            ("gb", "a _word_ b\n", (2, 7), "a _**word**_ b\n"),
+            ("gb", "a _word_ b\n", (2, 7), "a ___word___ b\n"),
         ];
         for (keys, before, (lo, hi), after) in cases {
             let mut app = app_with(before);
