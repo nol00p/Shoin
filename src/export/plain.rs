@@ -29,11 +29,31 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
     let mut carry = Carry::default();
     let mut in_fence = false;
 
-    for (i, line) in text.lines().enumerate() {
-        let (kind, next) = classify(line, &carry, i == 0, md.math);
-        carry = next;
+    // Classified up front: whether a line ends in a hard break depends on
+    // whether the next line carries its paragraph on, and a table's header
+    // row is only known by the delimiter row after it — two lines ahead.
+    let lines: Vec<(&str, BlockKind)> = text
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let (kind, next) = classify(line, &carry, i == 0, md.math);
+            carry = next;
+            (line, kind)
+        })
+        .collect();
+    // With `tables = false` a table is prose to the paragraph rule, as it is
+    // to HTML; it is still written as the rows it is.
+    let as_prose = |k: &BlockKind| match k {
+        BlockKind::Table if !md.tables => BlockKind::Paragraph,
+        other => other.clone(),
+    };
+    let mut held = super::Held::default();
 
-        match &kind {
+    for (i, (line, kind)) in lines.iter().enumerate() {
+        let before = std::mem::take(&mut held);
+        held = before.next(line, &as_prose(kind), md.math);
+
+        match kind {
             // The fence delimiters go; the code between them is indented, which
             // is how plain text has always marked a block as verbatim.
             BlockKind::FenceOpen(_) => {
@@ -62,8 +82,18 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
             out.push(format!("    {line}"));
             continue;
         }
+        // Code is never touched, so this comes after the fence check.
+        let line = match as_prose(kind) {
+            BlockKind::Paragraph | BlockKind::Quote(_) | BlockKind::ListItem { .. } => {
+                let joins = lines.get(i + 1).is_some_and(|(next, k)| {
+                    held.joins(next, &as_prose(k), lines.get(i + 2).map(|(_, k)| k), md)
+                });
+                without_break(line, joins)
+            }
+            _ => line,
+        };
 
-        match &kind {
+        match kind {
             BlockKind::Heading(level) => {
                 let title = strip_inline(line.trim_start().trim_start_matches('#').trim(), md);
                 out.push(title.clone());
@@ -110,6 +140,24 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
         joined.push('\n');
     }
     joined
+}
+
+/// `line` without its hard-break marker. Plain text breaks a line by breaking
+/// it, so the two trailing spaces or the backslash that say so in Markdown
+/// are noise here. Trailing whitespace goes always; a backslash only when
+/// the next line carries the paragraph on (`Held::joins`), since one that ends a paragraph
+/// breaks nothing and is the author's text. An even run of backslashes is
+/// escaped backslashes, not a break — as `html::ParaLine` reads it.
+fn without_break(line: &str, continues: bool) -> &str {
+    let text = line.trim_end();
+    if text.len() < line.len() || !continues {
+        return text;
+    }
+    let slashes = text.len() - text.trim_end_matches('\\').len();
+    match slashes % 2 {
+        1 => &text[..text.len() - 1],
+        _ => text,
+    }
 }
 
 /// `12.` from `  12. text`.
@@ -283,6 +331,30 @@ mod tests {
         assert_eq!(render("1.\tone two\n", 72, false, &md), "1. one two\n");
         assert_eq!(render("- [x]\tdone\n", 72, false, &md), "[x] done\n");
         assert_eq!(render("*\t[ ]\tto do\n", 72, false, &md), "[ ] to do\n");
+    }
+
+    /// Plain text has line breaks of its own: a hard break's two spaces or
+    /// backslash are Markdown for one, and go. A backslash that ends the
+    /// paragraph breaks nothing and is text.
+    #[test]
+    fn hard_break_markers_go() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("one  \ntwo\n", 72, false, &md), "one\ntwo\n");
+        assert_eq!(render("one\\\ntwo\n", 72, false, &md), "one\ntwo\n");
+        assert_eq!(render("> one\\\n> two\n", 72, false, &md), "> one\n> two\n");
+        assert_eq!(render("> one  \n> two\n", 72, false, &md), "> one\n> two\n");
+        assert_eq!(render("- one\\\n  two\n", 72, false, &md), "- one\n  two\n");
+        assert_eq!(render("one\\\n", 72, false, &md), "one\\\n");
+        assert_eq!(render("one\\\n\ntwo\n", 72, false, &md), "one\\\n\ntwo\n");
+        assert_eq!(render("> one\\\n>\n> two\n", 72, false, &md), "> one\\\n> \n> two\n");
+    }
+
+    /// Code keeps its trailing spaces and backslashes: they are not breaks.
+    #[test]
+    fn code_keeps_its_line_ends() {
+        let md = MarkdownConfig::default();
+        assert_eq!(render("```\na  \nb\\\nc\n```\n", 72, false, &md), "    a  \n    b\\\n    c\n");
+        assert_eq!(render("- item\n  ```\n  a\\\n  b\n  ```\n", 72, false, &md), "- item\n      a\\\n      b\n");
     }
 
     #[test]

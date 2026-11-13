@@ -134,8 +134,17 @@ use std::path::Path;
 
 /// Whether two paths name the same file, resolving symlinks and `..` where the
 /// files exist. Used to keep `:export` from writing over its own source —
-/// comparing the strings would miss `./notes.md` against `notes.md`.
+/// comparing the strings would miss `./notes.md` against `notes.md`. On Unix
+/// the inode decides, because a hard link is a second name for the same file
+/// that no path resolution reveals.
 pub fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return x.dev() == y.dev() && x.ino() == y.ino();
+        }
+    }
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         // A destination that does not exist yet cannot be the source.
