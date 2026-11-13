@@ -306,7 +306,14 @@ fn rebase_line(line: &str, from: &Path, to: Option<&Path>, md: &MarkdownConfig) 
         out.extend(&chars[i..sp.outer.start]);
         let whole: String = chars[sp.outer.clone()].iter().collect();
         match sp.kind {
-            Inline::Bold | Inline::Italic | Inline::BoldItalic | Inline::Strikethrough | Inline::Highlight => {
+            // A link's text may hold a picture: the README badge
+            // `[![alt](img)](url)`.
+            Inline::Bold
+            | Inline::Italic
+            | Inline::BoldItalic
+            | Inline::Strikethrough
+            | Inline::Highlight
+            | Inline::Link => {
                 let inner: String = chars[sp.inner.clone()].iter().collect();
                 out.extend(&chars[sp.outer.start..sp.inner.start]);
                 out.push_str(&rebase_line(&inner, from, to, md));
@@ -572,6 +579,16 @@ mod tests {
     }
 
     use super::*;
+
+    /// A picture inside a link's text — the README badge — is rebased like
+    /// any other; the link's own address is left as written.
+    #[test]
+    fn a_badge_in_a_link_is_rebased() {
+        let md = MarkdownConfig::default();
+        let from = Path::new("/notes");
+        let got = rebase_line("[![ci](img/b.svg)](docs/x.md) and **![p](q.png)**", from, None, &md);
+        assert_eq!(got, "[![ci](/notes/img/b.svg)](docs/x.md) and **![p](/notes/q.png)**");
+    }
 
     #[test]
     fn formats_parse_by_extension_or_name() {

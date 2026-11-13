@@ -241,7 +241,8 @@ fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
                     _ => out.push_str(&text),
                 }
             }
-            Inline::Image => out.push_str(&format!("[image: {inner}]")),
+            // Alt text is plain: `![a [b](c)](d)` reads "a b".
+            Inline::Image => out.push_str(&format!("[image: {}]", strip_in(&inner, md, true))),
             // What the reader sees in the editor: the label after `|`, or
             // the target when there is none.
             Inline::WikiLink => match inner.split_once('|') {
@@ -259,6 +260,14 @@ fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A picture's alt text is plain, and a badge in a link names its picture.
+    #[test]
+    fn pictures_name_their_plain_alt_text() {
+        let md = MarkdownConfig::default();
+        assert_eq!(strip_inline("![a [b](c) *d*](p.png)", &md), "[image: a b d]");
+        assert_eq!(strip_inline("[![ci](b.svg)](https://x.y)", &md), "[image: ci] (https://x.y)");
+    }
 
     /// LaTeX is not Markdown: nothing in a display block is stripped.
     #[test]
