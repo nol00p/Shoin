@@ -1314,8 +1314,12 @@ mod tests {
         assert_eq!(out, "10. a\n         - x\n\n      para\n    - w\n");
     }
 
+    /// U+2028 is not a line break (F05): `x\u{2028}y` is ONE buffer line, so
+    /// the list starts on line 2 and line 3 is the blank inside it. Realign
+    /// counts lines the way the buffer does, re-indents only the list, and
+    /// leaves the separator where it was.
     #[test]
-    fn realign_reads_lines_ropey_splits_on_its_own() {
+    fn realign_keeps_a_line_separator_inside_its_line() {
         let t = "x\u{2028}y\n\n- a\n\n       para\n- b\n\n       more\n";
         let (out, skipped) = realigned_tw(t, 3, 4);
         assert!(skipped.is_empty(), "{skipped:?}");
