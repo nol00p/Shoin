@@ -237,7 +237,7 @@ pub fn wrap_chars(chars: &[char], measure: u16) -> Vec<(usize, usize)> {
     let mut i = 0usize;
 
     while i < chars.len() {
-        let w = UnicodeWidthChar::width(chars[i]).unwrap_or(0);
+        let w = cell_width(chars[i]);
         if width + w > max && i > start {
             // Break at the last space if there was one inside this row,
             // otherwise hard-break at the current character.
@@ -269,6 +269,35 @@ pub fn char_window(chars: &[char], start: usize, end: usize) -> String {
     chars[start.min(end)..end].iter().collect()
 }
 
+/// What a char that must not reach the terminal raw is drawn as instead.
+///
+/// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR sit inside a line,
+/// since lines break on `\n` only (F05). Sent raw, terminals disagree on
+/// them: some break the row, some draw nothing, and the screen drifts from
+/// the layout. So each is drawn as a dim `↵` — not East Asian Ambiguous, so a
+/// CJK terminal draws it one cell wide too — and the reader can see, and put
+/// the caret on, a char that is really there. The C0 controls need nothing
+/// here: they measure zero cells and ratatui drops them.
+pub fn stand_in(c: char) -> Option<char> {
+    match c {
+        '\u{2028}' | '\u{2029}' => Some('\u{21b5}'),
+        _ => None,
+    }
+}
+
+/// The cells `c` takes on screen: a `stand_in` char is measured as the glyph
+/// drawn for it, not as itself. unicode-width gives both one cell today, but
+/// every screen measure — wrap, caret, click, conceal — goes through here so
+/// the measure follows the draw whatever the two say. Not for the file:
+/// `text::table` pads by unicode-width itself.
+pub fn cell_width(c: char) -> usize {
+    match stand_in(c) {
+        Some(g) => UnicodeWidthChar::width(g).unwrap_or(1),
+        None => UnicodeWidthChar::width(c).unwrap_or(0),
+    }
+}
+
+
 /// A line that never wraps: one range, covering the whole line.
 ///
 /// A table row's columns are aligned by `|`s the author placed in the source;
@@ -282,7 +311,7 @@ pub fn no_wrap(text: &str) -> Vec<(usize, usize)> {
 /// The single funnel for measuring a line in display cells.
 pub fn display_width(text: &str) -> u16 {
     text.chars()
-        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .map(cell_width)
         .sum::<usize>() as u16
 }
 

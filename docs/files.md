@@ -155,3 +155,5 @@ version and then the file's, in the order shown on screen.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
   separator (U+2028) stays inside its line and is saved as it was. A form
   feed, a lone `\r` and other control characters show as nothing on screen.
+  A line separator or paragraph separator (U+2029) shows as a dim `↵`, one
+  cell wide, so the cursor can rest on it.
