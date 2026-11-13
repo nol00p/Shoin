@@ -285,9 +285,11 @@ pub fn stand_in(c: char) -> Option<char> {
     }
 }
 
-/// The cells `c` takes on screen. unicode-width gives the separators zero,
-/// but they are drawn as their one-cell `stand_in`, so every measure — wrap,
-/// caret, click, conceal — must count that one cell or drift from the draw.
+/// The cells `c` takes on screen: a `stand_in` char is measured as the glyph
+/// drawn for it, not as itself. unicode-width gives both one cell today, but
+/// every screen measure — wrap, caret, click, conceal — goes through here so
+/// the measure follows the draw whatever the two say. Not for the file:
+/// `text::table` pads by unicode-width itself.
 pub fn cell_width(c: char) -> usize {
     match stand_in(c) {
         Some(g) => UnicodeWidthChar::width(g).unwrap_or(1),
@@ -295,14 +297,6 @@ pub fn cell_width(c: char) -> usize {
     }
 }
 
-/// `text` with every `stand_in` char replaced, for text drawn in one style.
-pub fn screen_text(text: &str) -> std::borrow::Cow<'_, str> {
-    if text.chars().any(|c| stand_in(c).is_some()) {
-        text.chars().map(|c| stand_in(c).unwrap_or(c)).collect::<String>().into()
-    } else {
-        text.into()
-    }
-}
 
 /// A line that never wraps: one range, covering the whole line.
 ///

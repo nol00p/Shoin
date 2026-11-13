@@ -12,14 +12,12 @@
 
 use std::ops::Range;
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::config::schema::GlyphConfig;
 use crate::input::mode::Mode;
 use crate::text::cursor::Cursor;
 
 use super::indent;
-use super::layout::cell_width;
+use super::layout::{cell_width, display_width};
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
 use super::theme::{Attrs, Color, Style, Theme};
@@ -195,7 +193,7 @@ impl ConcealMap {
             match op {
                 Conceal::Hide(rr) => src = rr.end,
                 Conceal::Replace { range, text, .. } => {
-                    let w = UnicodeWidthStr::width(text.as_str()) as u16;
+                    let w = display_width(text);
                     if display_col < disp + w {
                         return range.start;
                     }
@@ -313,7 +311,7 @@ impl ConcealMap {
             let hidden: usize = chars[r.clone()].iter().map(width_of).sum();
             let shown = match op {
                 Conceal::Hide(_) => 0,
-                Conceal::Replace { text, .. } => UnicodeWidthStr::width(text.as_str()),
+                Conceal::Replace { text, .. } => display_width(text) as usize,
             };
             shift += hidden.saturating_sub(shown);
             src = r.end;
@@ -1105,7 +1103,7 @@ fn math_block_ops(chars: &[char], ops: &mut Vec<Conceal>) {
 /// A horizontal rule `width` cells wide, drawn from `glyph` (which may itself
 /// be more than one cell).
 fn rule(glyph: &str, width: u16) -> String {
-    let unit = UnicodeWidthStr::width(glyph).max(1);
+    let unit = display_width(glyph).max(1) as usize;
     glyph.repeat((width as usize / unit).max(1))
 }
 
@@ -1300,14 +1298,14 @@ mod tests {
     #[test]
     fn fence_delimiters_become_a_rule() {
         let open = shown("```rust");
-        assert_eq!(UnicodeWidthStr::width(open.as_str()), MEASURE as usize);
+        assert_eq!(display_width(&open), MEASURE);
         assert!(!open.contains('`'));
         // The closing fence needs the carry state that says we are inside one.
         let close = shown_in(
             "```",
             &Carry::from(Open::InFence { fence: "```".into(), lang: None, cont: Default::default() }),
         );
-        assert_eq!(UnicodeWidthStr::width(close.as_str()), MEASURE as usize);
+        assert_eq!(display_width(&close), MEASURE);
     }
 
     /// The bar and the box wear their own theme colors, not the dim marker
@@ -1469,6 +1467,20 @@ mod tests {
         assert_eq!(m.source_col(line, 3), 6); // its second cell is still 世
         assert_eq!(m.source_col(line, 4), 7); // 界
         assert_eq!(m.source_col(line, 6), 8); // 'x'
+    }
+
+    /// A line separator is drawn as a one-cell `↵`, inside replaced text
+    /// (inline math keeps it) as anywhere else, so a click past it is counted
+    /// with that cell.
+    #[test]
+    fn source_col_counts_a_separator_in_replaced_text() {
+        // `\alpha` makes the math one `Replace` of the whole inside: 1..9.
+        let line = "$\\alpha\u{2028}b$ x";
+        assert_eq!(shown(line), "\u{3b1}\u{2028}b x");
+        let m = map(line);
+        assert_eq!(m.source_col(line, 2), 1, "inside the math lands on its start");
+        assert_eq!(m.source_col(line, 3), 10, "the space after it");
+        assert_eq!(m.source_col(line, 4), 11, "the x");
     }
 
     #[test]

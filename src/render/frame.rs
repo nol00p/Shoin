@@ -20,7 +20,7 @@ use crate::render::markdown::block::BlockKind;
 use crate::render::splash;
 use crate::render::focus::FocusRegion;
 use crate::render::layout::{
-    char_window, display_width, screen_text, scroll_offset, stand_in, Layout, VisualRow,
+    char_window, display_width, scroll_offset, stand_in, Layout, VisualRow,
 };
 use crate::render::numbers::NumberMode;
 use crate::render::theme::Color as ThemeColor;
@@ -134,9 +134,9 @@ pub fn render(frame: &mut Frame, app: &App) {
             // clipped message looks like a finished one, and the half that
             // gets lost is the end — which for an error is the half that says
             // what to do about it.
+            let status = elide(&status, lay.measure as usize);
             // A message can quote the document, or name a file.
-            let status = elide(&screen_text(&status), lay.measure as usize);
-            let line = Line::from(Span::styled(status, style)).right_aligned();
+            let line = Line::from(screen_spans(&status, style)).right_aligned();
             frame.render_widget(Paragraph::new(line), status_area);
         }
     }
@@ -550,16 +550,16 @@ fn render_embed_row(
             }
         }
         // A label or message can carry a file name, and a file name a separator.
-        Row::Caption(text) => vec![Span::styled(elide(&screen_text(text), width), dim)],
+        Row::Caption(text) => screen_spans(&elide(text, width), dim),
         Row::Top(label) => {
             // `\u{256d} `, ` `, at least one rule cell, and `\u{256e}` are the fixed cost; a
             // label longer than what is left is elided rather than allowed to
             // push the closing corner off the screen.
             let room = width.saturating_sub(5);
-            let label = elide(&screen_text(label), room);
+            let label = elide(label, room);
             let head = format!("\u{256d} {label} ");
             let rule = "\u{2500}".repeat(width.saturating_sub(display_width(&head) as usize + 1));
-            vec![Span::styled(format!("{head}{rule}\u{256e}"), dim)]
+            screen_spans(&format!("{head}{rule}\u{256e}"), dim)
         }
         Row::Bottom => vec![Span::styled(
             format!(
@@ -568,10 +568,7 @@ fn render_embed_row(
             ),
             dim,
         )],
-        Row::Error(msg) => vec![Span::styled(
-            screen_text(msg).into_owned(),
-            ThemeStyle::fg(theme.error).to_ratatui(),
-        )],
+        Row::Error(msg) => screen_spans(msg, ThemeStyle::fg(theme.error).to_ratatui()),
         Row::Body(text, block) => {
             // Styled AND CONCEALED with the document's own rules. An embedded
             // line is never the active line — it is not in this rope at all —
@@ -908,19 +905,24 @@ fn tree_row<'a>(app: &App, tree: &FileTree, e: &Entry, selected: bool, width: us
     // --- assemble, truncating the NAME (never the guides) to fit ---
     let fixed = prefix.chars().count() + icon.chars().count() + 1;
     let room = width.saturating_sub(fixed);
-    let name: String = screen_text(&e.name).chars().take(room).collect();
+    let name: std::borrow::Cow<str> = if e.name.chars().count() > room {
+        e.name.chars().take(room).collect::<String>().into()
+    } else {
+        e.name.as_str().into()
+    };
     let pad = width.saturating_sub(fixed + name.chars().count());
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             prefix,
             sel_bg(Style::default().fg(theme.text_dim.to_ratatui()).add_modifier(Modifier::DIM)),
         ),
         Span::styled(icon, sel_bg(Style::default().fg(icon_color.to_ratatui()))),
         Span::styled(" ", sel_bg(Style::default())),
-        Span::styled(name, sel_bg(name_style)),
-        Span::styled(" ".repeat(pad), sel_bg(Style::default())),
-    ])
+    ];
+    spans.extend(screen_spans(&name, sel_bg(name_style)));
+    spans.push(Span::styled(" ".repeat(pad), sel_bg(Style::default())));
+    Line::from(spans)
 }
 
 /// Draw the `:diff` conflict view: the buffer on the left, the file on the
@@ -1035,23 +1037,22 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
                     mark: char,
                     w: usize,
                     live: bool|
-         -> Span<'static> {
+         -> Vec<Span<'static>> {
             match line {
-                Some(n) => Span::styled(
-                    pad(format!("{mark}{}", screen_text(from.get(n).map_or("", String::as_str))), w),
+                Some(n) => screen_spans(
+                    &pad(format!("{mark}{}", from.get(n).cloned().unwrap_or_default()), w),
                     match keeps(live) {
                         true => Style::default().fg(colour),
                         false => Style::default().fg(dim).add_modifier(Modifier::CROSSED_OUT),
                     },
                 ),
-                None => Span::styled(filler(w), Style::default().fg(dim)),
+                None => vec![Span::styled(filler(w), Style::default().fg(dim))],
             }
         };
-        lines.push(Line::from(vec![
-            text(row.left(), &view.mine, marks.0, side, true),
-            bar,
-            text(row.right(), &view.theirs, marks.1, right_w, false),
-        ]));
+        let mut cells = text(row.left(), &view.mine, marks.0, side, true);
+        cells.push(bar);
+        cells.extend(text(row.right(), &view.theirs, marks.1, right_w, false));
+        lines.push(Line::from(cells));
     }
     frame.render_widget(Paragraph::new(lines), body);
 }
@@ -1429,16 +1430,16 @@ fn render_command_box(
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
 
-    let line = Line::from(vec![
-        Span::styled(prompt.to_string(), Style::default().fg(accent.to_ratatui())),
-        // A search can be pasted from the document, separators and all.
-        Span::styled(
-            screen_text(buf).into_owned(),
-            Style::default()
-                .fg(theme.text.to_ratatui())
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
+    // A prompt can name a path, and a search can be pasted from the document,
+    // separators and all; both are placed by `display_width` below.
+    let mut spans = screen_spans(prompt, Style::default().fg(accent.to_ratatui()));
+    spans.extend(screen_spans(
+        buf,
+        Style::default()
+            .fg(theme.text.to_ratatui())
+            .add_modifier(Modifier::BOLD),
+    ));
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), inner);
 
     // Caret after the typed text, clamped inside the box. Measured from the
@@ -1520,23 +1521,25 @@ fn render_finder(frame: &mut Frame, app: &App, finder: &Finder, area: Rect) {
         finder.file_count(),
         if finder.truncated { "+" } else { "" }
     );
-    let gap = inner_w.saturating_sub(typed.chars().count() + count.chars().count());
-    let mut lines = vec![Line::from(vec![
-        Span::styled("> ", Style::default().fg(accent.to_ratatui())),
-        Span::styled(
-            finder.query.clone(),
-            Style::default()
-                .fg(theme.text.to_ratatui())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(
-            count,
-            Style::default()
-                .fg(theme.text_dim.to_ratatui())
-                .add_modifier(Modifier::DIM),
-        ),
-    ])];
+    // Cells, as the caret below measures them, so a wide or stand-in char in
+    // the query does not push the count off the row.
+    let gap = inner_w
+        .saturating_sub(display_width(&typed) as usize + display_width(&count) as usize);
+    let mut query = vec![Span::styled("> ", Style::default().fg(accent.to_ratatui()))];
+    query.extend(screen_spans(
+        &finder.query,
+        Style::default()
+            .fg(theme.text.to_ratatui())
+            .add_modifier(Modifier::BOLD),
+    ));
+    query.push(Span::raw(" ".repeat(gap)));
+    query.push(Span::styled(
+        count,
+        Style::default()
+            .fg(theme.text_dim.to_ratatui())
+            .add_modifier(Modifier::DIM),
+    ));
+    let mut lines = vec![Line::from(query)];
 
     // --- result rows, scrolled to keep the selection in view ---
     let len = finder.matches.len();
@@ -1629,7 +1632,10 @@ fn result_line<'a>(
     }
     for (i, c) in chars.iter().enumerate().skip(skipped) {
         let style = if positions.contains(&i) { hit } else { base };
-        spans.push(Span::styled(stand_in(*c).unwrap_or(*c).to_string(), style));
+        match stand_in(*c) {
+            Some(g) => spans.push(Span::styled(g.to_string(), style.add_modifier(Modifier::DIM))),
+            None => spans.push(Span::styled(c.to_string(), style)),
+        }
     }
     let drawn = lead + usize::from(elided) + (chars.len() - skipped);
     spans.push(Span::styled(" ".repeat(width.saturating_sub(drawn)), base));
@@ -1947,6 +1953,28 @@ fn window_spans(chars: &[char], styled: &[StyledSpan], start: usize, end: usize)
         if run < e {
             out.push(Span::styled(chars[run..e].iter().collect::<String>(), style));
         }
+    }
+    out
+}
+
+/// `text` in one `style`, with each `stand_in` char split out and drawn as
+/// that stand-in, dimmed, the way `window_spans` draws one in the document.
+/// For the chrome that shows document text or file names: the status line,
+/// embed labels, the diff view, the prompts, the tree.
+fn screen_spans(text: &str, style: Style) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut run = 0;
+    for (at, c) in text.char_indices() {
+        if let Some(g) = stand_in(c) {
+            if run < at {
+                out.push(Span::styled(text[run..at].to_string(), style));
+            }
+            out.push(Span::styled(g.to_string(), style.add_modifier(Modifier::DIM)));
+            run = at + c.len_utf8();
+        }
+    }
+    if run < text.len() || out.is_empty() {
+        out.push(Span::styled(text[run..].to_string(), style));
     }
     out
 }
@@ -3520,6 +3548,26 @@ mod tests {
         no_raw_separator(&buf);
         let screen: String = (0..24).map(|y| row_text(&buf, y)).collect::<Vec<_>>().join("\n");
         assert!(screen.contains("a\u{21b5}b") && screen.contains("a\u{21b5}c"), "{screen}");
+        let marks: Vec<_> = (0..24)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .filter(|p| buf[*p].symbol() == "\u{21b5}")
+            .collect();
+        assert_eq!(marks.len(), 2);
+        assert!(marks.iter().all(|p| buf[*p].modifier.contains(Modifier::DIM)), "dim, as in the editor");
+    }
+
+    /// The chrome's split: text either side keeps its style, the stand-in
+    /// adds DIM, and text with no separator stays one span.
+    #[test]
+    fn screen_spans_dims_only_the_stand_in() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let spans = screen_spans("a\u{2028}\u{2029}b", bold);
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, ["a", "\u{21b5}", "\u{21b5}", "b"]);
+        assert_eq!(spans[0].style, bold);
+        assert_eq!(spans[1].style, bold.add_modifier(Modifier::DIM));
+        assert_eq!(screen_spans("plain", bold).len(), 1);
+        assert_eq!(screen_spans("", bold).len(), 1);
     }
 }
 
