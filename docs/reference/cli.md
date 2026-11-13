@@ -68,7 +68,8 @@ are in the [key reference](keys.md#read-only), and
 ## Other options
 
 Without `--out` or `--stdout`, `--export` writes `<name>.<format>` beside
-the file. With no `FILE` and nothing piped in, Shoin opens a blank page with
+the file, or `<name>-export.<format>` when that is the file itself: Markdown
+from `notes.md` goes to `notes-export.md`. With no `FILE` and nothing piped in, Shoin opens a blank page with
 the splash screen.
 `SHOIN_CONFIG` names a config like `--config` does, and
 `SHOIN_IMAGE_PROTOCOL=kitty|iterm|none` overrides image detection. See

@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -442,21 +443,84 @@ pub struct Search {
     pub reverse: bool,
 }
 
-/// First index at or after `from` where `needle` occurs in `hay`.
-fn char_find(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
-        return None;
-    }
-    (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
+// Search runs per keypress (`/`, `n`, `N`), so it reads the rope a line at a
+// time with `str::find` rather than copying the document into a `Vec<char>`
+// and comparing at every position. Positions are CHAR indexes into the rope;
+// bytes are only ever an offset inside one line's text.
+
+/// The byte offset of char `col` in `s`, or `s.len()` past its end.
+fn byte_of(s: &str, col: usize) -> usize {
+    s.char_indices().nth(col).map_or(s.len(), |(b, _)| b)
 }
 
-/// Last index at or before `before` where `needle` occurs in `hay`.
-fn char_rfind(hay: &[char], needle: &[char], before: usize) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
+/// First char index at or after `from` where `needle` starts in `hay`.
+fn str_find(hay: &str, needle: &str, from: usize) -> Option<usize> {
+    let at = byte_of(hay, from);
+    let found = hay[at..].find(needle)?;
+    Some(from + hay[at..at + found].chars().count())
+}
+
+/// Last char index at or before `before` where `needle` starts in `hay`. The
+/// match may run past `before`, so the text searched ends a needle's length
+/// after it: no match starting later fits in that.
+fn str_rfind(hay: &str, needle: &str, before: usize) -> Option<usize> {
+    let end = byte_of(hay, before.saturating_add(needle.chars().count()));
+    let found = hay[..end].rfind(needle)?;
+    Some(hay[..found].chars().count())
+}
+
+/// One line's text: borrowed when the rope holds it in one chunk, as it does
+/// for all but the rare line that straddles two.
+fn line_str(rope: &ropey::Rope, line: usize) -> std::borrow::Cow<'_, str> {
+    let slice = rope.line(line);
+    match slice.as_str() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(slice.to_string()),
+    }
+}
+
+/// First char index at or after `from` where `needle` occurs in `rope`.
+fn rope_find(rope: &ropey::Rope, needle: &str, from: usize) -> Option<usize> {
+    if needle.is_empty() || from >= rope.len_chars() {
         return None;
     }
-    let max = before.min(hay.len() - needle.len());
-    (0..=max).rev().find(|&i| hay[i..i + needle.len()] == needle[..])
+    // Only `\n` ends a rope line here (ropey is built without `unicode_lines`
+    // and `cr_lines`), so a needle without one lies inside a single line. One
+    // with it — it would have to be pasted into the search line — is looked
+    // for in the whole text.
+    if needle.contains('\n') {
+        return str_find(&rope.to_string(), needle, from);
+    }
+    let first = rope.char_to_line(from);
+    (first..rope.len_lines()).find_map(|line| {
+        let base = rope.line_to_char(line);
+        str_find(&line_str(rope, line), needle, from.max(base) - base).map(|i| base + i)
+    })
+}
+
+/// Last char index at or before `before` where `needle` occurs in `rope`.
+fn rope_rfind(rope: &ropey::Rope, needle: &str, before: usize) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let before = before.min(rope.len_chars());
+    if needle.contains('\n') {
+        return str_rfind(&rope.to_string(), needle, before);
+    }
+    let last = rope.char_to_line(before);
+    (0..=last).rev().find_map(|line| {
+        let base = rope.line_to_char(line);
+        let limit = if line == last { before - base } else { usize::MAX };
+        str_rfind(&line_str(rope, line), needle, limit).map(|i| base + i)
+    })
+}
+
+/// An emphasis span the bold and italic toggles can strip, in char indexes
+/// into the rope (`inline::InlineSpan` counts from the start of its line).
+struct EmphasisSpan {
+    kind: Inline,
+    outer: Range<usize>,
+    inner: Range<usize>,
 }
 
 /// Where the link under the cursor points.
@@ -1650,8 +1714,11 @@ impl App {
         // Open ON the first difference rather than at the top: the reader asked
         // to see what changed, and in a long note that is rarely line 1.
         if let Some(first) = view.align.hunks.first().map(|h| h.start) {
-            view.reveal(first, self.term_size.1.saturating_sub(4).max(4) as usize);
+            view.reveal(first, crate::diff::DiffView::body_height(self.term_size.1));
         }
+        // The view draws the flash inside it, so one left from before it
+        // opened (a failed save, say) would read as being about the merge.
+        self.flash = None;
         if view.align.coarse {
             self.notify("the two versions share little — showing one block", FlashKind::Info);
         }
@@ -1689,20 +1756,29 @@ impl App {
             );
         }
 
-        self.diff = None;
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let doc = &mut self.docs[doc];
         // The merge has to land in the buffer before it is written. A buffer
         // that refuses it (read-only mode, a read-only range) must not be
         // written either: that would put the UNMERGED text over the file.
+        //
+        // Read-only mode keeps the view OPEN, every choice in it, and says how
+        // to go on from there: `W` leaves read-only and writes those choices.
+        // Closing would throw the reader's per-difference work away over a
+        // mode one key can change. A read-only RANGE is not the reader's to
+        // change, so that refusal closes the view as before: nothing in it
+        // could ever be written.
         if !doc.buffer.replace_all(&merged) {
-            let msg = if doc.buffer.read_only {
-                "read-only — nothing written; :view to edit, then :diff".to_string()
-            } else {
-                format!("part of {name} refuses edits — nothing written")
-            };
+            self.needs_redraw = true;
+            if doc.buffer.read_only {
+                let msg = "read-only — nothing written; W leaves read-only and writes";
+                return self.notify(msg, FlashKind::Error);
+            }
+            self.diff = None;
+            let msg = format!("part of {name} refuses edits — nothing written");
             return self.notify(msg, FlashKind::Error);
         }
+        self.diff = None;
         // Forced, and safe to force: the guard exists to catch a change nobody
         // has looked at, and the check above just proved there is none.
         match doc.buffer.save(policy, true) {
@@ -1719,7 +1795,7 @@ impl App {
     /// Keys inside the diff view. It has drawn over everything, so this is the
     /// whole grammar while it is up — deliberately small, and none of it edits.
     fn on_key_diff(&mut self, key: KeyEvent) {
-        let height = self.term_size.1.saturating_sub(4).max(4) as usize;
+        let height = crate::diff::DiffView::body_height(self.term_size.1);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let Some(view) = self.diff.as_mut() else { return };
 
@@ -1774,6 +1850,15 @@ impl App {
                 self.notify("every difference: keep both · w to commit", FlashKind::Info);
             }
             KeyCode::Char('w') => return self.commit_diff(),
+            // The way on from a `w` refused in read-only mode, named in that
+            // refusal: what `:view` would do, without leaving the view and
+            // the choices in it. Elsewhere it is `w`.
+            KeyCode::Char('W') => {
+                if self.view {
+                    self.set_view(false);
+                }
+                return self.commit_diff();
+            }
             _ => {}
         }
         self.needs_redraw = true;
@@ -3044,6 +3129,19 @@ impl App {
     fn open_or_create(&mut self, path: PathBuf, section: &link::Section, name: bool) {
         let path = if path.exists() { path } else { with_default_ext(path, name) };
         if !path.exists() {
+            // `exists` follows links: a link to a missing note lands here too,
+            // and there is nothing to create, only a link to fix.
+            match ops::taken(&path) {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.notify(format!("{} is a broken link", self.shown(&path)), FlashKind::Error);
+                    return;
+                }
+                Err(e) => {
+                    self.notify(format!("{e:#}"), FlashKind::Error);
+                    return;
+                }
+            }
             if !creatable(&path, name) {
                 self.notify(format!("no {}", self.shown(&path)), FlashKind::Error);
                 return;
@@ -3933,7 +4031,90 @@ impl App {
                 None => return,
             }
         };
-        self.toggle_inline(marker, start, end);
+        // The bold and italic toggles act on what the RENDERER styles, read
+        // with its own scanner, and nothing else. That makes `_x_` and `__x__`
+        // emphasis like the star forms, and `snake_case` or `a_b_c` plain text.
+        // `==` and `` ` `` have one spelling and keep the plain check.
+        let italic = match marker {
+            "*" => true,
+            "**" => false,
+            _ => return self.toggle_inline(marker, start, end),
+        };
+        // A line the renderer styles nothing on (a fence, a table row), or a
+        // range over several lines, keeps the plain check too: it only ever
+        // strips the marker it writes, so an underscore the reader sees
+        // literally is never taken for emphasis.
+        let Some(spans) = self.emphasis_spans(start, end) else {
+            return self.toggle_inline(marker, start, end);
+        };
+        // The span the range lies in. Only one that holds ALL of it: a
+        // selection running out of a span (`_a_ b`) is not about that span.
+        let Some(span) = spans.iter().find(|s| s.outer.start <= start && end <= s.outer.end) else {
+            return self.wrap_inline(marker, start, end);
+        };
+        let has = match span.kind {
+            Inline::Italic => italic,
+            Inline::Bold => !italic,
+            _ => true,
+        };
+        // Whichever part of the span the range covers, the toggle is about
+        // the span: it changes the span's own delimiter runs, star or
+        // underscore, by the marker's length.
+        let n = marker.len();
+        let (s, e) = (span.inner.start, span.inner.end);
+        let at = start.clamp(s, e);
+        if has {
+            // One from `***x***` leaves `**x**`; all of `_x_` leaves `x`.
+            self.buffer.delete_chars(e, e + n);
+            self.buffer.delete_chars(s - n, s);
+            self.buffer.cursor = self.idx_to_cursor(at - n);
+        } else {
+            // Lengthen the runs: `**x**` becomes `***x***`. A marker written
+            // INSIDE the span (`**_x_**`) would show literally, since the
+            // renderer styles no span within another; a run of three is the
+            // one bold-and-italic it draws.
+            let delim = self.buffer.rope.char(span.outer.start).to_string().repeat(n);
+            let (at_e, at_s) = (self.idx_to_cursor(e), self.idx_to_cursor(s));
+            self.buffer.insert_str(at_e, &delim);
+            self.buffer.insert_str(at_s, &delim);
+            self.buffer.cursor = self.idx_to_cursor(at + n);
+        }
+    }
+
+    /// The emphasis spans the renderer styles on the line `[start, end)` sits
+    /// on, as char indexes into the rope.
+    ///
+    /// The renderer styles the TOP-LEVEL spans of a line only (`inline::scan`
+    /// then `to_styled`): `_word_` inside `**…**`, a link label or `==…==`
+    /// shows its underscores, so it is not emphasis here either. `None` where
+    /// it styles nothing (`allows_inline`, with the same `[markdown] tables`
+    /// override as `render::cache::build`) or the range crosses a line.
+    fn emphasis_spans(&mut self, start: usize, end: usize) -> Option<Vec<EmphasisSpan>> {
+        self.refresh_blocks();
+        let rope = &self.buffer.rope;
+        let line = rope.char_to_line(start);
+        if end > start && rope.char_to_line(end - 1) != line {
+            return None;
+        }
+        let block = match self.blocks.kinds.get(line) {
+            Some(BlockKind::Table) if !self.config.markdown.tables => BlockKind::Paragraph,
+            Some(kind) => kind.clone(),
+            None => BlockKind::Paragraph,
+        };
+        if !block.allows_inline() {
+            return None;
+        }
+        let base = rope.line_to_char(line);
+        let spans = inline::scan(&self.buffer.line_text(line), &self.config.markdown)
+            .into_iter()
+            .filter(|s| matches!(s.kind, Inline::Italic | Inline::Bold | Inline::BoldItalic))
+            .map(|s| EmphasisSpan {
+                kind: s.kind,
+                outer: s.outer.start + base..s.outer.end + base,
+                inner: s.inner.start + base..s.inner.end + base,
+            })
+            .collect();
+        Some(spans)
     }
 
     /// The word (alphanumeric/`_` run) under `col`, as a `[start, end)` column
@@ -3983,12 +4164,20 @@ impl App {
             self.buffer.delete_chars(start - mlen, start);
             self.buffer.cursor = self.idx_to_cursor(start - mlen);
         } else {
-            // Wrap: insert at the end first, then the start.
-            let (at_end, at_start) = (self.idx_to_cursor(end), self.idx_to_cursor(start));
-            self.buffer.insert_str(at_end, marker);
-            self.buffer.insert_str(at_start, marker);
-            self.buffer.cursor = self.idx_to_cursor(start + mlen);
+            self.wrap_inline(marker, start, end);
         }
+    }
+
+    /// Wrap `[start, end)` in `marker`, whatever is around it already.
+    fn wrap_inline(&mut self, marker: &str, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        // Insert at the end first, then the start, so `start` stays valid.
+        let (at_end, at_start) = (self.idx_to_cursor(end), self.idx_to_cursor(start));
+        self.buffer.insert_str(at_end, marker);
+        self.buffer.insert_str(at_start, marker);
+        self.buffer.cursor = self.idx_to_cursor(start + marker.chars().count());
     }
 
     /// `gt`: flip a task checkbox, or add one to a plain list item.
@@ -5975,16 +6164,15 @@ impl App {
             Some(s) if !s.pattern.is_empty() => s.pattern.clone(),
             _ => return,
         };
-        let needle: Vec<char> = pattern.chars().collect();
-        let hay: Vec<char> = self.buffer.rope.chars().collect();
+        let rope = &self.buffer.rope;
         let cur = self.buffer.char_index(self.buffer.cursor);
         let found = if backward {
             // Strictly before the cursor, else wrap to the end.
             cur.checked_sub(1)
-                .and_then(|before| char_rfind(&hay, &needle, before))
-                .or_else(|| char_rfind(&hay, &needle, hay.len()))
+                .and_then(|before| rope_rfind(rope, &pattern, before))
+                .or_else(|| rope_rfind(rope, &pattern, rope.len_chars()))
         } else {
-            char_find(&hay, &needle, cur + 1).or_else(|| char_find(&hay, &needle, 0))
+            rope_find(rope, &pattern, cur + 1).or_else(|| rope_find(rope, &pattern, 0))
         };
         match found {
             Some(idx) => {
@@ -6889,6 +7077,22 @@ mod tests {
         );
     }
 
+    /// A note that is a link to a missing file is not created at the link's
+    /// far end: `gf` says the link is broken and makes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn gf_on_a_broken_link_says_so_and_creates_nothing() {
+        let (d, mut app) = vault("plan: [[tomorrow]]\n", &[]);
+        std::os::unix::fs::symlink(d.join("gone.md"), d.join("tomorrow.md")).unwrap();
+        cursor_on(&mut app, 0, "tomorrow");
+        feed(&mut app, "gf");
+
+        let flash = flash_text(&app);
+        assert!(flash.contains("tomorrow.md is a broken link"), "got {flash:?}");
+        assert!(std::fs::symlink_metadata(d.join("gone.md")).is_err(), "nothing at the far end");
+        assert!(std::fs::symlink_metadata(d.join("tomorrow.md")).unwrap().file_type().is_symlink());
+    }
+
     /// `#Heading` lands ON the heading, not at the top of the file.
     #[test]
     fn gf_lands_on_the_section_a_link_asks_for() {
@@ -7451,6 +7655,10 @@ mod tests {
     /// `w` in the diff view writes nothing in read-only mode. The merge
     /// cannot go into a buffer that refuses edits, and writing the buffer
     /// as it stands would put the unmerged text over the file's.
+    ///
+    /// The view stays open with every choice the reader made: closing it
+    /// would throw those away for a refusal they can do nothing about inside
+    /// it. The refusal is drawn in the view (see `render_diff`).
     #[test]
     fn read_only_diff_commit_writes_nothing() {
         let (mut app, path) = app_on_disk("ro-diff", "mine\n");
@@ -7460,13 +7668,48 @@ mod tests {
         app.set_view(true);
         app.open_diff();
         assert!(app.diff.is_some(), "a read-only buffer can still be compared");
+        // `:view` flashed a message; the view would show it as its own.
+        assert!(app.flash.is_none(), "an older message does not follow it in");
         diff_key(&mut app, 'f');
         diff_key(&mut app, 'w');
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "the file is untouched");
         assert_eq!(text(&app), "mine edited\n", "so is the buffer");
         assert!(app.buffer.modified, "and its changes are still unsaved");
-        assert!(app.diff.is_none(), "closed, so the message can be seen");
+        let view = app.diff.as_ref().expect("the view stays open");
+        assert!(
+            view.sides.iter().all(|s| *s == crate::diff::Side::File),
+            "with the choices made in it: {:?}",
+            view.sides
+        );
         assert!(flash_text(&app).contains("read-only"), "got: {}", flash_text(&app));
+        assert!(flash_text(&app).contains("W "), "and names the way on: {}", flash_text(&app));
+        // `q` still leaves it, and nothing was written on the way out.
+        diff_key(&mut app, 'q');
+        assert!(app.diff.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
+        assert!(app.buffer.read_only);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `W` after that refusal is the way on: it leaves read-only mode and
+    /// writes the merge the view's choices add up to.
+    #[test]
+    fn read_only_diff_shift_w_leaves_read_only_and_writes() {
+        let (mut app, path) = app_on_disk("ro-diff-w", "mine\n");
+        feed(&mut app, "A edited");
+        esc(&mut app);
+        write_settled(&path, "theirs\n");
+        app.set_view(true);
+        app.open_diff();
+        diff_key(&mut app, 'b');
+        diff_key(&mut app, 'w');
+        assert!(app.diff.is_some(), "refused, still open");
+        diff_key(&mut app, 'W');
+        assert!(app.diff.is_none(), "written, so closed");
+        assert!(!app.buffer.read_only, "read-only mode is off");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine edited\ntheirs\n");
+        assert_eq!(text(&app), "mine edited\ntheirs\n");
+        assert!(!app.buffer.modified);
         let _ = std::fs::remove_file(path);
     }
 
@@ -10361,6 +10604,126 @@ mod tests {
         assert_eq!(text(&app), "`word`\n");
     }
 
+    /// `_word_` and `__word__` are emphasis too (F14), and `_` is a word
+    /// character, so the word under the cursor INCLUDES the underscores. The
+    /// toggles act on the span the renderer styles, so they strip those
+    /// underscores rather than wrapping them in stars.
+    #[test]
+    fn gi_and_gb_strip_underscore_emphasis() {
+        let cases = [
+            ("gi", "_word_\n", "word\n"),
+            ("gb", "__word__\n", "word\n"),
+            ("gi", "say _hi_ now\n", "say hi now\n"),
+            ("gb", "say __hi__ now\n", "say hi now\n"),
+            ("gi", "_snake_case_\n", "snake_case\n"),
+            // Anywhere in the span: the toggle is about the span.
+            ("gi", "_two words_\n", "two words\n"),
+            // Not emphasis: an underscore inside a word is plain text.
+            ("gi", "snake_case\n", "*snake_case*\n"),
+            ("gi", "_private\n", "*_private*\n"),
+        ];
+        for (keys, before, after) in cases {
+            assert_eq!(toggled(keys, before), after, "{keys} on {before:?}");
+        }
+    }
+
+    /// Run `keys` with the cursor on the first letter after the first
+    /// underscore (or the first letter, with none), and return the text.
+    fn toggled(keys: &str, before: &str) -> String {
+        let mut app = app_with(before);
+        let from = before.find('_').unwrap_or(0);
+        let col = from + before[from..].find(char::is_alphanumeric).unwrap();
+        app.buffer.cursor = Cursor::new(0, before[..col].chars().count());
+        feed(&mut app, keys);
+        text(&app)
+    }
+
+    /// The renderer styles only the OUTER span of a line: `_word_` inside
+    /// `**…**` shows its underscores, so it is bold text, not italic. The
+    /// toggles follow that: they strip the outer span when it has the
+    /// emphasis, and otherwise lengthen its runs to three, the one
+    /// bold-and-italic the renderer draws.
+    #[test]
+    fn gi_and_gb_act_on_the_span_the_renderer_styles() {
+        let cases = [
+            ("gb", "**_word_**\n", "_word_\n"),
+            ("gi", "_**word**_\n", "**word**\n"),
+            ("gi", "*__word__*\n", "__word__\n"),
+            ("gb", "__*word*__\n", "*word*\n"),
+            // Not italic, as drawn: italic is added to the bold span.
+            ("gi", "**_word_**\n", "***_word_***\n"),
+            ("gi", "**word**\n", "***word***\n"),
+            ("gi", "__word__\n", "___word___\n"),
+            ("gb", "_word_\n", "___word___\n"),
+            ("gi", "***word***\n", "**word**\n"),
+            ("gb", "___word___\n", "_word_\n"),
+            // A link label is styled as a link, its underscores shown.
+            ("gi", "[_word_](u)\n", "[*_word_*](u)\n"),
+        ];
+        for (keys, before, after) in cases {
+            assert_eq!(toggled(keys, before), after, "{keys} on {before:?}");
+        }
+    }
+
+    /// Where the renderer styles nothing inline — a fence, a table row — the
+    /// toggles look only at the characters, and only for the marker they
+    /// write: an underscore the reader sees literally is never stripped.
+    #[test]
+    fn toggles_read_no_emphasis_where_nothing_is_styled() {
+        let mut app = app_with("```\n_word_\n*code*\n```\n");
+        app.buffer.cursor = Cursor::new(1, 1);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "```\n*_word_*\n*code*\n```\n");
+        app.buffer.cursor = Cursor::new(2, 1);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "```\n*_word_*\ncode\n```\n");
+
+        let table = "| x | y |\n| - | - |\n| _a_ | b |\n";
+        let mut app = app_with(table);
+        app.buffer.cursor = Cursor::new(2, 3);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "| x | y |\n| - | - |\n| *_a_* | b |\n");
+        // With `[markdown] tables = false` the row renders as prose, styled.
+        let mut app = app_with(table);
+        app.config.markdown.tables = false;
+        app.buffer.cursor = Cursor::new(2, 3);
+        feed(&mut app, "gi");
+        assert_eq!(text(&app), "| x | y |\n| - | - |\n| a | b |\n");
+    }
+
+    /// The same in Visual, whether the selection is the text between the
+    /// markers or includes them. A selection that runs OUT of a span is not
+    /// about that span, and is wrapped whole.
+    #[test]
+    fn visual_gi_and_gb_strip_underscore_emphasis() {
+        let cases = [
+            ("gi", "a _word_ b\n", (3, 6), "a word b\n"),
+            ("gi", "a _word_ b\n", (2, 7), "a word b\n"),
+            ("gb", "a __word__ b\n", (4, 7), "a word b\n"),
+            ("gb", "a __word__ b\n", (2, 9), "a word b\n"),
+            ("gi", "a *word* b\n", (3, 6), "a word b\n"),
+            ("gi", "a *word* b\n", (2, 7), "a word b\n"),
+            ("gb", "a **word** b\n", (2, 9), "a word b\n"),
+            ("gi", "a _two words_ b\n", (3, 5), "a two words b\n"),
+            // Underscores inside a word open nothing: wrap, do not strip.
+            ("gi", "a_b_c\n", (2, 2), "a_*b*_c\n"),
+            // Two spans selected together are not one span to strip.
+            ("gi", "*a* *b*\n", (0, 6), "**a* *b**\n"),
+            ("gb", "_a_ b\n", (0, 4), "**_a_ b**\n"),
+            ("gi", "a **word** b\n", (2, 9), "a ***word*** b\n"),
+            ("gb", "a _word_ b\n", (2, 7), "a ___word___ b\n"),
+        ];
+        for (keys, before, (lo, hi), after) in cases {
+            let mut app = app_with(before);
+            app.buffer.cursor = Cursor::new(0, lo);
+            feed(&mut app, "v");
+            app.buffer.cursor = Cursor::new(0, hi);
+            feed(&mut app, keys);
+            assert_eq!(text(&app), after, "{keys} on {before:?} {lo}..={hi}");
+            assert_eq!(app.mode, Mode::Normal);
+        }
+    }
+
     #[test]
     fn gb_wraps_the_visual_selection() {
         let mut app = app_with("alpha beta gamma\n");
@@ -10515,6 +10878,109 @@ mod tests {
         enter_key(&mut app);
         assert_eq!(app.buffer.cursor.line, 1);
         assert_eq!(app.buffer.cursor.col, 5);
+    }
+
+    fn search_for(app: &mut App, sigil: char, pattern: &str) {
+        feed(app, &format!("{sigil}{pattern}"));
+        enter_key(app);
+    }
+
+    /// `/` starts AFTER the cursor and wraps to the top, where a match AT the
+    /// cursor counts: it is the only one, so the cursor stays on it.
+    #[test]
+    fn search_wraps_to_a_match_at_the_cursor() {
+        let mut app = app_with("foo bar\n");
+        search_for(&mut app, '/', "foo");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
+        assert!(!flash_text(&app).contains("not found"), "{}", flash_text(&app));
+        let mut app = app_with("one\ntwo foo\nthree\n");
+        app.buffer.cursor = Cursor::new(2, 2);
+        search_for(&mut app, '/', "foo");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 4), "wrapped past the end");
+    }
+
+    /// `?` finds the last match that STARTS strictly before the cursor, even
+    /// one that runs over it, and wraps to the last match of the document.
+    #[test]
+    fn search_backward_is_strictly_before_the_cursor() {
+        let mut app = app_with("aaaa\n");
+        app.buffer.cursor = Cursor::new(0, 2);
+        search_for(&mut app, '?', "aa");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 1), "overlaps the cursor");
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 2), "wrapped to the last match");
+
+        let mut app = app_with("foo\nbar foo\nbaz\n");
+        app.buffer.cursor = Cursor::new(1, 4);
+        search_for(&mut app, '?', "foo");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 0), "the match AT the cursor is skipped");
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 4), "wrapped to the end");
+    }
+
+    /// Positions are characters, not bytes: a search past accented letters,
+    /// CJK and an emoji lands on the character the match starts at.
+    #[test]
+    fn search_counts_multibyte_characters() {
+        let mut app = app_with("é 日本 🎉 café\ncafé ü\n");
+        search_for(&mut app, '/', "café");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 7));
+        feed(&mut app, "n");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 0));
+        feed(&mut app, "N");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 7));
+        search_for(&mut app, '/', "ü");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 5));
+        search_for(&mut app, '?', "日本");
+        assert_eq!(app.buffer.cursor, Cursor::new(0, 2));
+    }
+
+    /// The rope search against the obvious one over a `Vec<char>`, on random
+    /// text built from few letters (so matches overlap and repeat), multi-byte
+    /// characters and line breaks, at every start position.
+    #[test]
+    fn rope_search_matches_the_naive_search() {
+        fn naive_find(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
+            if needle.is_empty() || needle.len() > hay.len() {
+                return None;
+            }
+            (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
+        }
+        fn naive_rfind(hay: &[char], needle: &[char], before: usize) -> Option<usize> {
+            if needle.is_empty() || needle.len() > hay.len() {
+                return None;
+            }
+            let max = before.min(hay.len() - needle.len());
+            (0..=max).rev().find(|&i| hay[i..i + needle.len()] == needle[..])
+        }
+        let alphabet = ['a', 'b', 'é', '日', '\n', '\r', '\u{2028}'];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..400 {
+            let hay: String = (0..next(30)).map(|_| alphabet[next(alphabet.len())]).collect();
+            let needle: String = (0..next(4)).map(|_| alphabet[next(alphabet.len())]).collect();
+            let rope = ropey::Rope::from_str(&hay);
+            let (h, n): (Vec<char>, Vec<char>) = (hay.chars().collect(), needle.chars().collect());
+            for at in 0..=h.len() + 1 {
+                assert_eq!(
+                    rope_find(&rope, &needle, at),
+                    naive_find(&h, &n, at),
+                    "find {needle:?} in {hay:?} from {at}"
+                );
+                assert_eq!(
+                    rope_rfind(&rope, &needle, at),
+                    naive_rfind(&h, &n, at),
+                    "rfind {needle:?} in {hay:?} before {at}"
+                );
+            }
+        }
     }
 
     #[test]

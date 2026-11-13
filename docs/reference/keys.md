@@ -254,6 +254,7 @@ remove it.
 | `Tab` | cycle this difference: live → file → both |
 | `l` `f` `b` | set every difference to live / file / both |
 | `w` | commit the merge and write it |
+| `W` | in read-only mode: leave it, then commit and write |
 | `q` `Esc` | abort |
 
 ## Action names
