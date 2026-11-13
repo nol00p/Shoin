@@ -160,10 +160,13 @@ version and then the file's, in the order shown on screen.
   are readable by you only.
 - A new recovery file takes the number after the highest one there, even
   when a lower name is free, so the highest number is always the newest.
-  A recovery file is written in full under a name ending `.partial-<pid>`
-  first and given its name when complete: if Shoin is killed during the write, the
-  `.partial` file is all that is left, never a recovery file that is
-  missing its end.
+  Opening a file looks for the others only when `notes.md.shoin-recover` or
+  `notes.md.shoin-recover-2` is there.
+- A recovery file is written in full under a name ending `.partial-<pid>`
+  (`notes.md.shoin-recover.partial-<pid>`, or `recover.partial-<pid>` in the
+  state folder) and given its name when complete: if Shoin is killed during
+  the write, the `.partial` file is all that is left, never a recovery file
+  that is missing its end.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
   separator (U+2028) stays inside its line and is saved as it was. A form
   feed, a lone `\r` and other control characters show as nothing on screen.
