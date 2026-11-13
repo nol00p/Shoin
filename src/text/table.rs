@@ -12,7 +12,8 @@
 
 use std::ops::Range;
 
-use crate::render::layout::display_width;
+use unicode_width::UnicodeWidthChar;
+
 use crate::render::markdown::block::BlockKind;
 
 /// `[editor] table_align`: whether leaving Insert after an edit in a table
@@ -91,7 +92,7 @@ pub fn align(rows: &[String]) -> Vec<String> {
                 .enumerate()
                 .filter(|(i, _)| Some(*i) != delim)
                 .filter_map(|(_, row)| row.get(c))
-                .map(|cell| display_width(cell) as usize)
+                .map(|cell| file_width(cell))
                 .max()
                 .unwrap_or(0)
                 .max(3)
@@ -119,7 +120,7 @@ pub fn align(rows: &[String]) -> Vec<String> {
                     out.push(r);
                 } else {
                     let cell = row.get(c).map(String::as_str).unwrap_or("");
-                    let gap = w - display_width(cell) as usize;
+                    let gap = w - file_width(cell);
                     let (before, after) = match aligns[c] {
                         Align::Right => (gap, 0),
                         Align::Center => (gap / 2, gap - gap / 2),
@@ -155,6 +156,14 @@ pub fn cursor_col(old: &str, new: &str, col: usize) -> usize {
         Some(s) => s.text.start + offset,
         None => col,
     }
+}
+
+/// A cell's width in the FILE: what other editors pad to, so plain
+/// unicode-width. Not the screen's `display_width`, which counts a line
+/// separator's one-cell stand-in: padding by that would change the saved
+/// bytes for what is only a choice of how Shoin draws the char.
+fn file_width(cell: &str) -> usize {
+    cell.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
 }
 
 /// One cell of a row, in chars: `raw` runs between its `|`s, `text` is the
@@ -303,6 +312,16 @@ mod tests {
     fn wide_characters_pad_by_display_width() {
         let t = "| 名前 | x |\n|---|---|\n| ab | y |";
         assert_eq!(aligned(t), "| 名前 | x   |\n|------|-----|\n| ab   | y   |");
+    }
+
+    /// A line separator in a cell pads by unicode-width, as it did before the
+    /// screen drew it as `↵`: the saved bytes do not depend on that choice.
+    #[test]
+    fn a_line_separator_pads_as_before() {
+        assert_eq!(UnicodeWidthChar::width('\u{2028}'), Some(1));
+        assert_eq!(UnicodeWidthChar::width('\u{2029}'), Some(1));
+        let t = "| a\u{2028}b | x |\n|---|---|";
+        assert_eq!(aligned(t), "| a\u{2028}b | x   |\n|-----|-----|");
     }
 
     #[test]

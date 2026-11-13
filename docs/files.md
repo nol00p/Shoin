@@ -124,8 +124,9 @@ version and then the file's, in the order shown on screen.
 - `:set autoreload off` stops taking outside changes automatically; `:revert`
   still does it on request.
 - In read-only mode, outside changes and `:revert!` still come in, and
-  `:diff` still shows the two versions, but its `w` writes nothing: `:view`
-  to edit first.
+  `:diff` still shows the two versions, but its `w` writes nothing. The
+  view stays open with your choices set; `W` leaves read-only mode and
+  writes them.
 - Written in place, every hard link sees the new text, and someone else's
   file keeps its owner. A file you cannot write is still replaced when its
   folder allows it. If an in-place write fails, the error names the backup
@@ -155,3 +156,5 @@ version and then the file's, in the order shown on screen.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
   separator (U+2028) stays inside its line and is saved as it was. A form
   feed, a lone `\r` and other control characters show as nothing on screen.
+  A line separator or paragraph separator (U+2029) shows as a dim `↵`, one
+  cell wide, so the cursor can rest on it.

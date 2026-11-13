@@ -55,12 +55,18 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   exports as plain text; `math = false` then also reaches `pdf`, where `$`
   stays a dollar sign.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
+- Export refuses a destination that is the document itself or any note or
+  picture it embeds, under any name: through `..`, a symlink or a hard link.
+  `html` and `pdf` also refuse a picture the document links to
+  (`![alt](img/p.png)`), since they read it to put it on the page.
 - In `html`, a wiki link becomes a link to `<note>.html`. A wiki link whose
   target has a scheme (`[[https://…]]`) or starts with `//` exports as plain
   text: it names an address, not a note. In `txt` a wiki link is its label.
 - In `html`, each heading gets an id from its text; a repeated heading
   gets `-1`, `-2` added, as on GitHub. A line ending in two spaces or a
-  backslash breaks the line (`<br>`).
+  backslash breaks the line (`<br>`); in `txt` the line just ends there, and
+  the spaces or backslash go. Consecutive `>` lines are one quoted
+  paragraph; a bare `>` starts the next.
 - Setext headings (`Title` over `=====`), footnotes, indented code blocks
   and raw HTML are not part of Shoin's Markdown. They export as the text
   they are.

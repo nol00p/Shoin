@@ -419,6 +419,15 @@ impl DiffView {
         }
     }
 
+    /// Rows of differences the view shows on a terminal `term_rows` tall:
+    /// all but its two borders, the header naming the sides, and the message
+    /// row. The message row is kept even with no message up, so the body does
+    /// not jump when one comes and goes. One function for the drawing and the
+    /// keys, so the scroll `G` / `n` / `p` compute is the one on screen.
+    pub fn body_height(term_rows: u16) -> usize {
+        term_rows.saturating_sub(4).max(1) as usize
+    }
+
     pub fn rows(&self) -> usize {
         self.align.rows.len()
     }
