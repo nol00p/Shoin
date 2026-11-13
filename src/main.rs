@@ -298,23 +298,36 @@ fn main() -> Result<()> {
     // crash can lose for good, and nothing after it may get the chance.
     let restore_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Recovery files are written once, by whoever ends the editor first.
-        // A signal thread that got here first is writing them and will exit
-        // the process, so any other thread waits for that; if the signal
-        // thread itself panics, it still restores and exits.
-        let owns = recover::panicked();
-        if !owns && recover::signalled() && !recover::on_signal_thread() {
-            loop {
-                std::thread::park();
+        // Recovery files are written once, by whoever ends the editor first;
+        // `recover::OnPanic` spells out each case.
+        match recover::on_panic() {
+            recover::OnPanic::SafetyCopy { dump } => {
+                if dump {
+                    recover::dump();
+                }
+                recover::note(info.to_string());
+                return;
             }
+            recover::OnPanic::SignalThread => {
+                recover::settle();
+                release_terminal_modes();
+                restore_hook(info);
+                recover::report();
+                std::process::exit(recover::signal_status());
+            }
+            recover::OnPanic::Wait => {
+                recover::note(info.to_string());
+                recover::abandon_frame();
+                loop {
+                    std::thread::park();
+                }
+            }
+            recover::OnPanic::Owner => recover::dump(),
+            recover::OnPanic::Restore => {}
         }
-        let written = if owns { recover::dump() } else { Vec::new() };
         release_terminal_modes();
         restore_hook(info);
-        recover::report(&written);
-        if recover::on_signal_thread() {
-            std::process::exit(101);
-        }
+        recover::report();
     }));
     // SIGTERM and SIGHUP (the window closed) would end the process where it
     // stands, terminal modes and unsaved text with it. Caught, they end it the
@@ -322,36 +335,36 @@ fn main() -> Result<()> {
     // dump, and the terminal is restored only once the frame being drawn is
     // done, so no part of one lands on the shell.
     recover::catch_signals(|sig| {
-        let owns = recover::stop();
-        if !owns && recover::quitting() {
-            // The loop is already on its way out and restores by itself.
-            return;
+        if !recover::stop(sig) {
+            // The loop's exit or a panic owns the ending and writes the
+            // recovery files; this thread only makes sure the process ends.
+            recover::wait_for_owner();
         }
-        let written = if owns { recover::dump() } else { Vec::new() };
+        recover::dump();
         recover::settle();
         release_terminal_modes();
         ratatui::restore();
-        recover::report(&written);
-        std::process::exit(128 + sig);
+        recover::report();
+        std::process::exit(recover::signal_status());
     });
-    let result = app.run_loop(&mut terminal);
-    // A signal that came first ends the editor from its own thread: restoring
-    // here too would do it twice, and race that thread's writes.
-    let owns = recover::quit();
-    if !owns && recover::signalled() {
+    let ended = app.run_loop(&mut terminal);
+    // A signal or a panic that came first ends the editor from its own
+    // thread: restoring here too would do it twice, and race its writes.
+    if matches!(ended, Ok(recover::Ended::Stopped)) || !recover::quit() {
         loop {
             std::thread::park();
         }
     }
     // An error that ends the loop (a terminal that went away) leaves the
-    // buffers unsaved: the editor is dying, so the text is kept, unless a
-    // panic on another thread has written it already.
-    let written = if owns && result.is_err() { recover::dump() } else { Vec::new() };
+    // buffers unsaved: the editor is dying, so the text is kept.
+    if ended.is_err() {
+        recover::dump();
+    }
     release_terminal_modes();
     ratatui::restore();
-    recover::report(&written);
+    recover::report();
 
-    result
+    ended.map(|_| ())
 }
 
 /// Undo every mode `main` turned on after `ratatui::init`, in reverse order.

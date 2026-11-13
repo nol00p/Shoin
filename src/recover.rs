@@ -10,8 +10,10 @@
 //!
 //! A recovery file is never overwritten: it may be the only copy of that text,
 //! and a second crash before anyone looked at the first must not take it. The
-//! next one beside the same file is `<file>.shoin-recover-2`, then `-3`, and
-//! so on; the unnamed ones skip any `<n>` already taken.
+//! next one beside the same file is `<file>.shoin-recover-2`, then `-3`, each
+//! one past the highest number already there; the unnamed ones skip any `<n>`
+//! already taken. Each is written in full under a `.partial` name first, so a
+//! dump cut off part way never leaves a recovery file missing its end.
 //!
 //! The panic hook has no `App` to read, so the event loop keeps a process-wide
 //! [`REGISTRY`] of the modified buffers up to date through [`tick`]. A rope
@@ -119,37 +121,48 @@ fn notice<'a>(buffers: impl Iterator<Item = &'a Buffer>) -> Option<String> {
 }
 
 /// Every recovery file beside `path`, newest first: `<file>.shoin-recover`
-/// and any `<file>.shoin-recover-<n>`. Newest is by the time each was written,
-/// not by `<n>`: once the plain name is deleted, the next crash takes it again.
+/// and any `<file>.shoin-recover-<n>`. Newest is by the time each was
+/// written, then by `<n>`: a new one always takes the number past the highest
+/// already there, so a tie of coarse timestamps still puts it first.
 pub fn recovery_files(path: &Path) -> Vec<PathBuf> {
-    let first = beside(path);
-    let Some(name) = first.file_name() else { return Vec::new() };
-    let name = name.as_encoded_bytes();
-    let dir = match first.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => Path::new("."),
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let file = entry.file_name();
-        let n = match file.as_encoded_bytes().strip_prefix(name) {
-            Some([]) => 1,
-            Some([b'-', digits @ ..]) if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) => {
-                std::str::from_utf8(digits).ok().and_then(|d| d.parse::<u64>().ok()).unwrap_or(u64::MAX)
-            }
-            _ => continue,
-        };
-        let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
-            continue;
-        }
-        let written = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        found.push((written, n, dir.join(file)));
-    }
+    let mut found: Vec<_> = probe(path)
+        .into_iter()
+        .map(|(n, p, meta)| (meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH), n, p))
+        .collect();
     found.sort_by_key(|a| std::cmp::Reverse((a.0, a.1)));
     found.into_iter().map(|(_, _, p)| p).collect()
 }
+
+/// The recovery files beside `path` with their numbers, found by asking for
+/// each name in turn rather than listing the folder: a folder may let you
+/// reach its files but not list them, and listing a folder of 100,000 files
+/// would hold up the screen. The search ends after [`MISSES`] free numbers in
+/// a row, so a few files deleted from the middle do not hide later ones.
+fn probe(path: &Path) -> Vec<(u32, PathBuf, std::fs::Metadata)> {
+    let mut found = Vec::new();
+    let mut misses = 0;
+    for n in 1..=MAX_TRIES {
+        let p = beside_nth(path, n);
+        match std::fs::metadata(&p) {
+            Ok(meta) if meta.is_file() => {
+                misses = 0;
+                found.push((n, p, meta));
+            }
+            // A folder of that name is no recovery file, but the number is taken.
+            Ok(_) => misses = 0,
+            Err(_) => {
+                misses += 1;
+                if misses == MISSES {
+                    break;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// How many free numbers in a row end the search for recovery files.
+const MISSES: u32 = 8;
 
 /// The `n`th recovery file name beside `path`: the plain one first, so a
 /// single crash still leaves `notes.md.shoin-recover`.
@@ -158,9 +171,7 @@ fn beside_nth(path: &Path, n: u32) -> PathBuf {
     if n <= 1 {
         return first;
     }
-    let mut name = first.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(format!("-{n}"));
-    first.with_file_name(name)
+    with_suffix(&first, &format!("-{n}"))
 }
 
 /// How many names [`dump_to`] tries before it gives a file up: past this many
@@ -169,8 +180,12 @@ const MAX_TRIES: u32 = 1000;
 
 /// `notes.md` → `notes.md.shoin-recover`, in the same folder.
 pub fn beside(path: &Path) -> PathBuf {
+    with_suffix(path, SUFFIX)
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(SUFFIX);
+    name.push(suffix);
     path.with_file_name(name)
 }
 
@@ -187,13 +202,21 @@ fn state_dir() -> PathBuf {
     base.join("shoin")
 }
 
-/// Write every buffer the registry holds and return where each went. Called
-/// from the panic hook and after a signal, never while the editor runs.
+/// Every recovery file written so far in this process, and the lines kept for
+/// later: [`report`] prints both once the terminal is back. Kept here rather
+/// than handed back, so a dump cut short by a panic still reports the files it
+/// finished.
+static WRITTEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Write every buffer the registry holds. Called when the editor dies, and
+/// for a safety copy after a panic that leaves it running (a background
+/// thread, in a build that unwinds).
 ///
 /// The panic may have happened on another thread while the loop held the
 /// lock, so it is tried for a moment rather than waited on: a dump that gives
 /// up is better than a hook that never returns.
-pub fn dump() -> Vec<PathBuf> {
+pub fn dump() {
     let mut tries = 0;
     let reg = loop {
         match REGISTRY.try_lock() {
@@ -203,13 +226,14 @@ pub fn dump() -> Vec<PathBuf> {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err(TryLockError::WouldBlock) => return Vec::new(),
+            Err(TryLockError::WouldBlock) => return,
         }
     };
-    dump_to(&reg, &state_dir())
+    dump_to(&reg, &state_dir(), &mut |p| WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).push(p.to_path_buf()));
 }
 
-fn dump_to(snaps: &[Snapshot], state: &Path) -> Vec<PathBuf> {
+/// Write `snaps`, handing each file to `done` as soon as it is complete.
+fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) -> Vec<PathBuf> {
     let mut written = Vec::new();
     // Shared by every unnamed buffer of this dump, and moved past any name a
     // dead editor with the same pid left behind.
@@ -217,7 +241,12 @@ fn dump_to(snaps: &[Snapshot], state: &Path) -> Vec<PathBuf> {
     let pid = std::process::id();
     for s in snaps {
         if let Some(path) = &s.path {
-            if let Some(target) = write_new(s, (1..=MAX_TRIES).map(|n| beside_nth(path, n))) {
+            // Past the highest number there, never into a gap below it: see
+            // `recovery_files` for why.
+            let next = probe(path).last().map_or(1, |(n, _, _)| n + 1);
+            let partial = with_suffix(&beside(path), &format!(".partial-{pid}"));
+            if let Some(target) = write_new(s, &partial, (next..=MAX_TRIES).map(|n| beside_nth(path, n))) {
+                done(&target);
                 written.push(target);
                 continue;
             }
@@ -229,62 +258,87 @@ fn dump_to(snaps: &[Snapshot], state: &Path) -> Vec<PathBuf> {
             unnamed += 1;
             Some(state.join(format!("recover-{pid}-{unnamed}.md")))
         });
-        if let Some(target) = write_new(s, names.take(MAX_TRIES as usize)) {
+        let partial = state.join(format!("recover-{pid}.partial"));
+        if let Some(target) = write_new(s, &partial, names.take(MAX_TRIES as usize)) {
+            done(&target);
             written.push(target);
         }
     }
     written
 }
 
-/// Write `s` to the first of `names` that does not exist yet. Any failure
-/// other than a taken name ends the search: the folder refuses the write.
-fn write_new(s: &Snapshot, names: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
+/// Write `s` in full to `partial`, then give it the first of `names` not
+/// taken yet. A dump cut off part way (the process ends under it) leaves at
+/// most the `.partial` file, never a recovery file that is missing its end.
+///
+/// The name is given by a hard link, which fails on a taken name rather than
+/// replacing it, as a rename would. Where links are refused (FAT, some network
+/// mounts), a rename to a name just seen free does it instead.
+fn write_new(s: &Snapshot, partial: &Path, names: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
+    // A `.partial` left by an earlier dump of this pid that was cut off goes:
+    // that dump's recovery files are named in full or not at all.
+    let _ = std::fs::remove_file(partial);
+    if write(partial, s).is_err() {
+        let _ = std::fs::remove_file(partial);
+        return None;
+    }
+    let mut placed = None;
     for target in names {
-        match write(&target, s) {
-            Ok(()) => return Some(target),
+        match std::fs::hard_link(partial, &target) {
+            Ok(()) => {
+                placed = Some(target);
+                break;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return None,
+            Err(_) if std::fs::symlink_metadata(&target).is_err() => {
+                if std::fs::rename(partial, &target).is_ok() {
+                    return Some(target);
+                }
+                break;
+            }
+            Err(_) => {}
         }
     }
-    None
+    let _ = std::fs::remove_file(partial);
+    placed
 }
 
-/// Write one snapshot to a file that must not exist yet, readable by its
-/// owner only: it is somebody's draft.
+/// Write one snapshot, readable by its owner only: it is somebody's draft.
 fn write(target: &Path, s: &Snapshot) -> std::io::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
-    // `create_new` is atomic: a name taken between the check and the write is
-    // still never overwritten.
     opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let file = opts.open(target)?;
-    let fill = || -> std::io::Result<()> {
-        let mut out = std::io::BufWriter::new(file);
-        for chunk in s.rope.chunks() {
-            if s.crlf {
-                out.write_all(chunk.replace('\n', "\r\n").as_bytes())?;
-            } else {
-                out.write_all(chunk.as_bytes())?;
-            }
+    let mut out = std::io::BufWriter::new(opts.open(target)?);
+    for chunk in s.rope.chunks() {
+        if s.crlf {
+            out.write_all(chunk.replace('\n', "\r\n").as_bytes())?;
+        } else {
+            out.write_all(chunk.as_bytes())?;
         }
-        out.into_inner().map_err(|e| e.into_error())?.sync_all()
-    };
-    // A half-written file would never be overwritten now, and its name would
-    // keep being reported as holding the text: take it away.
-    fill().inspect_err(|_| {
-        let _ = std::fs::remove_file(target);
-    })
+    }
+    out.into_inner().map_err(|e| e.into_error())?.sync_all()
 }
 
-/// Print where the text went, after the terminal is back to normal. Not
-/// `eprintln!`: after `SIGHUP` stderr is a dead terminal, and a failed print
-/// must not become a panic.
-pub fn report(written: &[PathBuf]) {
+/// Keep a line for [`report`]: a panic message that could not be printed
+/// when it happened, because the screen was the editor's.
+pub fn note(line: String) {
+    NOTES.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+}
+
+/// Print what was kept and where the text went, after the terminal is back
+/// to normal. Not `eprintln!`: after `SIGHUP` stderr is a dead terminal, and a
+/// failed print must not become a panic.
+pub fn report() {
+    let notes = std::mem::take(&mut *NOTES.lock().unwrap_or_else(|e| e.into_inner()));
+    let written = std::mem::take(&mut *WRITTEN.lock().unwrap_or_else(|e| e.into_inner()));
     let mut err = std::io::stderr().lock();
+    for line in notes {
+        let _ = writeln!(err, "shoin: {line}");
+    }
     for p in written {
         let _ = writeln!(err, "shoin: unsaved text written to {}", p.display());
     }
@@ -292,19 +346,21 @@ pub fn report(written: &[PathBuf]) {
 
 // ------------------------------------------------------------------ ending
 //
-// The signal thread ends the editor while the event loop may be halfway
-// through a frame. Restoring the terminal under a frame lands the rest of that
-// frame on the user's shell, and a frame drawn after it does the same. So the
-// loop writes to the terminal only while it holds [`frame`]; the signal thread,
-// through [`stop`], keeps any new frame from starting, writes the recovery
-// files, and then, through [`settle`], waits for the frame in flight before it
-// touches the terminal. The dump comes before the wait: the text is what
-// cannot be lost, and a frame can take a while (a clipboard program gets a
-// second).
+// Three things can end the editor: the loop's own exit (`:q`, or a terminal
+// that went away), a signal, and a panic that takes the process down (any
+// panic in a release build, which aborts; one on the main thread otherwise).
+// The first to come claims the ending, and only the owner writes the recovery
+// files and restores the terminal, so each happens once. A panic on a
+// background thread of a build that unwinds leaves the editor running: it
+// writes a safety copy but claims nothing, so a later ending still dumps.
 //
-// One claim says who ends the editor, so the recovery files are written once
-// and the terminal restored once: the loop's own exit, a signal, or a panic,
-// whichever comes first.
+// The signal thread ends the editor while the event loop may be halfway
+// through a frame. Restoring the terminal under a frame lands the rest of it
+// on the user's shell, and a frame drawn after it does the same. So the loop
+// writes to the terminal only while it holds a [`Frame`]; [`stop`] keeps any
+// new frame from starting, the recovery files are written, and [`settle`]
+// waits for the frame in flight before the terminal is touched. The dump comes
+// before the wait: the text is what cannot be lost.
 
 const RUNNING: u8 = 0;
 const QUITTING: u8 = 1;
@@ -314,24 +370,67 @@ const PANICKED: u8 = 3;
 /// The name of the thread [`catch_signals`] starts.
 const SIGNAL_THREAD: &str = "signals";
 
+/// How the event loop ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// It quit, or its terminal went away: the caller ends the editor.
+    Quit,
+    /// A signal is ending the editor from its own thread, which restores the
+    /// terminal and exits with the signal's status.
+    Stopped,
+}
+
 /// Who is ending the editor, whether frames may still start, and the lock a
 /// frame holds while it is written.
 struct Gate {
     ending: AtomicU8,
     stopping: AtomicBool,
+    /// Set by a thread that panicked while holding the frame and now waits
+    /// for the signal thread: its frame will never finish.
+    abandoned: AtomicBool,
     frame: Mutex<()>,
+}
+
+thread_local! {
+    /// How many [`Frame`]s this thread holds: a write nested in a frame (the
+    /// clipboard's OSC 52 during a pass of the loop) takes no second lock.
+    static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Permission to write to the terminal; see [`frame`].
+pub struct Frame<'a> {
+    _guard: Option<MutexGuard<'a, ()>>,
+}
+
+impl Drop for Frame<'_> {
+    fn drop(&mut self) {
+        DEPTH.with(|d| d.set(d.get() - 1));
+    }
 }
 
 impl Gate {
     const fn new() -> Gate {
-        Gate { ending: AtomicU8::new(RUNNING), stopping: AtomicBool::new(false), frame: Mutex::new(()) }
+        Gate {
+            ending: AtomicU8::new(RUNNING),
+            stopping: AtomicBool::new(false),
+            abandoned: AtomicBool::new(false),
+            frame: Mutex::new(()),
+        }
     }
 
-    fn frame(&self) -> Option<MutexGuard<'_, ()>> {
+    fn frame(&self) -> Option<Frame<'_>> {
+        if DEPTH.with(|d| d.get()) > 0 {
+            DEPTH.with(|d| d.set(d.get() + 1));
+            return Some(Frame { _guard: None });
+        }
         let guard = self.frame.lock().unwrap_or_else(|e| e.into_inner());
         // Read under the lock: `stop` sets the flag before `settle` takes the
         // lock, so a frame that gets the lock after that sees it.
-        (!self.stopping.load(Ordering::SeqCst)).then_some(guard)
+        if self.stopping.load(Ordering::SeqCst) {
+            return None;
+        }
+        DEPTH.with(|d| d.set(d.get() + 1));
+        Some(Frame { _guard: Some(guard) })
     }
 
     fn claim(&self, by: u8) -> bool {
@@ -353,10 +452,35 @@ impl Gate {
         // Bounded: a frame stuck on a terminal that stopped reading must not
         // keep the editor from ending.
         for _ in 0..200 {
+            if self.abandoned.load(Ordering::SeqCst) {
+                return;
+            }
             match self.frame.try_lock() {
                 Ok(_) | Err(TryLockError::Poisoned(_)) => return,
                 Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
+        }
+    }
+
+    fn on_panic(&self, ends_process: bool, signal_thread: bool) -> OnPanic {
+        if !ends_process {
+            return OnPanic::SafetyCopy { dump: self.is(RUNNING) };
+        }
+        if signal_thread {
+            return OnPanic::SignalThread;
+        }
+        if self.claim(PANICKED) {
+            OnPanic::Owner
+        } else if self.is(SIGNALLED) {
+            OnPanic::Wait
+        } else {
+            OnPanic::Restore
+        }
+    }
+
+    fn abandon(&self) {
+        if DEPTH.with(|d| d.get()) > 0 {
+            self.abandoned.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -364,50 +488,98 @@ impl Gate {
 static GATE: Gate = Gate::new();
 
 /// Held by the event loop while it writes to the terminal. `None` once a
-/// signal is ending the editor: the loop must then stop writing and return,
-/// and leave the terminal to the signal thread.
-pub fn frame() -> Option<MutexGuard<'static, ()>> {
+/// signal is ending the editor: the loop must then write nothing more and
+/// return [`Ended::Stopped`].
+pub fn frame() -> Option<Frame<'static>> {
     GATE.frame()
 }
 
+/// Whether frames have stopped: a signal is ending the editor.
+pub fn stopping() -> bool {
+    GATE.stopping.load(Ordering::SeqCst)
+}
+
+/// The signal being handled, for the exit status.
+static SIGNAL: AtomicU8 = AtomicU8::new(0);
+
 /// For the signal thread: keep frames from starting, and claim the ending.
-/// `false` when the loop's exit or a panic got there first; that path writes
+/// `false` when the loop's exit or a panic got there first, and is writing
 /// the recovery files.
-pub fn stop() -> bool {
+pub fn stop(sig: i32) -> bool {
+    SIGNAL.store(sig as u8, Ordering::SeqCst);
     GATE.stop()
 }
 
-/// For the signal thread, after [`stop`]: wait (up to two seconds) for the
+/// The exit status for the signal being handled.
+pub fn signal_status() -> i32 {
+    128 + i32::from(SIGNAL.load(Ordering::SeqCst))
+}
+
+/// For the signal thread, after the dump: wait (up to two seconds) for the
 /// frame being written to finish, so the terminal can be restored.
 pub fn settle() {
     GATE.settle()
 }
 
-/// For the event loop's own exit: claim the ending. `false` when a signal or
-/// a panic got there first.
+/// For the signal thread when another ending got there first: give it time to
+/// write its recovery files and end the process, then end it anyway, so a
+/// quit stuck on a terminal that stopped reading cannot outlive the signal.
+pub fn wait_for_owner() -> ! {
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    std::process::exit(signal_status());
+}
+
+/// For the event loop's exit: claim the ending, or find it already claimed by
+/// an earlier call. `false` when a signal or a panic got there first.
 pub fn quit() -> bool {
-    GATE.claim(QUITTING)
+    GATE.claim(QUITTING) || GATE.is(QUITTING)
 }
 
-/// For the panic hook: claim the ending. `false` when the loop's exit or a
-/// signal got there first.
-pub fn panicked() -> bool {
-    GATE.claim(PANICKED)
+/// What the panic hook does. Decided here, with the claim, so the rules
+/// can be held to in a test.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OnPanic {
+    /// The editor keeps running (a background thread, in a build that
+    /// unwinds): claim nothing, so the real ending still writes the text as
+    /// it is then. A safety copy, when no ending is writing one already, and
+    /// the message kept for the exit, as printed now it would land on the
+    /// editor's screen.
+    SafetyCopy { dump: bool },
+    /// The signal thread's own dump or restore failed part way: wait for the
+    /// frame, restore, name what was written, and exit with the signal's
+    /// status.
+    SignalThread,
+    /// This panic ends the editor: dump, restore, report.
+    Owner,
+    /// A signal owns the ending and will restore and exit: keep the message
+    /// for its report, give up the frame, and wait.
+    Wait,
+    /// The loop's own exit owns the ending (a panic while it restores):
+    /// restore and report, but no second dump.
+    Restore,
 }
 
-/// Whether a signal is ending the editor; its thread then exits the process.
-pub fn signalled() -> bool {
-    GATE.is(SIGNALLED)
+/// For the panic hook: what to do about a panic on this thread.
+pub fn on_panic() -> OnPanic {
+    GATE.on_panic(panic_ends_process(), on_signal_thread())
 }
 
-/// Whether the event loop's own exit is ending the editor.
-pub fn quitting() -> bool {
-    GATE.is(QUITTING)
+/// For a thread that panicked and now waits for the signal thread to end the
+/// process: if it held the frame, that frame will never finish.
+pub fn abandon_frame() {
+    GATE.abandon()
 }
 
 /// Whether this is the thread [`catch_signals`] runs `on_stop` on.
-pub fn on_signal_thread() -> bool {
+fn on_signal_thread() -> bool {
     std::thread::current().name() == Some(SIGNAL_THREAD)
+}
+
+/// Whether a panic on this thread ends the process: always in a build that
+/// aborts on panic (release), otherwise only on the main thread, where it
+/// unwinds out of `main`.
+fn panic_ends_process() -> bool {
+    cfg!(panic = "abort") || std::thread::current().name() == Some("main")
 }
 
 // ------------------------------------------------------------------ signals
@@ -509,7 +681,7 @@ mod tests {
             snap(Some(d.join("a.md")), "# A\n\nunsaved line\n", false),
             snap(Some(d.join("b.txt")), "one\ntwo\n", true),
         ];
-        let written = dump_to(&snaps, &d.join("state"));
+        let written = dump_to(&snaps, &d.join("state"), &mut |_| {});
         assert_eq!(written, vec![d.join("a.md.shoin-recover"), d.join("b.txt.shoin-recover")]);
         assert_eq!(std::fs::read_to_string(&written[0]).unwrap(), "# A\n\nunsaved line\n");
         assert_eq!(std::fs::read_to_string(&written[1]).unwrap(), "one\r\ntwo\r\n");
@@ -531,7 +703,7 @@ mod tests {
             snap(None, "piped text\n", false),
             snap(Some(d.join("no-such-folder/c.md")), "c\n", false),
         ];
-        let written = dump_to(&snaps, &state);
+        let written = dump_to(&snaps, &state, &mut |_| {});
         let pid = std::process::id();
         assert_eq!(written, vec![state.join(format!("recover-{pid}-1.md")), state.join(format!("recover-{pid}-2.md"))]);
         assert_eq!(std::fs::read_to_string(&written[0]).unwrap(), "piped text\n");
@@ -578,13 +750,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    fn dump(snaps: &[Snapshot], state: &Path) -> Vec<PathBuf> {
+        dump_to(snaps, state, &mut |_| {})
+    }
+
+    fn set_mtime(p: &Path, t: std::time::SystemTime) {
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+    }
+
     #[test]
     fn a_second_crash_never_overwrites_the_first_recovery_file() {
         let d = dir("twice");
         let path = d.join("t.md");
         std::fs::write(&path, "saved\n").unwrap();
-        let first = dump_to(&[snap(Some(path.clone()), "first crash\n", false)], &d.join("state"));
-        let second = dump_to(&[snap(Some(path.clone()), "second crash\n", false)], &d.join("state"));
+        let first = dump(&[snap(Some(path.clone()), "first crash\n", false)], &d.join("state"));
+        let second = dump(&[snap(Some(path.clone()), "second crash\n", false)], &d.join("state"));
         assert_eq!(first, vec![d.join("t.md.shoin-recover")]);
         assert_eq!(second, vec![d.join("t.md.shoin-recover-2")]);
         assert_eq!(std::fs::read_to_string(&first[0]).unwrap(), "first crash\n");
@@ -596,19 +776,84 @@ mod tests {
         std::fs::write(d.join("t.md.shoin-recover-"), "").unwrap();
         std::fs::write(d.join("tt.md.shoin-recover"), "").unwrap();
         assert_eq!(recovery_files(&path).len(), 2);
+        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(
+            !names.iter().any(|n| n.to_string_lossy().contains("partial")),
+            "no .partial file is left behind: {names:?}"
+        );
 
         let b = Buffer::open(path.clone(), &[]).unwrap();
         let text = notice([&b].into_iter()).expect("a notice");
         assert_eq!(text, "unsaved text from a crash, newest first: t.md.shoin-recover-2, t.md.shoin-recover");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
-        // With the plain name deleted, the next crash takes it again, and it
-        // is still listed first: newest is by time, not by number.
+    #[test]
+    fn a_new_recovery_file_goes_past_the_highest_number_and_is_listed_first() {
+        let d = dir("order");
+        let path = d.join("o.md");
+        let first = dump(&[snap(Some(path.clone()), "1\n", false)], &d);
+        let second = dump(&[snap(Some(path.clone()), "2\n", false)], &d);
+        // The plain name deleted: the next crash still goes past `-2`, not
+        // back to the free plain name, so the number orders them too.
         std::fs::remove_file(&first[0]).unwrap();
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
-        std::fs::File::options().write(true).open(&second[0]).unwrap().set_modified(old).unwrap();
-        let third = dump_to(&[snap(Some(path.clone()), "third crash\n", false)], &d.join("state"));
-        assert_eq!(third, vec![d.join("t.md.shoin-recover")]);
+        let third = dump(&[snap(Some(path.clone()), "3\n", false)], &d);
+        assert_eq!(third, vec![d.join("o.md.shoin-recover-3")]);
+        // Timestamps that cannot tell them apart (FAT keeps two seconds).
+        let t = std::time::SystemTime::now();
+        set_mtime(&second[0], t);
+        set_mtime(&third[0], t);
         assert_eq!(recovery_files(&path), vec![third[0].clone(), second[0].clone()]);
+        // A few deleted from the middle of the run do not hide later ones.
+        for n in 4..=9 {
+            std::fs::write(beside_nth(&path, n), "").unwrap();
+        }
+        for n in 3..=8 {
+            std::fs::remove_file(beside_nth(&path, n)).unwrap();
+        }
+        assert_eq!(recovery_files(&path).len(), 2, "-2 and -9");
+        assert_eq!(dump(&[snap(Some(path.clone()), "4\n", false)], &d), vec![d.join("o.md.shoin-recover-10")]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_files_are_found_in_a_folder_that_cannot_be_listed() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("nolist");
+        let inner = d.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        let path = inner.join("x.md");
+        dump(&[snap(Some(path.clone()), "x\n", false)], &d);
+        dump(&[snap(Some(path.clone()), "y\n", false)], &d);
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let listable = std::fs::read_dir(&inner).is_ok();
+        let found = recovery_files(&path);
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Root lists any folder; the probe must find them either way.
+        assert!(listable || found.len() == 2, "{found:?}");
+        assert_eq!(found.len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_cut_off_dump_leaves_no_recovery_file_missing_its_end() {
+        let d = dir("partial");
+        let path = d.join("p.md");
+        // What a dump killed half way leaves: only the `.partial` file.
+        let partial = with_suffix(&beside(&path), &format!(".partial-{}", std::process::id()));
+        std::fs::write(&partial, "half of the te").unwrap();
+        assert!(recovery_files(&path).is_empty(), "a .partial file is never listed");
+        let written = dump(&[snap(Some(path.clone()), "the whole text\n", false)], &d);
+        assert_eq!(written, vec![d.join("p.md.shoin-recover")]);
+        assert_eq!(std::fs::read_to_string(&written[0]).unwrap(), "the whole text\n");
+        assert!(!partial.exists(), "the next dump of this pid clears it");
+        // A taken name is passed over, not replaced.
+        std::fs::write(beside_nth(&path, 2), "someone else's\n").unwrap();
+        let next = write_new(&snap(None, "next\n", false), &partial, (2..=3).map(|n| beside_nth(&path, n)));
+        assert_eq!(next, Some(beside_nth(&path, 3)));
+        assert_eq!(std::fs::read_to_string(beside_nth(&path, 2)).unwrap(), "someone else's\n");
+        assert!(!partial.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -619,9 +864,22 @@ mod tests {
         let pid = std::process::id();
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join(format!("recover-{pid}-1.md")), "earlier\n").unwrap();
-        let written = dump_to(&[snap(None, "a\n", false), snap(None, "b\n", false)], &state);
+        let written = dump(&[snap(None, "a\n", false), snap(None, "b\n", false)], &state);
         assert_eq!(written, vec![state.join(format!("recover-{pid}-2.md")), state.join(format!("recover-{pid}-3.md"))]);
         assert_eq!(std::fs::read_to_string(state.join(format!("recover-{pid}-1.md"))).unwrap(), "earlier\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_dump_names_each_file_as_soon_as_it_is_written() {
+        let d = dir("progress");
+        let mut seen = Vec::new();
+        let snaps = [snap(Some(d.join("a.md")), "a\n", false), snap(Some(d.join("b.md")), "b\n", false)];
+        let written = dump_to(&snaps, &d, &mut |p| {
+            assert!(p.is_file(), "named only once complete");
+            seen.push(p.to_path_buf());
+        });
+        assert_eq!(seen, written);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -637,11 +895,47 @@ mod tests {
         assert!(gate.claim(QUITTING));
         assert!(!gate.stop(), "a loop already on its way out writes the files itself");
         assert!(gate.is(QUITTING));
+    }
+
+    #[test]
+    fn a_frame_nested_in_a_frame_takes_no_second_lock() {
+        let gate = Gate::new();
+        let outer = gate.frame().unwrap();
+        let inner = gate.frame().expect("the clipboard's OSC 52 inside a pass of the loop");
+        drop(inner);
+        assert!(gate.frame.try_lock().is_err(), "the outer frame still holds the lock");
+        drop(outer);
+        assert!(gate.frame.try_lock().is_ok());
+    }
+
+    #[test]
+    fn a_background_panic_leaves_the_ending_to_a_later_signal() {
+        let gate = Gate::new();
+        // In a build that unwinds, a background thread's panic leaves the
+        // editor running: it may copy, but it claims nothing.
+        assert_eq!(gate.on_panic(false, false), OnPanic::SafetyCopy { dump: true });
+        assert!(gate.is(RUNNING));
+        assert!(gate.stop(), "the signal that comes later still owns the ending, and dumps");
+        assert_eq!(gate.on_panic(false, false), OnPanic::SafetyCopy { dump: false }, "no copy over its dump");
+        // A main-thread panic now waits for the signal thread.
+        assert_eq!(gate.on_panic(true, false), OnPanic::Wait);
+        assert_eq!(gate.on_panic(true, true), OnPanic::SignalThread);
 
         let gate = Gate::new();
-        assert!(gate.claim(PANICKED));
-        assert!(!gate.stop(), "a panic that already wrote the files is not followed by a second dump");
-        assert!(gate.frame().is_none(), "but frames still stop for the restore");
+        assert_eq!(gate.on_panic(true, false), OnPanic::Owner, "a panic that ends the process owns it");
+        assert!(!gate.stop(), "and a signal after it does not dump again");
+        assert!(gate.frame().is_none(), "but frames stop all the same");
+
+        let gate = Gate::new();
+        assert!(gate.claim(QUITTING));
+        assert_eq!(gate.on_panic(true, false), OnPanic::Restore, "a panic while the loop restores");
+    }
+
+    #[test]
+    fn on_this_test_thread_a_panic_does_not_end_the_process() {
+        // Tests unwind and run off the main thread: a background thread.
+        assert!(!panic_ends_process() || cfg!(panic = "abort"));
+        assert!(!on_signal_thread());
     }
 
     #[test]
@@ -660,5 +954,25 @@ mod tests {
         rx.recv_timeout(std::time::Duration::from_secs(5)).expect("settle returns once the frame is done");
         stopper.join().unwrap();
         assert!(GATE.frame().is_none());
+    }
+
+    #[test]
+    fn settle_does_not_wait_for_a_frame_its_panicked_holder_gave_up() {
+        static GATE: Gate = Gate::new();
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let holder = std::thread::spawn(move || {
+            let _frame = GATE.frame().unwrap();
+            // What the panic hook does on a thread that waits for the signal.
+            GATE.abandon();
+            held.0.send(()).unwrap();
+            let _ = release.1.recv();
+        });
+        held.1.recv().unwrap();
+        assert!(GATE.stop());
+        let start = std::time::Instant::now();
+        GATE.settle();
+        assert!(start.elapsed() < std::time::Duration::from_millis(500), "{:?}", start.elapsed());
+        release.0.send(()).unwrap();
+        holder.join().unwrap();
     }
 }

@@ -388,6 +388,8 @@ fn run_paste(argv: &[&str], deadline: Instant) -> Run<String> {
 
 /// Hand `text` to the terminal's own clipboard with an OSC 52 escape.
 fn osc52(text: &str) {
+    // Not over a terminal a signal is restoring.
+    let Some(_frame) = crate::recover::frame() else { return };
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b]52;c;{}\x07", crate::image::base64(text.as_bytes()));
     let _ = out.flush();

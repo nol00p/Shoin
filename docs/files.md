@@ -157,9 +157,12 @@ version and then the file's, in the order shown on screen.
   `$XDG_STATE_HOME/shoin/recover-<pid>-<n>.md` (`~/.local/state/shoin/` when
   `XDG_STATE_HOME` is unset), skipping any `<n>` already taken. Recovery files
   are readable by you only.
-- Newest first means by the time each recovery file was written, not by its
-  number: once `notes.md.shoin-recover` is deleted, the next crash uses that
-  name again.
+- A new recovery file takes the number after the highest one there, even
+  when a lower name is free, so the highest number is always the newest.
+  A recovery file is written in full under a name ending `.partial-<pid>`
+  first and given its name when complete: if Shoin is killed during the write, the
+  `.partial` file is all that is left, never a recovery file that is
+  missing its end.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
   separator (U+2028) stays inside its line and is saved as it was. A form
   feed, a lone `\r` and other control characters show as nothing on screen.
