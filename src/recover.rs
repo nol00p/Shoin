@@ -104,7 +104,8 @@ fn notice<'a>(buffers: impl Iterator<Item = &'a Buffer>) -> Option<String> {
         checked.insert(path.to_path_buf());
         // Two stats for a file with no recovery file, the common case: the
         // folder is listed only when the first or second name is there. A
-        // lone `-3` left after deleting both is not announced.
+        // lone `-3` left after deleting both is not announced, but a new crash
+        // re-takes the free plain name (`dump_to`), so the newest always is.
         if !beside_nth(path, 1).exists() && !beside_nth(path, 2).exists() {
             continue;
         }
@@ -128,8 +129,10 @@ fn notice<'a>(buffers: impl Iterator<Item = &'a Buffer>) -> Option<String> {
 
 /// Every recovery file beside `path`, newest first: `<file>.shoin-recover`
 /// and any `<file>.shoin-recover-<n>`. Newest is by the time each was
-/// written, then by `<n>`: a new one always takes the number past the highest
-/// already there, so a tie of coarse timestamps still puts it first.
+/// written, then by `<n>`: a new one takes the plain name when it is free and
+/// otherwise the number past the highest already there, so a tie of coarse
+/// timestamps still puts it first unless it re-took the plain name (which
+/// needs the user to have deleted the older files in between).
 pub fn recovery_files(path: &Path) -> Vec<PathBuf> {
     let mut found: Vec<_> = existing(path)
         .into_iter()
@@ -294,11 +297,14 @@ fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) -> Vec
     let pid = std::process::id();
     for s in snaps {
         if let Some(path) = &s.path {
-            // Past the highest number there, never into a gap below it: see
-            // `recovery_files` for why.
-            let next = existing(path).iter().map(|e| e.0).max().map_or(1, |n| n.saturating_add(1));
+            // The plain name when it is free, so `notice` (which looks only
+            // when the plain name or `-2` is there) always finds the newest.
+            // Otherwise past the highest number there, never into a gap below
+            // it: see `recovery_files` for why.
+            let next = existing(path).iter().map(|e| e.0).max().map_or(1, |n| n.saturating_add(1)).max(2);
+            let numbers = std::iter::once(1).chain(next..next.saturating_add(MAX_TRIES));
             let partial = with_suffix(&beside(path), &format!(".partial-{pid}"));
-            let names = (next..next.saturating_add(MAX_TRIES)).map(|n| beside_nth(path, n));
+            let names = numbers.map(|n| beside_nth(path, n));
             if let Some(target) = write_new(s, &partial, names) {
                 done(&target);
                 written.push(target);
@@ -391,7 +397,7 @@ pub fn restore_terminal() {
 }
 
 fn restore_to(out: &mut impl Write) {
-    use ratatui::crossterm::cursor::Show;
+    use ratatui::crossterm::cursor::{SetCursorStyle, Show};
     use ratatui::crossterm::event::{
         DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, PopKeyboardEnhancementFlags,
     };
@@ -403,8 +409,11 @@ fn restore_to(out: &mut impl Write) {
         DisableFocusChange,
         DisableMouseCapture,
         LeaveAlternateScreen,
-        Show
+        Show,
+        SetCursorStyle::DefaultUserShape
     );
+    // The caret's colour (OSC 112), which Insert and `:` set with OSC 12.
+    let _ = write!(out, "\x1b]112\x07");
     let _ = out.flush();
 }
 
@@ -557,7 +566,7 @@ impl Gate {
         }
     }
 
-    fn on_panic(&self, ends_process: bool, signal_thread: bool) -> OnPanic {
+    fn on_panic(&self, ends_process: bool, signal_thread: bool, main_thread: bool) -> OnPanic {
         // First: the signal thread ends the process whatever the build, and
         // nobody else would once it is gone.
         if signal_thread {
@@ -573,10 +582,13 @@ impl Gate {
             // As for a signal: the restore must not land under a frame.
             self.stopping.store(true, Ordering::SeqCst);
             OnPanic::Owner
-        } else if self.is(SIGNALLED) {
-            OnPanic::Wait
-        } else {
+        } else if self.is(QUITTING) && main_thread {
+            // `quit` is claimed on the main thread: its own panic on the way out.
             OnPanic::Restore
+        } else {
+            // Another owner is dumping or restoring; returning would end the
+            // process (`panic = "abort"`) under it.
+            OnPanic::Wait
         }
     }
 
@@ -674,8 +686,9 @@ pub enum OnPanic {
     /// This panic ends the editor: frames have stopped; dump, wait for the
     /// frame in flight, restore, report.
     Owner,
-    /// A signal owns the ending and will restore and exit: keep the message
-    /// for its report, give up the frame, and wait.
+    /// Another thread owns the ending (a signal, a panic, or the loop's own
+    /// exit) and will restore and end the process: keep the message for its
+    /// report, give up the frame, and wait.
     Wait,
     /// The loop's own exit owns the ending (a panic while it restores):
     /// restore and report, but no second dump.
@@ -684,7 +697,7 @@ pub enum OnPanic {
 
 /// For the panic hook: what to do about a panic on this thread.
 pub fn on_panic() -> OnPanic {
-    GATE.on_panic(panic_ends_process(), on_signal_thread())
+    GATE.on_panic(panic_ends_process(), on_signal_thread(), on_main_thread())
 }
 
 /// For a thread that panicked and now waits for the signal thread to end the
@@ -702,7 +715,11 @@ fn on_signal_thread() -> bool {
 /// aborts on panic (release), otherwise only on the main thread, where it
 /// unwinds out of `main`.
 fn panic_ends_process() -> bool {
-    cfg!(panic = "abort") || std::thread::current().name() == Some("main")
+    cfg!(panic = "abort") || on_main_thread()
+}
+
+fn on_main_thread() -> bool {
+    std::thread::current().name() == Some("main")
 }
 
 // ------------------------------------------------------------------ signals
@@ -912,16 +929,41 @@ mod tests {
     }
 
     #[test]
+    fn a_new_crash_takes_the_free_plain_name_so_opening_the_file_names_it() {
+        let d = dir("plain-again");
+        let path = d.join("p.md");
+        std::fs::write(&path, "saved\n").unwrap();
+        let state = d.join("state");
+        let first = dump(&[snap(Some(path.clone()), "1\n", false)], &state);
+        let _ = dump(&[snap(Some(path.clone()), "2\n", false)], &state);
+        let third = dump(&[snap(Some(path.clone()), "3\n", false)], &state);
+        // The user reads and deletes the first two, keeping `-3`.
+        std::fs::remove_file(&first[0]).unwrap();
+        std::fs::remove_file(beside_nth(&path, 2)).unwrap();
+        let fourth = dump(&[snap(Some(path.clone()), "4\n", false)], &state);
+        assert_eq!(fourth, vec![first[0].clone()], "the plain name, free again");
+        set_mtime(&third[0], std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        let b = Buffer::open(path.clone(), &[]).unwrap();
+        let text = notice([&b].into_iter()).expect("the new crash is announced");
+        assert_eq!(text, "unsaved text from a crash, newest first: p.md.shoin-recover, p.md.shoin-recover-3");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_new_recovery_file_goes_past_the_highest_number_and_is_listed_first() {
         let d = dir("order");
         let path = d.join("o.md");
         let first = dump(&[snap(Some(path.clone()), "1\n", false)], &d);
         let second = dump(&[snap(Some(path.clone()), "2\n", false)], &d);
-        // The plain name deleted: the next crash still goes past `-2`, not
-        // back to the free plain name, so the number orders them too.
-        std::fs::remove_file(&first[0]).unwrap();
+        // A gap below the highest is not filled: `-2` deleted, the next
+        // goes past `-3`, so the number orders them too.
+        let extra = dump(&[snap(Some(path.clone()), "x\n", false)], &d);
+        assert_eq!(extra, vec![d.join("o.md.shoin-recover-3")]);
+        std::fs::remove_file(&second[0]).unwrap();
+        std::fs::rename(&extra[0], &second[0]).unwrap();
         let third = dump(&[snap(Some(path.clone()), "3\n", false)], &d);
         assert_eq!(third, vec![d.join("o.md.shoin-recover-3")]);
+        std::fs::remove_file(&first[0]).unwrap();
         // Timestamps that cannot tell them apart (FAT keeps two seconds).
         let t = std::time::SystemTime::now();
         set_mtime(&second[0], t);
@@ -935,7 +977,9 @@ mod tests {
             std::fs::remove_file(beside_nth(&path, n)).unwrap();
         }
         assert_eq!(recovery_files(&path).len(), 2, "-2 and -9");
-        assert_eq!(dump(&[snap(Some(path.clone()), "4\n", false)], &d), vec![d.join("o.md.shoin-recover-10")]);
+        // The plain name is free here, so the next takes it; then past `-9`.
+        assert_eq!(dump(&[snap(Some(path.clone()), "4\n", false)], &d), vec![d.join("o.md.shoin-recover")]);
+        assert_eq!(dump(&[snap(Some(path.clone()), "5\n", false)], &d), vec![d.join("o.md.shoin-recover-10")]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1036,39 +1080,47 @@ mod tests {
         let gate = Gate::new();
         // In a build that unwinds, a background thread's panic leaves the
         // editor running: it may copy, but it claims nothing.
-        assert_eq!(gate.on_panic(false, false), OnPanic::SafetyCopy { dump: true });
+        assert_eq!(gate.on_panic(false, false, true), OnPanic::SafetyCopy { dump: true });
         assert!(gate.is(RUNNING));
         assert!(gate.stop(), "the signal that comes later still owns the ending, and dumps");
-        assert_eq!(gate.on_panic(false, false), OnPanic::SafetyCopy { dump: false }, "no copy over its dump");
+        assert_eq!(gate.on_panic(false, false, true), OnPanic::SafetyCopy { dump: false }, "no copy over its dump");
         // In a build that unwinds the signal thread's panic still ends the
         // process; nothing else would once that thread is gone.
-        assert_eq!(gate.on_panic(false, true), OnPanic::SignalThread);
+        assert_eq!(gate.on_panic(false, true, true), OnPanic::SignalThread);
         // A main-thread panic now waits for the signal thread.
-        assert_eq!(gate.on_panic(true, false), OnPanic::Wait);
-        assert_eq!(gate.on_panic(true, true), OnPanic::SignalThread);
+        assert_eq!(gate.on_panic(true, false, true), OnPanic::Wait);
+        assert_eq!(gate.on_panic(true, true, true), OnPanic::SignalThread);
 
         let gate = Gate::new();
-        assert_eq!(gate.on_panic(true, false), OnPanic::Owner, "a panic that ends the process owns it");
+        assert_eq!(gate.on_panic(true, false, true), OnPanic::Owner, "a panic that ends the process owns it");
         assert!(!gate.stop(), "and a signal after it does not dump again");
         assert!(gate.frame().is_none(), "but frames stop all the same");
 
         let gate = Gate::new();
         assert!(gate.claim(QUITTING));
-        assert_eq!(gate.on_panic(true, false), OnPanic::Restore, "a panic while the loop restores");
+        assert_eq!(gate.on_panic(true, false, true), OnPanic::Restore, "a panic while the loop restores");
+        // Another thread's panic (a build that aborts) must not end the
+        // process under the loop's own dump or restore: it waits.
+        assert_eq!(gate.on_panic(true, false, false), OnPanic::Wait);
+
+        let gate = Gate::new();
+        assert_eq!(gate.on_panic(true, false, false), OnPanic::Owner, "a background thread's panic, aborting");
+        assert_eq!(gate.on_panic(true, false, true), OnPanic::Wait, "main waits while that owner dumps");
+        assert_eq!(gate.on_panic(true, false, false), OnPanic::Wait, "and so does a third thread");
     }
 
     #[test]
     fn a_background_panic_writes_one_safety_copy_per_process() {
         let gate = Gate::new();
-        assert_eq!(gate.on_panic(false, false), OnPanic::SafetyCopy { dump: true });
-        assert_eq!(gate.on_panic(false, false), OnPanic::SafetyCopy { dump: false });
+        assert_eq!(gate.on_panic(false, false, true), OnPanic::SafetyCopy { dump: true });
+        assert_eq!(gate.on_panic(false, false, true), OnPanic::SafetyCopy { dump: false });
         assert!(gate.is(RUNNING));
     }
 
     #[test]
     fn a_panic_that_ends_the_process_stops_frames_for_its_restore() {
         let gate = Gate::new();
-        assert_eq!(gate.on_panic(true, false), OnPanic::Owner);
+        assert_eq!(gate.on_panic(true, false, true), OnPanic::Owner);
         assert!(gate.frame().is_none(), "no frame lands under the restore");
         let gate = Gate::new();
         let frame = gate.frame().unwrap();
@@ -1095,6 +1147,8 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("\x1b[?1049l"), "the main screen back: {out:?}");
         assert!(out.contains("\x1b[?25h"), "the caret shown: {out:?}");
+        assert!(out.contains("\x1b[0 q"), "the caret's own shape back: {out:?}");
+        assert!(out.contains("\x1b]112\x07"), "the caret's own colour back: {out:?}");
     }
 
     #[test]
