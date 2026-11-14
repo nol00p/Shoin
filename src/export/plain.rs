@@ -241,8 +241,10 @@ fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
                     _ => out.push_str(&text),
                 }
             }
-            // Alt text is plain: `![a [b](c)](d)` reads "a b".
-            Inline::Image => out.push_str(&format!("[image: {}]", strip_in(&inner, md, true))),
+            // Alt text is plain: `![a [b](c)](d)` reads "a b". Flattened as
+            // HTML export's alt is, which does not recurse into a picture in
+            // it: pictures nest, and `![![![…` must not run the stack out.
+            Inline::Image => out.push_str(&format!("[image: {}]", super::html::plain_text(&inner, md))),
             // What the reader sees in the editor: the label after `|`, or
             // the target when there is none.
             Inline::WikiLink => match inner.split_once('|') {
@@ -267,6 +269,13 @@ mod tests {
         let md = MarkdownConfig::default();
         assert_eq!(strip_inline("![a [b](c) *d*](p.png)", &md), "[image: a b d]");
         assert_eq!(strip_inline("[![ci](b.svg)](https://x.y)", &md), "[image: ci] (https://x.y)");
+        assert_eq!(strip_inline("![see #todo](p.png)", &md), "[image: see #todo]");
+        // Pictures nested deep: no recursion per level.
+        let n = 50_000;
+        let deep = format!("{}a{}", "![".repeat(n), "](u)".repeat(n));
+        let t = std::time::Instant::now();
+        assert!(strip_inline(&deep, &md).starts_with("[image: "));
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
     }
 
     /// LaTeX is not Markdown: nothing in a display block is stripped.

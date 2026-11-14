@@ -737,7 +737,7 @@ fn off_host(file: &str) -> bool {
 /// Inline markup removed rather than translated — for a `<title>` and for the
 /// heading ids, neither of which can hold tags. Prose bodies are stripped
 /// again, as `inline_in` renders them again.
-fn plain_text(line: &str, md: &MarkdownConfig) -> String {
+pub(super) fn plain_text(line: &str, md: &MarkdownConfig) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
     if spans.is_empty() {
@@ -759,6 +759,8 @@ fn plain_text(line: &str, md: &MarkdownConfig) -> String {
             | Inline::Highlight
             | Inline::Link => out.push_str(&plain_text(&inner, md)),
             Inline::WikiLink => out.push_str(wiki_parts(&inner).2),
+            // A tag reads as written, `#` and all.
+            Inline::Tag => out.extend(&chars[sp.outer.clone()]),
             _ => out.push_str(&inner),
         }
         i = sp.outer.end;
@@ -1434,6 +1436,8 @@ mod tests {
         // A picture's alt text is plain text.
         let got = body("![a [b](c) *d*](https://x.y/p.png)\n");
         assert!(got.contains("alt=\"a b d\""), "{got}");
+        let got = body("![see #todo](https://x.y/p.png)\n");
+        assert!(got.contains("alt=\"see #todo\""), "a tag keeps its hash: {got}");
         well_formed(&got).unwrap();
     }
 

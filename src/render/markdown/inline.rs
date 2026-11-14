@@ -436,9 +436,23 @@ impl Parens {
 /// embed, so the bang is accepted here as belonging to the span after it.
 pub fn span_at(line: &str, col: usize, cfg: &MarkdownConfig) -> Option<InlineSpan> {
     let bang = line.chars().nth(col) == Some('!');
-    scan(line, cfg)
+    let found = scan(line, cfg)
         .into_iter()
-        .find(|s| s.outer.contains(&col) || (bang && s.outer.start == col + 1))
+        .find(|s| s.outer.contains(&col) || (bang && s.outer.start == col + 1))?;
+    // A link in a link's text (`[a [[note]] b](url)`, an autolink) is the
+    // one under the cursor. One level only: links do not nest, and a picture
+    // in the text is the outer link's (the README badge).
+    if found.kind == Inline::Link && found.inner.contains(&col) {
+        let text: String = line.chars().skip(found.inner.start).take(found.inner.len()).collect();
+        let off = found.inner.start;
+        let inner = scan(&text, cfg).into_iter().find(|s| {
+            s.outer.contains(&(col - off)) && matches!(s.kind, Inline::WikiLink | Inline::Autolink)
+        });
+        if let Some(s) = inner {
+            return Some(InlineSpan { kind: s.kind, outer: s.outer.start + off..s.outer.end + off, inner: s.inner.start + off..s.inner.end + off });
+        }
+    }
+    Some(found)
 }
 
 /// What a link span points AT — the note name or URL, never the display text.
@@ -1288,11 +1302,9 @@ mod tests {
                 let t = std::time::Instant::now();
                 let _ = scan(&line, &cfg);
                 let took = t.elapsed();
-                if cfg!(debug_assertions) {
-                    println!("{:?}…: {took:?}", &line[..4]);
-                } else {
-                    assert!(took < std::time::Duration::from_millis(200), "{:?}…: {took:?}", &line[..4]);
-                }
+                // CI tests a debug build: ~10 ms there now, ~6 s before.
+                let cap = if cfg!(debug_assertions) { 1000 } else { 200 };
+                assert!(took < std::time::Duration::from_millis(cap), "{:?}…: {took:?}", &line[..4]);
             }
         }
     }
@@ -1326,6 +1338,16 @@ mod tests {
         assert_eq!(span_at(line, url + 2, &cfg).unwrap().kind, Inline::Autolink);
 
         assert!(span_at(line, 1, &cfg).is_none(), "plain prose is not a link");
+
+        // A wiki link or address in a link's text is the one followed; the
+        // badge's picture follows the outer link.
+        let line = "[a [[note]] b https://c.d/e](https://x.y)";
+        let at = |s: &str| span_at(line, line.find(s).unwrap(), &cfg).and_then(|sp| target_of(&sp, line));
+        assert_eq!(at("note").as_deref(), Some("note"));
+        assert_eq!(at("c.d").as_deref(), Some("https://c.d/e"));
+        assert_eq!(at(" b ").as_deref(), Some("https://x.y"));
+        let line = "[![ci](b.svg)](https://x.y)";
+        assert_eq!(target_of(&span_at(line, 3, &cfg).unwrap(), line).as_deref(), Some("https://x.y"));
     }
 
     /// A destination is never the display text.
