@@ -658,7 +658,8 @@ fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: b
                 out.push_str(&format!(
                     "<img src=\"{}\" alt=\"{}\"{}>",
                     safe_src(&inline_src(&url, base)),
-                    escape(&inner),
+                    // Alt text is plain: `![a [b](c)](d)` reads "a b".
+                    escape(&plain_text(&inner, md)),
                     title_attr(title)
                 ));
             }
@@ -736,7 +737,7 @@ fn off_host(file: &str) -> bool {
 /// Inline markup removed rather than translated — for a `<title>` and for the
 /// heading ids, neither of which can hold tags. Prose bodies are stripped
 /// again, as `inline_in` renders them again.
-fn plain_text(line: &str, md: &MarkdownConfig) -> String {
+pub(super) fn plain_text(line: &str, md: &MarkdownConfig) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
     if spans.is_empty() {
@@ -758,6 +759,8 @@ fn plain_text(line: &str, md: &MarkdownConfig) -> String {
             | Inline::Highlight
             | Inline::Link => out.push_str(&plain_text(&inner, md)),
             Inline::WikiLink => out.push_str(wiki_parts(&inner).2),
+            // A tag reads as written, `#` and all.
+            Inline::Tag => out.extend(&chars[sp.outer.clone()]),
             _ => out.push_str(&inner),
         }
         i = sp.outer.end;
@@ -1420,11 +1423,21 @@ mod tests {
     /// its text.
     #[test]
     fn a_link_inside_link_text_is_text() {
-        // (`inline::scan` does not read brackets inside a link's text, so an
-        // autolink is the one link that can sit there today.)
         let got = body("[see <https://a.b> **x**](https://x.y)\n");
         assert_eq!(got.matches("<a ").count(), 1, "{got}");
         assert!(got.contains("<a href=\"https://x.y\">see https://a.b <strong>x</strong></a>"), "{got}");
+        well_formed(&got).unwrap();
+        // A wiki link in a link's text is its label.
+        let got = body("[a [[note|wiki]] b](https://x.y)\n");
+        assert!(got.contains("<a href=\"https://x.y\">a wiki b</a>"), "{got}");
+        // A picture in a link's text is a picture: the README badge.
+        let got = body("[![badge](https://ci.example/b.svg)](https://x.y)\n");
+        assert!(got.contains("<a href=\"https://x.y\"><img src=\"https://ci.example/b.svg\" alt=\"badge\"></a>"), "{got}");
+        // A picture's alt text is plain text.
+        let got = body("![a [b](c) *d*](https://x.y/p.png)\n");
+        assert!(got.contains("alt=\"a b d\""), "{got}");
+        let got = body("![see #todo](https://x.y/p.png)\n");
+        assert!(got.contains("alt=\"see #todo\""), "a tag keeps its hash: {got}");
         well_formed(&got).unwrap();
     }
 

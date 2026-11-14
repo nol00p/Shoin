@@ -7031,7 +7031,7 @@ mod tests {
     }
 
     /// The `!` of an unexpanded `![[…]]` is not part of the scanner's span —
-    /// `bracket_link` rejects it and the scan falls through to `wiki_at`. A
+    /// the scan leaves it a character and reads the wiki link after it. A
     /// reader whose cursor is on the bang still means the embed.
     #[test]
     fn gf_follows_an_embed_from_its_bang() {

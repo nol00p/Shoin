@@ -1,4 +1,5 @@
-//! Pass B — single left-to-right inline scan. SPEC.md §5.2.
+//! Pass B — inline scan, left to right: links and what binds tighter, then
+//! emphasis around them (see `scan`). SPEC.md §5.2.
 //!
 //! Delimiter matching is deliberately naive-but-safe: an opener is honored only
 //! if a matching closer exists later on the SAME line. Unbalanced markers render
@@ -45,37 +46,413 @@ pub struct InlineSpan {
 /// Guarantees, enforced by tests and fuzzing:
 ///   - never panics on arbitrary input
 ///   - spans never overlap and never exceed the line's char length
+///
+/// Two passes, in CommonMark's order of precedence. `tight` finds what binds
+/// tighter than a link (escapes, code spans, math, autolinks, wiki links) and
+/// the links and images themselves; `loose` then finds emphasis, `~~`, `==`
+/// and tags in the text between them. Emphasis may hold a whole link or code
+/// span (`**see [docs](u)**`) but never starts or ends inside one, so
+/// `[*](u) *b*` is a link and then `b` in italics.
 pub fn scan(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     let chars: Vec<char> = line.chars().collect();
+    let atoms = tight(&chars, cfg);
+    loose(&chars, atoms, cfg)
+}
+
+/// The first pass: escapes, code spans, math, autolinks, wiki links, and
+/// links and images, left to right.
+///
+/// Each `[` (or `![`) this pass reaches waits on a stack, and a `]` it
+/// reaches takes the nearest one; the two make a link when a `(…)` follows.
+/// What another construct here took — a `]` in a code span, an escaped
+/// `\]`, a `[[wiki]]` — is not a bracket, so a link's text may hold any of
+/// those and balanced `[…]`, including an image (the README badge
+/// `[![alt](img)](url)`).
+fn tight(chars: &[char], cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     let len = chars.len();
     let mut spans = Vec::new();
+    let mut wiki_close = None;
+    let mut parens: Option<Parens> = None;
+    // A backtick run this long or longer has no closer from here on, so
+    // `code_at` need not look again: what keeps a line of `` [` `` linear.
+    let mut no_code = usize::MAX;
+    let mut open: Vec<Opener> = Vec::new();
+    // The `[` of the last link formed. A `[` before it that still waits was
+    // open around that link, and links do not nest: it is text now
+    // (`[a [b](c) d](e)` links only `b`). An image may still hold one.
+    let mut last_link: Option<usize> = None;
     let mut i = 0;
     while i < len {
-        match match_at(&chars, i, cfg) {
-            // A match always starts at `i` and ends past it, so `i` advances and
-            // the emitted spans stay ordered and non-overlapping.
-            Some(span) => {
-                i = span.outer.end.max(i + 1);
-                spans.push(span);
+        let found = match chars[i] {
+            '\\' => escape_at(chars, i),
+            '`' => {
+                let run = run_len(chars, i, '`');
+                let code = if run < no_code { code_at(chars, i) } else { None };
+                if code.is_none() {
+                    no_code = no_code.min(run);
+                }
+                code
             }
-            None => i += 1,
+            '[' if cfg.wiki_links && chars.get(i + 1) == Some(&'[') => wiki_at(chars, i, &mut wiki_close),
+            'h' => autolink_at(chars, i),
+            '<' => angle_autolink_at(chars, i),
+            '$' if cfg.math => {
+                if chars.get(i + 1) == Some(&'$') {
+                    latex_delimited_at(chars, i)
+                } else {
+                    latex_at(chars, i)
+                }
+            }
+            _ => None,
+        };
+        if let Some(span) = found {
+            // A match always starts at `i` and ends past it, so `i` advances
+            // and the emitted spans stay ordered and non-overlapping.
+            i = span.outer.end.max(i + 1);
+            spans.push(span);
+            continue;
         }
+        match chars[i] {
+            '[' => open.push(Opener { at: i, image: false, spans: spans.len() }),
+            // `![[note]]` is an embed: the `!` stays a character and the
+            // wiki link after it is read next.
+            '!' if chars.get(i + 1) == Some(&'[')
+                && !(cfg.wiki_links
+                    && chars.get(i + 2) == Some(&'[')
+                    && wiki_at(chars, i + 1, &mut wiki_close).is_some()) =>
+            {
+                open.push(Opener { at: i + 1, image: true, spans: spans.len() });
+                i += 1;
+            }
+            ']' => {
+                if let Some(o) = open.pop() {
+                    let active = o.image || last_link.is_none_or(|l| l < o.at);
+                    let close = (active && chars.get(i + 1) == Some(&'('))
+                        .then(|| parens.get_or_insert_with(|| Parens::new(chars)).link_close(chars, i + 2))
+                        .flatten();
+                    if let Some(close) = close {
+                        // The text's own spans give way to the link; export
+                        // reads the text again for what is inside it.
+                        spans.truncate(o.spans);
+                        spans.push(InlineSpan {
+                            kind: if o.image { Inline::Image } else { Inline::Link },
+                            outer: if o.image { o.at - 1 } else { o.at }..close + 1,
+                            inner: o.at + 1..i,
+                        });
+                        if !o.image {
+                            last_link = Some(o.at);
+                        }
+                        // On past the address: a bracket in it is not one.
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
     spans
 }
 
+/// A `[` or `![` the first pass has passed, waiting for its `]`.
+struct Opener {
+    /// Where the `[` is.
+    at: usize,
+    image: bool,
+    /// How many spans the pass had found when it passed the `[`; those after
+    /// are inside the text.
+    spans: usize,
+}
+
+/// The second pass: emphasis, `~~`, `==` and tags in the text around what
+/// `tight` found (`atoms`), which come through as they are unless emphasis
+/// holds them whole.
+fn loose(chars: &[char], atoms: Vec<InlineSpan>, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
+    let len = chars.len();
+    let ranges: Vec<Range<usize>> = atoms.iter().map(|a| a.outer.clone()).collect();
+    let mut gaps = Gaps { chars, atoms: &ranges, closers: [(usize::MAX, None); 12] };
+    let mut out = Vec::with_capacity(atoms.len());
+    let mut atoms = atoms.into_iter().zip(ranges.iter().map(|r| r.start)).peekable();
+    let mut i = 0;
+    while i < len {
+        // Atoms that emphasis took whole are behind `i`.
+        while atoms.next_if(|(_, start)| *start < i).is_some() {}
+        if let Some((atom, _)) = atoms.next_if(|(_, start)| *start == i) {
+            i = atom.outer.end;
+            out.push(atom);
+            continue;
+        }
+        let next_atom = atoms.peek().map_or(len, |(_, start)| *start);
+        let found = match chars[i] {
+            '*' | '_' => gaps.emphasis_at(i, chars[i]),
+            '~' => gaps.pair_at(i, '~', Inline::Strikethrough),
+            '=' if cfg.highlight => gaps.pair_at(i, '=', Inline::Highlight),
+            // A tag is letters, so it stops at the next atom's first one.
+            '#' if cfg.tags => tag_at(&chars[..next_atom], i),
+            _ => None,
+        };
+        match found {
+            Some(span) => {
+                i = span.outer.end.max(i + 1);
+                out.push(span);
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// Where the second pass looks for closing markers: in the text between the
+/// first pass's atoms, never inside one (`*a `*` b*` closes on the last star).
+struct Gaps<'a> {
+    chars: &'a [char],
+    atoms: &'a [Range<usize>],
+    /// For each marker (`*`, `_`, `~`, `=`) and length (1–3): where a search
+    /// for a closer last began, and what it found. A later search from
+    /// further right that is not inside a run of the marker walks the same
+    /// way from there on, so the answer holds until the scan passes it. Without
+    /// it a line of `**a ` walked to its end at every opener.
+    closers: [(usize, Option<usize>); 12],
+}
+
+impl Gaps<'_> {
+    /// `*` / `**` / `***`, and the same with `_`. The run length picks italic /
+    /// bold / both. The opener must be followed, and the closer preceded, by a
+    /// non-space, so `2 * 3 * 4` stays plain; `_` also stays plain inside a word.
+    fn emphasis_at(&mut self, i: usize, ch: char) -> Option<InlineSpan> {
+        let chars = self.chars;
+        let run = run_len(chars, i, ch);
+        if !can_open(chars, i, run, ch) {
+            return None;
+        }
+        let n = run.min(3);
+        let kind = match n {
+            3 => Inline::BoldItalic,
+            2 => Inline::Bold,
+            _ => Inline::Italic,
+        };
+        let open_end = i + n;
+        let close = self.find_closer(open_end, ch, n)?;
+        if close <= open_end || all_blank(chars, open_end..close) {
+            return None;
+        }
+        Some(InlineSpan {
+            kind,
+            outer: i..close + n,
+            inner: open_end..close,
+        })
+    }
+
+    /// A two-character symmetric fence: `~~x~~`, `==x==`. Spaced like emphasis:
+    /// `a == b == c` stays plain.
+    fn pair_at(&mut self, i: usize, ch: char, kind: Inline) -> Option<InlineSpan> {
+        let chars = self.chars;
+        let run = run_len(chars, i, ch);
+        if run < 2 || !can_open(chars, i, run, ch) {
+            return None;
+        }
+        let open_end = i + 2;
+        let close = self.find_closer(open_end, ch, 2)?;
+        if close <= open_end || all_blank(chars, open_end..close) {
+            return None;
+        }
+        Some(InlineSpan {
+            kind,
+            outer: i..close + 2,
+            inner: open_end..close,
+        })
+    }
+
+    /// The first closing run of at least `n` of `ch` at or after `from`,
+    /// outside every atom.
+    ///
+    /// A closer may not follow whitespace or be escaped, and a `_` closer may not
+    /// be followed by a letter or digit (so `snake_case` stays plain). A run that
+    /// fails is skipped whole: `*a **` must not close on the second star alone.
+    fn find_closer(&mut self, from: usize, ch: char, n: usize) -> Option<usize> {
+        let chars = self.chars;
+        let slot = match ch {
+            '*' => 0,
+            '_' => 3,
+            '~' => 6,
+            _ => 9,
+        } + n.clamp(1, 3)
+            - 1;
+        // A search from `from` walks as an earlier one did once that one
+        // reached `from`, unless the earlier one stepped over it inside a run
+        // of `ch` — the opener's own run, when it is longer than `n`.
+        let aligned = from == 0 || chars[from - 1] != ch || chars.get(from) != Some(&ch);
+        if aligned {
+            let (began, found) = self.closers[slot];
+            if began <= from && found.is_none_or(|c| c >= from) {
+                return found;
+            }
+        }
+        let mut atom = self.atoms.partition_point(|a| a.start < from);
+        let mut j = from;
+        let found = loop {
+            if j >= chars.len() {
+                break None;
+            }
+            if self.atoms.get(atom).is_some_and(|a| a.start == j) {
+                j = self.atoms[atom].end;
+                atom += 1;
+                continue;
+            }
+            if chars[j] != ch {
+                j += 1;
+                continue;
+            }
+            let run = run_len(chars, j, ch);
+            let after = chars.get(j + run);
+            let ok = run >= n
+                && j > 0
+                && !chars[j - 1].is_whitespace()
+                && !is_escaped(chars, j)
+                && !(ch == '_' && after.is_some_and(|c| c.is_alphanumeric()));
+            if ok {
+                break Some(j);
+            }
+            j += run;
+        };
+        if aligned {
+            self.closers[slot] = (from, found);
+        }
+        found
+    }
+}
+
+/// A line's parentheses, matched once, so that closing the `(…)` after each
+/// `](` does not walk the rest of the line: a line of `[a](()` repeated took
+/// half a second.
+struct Parens {
+    /// For each unescaped `(`, its matching `)`.
+    pair: Vec<Option<usize>>,
+    /// The next unescaped `(` or `)` at or after each index.
+    next_paren: Vec<usize>,
+    /// The next unescaped whitespace at or after each index.
+    next_space: Vec<usize>,
+    /// The next `)` at or after each index, escaped or not.
+    next_close: Vec<usize>,
+}
+
+impl Parens {
+    fn new(chars: &[char]) -> Self {
+        let len = chars.len();
+        // The walks this replaces skip the character after any backslash.
+        let mut escaped = vec![false; len];
+        let mut k = 0;
+        while k < len {
+            if chars[k] == '\\' && k + 1 < len {
+                escaped[k + 1] = true;
+                k += 1;
+            }
+            k += 1;
+        }
+        let mut pair = vec![None; len];
+        let mut stack = Vec::new();
+        for k in 0..len {
+            match chars[k] {
+                '(' if !escaped[k] => stack.push(k),
+                ')' if !escaped[k] => {
+                    if let Some(o) = stack.pop() {
+                        pair[o] = Some(k);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut next_paren = vec![len; len + 1];
+        let mut next_space = vec![len; len + 1];
+        let mut next_close = vec![len; len + 1];
+        for k in (0..len).rev() {
+            let c = chars[k];
+            next_paren[k] = if matches!(c, '(' | ')') && !escaped[k] { k } else { next_paren[k + 1] };
+            next_space[k] = if c.is_whitespace() && !escaped[k] { k } else { next_space[k + 1] };
+            next_close[k] = if c == ')' { k } else { next_close[k + 1] };
+        }
+        Parens { pair, next_paren, next_space, next_close }
+    }
+
+    /// The `)` that closes the `(…)` starting at `from`, as CommonMark finds
+    /// it: the address may hold balanced parentheses
+    /// (`wiki/Rust_(language)`), may be written `<…>`, and may be followed by
+    /// a `"title"`. When the `(…)` does not have that shape — `[a](my
+    /// note.md)`, an unbalanced `(` — the first balancing `)`, then simply the
+    /// first `)`, closes it, so a link still forms wherever it formed before.
+    fn link_close(&self, chars: &[char], from: usize) -> Option<usize> {
+        let from = from.min(chars.len());
+        self.well_formed_close(chars, from)
+            .or_else(|| self.balanced(chars, from))
+            .or_else(|| (self.next_close[from] < chars.len()).then_some(self.next_close[from]))
+    }
+
+    /// `link_close`'s first try: `(url "title")` exactly.
+    fn well_formed_close(&self, chars: &[char], from: usize) -> Option<usize> {
+        let skip_ws = |mut j: usize| {
+            while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                j += 1;
+            }
+            j
+        };
+        let start = skip_ws(from);
+        // `dest_end`, answered from the tables.
+        let j = if chars.get(start) == Some(&'<') {
+            dest_end(chars, start)?
+        } else {
+            self.next_space[start].min(self.balanced(chars, start).unwrap_or(chars.len()))
+        };
+        let mut j = skip_ws(j);
+        if chars.get(j) != Some(&')') {
+            j = skip_ws(title_end(chars, j)?);
+        }
+        (chars.get(j) == Some(&')')).then_some(j)
+    }
+
+    /// The `)` that brings the paren count below zero from `from`: the first
+    /// one not matched by a `(` at or after `from`. An unmatched `(` on the
+    /// way means none: every `)` after it closes something after it.
+    fn balanced(&self, chars: &[char], from: usize) -> Option<usize> {
+        let mut k = from;
+        loop {
+            k = *self.next_paren.get(k)?;
+            match chars.get(k)? {
+                // Every group opened since `from` was jumped whole, so this
+                // `)` closes something before it.
+                ')' => return Some(k),
+                _ => k = self.pair[k]? + 1,
+            }
+        }
+    }
+}
+
 /// The link span the cursor sits in, if it sits in one.
 ///
-/// `!` is not part of an unexpanded `![[…]]`'s span: `bracket_link` rejects it
-/// (no `(` follows the `]`), the scan falls through one character, and
-/// `wiki_at` matches the `[[…]]` alone. That is fine for styling — the bang is
+/// `!` is not part of an unexpanded `![[…]]`'s span: the scan leaves it a
+/// character, since a wiki link follows it, and `wiki_at` matches the
+/// `[[…]]` alone. That is fine for styling — the bang is
 /// one dim character — but a reader whose cursor is ON the bang still means the
 /// embed, so the bang is accepted here as belonging to the span after it.
 pub fn span_at(line: &str, col: usize, cfg: &MarkdownConfig) -> Option<InlineSpan> {
     let bang = line.chars().nth(col) == Some('!');
-    scan(line, cfg)
+    let found = scan(line, cfg)
         .into_iter()
-        .find(|s| s.outer.contains(&col) || (bang && s.outer.start == col + 1))
+        .find(|s| s.outer.contains(&col) || (bang && s.outer.start == col + 1))?;
+    // A link in a link's text (`[a [[note]] b](url)`, an autolink) is the
+    // one under the cursor. One level only: links do not nest, and a picture
+    // in the text is the outer link's (the README badge).
+    if found.kind == Inline::Link && found.inner.contains(&col) {
+        let text: String = line.chars().skip(found.inner.start).take(found.inner.len()).collect();
+        let off = found.inner.start;
+        let inner = scan(&text, cfg).into_iter().find(|s| {
+            s.outer.contains(&(col - off)) && matches!(s.kind, Inline::WikiLink | Inline::Autolink)
+        });
+        if let Some(s) = inner {
+            return Some(InlineSpan { kind: s.kind, outer: s.outer.start + off..s.outer.end + off, inner: s.inner.start + off..s.inner.end + off });
+        }
+    }
+    Some(found)
 }
 
 /// What a link span points AT — the note name or URL, never the display text.
@@ -220,31 +597,6 @@ fn unescape(chars: &[char]) -> String {
     out
 }
 
-/// Try every construct that can begin at `i`, in priority order.
-fn match_at(chars: &[char], i: usize, cfg: &MarkdownConfig) -> Option<InlineSpan> {
-    match chars[i] {
-        '\\' => escape_at(chars, i),
-        '`' => code_at(chars, i),
-        '!' if chars.get(i + 1) == Some(&'[') => bracket_link(chars, i, true),
-        '[' if cfg.wiki_links && chars.get(i + 1) == Some(&'[') => wiki_at(chars, i),
-        '[' => bracket_link(chars, i, false),
-        '*' | '_' => emphasis_at(chars, i, chars[i]),
-        '~' => pair_at(chars, i, '~', Inline::Strikethrough),
-        '=' if cfg.highlight => pair_at(chars, i, '=', Inline::Highlight),
-        '#' if cfg.tags => tag_at(chars, i),
-        'h' => autolink_at(chars, i),
-        '<' => angle_autolink_at(chars, i),
-        '$' if cfg.math => {
-            if chars.get(i + 1) == Some(&'$') {
-                latex_delimited_at(chars, i)
-            } else {
-                latex_at(chars, i)
-            }
-        }
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------- scan helpers
 
 /// Run length of `ch` starting at `i`.
@@ -264,33 +616,6 @@ fn find_delim(chars: &[char], from: usize, ch: char, n: usize) -> Option<usize> 
             return Some(j);
         }
         j += 1;
-    }
-    None
-}
-
-/// The first closing run of at least `n` of `ch` at or after `from`.
-///
-/// A closer may not follow whitespace or be escaped, and a `_` closer may not
-/// be followed by a letter or digit (so `snake_case` stays plain). A run that
-/// fails is skipped whole: `*a **` must not close on the second star alone.
-fn find_closer(chars: &[char], from: usize, ch: char, n: usize) -> Option<usize> {
-    let mut j = from;
-    while j < chars.len() {
-        if chars[j] != ch {
-            j += 1;
-            continue;
-        }
-        let run = run_len(chars, j, ch);
-        let after = chars.get(j + run);
-        let ok = run >= n
-            && j > 0
-            && !chars[j - 1].is_whitespace()
-            && !is_escaped(chars, j)
-            && !(ch == '_' && after.is_some_and(|c| c.is_alphanumeric()));
-        if ok {
-            return Some(j);
-        }
-        j += run;
     }
     None
 }
@@ -402,126 +727,30 @@ fn latex_delimited_at(chars: &[char], i: usize) -> Option<InlineSpan> {
     None
 }
 
-/// `*` / `**` / `***`, and the same with `_`. The run length picks italic /
-/// bold / both. The opener must be followed, and the closer preceded, by a
-/// non-space, so `2 * 3 * 4` stays plain; `_` also stays plain inside a word.
-fn emphasis_at(chars: &[char], i: usize, ch: char) -> Option<InlineSpan> {
-    let run = run_len(chars, i, ch);
-    if !can_open(chars, i, run, ch) {
-        return None;
-    }
-    let n = run.min(3);
-    let kind = match n {
-        3 => Inline::BoldItalic,
-        2 => Inline::Bold,
-        _ => Inline::Italic,
-    };
-    let open_end = i + n;
-    let close = find_closer(chars, open_end, ch, n)?;
-    if close <= open_end || all_blank(chars, open_end..close) {
-        return None;
-    }
-    Some(InlineSpan {
-        kind,
-        outer: i..close + n,
-        inner: open_end..close,
-    })
-}
-
-/// A two-character symmetric fence: `~~x~~`, `==x==`. Spaced like emphasis:
-/// `a == b == c` stays plain.
-fn pair_at(chars: &[char], i: usize, ch: char, kind: Inline) -> Option<InlineSpan> {
-    let run = run_len(chars, i, ch);
-    if run < 2 || !can_open(chars, i, run, ch) {
-        return None;
-    }
-    let open_end = i + 2;
-    let close = find_closer(chars, open_end, ch, 2)?;
-    if close <= open_end || all_blank(chars, open_end..close) {
-        return None;
-    }
-    Some(InlineSpan {
-        kind,
-        outer: i..close + 2,
-        inner: open_end..close,
-    })
-}
-
-/// `[text](url)` and `![text](url)`. The rendered body is the text; the URL and
-/// brackets are markers. Naive: the first `]` closes the text.
+/// `[[target]]`, up to the first `]]`.
 ///
-/// The `)` that closes the construct is found as CommonMark finds it: the
-/// address may hold balanced parentheses (`wiki/Rust_(language)`), may be
-/// written `<…>`, and may be followed by a `"title"`. When the `(…)` does not
-/// have that shape — `[a](my note.md)`, an unbalanced `(` — the first
-/// balancing `)`, then simply the first `)`, closes it, so a link still
-/// forms wherever it formed before.
-fn bracket_link(chars: &[char], i: usize, image: bool) -> Option<InlineSpan> {
-    let text_start = if image { i + 2 } else { i + 1 };
-    let text_end = find_char(chars, text_start, ']')?;
-    if chars.get(text_end + 1) != Some(&'(') {
-        return None;
-    }
-    let from = text_end + 2;
-    let url_end = link_close(chars, from)
-        .or_else(|| balanced_close(chars, from))
-        .or_else(|| find_char(chars, from, ')'))?;
-    Some(InlineSpan {
-        kind: if image { Inline::Image } else { Inline::Link },
-        outer: i..url_end + 1,
-        inner: text_start..text_end,
-    })
-}
-
-/// The closing `)` of a well-formed `(url "title")` starting at `from`.
-fn link_close(chars: &[char], from: usize) -> Option<usize> {
-    let skip_ws = |mut j: usize| {
-        while chars.get(j).is_some_and(|c| c.is_whitespace()) {
-            j += 1;
-        }
-        j
-    };
-    let j = dest_end(chars, skip_ws(from))?;
-    let mut j = skip_ws(j);
-    if chars.get(j) != Some(&')') {
-        j = skip_ws(title_end(chars, j)?);
-    }
-    (chars.get(j) == Some(&')')).then_some(j)
-}
-
-/// The `)` that brings the paren count below zero, whitespace and quotes
-/// notwithstanding.
-fn balanced_close(chars: &[char], from: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut j = from;
-    while j < chars.len() {
-        match chars[j] {
-            '\\' => j += 1,
-            '(' => depth += 1,
-            ')' if depth == 0 => return Some(j),
-            ')' => depth -= 1,
-            _ => {}
-        }
-        j += 1;
-    }
-    None
-}
-
-/// `[[target]]`.
-fn wiki_at(chars: &[char], i: usize) -> Option<InlineSpan> {
+/// `memo` is the first `]]` at or after where it last looked (the line's
+/// length when there is none). The scan only moves right, so the answer holds
+/// until it passes it; a line of 100,000 `[` walked to its end at each one.
+fn wiki_at(chars: &[char], i: usize, memo: &mut Option<usize>) -> Option<InlineSpan> {
     let text_start = i + 2;
-    let mut j = text_start;
-    while j + 1 < chars.len() {
-        if chars[j] == ']' && chars[j + 1] == ']' {
-            return Some(InlineSpan {
-                kind: Inline::WikiLink,
-                outer: i..j + 2,
-                inner: text_start..j,
-            });
+    let close = match *memo {
+        Some(c) if c >= text_start => c,
+        _ => {
+            let mut j = text_start;
+            while j + 1 < chars.len() && !(chars[j] == ']' && chars[j + 1] == ']') {
+                j += 1;
+            }
+            let c = if j + 1 < chars.len() { j } else { chars.len() };
+            *memo = Some(c);
+            c
         }
-        j += 1;
-    }
-    None
+    };
+    (close < chars.len()).then(|| InlineSpan {
+        kind: Inline::WikiLink,
+        outer: i..close + 2,
+        inner: text_start..close,
+    })
 }
 
 /// `#tag` at a word boundary. A purely numeric tag (`#123`) is rejected, as in
@@ -566,7 +795,9 @@ fn autolink_at(chars: &[char], i: usize) -> Option<InlineSpan> {
     {
         j += 1;
     }
-    while j > i + scheme && matches!(chars[j - 1], '.' | ',' | ';' | ':' | '!' | '?') {
+    // `*`, `_` and `~` too, as GitHub does: an address is read before the
+    // emphasis around it, and `**https://x.y**` must leave its stars.
+    while j > i + scheme && matches!(chars[j - 1], '.' | ',' | ';' | ':' | '!' | '?' | '*' | '_' | '~') {
         j -= 1;
     }
     if j <= i + scheme {
@@ -605,10 +836,6 @@ fn angle_autolink_at(chars: &[char], i: usize) -> Option<InlineSpan> {
         outer: i..j + 1,
         inner: start..j,
     })
-}
-
-fn find_char(chars: &[char], from: usize, ch: char) -> Option<usize> {
-    (from..chars.len()).find(|&j| chars[j] == ch)
 }
 
 // ---------------------------------------------------------------------- styling
@@ -869,6 +1096,219 @@ mod tests {
         assert_eq!(text("a [[Note Name]] b", &w.inner), "Note Name");
     }
 
+    /// The kinds and texts of a line's spans, for whole-line assertions.
+    fn kinds(line: &str, cfg: &MarkdownConfig) -> Vec<(Inline, String)> {
+        scan(line, cfg).iter().map(|s| (s.kind, text(line, &s.outer))).collect()
+    }
+
+    /// A link's text may hold brackets, as CommonMark allows: an image (the
+    /// README badge), a `[[wiki link]]`, balanced or escaped brackets, and a
+    /// `]` inside a code span. The closing `]` is the one that balances.
+    #[test]
+    fn link_text_may_hold_brackets() {
+        let cases = [
+            ("[![badge](x.png)](https://ci.example/b)", "![badge](x.png)", "https://ci.example/b"),
+            ("[a [[wiki]] b](url)", "a [[wiki]] b", "url"),
+            ("[a [b] c](u)", "a [b] c", "u"),
+            ("[a [b [c] d] e](u)", "a [b [c] d] e", "u"),
+            ("[a \\] b](u)", "a \\] b", "u"),
+            ("[a \\[ b](u)", "a \\[ b", "u"),
+            ("[a `]` b](u)", "a `]` b", "u"),
+            ("[a ``x]`` b](u)", "a ``x]`` b", "u"),
+            ("![a [b] c](p.png)", "a [b] c", "p.png"),
+        ];
+        for (line, body, url) in cases {
+            let spans = scan(line, &md());
+            assert_eq!(spans.len(), 1, "{line}");
+            let s = &spans[0];
+            assert!(matches!(s.kind, Inline::Link | Inline::Image), "{line}");
+            assert_eq!(s.outer, 0..line.chars().count(), "{line}");
+            assert_eq!(text(line, &s.inner), body, "{line}");
+            assert_eq!(target_of(s, line).as_deref(), Some(url), "{line}");
+        }
+        // The same with wiki links off: `[[w]]` is only brackets then.
+        let cfg = MarkdownConfig { wiki_links: false, ..md() };
+        assert_eq!(kinds("[a [[w]] b](u)", &cfg), [(Inline::Link, "[a [[w]] b](u)".into())]);
+    }
+
+    /// A bracket that does not balance stays text, and a link inside a
+    /// link's text wins over the outer one (CommonMark: links do not nest).
+    #[test]
+    fn unbalanced_or_nested_link_brackets() {
+        let cfg = md();
+        // An extra `[` before a link: only the link is one.
+        assert_eq!(kinds("[a [b](u)", &cfg), [(Inline::Link, "[b](u)".into())]);
+        // An extra `]` closes the text early, and `] b](u)` is no link.
+        assert!(kinds("[a ] b](u)", &cfg).is_empty());
+        // An escaped bracket does not count toward the balance.
+        assert!(kinds("[a \\[ b] c](u)", &cfg).iter().all(|k| k.0 != Inline::Link));
+        // A `]` in a code span does not close the text, so nothing does.
+        assert_eq!(kinds("[a `]`(u)", &cfg), [(Inline::Code, "`]`".into())]);
+        // Never closed.
+        assert!(kinds("[a [b] c", &cfg).is_empty());
+        // A link in a link's text: the inner one is the link.
+        assert_eq!(kinds("[a [b](c) d](e)", &cfg), [(Inline::Link, "[b](c)".into())]);
+        assert_eq!(kinds("[[a](u)]", &cfg), [(Inline::Link, "[a](u)".into())]);
+        // An image may hold a link in its alt text.
+        assert_eq!(kinds("![a [b](c)](d)", &cfg), [(Inline::Image, "![a [b](c)](d)".into())]);
+        // A wiki link is not a CommonMark link: the outer link keeps it.
+        assert_eq!(kinds("[x [[w]]](u)", &cfg), [(Inline::Link, "[x [[w]]](u)".into())]);
+        // Where a `[[` opens both, the wiki link is read first, as before.
+        assert_eq!(kinds("[[a]](u)", &cfg), [(Inline::WikiLink, "[[a]]".into())]);
+    }
+
+    /// What binds tighter than a link is read first, and only that: a wiki
+    /// link or math in a link's text is not a link that would end the outer
+    /// one, and `![[a]]` is an embed.
+    #[test]
+    fn links_agree_with_the_rest_of_the_scan() {
+        let cfg = md();
+        // A code span binds tighter than emphasis and links, as in CommonMark:
+        // the backticks pair across the star and the link.
+        assert_eq!(kinds("*x `y* [a](b) `z`", &cfg), [(Inline::Code, "`y* [a](b) `".into())]);
+        assert_eq!(kinds("[t [[a]](u) more](v)", &cfg), [(Inline::Link, "[t [[a]](u) more](v)".into())]);
+        let math = MarkdownConfig { math: true, ..md() };
+        assert_eq!(kinds("[a $[b](c)$ d](e)", &math), [(Inline::Link, "[a $[b](c)$ d](e)".into())]);
+        assert_eq!(kinds("![[a]](u)", &cfg), [(Inline::WikiLink, "[[a]]".into())]);
+        // A `!` the scan took into something else does not make an image:
+        // the `[` after it is a plain link.
+        assert_eq!(
+            kinds("\\![a](u)", &cfg),
+            [(Inline::Escape, "\\!".into()), (Inline::Link, "[a](u)".into())]
+        );
+        // A link binds tighter than emphasis: the star is the link's text.
+        assert_eq!(
+            kinds("[*](u) and *b*", &cfg),
+            [(Inline::Link, "[*](u)".into()), (Inline::Italic, "*b*".into())]
+        );
+        assert_eq!(kinds("[a *b](c) d*", &cfg), [(Inline::Link, "[a *b](c)".into())]);
+        // Emphasis over a `]` that ends no link is still emphasis.
+        assert_eq!(kinds("[note *a]b* x", &cfg), [(Inline::Italic, "*a]b*".into())]);
+    }
+
+    /// Links are resolved before emphasis, which then pairs in the text
+    /// around them: it may hold a whole link or code span, but never opens or
+    /// closes inside one.
+    #[test]
+    fn emphasis_pairs_around_links() {
+        let cfg = md();
+        // The outer `[` is text (a link is inside it), so the star after the
+        // inner link pairs with the one past `](y)`.
+        assert_eq!(
+            kinds("[a [b](c) *x](y)*", &cfg),
+            [(Inline::Link, "[b](c)".into()), (Inline::Italic, "*x](y)*".into())]
+        );
+        // Emphasis holding a link: one flat span, the emphasis; export reads
+        // its text again and finds the link.
+        assert_eq!(kinds("[draft *see [docs](u) now*", &cfg), [(Inline::Italic, "*see [docs](u) now*".into())]);
+        assert_eq!(kinds("**see [docs](u)**", &cfg), [(Inline::Bold, "**see [docs](u)**".into())]);
+        assert_eq!(kinds("[x *a [b](c) d* y](z)", &cfg), [(Inline::Italic, "*a [b](c) d*".into())]);
+        // A `]` with no `(` after it ends a link's text without making one,
+        // and emphasis runs over it.
+        assert_eq!(kinds("[a *b] c* d](u)", &cfg), [(Inline::Italic, "*b] c*".into())]);
+        assert_eq!(kinds("[a **b] c** d](u) e", &cfg), [(Inline::Bold, "**b] c**".into())]);
+        // A `](` in a code span ends nothing.
+        assert_eq!(kinds("[a *b `](` c* d", &cfg), [(Inline::Italic, "*b `](` c*".into())]);
+        // A star inside a link or a code span does not close emphasis.
+        assert_eq!(kinds("*a [b*](u) c*", &cfg), [(Inline::Italic, "*a [b*](u) c*".into())]);
+        assert_eq!(kinds("*a `*` b*", &cfg), [(Inline::Italic, "*a `*` b*".into())]);
+        // A bare address does not take the emphasis marks around it.
+        assert_eq!(kinds("**https://x.y**", &cfg), [(Inline::Bold, "**https://x.y**".into())]);
+        assert_eq!(kinds("*see https://x.y/a_b*", &cfg), [(Inline::Italic, "*see https://x.y/a_b*".into())]);
+    }
+
+    /// The tables `Parens` keeps close a `(…)` exactly where walking the line
+    /// would: random lines over the characters an address is made of.
+    #[test]
+    fn paren_tables_close_where_a_walk_would() {
+        fn walk_balanced(chars: &[char], from: usize) -> Option<usize> {
+            let mut depth = 0usize;
+            let mut j = from;
+            while j < chars.len() {
+                match chars[j] {
+                    '\\' => j += 1,
+                    '(' => depth += 1,
+                    ')' if depth == 0 => return Some(j),
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            None
+        }
+        fn walk_close(chars: &[char], from: usize) -> Option<usize> {
+            let skip_ws = |mut j: usize| {
+                while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+                    j += 1;
+                }
+                j
+            };
+            let well_formed = || {
+                let j = dest_end(chars, skip_ws(from))?;
+                let mut j = skip_ws(j);
+                if chars.get(j) != Some(&')') {
+                    j = skip_ws(title_end(chars, j)?);
+                }
+                (chars.get(j) == Some(&')')).then_some(j)
+            };
+            well_formed()
+                .or_else(|| walk_balanced(chars, from))
+                .or_else(|| (from..chars.len()).find(|&j| chars[j] == ')'))
+        }
+        let alphabet: Vec<char> = "()\\ \"'<>ab".chars().collect();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..20_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let n = (seed % 16) as usize;
+            let mut chars = Vec::new();
+            for _ in 0..n {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                chars.push(alphabet[(seed % alphabet.len() as u64) as usize]);
+            }
+            let parens = Parens::new(&chars);
+            for from in 0..=chars.len() {
+                // A `(…)` starts after `](`: never right after a backslash.
+                if from > 0 && chars[from - 1] == '\\' {
+                    continue;
+                }
+                assert_eq!(parens.link_close(&chars, from), walk_close(&chars, from), "{chars:?} from {from}");
+            }
+        }
+    }
+
+    /// Bracket matching stays linear: a long line of openers that never
+    /// close, or of `](` with no `)`, must not be walked to its end each time.
+    /// Timed in a release build only; a debug build prints the times.
+    #[test]
+    fn a_long_line_of_brackets_scans_fast() {
+        let off = MarkdownConfig { wiki_links: false, ..md() };
+        let lines = [
+            "[".repeat(100_000),
+            "![".repeat(50_000),
+            "[a]".repeat(33_000),
+            "[`".repeat(50_000),
+            "[a](".repeat(25_000),
+            "[a](()".repeat(16_000),
+            format!("[{}](u) a**", "**a ".repeat(25_000)),
+            "**a ".repeat(25_000),
+            "*a [b](c) ".repeat(10_000),
+        ];
+        for line in lines {
+            for cfg in [md(), off.clone()] {
+                let t = std::time::Instant::now();
+                let _ = scan(&line, &cfg);
+                let took = t.elapsed();
+                // CI tests a debug build: ~10 ms there now, ~6 s before.
+                let cap = if cfg!(debug_assertions) { 1000 } else { 200 };
+                assert!(took < std::time::Duration::from_millis(cap), "{:?}…: {took:?}", &line[..4]);
+            }
+        }
+    }
+
     #[test]
     fn tags_need_boundaries() {
         let s = only("a #project tag");
@@ -898,6 +1338,16 @@ mod tests {
         assert_eq!(span_at(line, url + 2, &cfg).unwrap().kind, Inline::Autolink);
 
         assert!(span_at(line, 1, &cfg).is_none(), "plain prose is not a link");
+
+        // A wiki link or address in a link's text is the one followed; the
+        // badge's picture follows the outer link.
+        let line = "[a [[note]] b https://c.d/e](https://x.y)";
+        let at = |s: &str| span_at(line, line.find(s).unwrap(), &cfg).and_then(|sp| target_of(&sp, line));
+        assert_eq!(at("note").as_deref(), Some("note"));
+        assert_eq!(at("c.d").as_deref(), Some("https://c.d/e"));
+        assert_eq!(at(" b ").as_deref(), Some("https://x.y"));
+        let line = "[![ci](b.svg)](https://x.y)";
+        assert_eq!(target_of(&span_at(line, 3, &cfg).unwrap(), line).as_deref(), Some("https://x.y"));
     }
 
     /// A destination is never the display text.
