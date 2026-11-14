@@ -71,6 +71,10 @@ Opening `notes.md` again says the recovery file is there. Nothing applies it
 for you: compare the two (`diff notes.md notes.md.shoin-recover`), keep what
 you want, and delete the recovery file.
 
+A recovery file is never overwritten. If Shoin dies again before you looked at
+the first one, the next goes to `notes.md.shoin-recover-2`, then `-3`, and
+opening `notes.md` names them all, newest first.
+
 ## Merging with :diff
 
 `:diff` lines your buffer up against the file, row for row, with a filler bar
@@ -152,7 +156,18 @@ version and then the file's, in the order shown on screen.
   normal quit, `:q!` included, writes none. A buffer with no filename, or one
   whose folder refuses the write, goes to
   `$XDG_STATE_HOME/shoin/recover-<pid>-<n>.md` (`~/.local/state/shoin/` when
-  `XDG_STATE_HOME` is unset). Recovery files are readable by you only.
+  `XDG_STATE_HOME` is unset), skipping any `<n>` already taken. Recovery files
+  are readable by you only.
+- A new recovery file takes `notes.md.shoin-recover` when that name is free,
+  and otherwise the number after the highest one there, even when a lower
+  name is free. Opening a file looks for the others only when
+  `notes.md.shoin-recover` or `notes.md.shoin-recover-2` is there, so the
+  newest is always found.
+- A recovery file is written in full under a name ending `.partial-<pid>`
+  (`notes.md.shoin-recover.partial-<pid>`, or `recover.partial-<pid>` in the
+  state folder) and given its name when complete: if Shoin is killed during
+  the write, the `.partial` file is all that is left, never a recovery file
+  that is missing its end.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
   separator (U+2028) stays inside its line and is saved as it was. A form
   feed, a lone `\r` and other control characters show as nothing on screen.

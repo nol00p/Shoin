@@ -993,11 +993,15 @@ impl App {
         })
     }
 
-    pub fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+    pub fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<crate::recover::Ended> {
         if let Ok(size) = terminal.size() {
             self.term_size = (size.width, size.height);
         }
         while !self.quit {
+            // A signal is ending the editor: its thread owns the terminal now.
+            if crate::recover::stopping() {
+                return Ok(crate::recover::Ended::Stopped);
+            }
             // Keep the crash-recovery copy of the unsaved buffers current, and
             // say so when an open file has a recovery file beside it.
             if let Some(text) = crate::recover::tick(self.docs.iter().map(|d| &d.buffer)) {
@@ -1019,6 +1023,7 @@ impl App {
             self.clipboard.poll();
             self.refresh_blocks();
             self.refresh_focus();
+            let Some(frame) = crate::recover::frame() else { return Ok(crate::recover::Ended::Stopped) };
             self.sync_cursor_shape();
             if self.needs_redraw {
                 let blanks = {
@@ -1043,12 +1048,15 @@ impl App {
                 self.paint_images(places);
                 self.needs_redraw = false;
             }
+            drop(frame);
             self.step()?;
         }
         // Hand the caret back to the terminal's own default on the way out.
-        let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
-        set_cursor_color(None);
-        Ok(())
+        if let Some(_frame) = crate::recover::frame() {
+            let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
+            set_cursor_color(None);
+        }
+        Ok(crate::recover::Ended::Quit)
     }
 
     /// Erase the pixels of iTerm2 pictures that moved or went away.
@@ -1383,7 +1391,13 @@ impl App {
             absorbed += 1;
             // `quit` first: whatever follows `:q` in the queue was typed at a
             // buffer that is on its way out, and belongs to the shell now.
-            if self.quit || absorbed >= BATCH_MAX || Instant::now() >= deadline {
+            if self.quit {
+                // Claimed now, so a signal from here on does not dump the
+                // text a `:q!` just discarded.
+                crate::recover::quit();
+                break;
+            }
+            if absorbed >= BATCH_MAX || Instant::now() >= deadline {
                 break;
             }
         }
@@ -1433,6 +1447,7 @@ impl App {
         if cfg!(test) {
             return;
         }
+        let Some(_frame) = crate::recover::frame() else { return };
         let _ = if on {
             execute!(std::io::stdout(), EnableMouseCapture)
         } else {

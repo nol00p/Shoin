@@ -2,8 +2,8 @@
 //!
 //! `ratatui::init()` acquires raw mode + the alternate screen AND installs a
 //! panic hook that restores the terminal before printing the panic, so a crash
-//! never leaves a wedged shell. `ratatui::restore()` undoes it. That is the
-//! whole of build-order step 1.
+//! never leaves a wedged shell. `recover::restore_terminal()` undoes it, and
+//! replaces that hook with one of its own (see `main`).
 
 // NOTE: there is deliberately NO crate-wide `allow(dead_code)` here.
 // One stood while the build order was being worked through, and by the time it
@@ -256,6 +256,10 @@ fn main() -> Result<()> {
         app.set_view(true);
     }
 
+    // The standard hook, which prints the panic message, taken before
+    // `ratatui::init` wraps it in one that restores the terminal: ours restores
+    // by itself, and `ratatui::restore` can panic (see `recover::restore_terminal`).
+    let print_panic = std::panic::take_hook();
     let mut terminal = ratatui::init();
     use ratatui::crossterm::event::{
         EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
@@ -291,51 +295,84 @@ fn main() -> Result<()> {
         )
     );
     // `ratatui::init`'s panic hook restores raw mode and the screen but knows
-    // nothing of the modes above: a crash would leave the shell with mouse
-    // reports and kitty-encoded keys. Release them first, then run its hook.
+    // nothing of the modes above, and its restore can itself panic on a dead
+    // terminal. It is replaced: `recover::restore_terminal` undoes everything,
+    // and `print_panic` prints the message once the terminal is back.
     //
     // The unsaved text goes to recovery files FIRST: it is the one thing a
     // crash can lose for good, and nothing after it may get the chance.
-    let restore_hook = std::panic::take_hook();
+    drop(std::panic::take_hook());
     std::panic::set_hook(Box::new(move |info| {
-        let written = recover::dump();
-        release_terminal_modes();
-        restore_hook(info);
-        recover::report(&written);
+        // Recovery files are written once, by whoever ends the editor first;
+        // `recover::OnPanic` spells out each case.
+        match recover::on_panic() {
+            recover::OnPanic::SafetyCopy { dump } => {
+                if dump {
+                    recover::dump();
+                }
+                recover::note(format!(
+                    "a background thread failed; the editor kept running and this is not a crash: {info}"
+                ));
+                return;
+            }
+            recover::OnPanic::SignalThread => {
+                recover::settle();
+                recover::restore_terminal();
+                print_panic(info);
+                recover::report();
+                std::process::exit(recover::signal_status());
+            }
+            recover::OnPanic::Wait => {
+                recover::note(info.to_string());
+                recover::abandon_frame();
+                loop {
+                    std::thread::park();
+                }
+            }
+            recover::OnPanic::Owner => {
+                recover::dump();
+                recover::settle();
+            }
+            recover::OnPanic::Restore => {}
+        }
+        recover::restore_terminal();
+        print_panic(info);
+        recover::report();
     }));
     // SIGTERM and SIGHUP (the window closed) would end the process where it
     // stands, terminal modes and unsaved text with it. Caught, they end it the
-    // way a crash does, from a thread of their own.
+    // way a crash does, from a thread of their own. Frames stop before the
+    // dump, and the terminal is restored only once the frame being drawn is
+    // done, so no part of one lands on the shell.
     recover::catch_signals(|sig| {
-        let written = recover::dump();
-        release_terminal_modes();
-        ratatui::restore();
-        recover::report(&written);
-        std::process::exit(128 + sig);
+        if !recover::stop(sig) {
+            // The loop's exit or a panic owns the ending and writes the
+            // recovery files; this thread only makes sure the process ends.
+            recover::wait_for_owner();
+        }
+        recover::dump();
+        recover::settle();
+        recover::restore_terminal();
+        recover::report();
+        std::process::exit(recover::signal_status());
     });
-    let result = app.run_loop(&mut terminal);
+    let ended = app.run_loop(&mut terminal);
+    // A signal or a panic that came first ends the editor from its own
+    // thread: restoring here too would do it twice, and race its writes.
+    if matches!(ended, Ok(recover::Ended::Stopped)) || !recover::quit() {
+        loop {
+            std::thread::park();
+        }
+    }
     // An error that ends the loop (a terminal that went away) leaves the
     // buffers unsaved: the editor is dying, so the text is kept.
-    let written = if result.is_err() { recover::dump() } else { Vec::new() };
-    release_terminal_modes();
-    ratatui::restore();
-    recover::report(&written);
+    if ended.is_err() {
+        recover::dump();
+    }
+    recover::restore_terminal();
+    recover::report();
 
-    result
-}
-
-/// Undo every mode `main` turned on after `ratatui::init`, in reverse order.
-/// Each is harmless to undo when it was never on, so this runs unconditionally
-/// on the way out, whether the editor quit or panicked.
-fn release_terminal_modes() {
-    use ratatui::crossterm::event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
-        PopKeyboardEnhancementFlags,
-    };
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableFocusChange);
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    ended.map(|_| ())
 }
 
 /// `-` is stdin, as it is for most tools that take a file.
