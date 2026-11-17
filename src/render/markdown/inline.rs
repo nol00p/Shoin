@@ -55,8 +55,63 @@ pub struct InlineSpan {
 /// `[*](u) *b*` is a link and then `b` in italics.
 pub fn scan(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     let chars: Vec<char> = line.chars().collect();
-    let atoms = tight(&chars, cfg);
-    loose(&chars, atoms, cfg)
+    scan_chars(&chars, cfg)
+}
+
+/// `scan` over a line already split into chars.
+fn scan_chars(chars: &[char], cfg: &MarkdownConfig) -> Vec<InlineSpan> {
+    let atoms = tight(chars, cfg);
+    loose(chars, atoms, cfg)
+}
+
+/// What the editor styles on a line: `scan`'s spans and, right after each
+/// link, the emphasis, `~~` and `==` in its text (`[**see** docs](u)`).
+///
+/// The spans are in order of their start. Those after a link that start in
+/// its text lie wholly in it, and are the only ones that overlap another;
+/// the rest keep `scan`'s guarantees. Only a link's text is read again: one
+/// level, as the renderer styles no span inside emphasis, and an image's alt
+/// text is plain. Export reads `scan` and nests on its own.
+pub fn scan_styled(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
+    let chars: Vec<char> = line.chars().collect();
+    let spans = scan_chars(&chars, cfg);
+    if !spans.iter().any(|s| s.kind == Inline::Link) {
+        return spans;
+    }
+    let mut out = Vec::with_capacity(spans.len());
+    for sp in spans {
+        let text = (sp.kind == Inline::Link).then(|| sp.inner.clone());
+        out.push(sp);
+        if let Some(text) = text {
+            let off = text.start;
+            out.extend(
+                scan_chars(&chars[text], cfg)
+                    .into_iter()
+                    .filter(|s| is_prose_wrap(s.kind))
+                    .map(|s| s.shifted(off)),
+            );
+        }
+    }
+    out
+}
+
+/// Emphasis, `~~` and `==`: what wraps prose and is styled in a link's text.
+fn is_prose_wrap(kind: Inline) -> bool {
+    matches!(
+        kind,
+        Inline::Bold | Inline::Italic | Inline::BoldItalic | Inline::Strikethrough | Inline::Highlight
+    )
+}
+
+impl InlineSpan {
+    /// The span `off` chars further right: one found in a slice of the line.
+    fn shifted(self, off: usize) -> Self {
+        InlineSpan {
+            kind: self.kind,
+            outer: self.outer.start + off..self.outer.end + off,
+            inner: self.inner.start + off..self.inner.end + off,
+        }
+    }
 }
 
 /// The first pass: escapes, code spans, math, autolinks, wiki links, and
@@ -170,20 +225,22 @@ struct Opener {
 /// holds them whole.
 fn loose(chars: &[char], atoms: Vec<InlineSpan>, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     let len = chars.len();
-    let ranges: Vec<Range<usize>> = atoms.iter().map(|a| a.outer.clone()).collect();
-    let mut gaps = Gaps { chars, atoms: &ranges, closers: [(usize::MAX, None); 12] };
-    let mut out = Vec::with_capacity(atoms.len());
-    let mut atoms = atoms.into_iter().zip(ranges.iter().map(|r| r.start)).peekable();
+    let mut gaps = Gaps { chars, atoms: &atoms, closers: [(usize::MAX, None); 12] };
+    let mut found_all = Vec::new();
+    // The first atom not behind `i`.
+    let mut next = 0;
     let mut i = 0;
     while i < len {
         // Atoms that emphasis took whole are behind `i`.
-        while atoms.next_if(|(_, start)| *start < i).is_some() {}
-        if let Some((atom, _)) = atoms.next_if(|(_, start)| *start == i) {
+        while atoms.get(next).is_some_and(|a| a.outer.start < i) {
+            next += 1;
+        }
+        if let Some(atom) = atoms.get(next).filter(|a| a.outer.start == i) {
             i = atom.outer.end;
-            out.push(atom);
+            next += 1;
             continue;
         }
-        let next_atom = atoms.peek().map_or(len, |(_, start)| *start);
+        let next_atom = atoms.get(next).map_or(len, |a| a.outer.start);
         let found = match chars[i] {
             '*' | '_' => gaps.emphasis_at(i, chars[i]),
             '~' => gaps.pair_at(i, '~', Inline::Strikethrough),
@@ -195,11 +252,22 @@ fn loose(chars: &[char], atoms: Vec<InlineSpan>, cfg: &MarkdownConfig) -> Vec<In
         match found {
             Some(span) => {
                 i = span.outer.end.max(i + 1);
-                out.push(span);
+                found_all.push(span);
             }
             None => i += 1,
         }
     }
+    // In order, without the atoms a span found here holds whole.
+    let mut out = Vec::with_capacity(atoms.len() + found_all.len());
+    let mut atoms = atoms.into_iter().peekable();
+    for span in found_all {
+        while let Some(atom) = atoms.next_if(|a| a.outer.start < span.outer.start) {
+            out.push(atom);
+        }
+        while atoms.next_if(|a| a.outer.start < span.outer.end).is_some() {}
+        out.push(span);
+    }
+    out.extend(atoms);
     out
 }
 
@@ -207,7 +275,7 @@ fn loose(chars: &[char], atoms: Vec<InlineSpan>, cfg: &MarkdownConfig) -> Vec<In
 /// first pass's atoms, never inside one (`*a `*` b*` closes on the last star).
 struct Gaps<'a> {
     chars: &'a [char],
-    atoms: &'a [Range<usize>],
+    atoms: &'a [InlineSpan],
     /// For each marker (`*`, `_`, `~`, `=`) and length (1–3): where a search
     /// for a closer last began, and what it found. A later search from
     /// further right that is not inside a run of the marker walks the same
@@ -270,6 +338,10 @@ impl Gaps<'_> {
     /// A closer may not follow whitespace or be escaped, and a `_` closer may not
     /// be followed by a letter or digit (so `snake_case` stays plain). A run that
     /// fails is skipped whole: `*a **` must not close on the second star alone.
+    ///
+    /// An escape is an atom, so the search never stops on its star; the
+    /// backslash that escapes a closer here ends a bare address
+    /// (`*a https://x.y\*`), whose atom took it without the star.
     fn find_closer(&mut self, from: usize, ch: char, n: usize) -> Option<usize> {
         let chars = self.chars;
         let slot = match ch {
@@ -289,14 +361,14 @@ impl Gaps<'_> {
                 return found;
             }
         }
-        let mut atom = self.atoms.partition_point(|a| a.start < from);
+        let mut atom = self.atoms.partition_point(|a| a.outer.start < from);
         let mut j = from;
         let found = loop {
             if j >= chars.len() {
                 break None;
             }
-            if self.atoms.get(atom).is_some_and(|a| a.start == j) {
-                j = self.atoms[atom].end;
+            if self.atoms.get(atom).is_some_and(|a| a.outer.start == j) {
+                j = self.atoms[atom].outer.end;
                 atom += 1;
                 continue;
             }
@@ -434,22 +506,36 @@ impl Parens {
 /// `[[…]]` alone. That is fine for styling — the bang is
 /// one dim character — but a reader whose cursor is ON the bang still means the
 /// embed, so the bang is accepted here as belonging to the span after it.
+///
+/// The scan's spans are flat: emphasis holds a link whole
+/// (`**see [docs](u)**`), and a link holds what is in its text. Both are
+/// read again for the span under the cursor.
 pub fn span_at(line: &str, col: usize, cfg: &MarkdownConfig) -> Option<InlineSpan> {
-    let bang = line.chars().nth(col) == Some('!');
-    let found = scan(line, cfg)
-        .into_iter()
-        .find(|s| s.outer.contains(&col) || (bang && s.outer.start == col + 1))?;
+    let chars: Vec<char> = line.chars().collect();
+    let bang = chars.get(col) == Some(&'!');
+    let under = |s: &InlineSpan| s.outer.contains(&col) || (bang && s.outer.start == col + 1);
+    let mut found = scan_chars(&chars, cfg).into_iter().find(under)?;
+    // Into emphasis, `~~` and `==`, as deep as they go, for whatever is
+    // under the cursor there.
+    while is_prose_wrap(found.kind) && found.inner.contains(&col) {
+        let off = found.inner.start;
+        let Some(inner) = scan_chars(&chars[found.inner.clone()], cfg).into_iter().map(|s| s.shifted(off)).find(under)
+        else {
+            break;
+        };
+        found = inner;
+    }
     // A link in a link's text (`[a [[note]] b](url)`, an autolink) is the
     // one under the cursor. One level only: links do not nest, and a picture
     // in the text is the outer link's (the README badge).
     if found.kind == Inline::Link && found.inner.contains(&col) {
-        let text: String = line.chars().skip(found.inner.start).take(found.inner.len()).collect();
         let off = found.inner.start;
-        let inner = scan(&text, cfg).into_iter().find(|s| {
-            s.outer.contains(&(col - off)) && matches!(s.kind, Inline::WikiLink | Inline::Autolink)
-        });
+        let inner = scan_chars(&chars[found.inner.clone()], cfg)
+            .into_iter()
+            .map(|s| s.shifted(off))
+            .find(|s| s.outer.contains(&col) && matches!(s.kind, Inline::WikiLink | Inline::Autolink));
         if let Some(s) = inner {
-            return Some(InlineSpan { kind: s.kind, outer: s.outer.start + off..s.outer.end + off, inner: s.inner.start + off..s.inner.end + off });
+            return Some(s);
         }
     }
     Some(found)
@@ -844,7 +930,8 @@ fn angle_autolink_at(chars: &[char], i: usize) -> Option<InlineSpan> {
 ///
 /// Each span contributes up to three pieces: a dimmed leading marker, the
 /// kind-styled body, and a dimmed trailing marker. Gaps between spans keep the
-/// block `base` style. Spans not fully inside the region are ignored.
+/// block `base` style. Spans not fully inside the region are ignored. A link's
+/// body is itself covered by the spans `scan_styled` lists after it.
 pub fn to_styled(
     line: &str,
     spans: &[InlineSpan],
@@ -852,21 +939,37 @@ pub fn to_styled(
     theme: &Theme,
 ) -> Vec<StyledSpan> {
     let len = line.chars().count();
-    let region_start = base.range.start;
-    let region_end = base.range.end.min(len);
-    let marker = marker_style(theme);
-
+    let region = base.range.start..base.range.end.min(len);
     let mut out = Vec::new();
-    let mut cursor = region_start;
+    cover(spans, region, base.style, false, theme, &mut out);
+    out
+}
 
-    for sp in spans {
-        if sp.outer.start < cursor || sp.outer.start < region_start || sp.outer.end > region_end {
+/// `to_styled` over `region` in the style `base`. The spans a link's text
+/// holds (`scan_styled` lists them after it) cover that text, in styles
+/// layered over the link's: in a link (`in_link`) they keep its color, so
+/// a bold word there still reads as a link.
+fn cover(
+    spans: &[InlineSpan],
+    region: Range<usize>,
+    base: Style,
+    in_link: bool,
+    theme: &Theme,
+    out: &mut Vec<StyledSpan>,
+) {
+    let marker = marker_style(theme);
+    let mut cursor = region.start;
+    let mut k = 0;
+    while k < spans.len() {
+        let sp = &spans[k];
+        k += 1;
+        if sp.outer.start < cursor || sp.outer.start < region.start || sp.outer.end > region.end {
             continue;
         }
         if sp.outer.start > cursor {
             out.push(StyledSpan {
                 range: cursor..sp.outer.start,
-                style: base.style,
+                style: base,
             });
         }
         if sp.inner.start > sp.outer.start {
@@ -875,10 +978,21 @@ pub fn to_styled(
                 style: marker,
             });
         }
-        if sp.inner.end > sp.inner.start {
+        let mut body = body_style(sp.kind, base, theme);
+        if in_link {
+            body.fg = base.fg;
+        }
+        let held = spans[k..]
+            .iter()
+            .take_while(|s| sp.inner.start <= s.outer.start && s.outer.start < sp.inner.end)
+            .count();
+        if held > 0 {
+            cover(&spans[k..k + held], sp.inner.clone(), body, true, theme, out);
+            k += held;
+        } else if sp.inner.end > sp.inner.start {
             out.push(StyledSpan {
                 range: sp.inner.clone(),
-                style: body_style(sp.kind, base.style, theme),
+                style: body,
             });
         }
         if sp.outer.end > sp.inner.end {
@@ -889,14 +1003,12 @@ pub fn to_styled(
         }
         cursor = sp.outer.end;
     }
-
-    if cursor < region_end {
+    if cursor < region.end {
         out.push(StyledSpan {
-            range: cursor..region_end,
-            style: base.style,
+            range: cursor..region.end,
+            style: base,
         });
     }
-    out
 }
 
 fn marker_style(theme: &Theme) -> Style {
@@ -1350,6 +1462,110 @@ mod tests {
         assert_eq!(target_of(&span_at(line, 3, &cfg).unwrap(), line).as_deref(), Some("https://x.y"));
     }
 
+    /// Emphasis holds a link whole in the scan, so the link under the cursor
+    /// is found by reading the emphasis again, however deep.
+    #[test]
+    fn span_at_finds_a_link_inside_emphasis() {
+        let cfg = MarkdownConfig::default();
+        let at = |line: &str, s: &str| {
+            let span = span_at(line, line.find(s).unwrap(), &cfg)?;
+            Some((span.kind, target_of(&span, line)))
+        };
+        let line = "**see [docs](u)**";
+        assert_eq!(at(line, "docs"), Some((Inline::Link, Some("u".into()))));
+        assert_eq!(at(line, "](u"), Some((Inline::Link, Some("u".into()))));
+        // Off the link, the emphasis is the span, and it points nowhere.
+        assert_eq!(at(line, "see"), Some((Inline::Bold, None)));
+        assert_eq!(at(line, "**s"), Some((Inline::Bold, None)));
+        assert_eq!(at("_a [b](u)_", "b"), Some((Inline::Link, Some("u".into()))));
+        assert_eq!(at("~~old [[note]]~~", "note"), Some((Inline::WikiLink, Some("note".into()))));
+        assert_eq!(at("==see https://x.y now==", "x.y"), Some((Inline::Autolink, Some("https://x.y".into()))));
+        // The embed's bang, inside emphasis.
+        assert_eq!(at("**![[note]]**", "!"), Some((Inline::WikiLink, Some("note".into()))));
+        // Emphasis in emphasis, and a wiki link in a link's text in emphasis.
+        assert_eq!(at("==a **b [c](u) d** e==", "c"), Some((Inline::Link, Some("u".into()))));
+        assert_eq!(at("*a [b [[n]] c](u)*", "n]"), Some((Inline::WikiLink, Some("n".into()))));
+        assert_eq!(at("*a [b [[n]] c](u)*", "c]"), Some((Inline::Link, Some("u".into()))));
+    }
+
+    /// `scan_styled` adds the emphasis, `~~` and `==` in a link's text, right
+    /// after the link; `scan`, which export reads, stays flat.
+    #[test]
+    fn scan_styled_reads_a_links_text() {
+        let cfg = md();
+        let styled = |line: &str| -> Vec<(Inline, String)> {
+            scan_styled(line, &cfg).iter().map(|s| (s.kind, text(line, &s.outer))).collect()
+        };
+        let line = "a [**see** ~~old~~ ==new== _x_](u) *b*";
+        assert_eq!(
+            styled(line),
+            [
+                (Inline::Link, "[**see** ~~old~~ ==new== _x_](u)".into()),
+                (Inline::Bold, "**see**".into()),
+                (Inline::Strikethrough, "~~old~~".into()),
+                (Inline::Highlight, "==new==".into()),
+                (Inline::Italic, "_x_".into()),
+                (Inline::Italic, "*b*".into()),
+            ]
+        );
+        assert_eq!(kinds(line, &cfg), [(Inline::Link, "[**see** ~~old~~ ==new== _x_](u)".into()), (Inline::Italic, "*b*".into())]);
+        // The spans are where they are in the line, not in the text.
+        let sp = &scan_styled(line, &cfg)[1];
+        assert_eq!((sp.outer.clone(), sp.inner.clone()), (3..10, 5..8));
+        // Only what wraps prose: not a code span, a tag, a wiki link or an
+        // address, and nothing in an image's alt text.
+        assert_eq!(styled("[`*a*` #t [[n]]](u)"), [(Inline::Link, "[`*a*` #t [[n]]](u)".into())]);
+        assert_eq!(styled("![**a**](x.png)"), [(Inline::Image, "![**a**](x.png)".into())]);
+        assert_eq!(
+            styled("[![**a**](b.svg) *c*](u)"),
+            [(Inline::Link, "[![**a**](b.svg) *c*](u)".into()), (Inline::Italic, "*c*".into())]
+        );
+        // A marker in the text pairs only in the text.
+        assert_eq!(styled("[a *b](u) c*"), [(Inline::Link, "[a *b](u)".into())]);
+        // Emphasis holding a link is one span still, as the renderer draws
+        // no span inside emphasis.
+        assert_eq!(styled("**see [*docs*](u)**"), [(Inline::Bold, "**see [*docs*](u)**".into())]);
+    }
+
+    /// A link's emphasis is styled over the link's own style, its markers
+    /// dimmed like any others.
+    #[test]
+    fn emphasis_in_a_link_is_styled() {
+        let line = "[a **b** ~~c~~](u)";
+        let theme = Theme::default();
+        let base = StyledSpan { range: 0..line.chars().count(), style: Style::fg(theme.text) };
+        let out = to_styled(line, &scan_styled(line, &md()), &base, &theme);
+        let at = |s: &str| {
+            let c = line.find(s).unwrap();
+            out.iter().find(|p| p.range.contains(&c)).unwrap().style
+        };
+        let marker = marker_style(&theme);
+        assert_eq!(at("[a"), marker);
+        assert_eq!(at("**b"), marker);
+        assert_eq!(at("~~c"), marker);
+        assert_eq!(at("](u)"), marker);
+        let link = body_style(Inline::Link, base.style, &theme);
+        assert_eq!(at("a "), link);
+        assert_eq!(at(" ~~"), link);
+        // The link's color and underline, with the emphasis's attributes.
+        let in_link = |kind| Style { fg: link.fg, ..body_style(kind, link, &theme) };
+        assert_eq!(at("b"), in_link(Inline::Bold));
+        assert_eq!(at("c"), in_link(Inline::Strikethrough));
+        assert!(at("b").attrs.underline == theme.link_underline && at("b").attrs.bold == theme.bold_attr);
+        assert!(at("c").attrs.strikethrough && at("c").fg == theme.link);
+        assert_eq!(out.iter().map(|p| p.range.clone()).collect::<Vec<_>>(), [0..1, 1..3, 3..5, 5..6, 6..8, 8..9, 9..11, 11..12, 12..14, 14..18]);
+    }
+
+    /// A backslash may end a bare address, as an escape does not: a star
+    /// after it is escaped, though no escape atom holds it, and closes
+    /// nothing.
+    #[test]
+    fn a_star_after_an_address_ending_in_a_backslash_closes_nothing() {
+        let cfg = md();
+        assert_eq!(kinds("*a https://x.y\\* b", &cfg), [(Inline::Autolink, "https://x.y\\".into())]);
+        assert_eq!(kinds("*a https://x.y\\* b*", &cfg), [(Inline::Italic, "*a https://x.y\\* b*".into())]);
+    }
+
     /// A destination is never the display text.
     #[test]
     fn target_of_reads_the_destination_not_the_label() {
@@ -1547,6 +1763,30 @@ mod tests {
                 let _ = (destination(&s, &line), target_of(&s, &line));
                 prev_end = s.outer.end;
             }
+            // `scan_styled`: a span overlaps another only inside a link's
+            // text, and the styled cover stays gap-free.
+            let styled = scan_styled(&line, &md());
+            let mut link: Option<Range<usize>> = None;
+            let mut prev_end = 0;
+            for s in &styled {
+                if let Some(text) = link.as_ref().filter(|t| s.outer.start >= t.start && s.outer.start < t.end) {
+                    assert!(s.outer.end <= text.end && is_prose_wrap(s.kind), "{line:?}");
+                    continue;
+                }
+                assert!(s.outer.start >= prev_end, "{line:?}");
+                link = (s.kind == Inline::Link).then(|| s.inner.clone());
+                prev_end = s.outer.end;
+            }
+            let _ = span_at(&line, (seed % 24) as usize, &md());
+            let theme = Theme::default();
+            let base = StyledSpan { range: 0..len, style: Style::fg(theme.text) };
+            let out = to_styled(&line, &styled, &base, &theme);
+            let mut at = 0;
+            for p in &out {
+                assert!(p.range.start == at && p.range.end > p.range.start, "{line:?}");
+                at = p.range.end;
+            }
+            assert_eq!(at, len, "{line:?}");
         }
     }
 
