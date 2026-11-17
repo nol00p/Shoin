@@ -17,13 +17,18 @@
 //!
 //! A dump that is killed outright (`SIGKILL`) leaves that `.partial` file
 //! behind. It may hold the only copy of most of the text, so nothing deletes
-//! it: opening the file names it with the recovery files, as cut off. A later
-//! dump removes one only when its process is gone and its text is whole under
-//! a recovery name too (it was cut off between the two).
+//! it or writes over it, not even a later process that has the same pid:
+//! opening the file names it with the recovery files, as cut off. A dump is
+//! taken to be over when its process is gone, when the pid is ours and no
+//! dump of ours is writing, or when nothing has written to it for three
+//! minutes. The one `.partial` that does go is a second name for a recovery
+//! file (its dump was cut off between the two): a later dump removes it once
+//! all its own text is written, and opening the file does not name it.
 //!
 //! A file name too long to take these endings (names stop at 255 bytes) is
 //! shortened in them, with a hash of the whole name so two long names that
-//! start the same way do not share recovery files.
+//! start the same way do not share recovery files. Recovery files that 0.2.4
+//! wrote under the full name are still found.
 //!
 //! The panic hook has no `App` to read, so the event loop keeps a process-wide
 //! [`REGISTRY`] of the modified buffers up to date through [`tick`]. A rope
@@ -112,18 +117,12 @@ fn notice<'a>(buffers: impl Iterator<Item = &'a Buffer>) -> Option<String> {
             continue;
         }
         checked.insert(path.to_path_buf());
-        // Two stats for the recovery files, the common case: the folder is
-        // listed for them only when the first or second name is there. A
-        // lone `-3` left after deleting both is not announced, but a new crash
-        // re-takes the free plain name (`dump_to`), so the newest always is.
-        // A cut-off `.partial` carries its dump's pid, so it can only be
-        // found by a listing: one per file, once per session.
-        let files = if beside_nth(path, 1).exists() || beside_nth(path, 2).exists() {
-            recovery_files(path)
-        } else {
-            Vec::new()
-        };
-        let cut = cut_off(path);
+        // One listing of the folder answers both questions, and only a name
+        // that is one of this file's is looked at further: a folder with none
+        // costs the listing alone.
+        let found = scan(path);
+        let files = newest_first(found.recovery);
+        let cut = cut_off(found.partials, WRITING.load(Ordering::SeqCst));
         // One notice per pass: any other file is looked at on the next one,
         // after this flash has had its turn.
         if let Some(text) = notice_text(&files, &cut) {
@@ -157,27 +156,63 @@ fn notice_text(files: &[PathBuf], cut: &[PathBuf]) -> Option<String> {
     }
 }
 
-/// The `.partial` files beside `path` that no running dump is writing, newest
-/// first: each is what a dump had written when it was killed.
-fn cut_off(path: &Path) -> Vec<PathBuf> {
-    let (dir, prefix) = partials_beside(path);
-    let mut found: Vec<_> = stale_partials(&dir, &prefix)
+/// The `.partial` files among `partials` whose dump is over and whose text is
+/// nowhere else, newest first: each is what a dump had written when it was
+/// killed. `own_writing`: a dump of this process is writing now.
+fn cut_off(partials: Vec<Found>, own_writing: bool) -> Vec<PathBuf> {
+    let mut found: Vec<_> = partials
         .into_iter()
-        .filter(|(pid, ..)| alive(*pid) != Some(true))
+        .filter(|(pid, _, meta)| !duplicate(meta) && over(*pid, meta, own_writing))
         .map(|(_, p, meta)| (meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH), p))
         .collect();
     found.sort();
     found.into_iter().rev().map(|(_, p)| p).collect()
 }
 
+/// Whether the dump that wrote a `.partial` is over. Its process is gone; or
+/// the pid is this process's and no dump of ours is writing (ours exist only
+/// while one is, so this one is an earlier process's that had the pid); or
+/// nothing has written to it for [`CUT_OFF_AFTER`], whatever has the pid now.
+fn over(pid: u32, meta: &std::fs::Metadata, own_writing: bool) -> bool {
+    let quiet = meta.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > CUT_OFF_AFTER);
+    let gone = if pid == std::process::id() { !own_writing } else { alive(pid) != Some(true) };
+    quiet || gone
+}
+
+/// A dump writes as it goes, and the waits around one give up at two
+/// minutes (`lock_for_dump`, `wait_for_owner`): a `.partial` nothing has
+/// written to for a minute past that is not coming back.
+const CUT_OFF_AFTER: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Whether a `.partial` is a second name for a recovery file: its dump was
+/// cut off after naming the file and before removing the `.partial` name.
+fn duplicate(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.nlink() > 1
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 /// Every recovery file beside `path`, newest first: `<file>.shoin-recover`
-/// and any `<file>.shoin-recover-<n>`. Newest is by the time each was
-/// written, then by `<n>`: a new one takes the plain name when it is free and
-/// otherwise the number past the highest already there, so a tie of coarse
-/// timestamps still puts it first unless it re-took the plain name (which
-/// needs the user to have deleted the older files in between).
-pub fn recovery_files(path: &Path) -> Vec<PathBuf> {
-    let mut found: Vec<_> = existing(path)
+/// and any `<file>.shoin-recover-<n>`.
+#[cfg(test)]
+fn recovery_files(path: &Path) -> Vec<PathBuf> {
+    newest_first(existing(path))
+}
+
+/// Newest is by the time each was written, then by `<n>`: a new one takes the
+/// plain name when it is free and otherwise the number past the highest
+/// already there, so a tie of coarse timestamps still puts it first unless it
+/// re-took the plain name (which needs the user to have deleted the older
+/// files in between).
+fn newest_first(found: Vec<Found>) -> Vec<PathBuf> {
+    let mut found: Vec<_> = found
         .into_iter()
         .map(|(n, p, meta)| (meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH), n, p))
         .collect();
@@ -185,52 +220,123 @@ pub fn recovery_files(path: &Path) -> Vec<PathBuf> {
     found.into_iter().map(|(_, _, p)| p).collect()
 }
 
-/// The recovery files beside `path` with their numbers. From a listing of the
-/// folder, which sees every number however many were deleted in between; a
-/// folder that lets you reach its files but not list them is asked name by
-/// name instead.
-fn existing(path: &Path) -> Vec<(u32, PathBuf, std::fs::Metadata)> {
-    listed(path).unwrap_or_else(|| probe(path))
+/// A file found beside another: a recovery file with its number, or a
+/// `.partial` with its pid.
+type Found = (u32, PathBuf, std::fs::Metadata);
+
+/// What sits beside a file.
+#[derive(Default)]
+struct Beside {
+    recovery: Vec<Found>,
+    partials: Vec<Found>,
 }
 
-fn listed(path: &Path) -> Option<Vec<(u32, PathBuf, std::fs::Metadata)>> {
+/// The recovery files beside `path` with their numbers.
+fn existing(path: &Path) -> Vec<Found> {
+    scan(path).recovery
+}
+
+/// What the recovery names of `path` start with: the one [`beside`] makes,
+/// and for a name it shortens, the full-length one 0.2.4 used, so the files
+/// written then are still found.
+fn bases(path: &Path) -> Vec<PathBuf> {
     let first = beside(path);
-    let name = first.file_name()?.as_encoded_bytes().to_vec();
-    let dir = match first.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => Path::new("."),
-    };
-    let mut found = Vec::new();
+    let full = with_suffix(path, SUFFIX);
+    if full == first {
+        vec![first]
+    } else {
+        vec![first, full]
+    }
+}
+
+/// The recovery files and `.partial` files beside `path`, from one listing of
+/// its folder, which sees every number however many were deleted in between.
+/// A folder that lets you reach its files but not list them is asked name by
+/// name for the recovery files; its `.partial` files, named by a pid, stay
+/// unseen there.
+fn scan(path: &Path) -> Beside {
+    let bases = bases(path);
+    let names: Vec<_> = bases.iter().filter_map(|b| b.file_name()).map(|n| n.as_encoded_bytes().to_vec()).collect();
+    match list(&folder(&bases[0]), &names) {
+        Some(found) => found,
+        None => Beside { recovery: bases.iter().flat_map(|b| probe(b)).collect(), partials: Vec::new() },
+    }
+}
+
+fn folder(p: &Path) -> PathBuf {
+    match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// What one listing of `dir` holds under any of `bases`: `<base>` and
+/// `<base>-<n>` are recovery files, `<base>.partial-<pid>` and
+/// `<base>.partial-<pid>.<k>` are `.partial` files. `None` when the folder
+/// cannot be listed.
+fn list(dir: &Path, bases: &[Vec<u8>]) -> Option<Beside> {
+    let mut found = Beside::default();
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let file = entry.file_name();
-        let n = match file.as_encoded_bytes().strip_prefix(&name[..]) {
-            Some([]) => 1,
-            // Only the names `beside_nth` makes: `-2` and up, no leading zero.
-            Some([b'-', digits @ ..]) if digits.first().is_some_and(|d| (b'1'..=b'9').contains(d)) => {
-                match std::str::from_utf8(digits).ok().and_then(|d| d.parse::<u32>().ok()) {
-                    Some(n) if n >= 2 => n,
-                    _ => continue,
-                }
-            }
-            _ => continue,
-        };
-        // `metadata` follows a link, as opening the file would.
-        match std::fs::metadata(dir.join(&file)) {
-            Ok(meta) if meta.is_file() => found.push((n, dir.join(&file), meta)),
-            _ => {}
+        let bytes = file.as_encoded_bytes();
+        let Some(name) = bases.iter().find_map(|b| bytes.strip_prefix(&b[..]).and_then(parse)) else { continue };
+        let p = dir.join(&file);
+        match name {
+            // `metadata` follows a link, as opening the file would.
+            Name::Recovery(n) => match std::fs::metadata(&p) {
+                Ok(meta) if meta.is_file() => found.recovery.push((n, p, meta)),
+                _ => {}
+            },
+            // A dump makes plain files only.
+            Name::Partial(pid) => match std::fs::symlink_metadata(&p) {
+                Ok(meta) if meta.is_file() => found.partials.push((pid, p, meta)),
+                _ => {}
+            },
         }
     }
     Some(found)
 }
 
-/// Name by name, for a folder that cannot be listed: the search ends after
-/// [`MISSES`] free numbers in a row, so files past a longer gap stay unseen
-/// there.
-fn probe(path: &Path) -> Vec<(u32, PathBuf, std::fs::Metadata)> {
+enum Name {
+    Recovery(u32),
+    Partial(u32),
+}
+
+/// What follows a base in the names a dump makes, and nothing else: `-2` and
+/// up and pids with no leading zero.
+fn parse(rest: &[u8]) -> Option<Name> {
+    match rest {
+        [] => Some(Name::Recovery(1)),
+        [b'-', digits @ ..] => number(digits).filter(|n| *n >= 2).map(Name::Recovery),
+        _ => {
+            let tail = rest.strip_prefix(PARTIAL.as_bytes())?;
+            let (pid, k) = match tail.iter().position(|b| *b == b'.') {
+                Some(dot) => (&tail[..dot], Some(&tail[dot + 1..])),
+                None => (tail, None),
+            };
+            if let Some(k) = k {
+                number(k).filter(|k| *k >= 2)?;
+            }
+            number(pid).map(Name::Partial)
+        }
+    }
+}
+
+fn number(digits: &[u8]) -> Option<u32> {
+    if !digits.first().is_some_and(|d| (b'1'..=b'9').contains(d)) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
+}
+
+/// Name by name, for a folder that cannot be listed, from the base recovery
+/// name `first`: the search ends after [`MISSES`] free numbers in a row, so
+/// files past a longer gap stay unseen there.
+fn probe(first: &Path) -> Vec<Found> {
     let mut found = Vec::new();
     let mut misses = 0;
     for n in 1..=MAX_TRIES {
-        let p = beside_nth(path, n);
+        let p = nth(first, n);
         match std::fs::metadata(&p) {
             Ok(meta) if meta.is_file() => {
                 misses = 0;
@@ -256,11 +362,14 @@ const MISSES: u32 = 8;
 /// The `n`th recovery file name beside `path`: the plain one first, so a
 /// single crash still leaves `notes.md.shoin-recover`.
 fn beside_nth(path: &Path, n: u32) -> PathBuf {
-    let first = beside(path);
+    nth(&beside(path), n)
+}
+
+fn nth(first: &Path, n: u32) -> PathBuf {
     if n <= 1 {
-        return first;
+        return first.to_path_buf();
     }
-    with_suffix(&first, &format!("-{n}"))
+    with_suffix(first, &format!("-{n}"))
 }
 
 /// How many names [`dump_to`] tries before it gives a file up: past this many
@@ -280,9 +389,9 @@ pub fn beside(path: &Path) -> PathBuf {
 const NAME_MAX: usize = 255;
 
 /// The room kept after `<file>.shoin-recover` for the longest ending a name
-/// gets: `.partial-<pid>`, where a pid takes ten digits at most (`-<n>` takes
-/// eleven).
-const ENDING: usize = PARTIAL.len() + 10;
+/// gets: `.partial-<pid>.<k>`, where a pid takes ten digits at most and `<k>`
+/// three (`-<n>` takes eleven).
+const ENDING: usize = PARTIAL.len() + 10 + ".100".len();
 
 /// What a name is cut to when it is too long, with `~` and eight hex digits
 /// of a hash of the whole name after it: two long names that start the same
@@ -330,41 +439,6 @@ fn partial_beside(path: &Path, pid: u32) -> PathBuf {
     with_suffix(&beside(path), &format!("{PARTIAL}{pid}"))
 }
 
-/// The folder the `.partial` files beside `path` are in, and what their names
-/// start with before the pid.
-fn partials_beside(path: &Path) -> (PathBuf, Vec<u8>) {
-    let first = beside(path);
-    let dir = match first.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let name = first.file_name().unwrap_or_default().as_encoded_bytes();
-    (dir, [name, PARTIAL.as_bytes()].concat())
-}
-
-/// The `.partial` files in `dir` whose names are `prefix` and a pid, with the
-/// pid. Regular files only: a dump never makes anything else.
-fn stale_partials(dir: &Path, prefix: &[u8]) -> Vec<(u32, PathBuf, std::fs::Metadata)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let own = std::process::id();
-    let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let file = entry.file_name();
-        let Some(digits) = file.as_encoded_bytes().strip_prefix(prefix) else { continue };
-        let Some(pid) = std::str::from_utf8(digits).ok().and_then(|d| d.parse::<u32>().ok()) else { continue };
-        // Not this process's own, which a dump of it may be writing right
-        // now, and only the names a dump makes: no leading zero.
-        if pid == own || digits.first() == Some(&b'0') {
-            continue;
-        }
-        match std::fs::symlink_metadata(dir.join(&file)) {
-            Ok(meta) if meta.is_file() => found.push((pid, dir.join(&file), meta)),
-            _ => {}
-        }
-    }
-    found
-}
-
 /// Whether process `pid` is running: `None` where that cannot be asked.
 fn alive(pid: u32) -> Option<bool> {
     #[cfg(unix)]
@@ -385,20 +459,15 @@ fn alive(pid: u32) -> Option<bool> {
     }
 }
 
-/// Remove the `.partial` files in `dir` named `prefix` and a pid whose dump is
-/// over and whose text a recovery file holds too: it was cut off after its
-/// file was named and before the `.partial` name went. Any other is kept,
-/// since it may hold the only copy of the text, and [`cut_off`] names it.
-fn clear_stale_partials(dir: &Path, prefix: &[u8]) {
-    #[cfg(unix)]
-    for (pid, p, meta) in stale_partials(dir, prefix) {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() > 1 && alive(pid) == Some(false) {
+/// Remove each of `partials` that is a second name for a recovery file and
+/// whose dump is over. Any other is kept, since it may hold the only copy of
+/// the text, and opening the file names it.
+fn clear_duplicates(partials: Vec<Found>) {
+    for (pid, p, meta) in partials {
+        if duplicate(&meta) && over(pid, &meta, false) {
             let _ = std::fs::remove_file(p);
         }
     }
-    #[cfg(not(unix))]
-    let _ = (dir, prefix);
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -507,8 +576,6 @@ fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) {
             // it: see `recovery_files` for why.
             let next = existing(path).iter().map(|e| e.0).max().map_or(1, |n| n.saturating_add(1)).max(2);
             let numbers = std::iter::once(1).chain(next..next.saturating_add(MAX_TRIES));
-            let (dir, prefix) = partials_beside(path);
-            clear_stale_partials(&dir, &prefix);
             let names = numbers.map(|n| beside_nth(path, n));
             if let Some(target) = write_new(s, &partial_beside(path, pid), names) {
                 done(&target);
@@ -518,7 +585,6 @@ fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) {
         if std::fs::create_dir_all(state).is_err() {
             continue;
         }
-        clear_stale_partials(state, format!("recover{PARTIAL}").as_bytes());
         let names = std::iter::from_fn(|| {
             unnamed += 1;
             Some(state.join(format!("recover-{pid}-{unnamed}.md")))
@@ -526,6 +592,23 @@ fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) {
         let partial = state.join(format!("recover{PARTIAL}{pid}"));
         if let Some(target) = write_new(s, &partial, names.take(MAX_TRIES as usize)) {
             done(&target);
+        }
+    }
+    // Only now, with every text written: a slow folder must not hold up a
+    // text still to be written, and a duplicate costs nothing to keep a
+    // moment longer. One listing per folder, however many files are in it.
+    let mut folders: std::collections::BTreeMap<PathBuf, Vec<Vec<u8>>> = std::collections::BTreeMap::new();
+    for path in snaps.iter().filter_map(|s| s.path.as_deref()) {
+        for base in bases(path) {
+            if let Some(name) = base.file_name() {
+                folders.entry(folder(&base)).or_default().push(name.as_encoded_bytes().to_vec());
+            }
+        }
+    }
+    folders.entry(state.to_path_buf()).or_default().push(b"recover".to_vec());
+    for (dir, names) in folders {
+        if let Some(found) = list(&dir, &names) {
+            clear_duplicates(found.partials);
         }
     }
 }
@@ -538,13 +621,7 @@ fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) {
 /// replacing it, as a rename would. Where links are refused (FAT, some network
 /// mounts), a rename to a name just seen free does it instead.
 fn write_new(s: &Snapshot, partial: &Path, names: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
-    // A `.partial` left by an earlier dump of this pid that was cut off goes:
-    // that dump's recovery files are named in full or not at all.
-    let _ = std::fs::remove_file(partial);
-    if write(partial, s).is_err() {
-        let _ = std::fs::remove_file(partial);
-        return None;
-    }
+    let partial = &write_partial(s, partial)?;
     let mut placed = None;
     for target in names {
         match std::fs::hard_link(partial, &target) {
@@ -565,6 +642,29 @@ fn write_new(s: &Snapshot, partial: &Path, names: impl Iterator<Item = PathBuf>)
     let _ = std::fs::remove_file(partial);
     placed
 }
+
+/// Write `s` in full to `partial`, or to `partial.2` and on when that is
+/// taken: a `.partial` already there is not this process's, whose exist only
+/// while one of its dumps writes and are gone at its end. It is an earlier
+/// process's that had the same pid and was cut off, and it may hold the only
+/// copy of its text, so it is never removed or written over.
+fn write_partial(s: &Snapshot, partial: &Path) -> Option<PathBuf> {
+    for k in 1..=PARTIAL_TRIES {
+        let p = if k == 1 { partial.to_path_buf() } else { with_suffix(partial, &format!(".{k}")) };
+        match write(&p, s) {
+            Ok(()) => return Some(p),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                let _ = std::fs::remove_file(&p);
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// How many `.partial` names a dump tries: see [`ENDING`].
+const PARTIAL_TRIES: u32 = 100;
 
 /// Write one snapshot, readable by its owner only: it is somebody's draft.
 fn write(target: &Path, s: &Snapshot) -> std::io::Result<()> {
@@ -1203,7 +1303,7 @@ mod tests {
         dump(&[snap(Some(path.clone()), "y\n", false)], &d);
         std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o300)).unwrap();
         let found = recovery_files(&path);
-        let probed = probe(&path).len();
+        let probed = probe(&beside(&path)).len();
         std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(probed, 2);
@@ -1214,20 +1314,29 @@ mod tests {
     fn a_cut_off_dump_leaves_no_recovery_file_missing_its_end() {
         let d = dir("partial");
         let path = d.join("p.md");
-        // What a dump killed half way leaves: only the `.partial` file.
-        let partial = with_suffix(&beside(&path), &format!(".partial-{}", std::process::id()));
+        // What a dump killed half way leaves: only the `.partial` file. Its
+        // pid is this process's: an earlier process had it (pids come round
+        // again, after a reboot most of all).
+        let partial = partial_beside(&path, std::process::id());
         std::fs::write(&partial, "half of the te").unwrap();
-        assert!(recovery_files(&path).is_empty(), "a .partial file is never listed");
+        assert!(recovery_files(&path).is_empty(), "a .partial file is never listed as a recovery file");
+        assert_eq!(cut_off(scan(&path).partials, false), vec![partial.clone()], "but named as cut off");
+        assert!(cut_off(scan(&path).partials, true).is_empty(), "unless a dump of ours is writing");
         let written = dump(&[snap(Some(path.clone()), "the whole text\n", false)], &d);
         assert_eq!(written, vec![d.join("p.md.shoin-recover")]);
         assert_eq!(std::fs::read_to_string(&written[0]).unwrap(), "the whole text\n");
-        assert!(!partial.exists(), "the next dump of this pid clears it");
+        assert_eq!(std::fs::read_to_string(&partial).unwrap(), "half of the te", "the earlier one is kept");
+        assert!(!with_suffix(&partial, ".2").exists(), "ours went under the next name, and is gone");
+        let b = Buffer::open(path.clone(), &[]).unwrap();
+        let text = notice([&b].into_iter()).expect("a notice");
+        assert!(text.ends_with(&format!("cut off part way: p.md.shoin-recover.partial-{}", std::process::id())), "{text}");
         // A taken name is passed over, not replaced.
         std::fs::write(beside_nth(&path, 2), "someone else's\n").unwrap();
         let next = write_new(&snap(None, "next\n", false), &partial, (2..=3).map(|n| beside_nth(&path, n)));
         assert_eq!(next, Some(beside_nth(&path, 3)));
         assert_eq!(std::fs::read_to_string(beside_nth(&path, 2)).unwrap(), "someone else's\n");
-        assert!(!partial.exists());
+        assert_eq!(std::fs::read_to_string(&partial).unwrap(), "half of the te");
+        assert!(!with_suffix(&partial, ".2").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1419,6 +1528,11 @@ mod tests {
         let b = Buffer::open(path.clone(), &[]).unwrap();
         let text = notice([&b].into_iter()).expect("a notice");
         assert_eq!(text, format!("{} holds unsaved text from a crash, cut off part way", dead.display()));
+        // Nothing written to it for longer than a dump lasts: cut off,
+        // whatever process has that pid now.
+        set_mtime(&running, std::time::SystemTime::now() - std::time::Duration::from_secs(600));
+        assert_eq!(cut_off(scan(&path).partials, false), vec![dead.clone(), running.clone()]);
+        set_mtime(&running, std::time::SystemTime::now());
 
         // A crash after it: both named, the cut-off one apart.
         let written = dump(&[snap(Some(path.clone()), "whole\n", false)], &d.join("state"));
@@ -1427,7 +1541,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&running).unwrap(), "in progress", "nor a running dump's");
         let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(
-            notice_text(&recovery_files(&path), &cut_off(&path)).unwrap(),
+            notice_text(&recovery_files(&path), &cut_off(scan(&path).partials, false)).unwrap(),
             format!("unsaved text from a crash, newest first: k.md.shoin-recover; cut off part way: {}", name(&dead))
         );
         let _ = std::fs::remove_dir_all(&d);
@@ -1451,7 +1565,15 @@ mod tests {
         let dead_unnamed = state.join(format!("recover.partial-{}", dead_pid()));
         std::fs::hard_link(state.join("recover-1-1.md"), &dead_unnamed).unwrap();
 
-        dump(&[snap(Some(path.clone()), "two\n", false), snap(None, "three\n", false)], &state);
+        assert!(cut_off(scan(&path).partials, false).is_empty(), "not named as cut off: its text is whole");
+        let b = Buffer::open(path.clone(), &[]).unwrap();
+        assert_eq!(notice([&b].into_iter()).unwrap(), format!("{} holds unsaved text from a crash", first[0].display()));
+        assert!(dead.exists(), "and opening the file deletes nothing");
+
+        let snaps = [snap(Some(path.clone()), "two\n", false), snap(None, "three\n", false)];
+        dump_to(&snaps, &state, &mut |_| {
+            assert!(dead.exists() && dead_unnamed.exists(), "cleared only after every text is written");
+        });
         assert!(!dead.exists() && !dead_unnamed.exists(), "a second name for a whole file goes");
         assert!(running.exists(), "a running dump's is left to it");
         assert_eq!(std::fs::read_to_string(&first[0]).unwrap(), "one\n");
@@ -1462,8 +1584,8 @@ mod tests {
     fn a_name_too_long_for_the_endings_is_shortened_in_them() {
         let d = dir("long");
         // 250 bytes, with a two-byte character across the place it is cut.
-        // It is cut to 213 bytes, and the `é` takes the 213th and 214th.
-        let long = |end: &str| format!("{}é{}{end}", "a".repeat(212), "b".repeat(250 - 214 - end.len()));
+        // It is cut to 209 bytes, and the `é` takes the 209th and 210th.
+        let long = |end: &str| format!("{}é{}{end}", "a".repeat(208), "b".repeat(250 - 210 - end.len()));
         let (a, b) = (d.join(long("-one.md")), d.join(long("-two.md")));
         assert_eq!(a.file_name().unwrap().len(), 250);
         for p in [&a, &b] {
@@ -1479,11 +1601,34 @@ mod tests {
         assert!(!state.exists());
         let longest = with_suffix(&beside_nth(&a, u32::MAX), "");
         assert!(longest.file_name().unwrap().len() <= NAME_MAX);
-        assert!(partial_beside(&a, u32::MAX).file_name().unwrap().len() <= NAME_MAX);
+        let partial = with_suffix(&partial_beside(&a, u32::MAX), &format!(".{PARTIAL_TRIES}"));
+        assert!(partial.file_name().unwrap().len() <= NAME_MAX);
         assert_eq!(recovery_files(&a), vec![second[0].clone(), first[0].clone()]);
         assert_eq!(recovery_files(&b), vec![other[0].clone()]);
         // Short names are as they were.
         assert_eq!(beside(&d.join("n.md")), d.join("n.md.shoin-recover"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_long_name_still_finds_what_0_2_4_wrote_under_the_full_name() {
+        let d = dir("legacy");
+        let path = d.join(format!("{}.md", "x".repeat(222)));
+        std::fs::write(&path, "saved\n").unwrap();
+        assert_ne!(beside(&path), with_suffix(&path, SUFFIX), "a name `stem` shortens");
+        // What 0.2.4 wrote: the full name with the suffix after it.
+        let old = with_suffix(&path, SUFFIX);
+        std::fs::write(&old, "from 0.2.4\n").unwrap();
+        set_mtime(&old, std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        assert_eq!(recovery_files(&path), vec![old.clone()]);
+        let b = Buffer::open(path.clone(), &[]).unwrap();
+        let text = notice([&b].into_iter()).expect("a notice");
+        assert_eq!(text, format!("{} holds unsaved text from a crash", old.display()));
+        // A new crash goes under the short name, and both are listed.
+        let new = dump(&[snap(Some(path.clone()), "new\n", false)], &d.join("state"));
+        assert_eq!(new, vec![beside(&path)]);
+        assert_eq!(recovery_files(&path), vec![new[0].clone(), old.clone()]);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "from 0.2.4\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
