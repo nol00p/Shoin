@@ -1,5 +1,150 @@
 # Changelog
 
+## 0.2.4
+
+**Math**
+
+- LaTeX math is styled as you write it. Inline `$…$` and display `$$…$$`
+  conceal to Unicode symbols away from the cursor: Greek letters,
+  operators, fractions, roots, sub- and superscripts. `$` follows pandoc's
+  rules, so `$5 and $6` stays plain, and an unclosed `$$` ends at the next
+  blank line. Math is on by default; `math = false` under `[markdown]`
+  turns it off (#75).
+- Long math lines wrap instead of running off the pane. Operator names
+  such as `\sin` and `\log` print without the backslash and keep their
+  space (`\sin\theta` → `sin θ`); a command is a script's or accent's whole
+  argument (`e^\pi`, `a_\text{max}`, `\hat\theta`); escaped specials
+  (`\$`, `\%`, `\{`, …) are the character itself (#80).
+- HTML export writes math as pandoc does, in `math inline` and
+  `math display` elements (#75).
+
+**Lists**
+
+- `:fixlist` re-indents the list under the cursor so that GitHub, pandoc
+  and other tools read it as Shoin shows it. After a renumber across `9.`
+  to `10.`, the lines under an item can fall out of it elsewhere;
+  `:fixlist` moves them to the item's text column (#88).
+- A fence, `$$` block, heading or rule inside a list item counts its indent
+  from the item's text, so code under a `10.` item shows as code. HTML
+  export keeps these blocks, and the text after them, in their item
+  instead of splitting the list (#90).
+- In Visual mode, `Alt-j` / `Alt-k` move the list items the selection
+  touches, with their children, past the next or previous sibling (#82).
+- List commands stay fast on long lists: `Alt-j` among 1,000 sub-items
+  went from about 0.9 s to under 10 ms (#89).
+
+**Editing**
+
+- In Visual mode `p`, `P`, `~`, `r`, `J`, `D`, `X`, `Y`, `C`, `S`, `R`,
+  `I` and `A` act on the selection and end it, as in vim, instead of
+  editing at the cursor (#103).
+- Counts work on `i`, `a`, `o` and `.`: `3ix<Esc>` types `xxx`, and `3.`
+  repeats the last change with a count of 3. `d2aw` and `d2iw` take that
+  many words (#108).
+- `cc` keeps the line's indent with `auto_indent`. `yy` and `yj` leave the
+  cursor where it was (#108).
+- `F` and `T` are exclusive, as in vim, so `dFx` no longer deletes the
+  character under the cursor. `;` and `,` are motions, so `d;` and `c,`
+  work (#105).
+- The `:` and `/` lines, prompts and the finder read control keys: `Esc`
+  and `Ctrl-C` cancel, `Ctrl-U` clears, `Ctrl-W` deletes a word. Other
+  chords are ignored instead of typing their letter (#104).
+- `_italic_` and `__bold__` are styled, except inside a word
+  (`snake_case_name`). A run of `*` with a space after it stays plain, so
+  `2 * 3 * 4` is not italic (#97). `gi` / `gb` strip underscore emphasis
+  too, and italic on bold adds italic instead of replacing bold (#119).
+- Links may hold brackets in their text (`[![badge](img)](url)`,
+  `[a [b] c](url)`), parentheses in their address, a `"title"` and
+  `<…>` addresses (#91, #117).
+- Search is faster on large documents (#119).
+
+**Files**
+
+- `:w other.md` on a buffer that has its own file writes a copy and keeps
+  editing the original, as in vim. `:saveas` (`:sav`) moves the buffer to
+  the new file (#107).
+- `~` at the start of a path typed in `:e`, `:w`, `:saveas`, `:export` and
+  the tree's prompts is your home folder (#107).
+- One file is one buffer: opening it by a relative path, an absolute path
+  or a symlink no longer gives two buffers, and a tree rename follows it
+  (#99).
+- `[[2024.01.15 meeting]]` and `[[Dr.Who]]` resolve and `gf` creates them
+  as notes; only a real file type counts as an extension. `![[diagram.png]]`
+  no longer embeds `diagram.md`, `[[archive/todo]]` no longer opens
+  `sub/todo.md`, and `gf` on a missing `[[report.pdf]]` says it is missing
+  instead of creating `report.pdf.md` (#93, #99, #102).
+- The tree can rename a file to another case of its name on macOS and
+  other case-insensitive filesystems (#109).
+
+**Saving and recovery**
+
+- If Shoin crashes or is killed by `SIGTERM` or `SIGHUP`, each unsaved
+  buffer is written to `<file>.shoin-recover` beside its file (or under
+  `$XDG_STATE_HOME/shoin` for an unnamed buffer), and the paths are
+  printed once the terminal is back. A later crash writes `-2`, `-3`, …
+  instead of overwriting the first. Opening a file with a recovery file
+  beside it says so; nothing is applied for you (#100, #118).
+- A save writes over the file in place, after a synced backup, when the
+  folder is not writable, the file has other hard links, or it belongs to
+  another user. Long file names save, and the folder is synced after a
+  rename so the save survives a power cut (#110).
+- A save no longer drops blank lines at the end of a file without a final
+  newline. `trim_on_save` leaves fenced code and hard breaks (two spaces at
+  the end of a line) alone, and the buffer takes the same change as the
+  file, so `:diff` finds nothing afterwards (#112).
+- A broken symlink counts as taken: `:w`, `:saveas`, the tree's create and
+  rename, and `gf` no longer replace it or write through it (#114).
+
+**Export**
+
+- `[markdown] export_follows_settings = true` makes `txt` and `html`
+  export follow the editor's `[markdown]` settings, so syntax switched off
+  in the editor exports as plain text. Off by default: export writes math,
+  tables and code as such whatever the editor shows (#81).
+- Bold, italic and links nested inside other markup are exported, not
+  escaped as text (#98).
+- `--export notes.md` and `:export` to Markdown write `notes-export.md` by
+  default instead of failing on the source itself. Export refuses to write
+  over the source, an embedded note or a picture it reads (#98, #115).
+- Pictures keep working when the export goes to another folder, and PDF
+  export works from any folder (#96, #98).
+- PDF export through Typst works again with Typst 0.15, and the hint for a
+  missing engine points Linux users to typst's releases (#76, #79).
+- HTML export: repeated headings get distinct ids, consecutive `>` lines
+  make one paragraph, hard breaks become `<br>`, links and pictures keep
+  their title, and `[[javascript:…]]` exports as text (#92, #98, #115).
+- Embedded notes with CRLF line endings lose their front matter, and a `#`
+  line inside fenced code no longer ends a heading embed (#93, #96).
+- Plain-text export no longer swallows the first word after a tab-separated
+  list marker (#92).
+
+**Speed**
+
+- Typing stays fast in 100,000-line documents: about 0.6 ms a keystroke,
+  down from 32–40 ms (#113).
+- A very long line (hundreds of KB) draws and searches in one pass instead
+  of slowing every frame (#111).
+
+**Fixes**
+
+- Lines break on `\n` only. A U+2028 or U+2029 inside a line used to start
+  a new line for some commands and not others; it stays in its line, saves
+  back as it was and is drawn as a dim `↵` (#95, #116).
+- A read-only buffer reloads when its file changes on disk (#95).
+- A file that changes into something Shoin cannot load is reported once,
+  not every second (#106).
+- `w` in the `:diff` view in read-only mode no longer writes the unmerged
+  buffer over the file; the view stays open and names `W` (#99, #119).
+- Kitty and Ghostty draw only PNG pictures; a JPEG or GIF there shows its
+  box and caption instead of bytes the terminal cannot decode (#100).
+- Counts are capped instead of overflowing, and a counted paste over 16 MB
+  is refused (#99).
+- A mouse drag in an empty pane no longer crashes (#94).
+- Visual selections belong to their pane: closing, splitting or leaving
+  the pane ends Visual, and `.` after `x` then `2.` no longer crashes (#85).
+- The block cache stays right after edits that keep the line count, such
+  as moving a numbered item past `10.` (#84).
+
 ## 0.2.3
 
 **Fixes**
