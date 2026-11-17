@@ -108,6 +108,14 @@ pub(crate) fn taken(path: &Path) -> Result<bool> {
     }
 }
 
+/// Whether `path` is a link that leads nowhere: to a missing file, around a
+/// loop, or through a folder that can't be searched. A save follows a link to
+/// the file it names; with no file to reach, its rename would replace the
+/// link itself.
+pub(crate) fn broken_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) && std::fs::metadata(path).is_err()
+}
+
 /// Whether `to` is `from` under another spelling — `Notes.md` for `notes.md`
 /// where case is ignored — rather than a second entry.
 ///

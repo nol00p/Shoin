@@ -232,6 +232,13 @@ impl Buffer {
         if !force && !same_file && ops::taken(path)? {
             anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
         }
+        // Its own file too, when that is a link to a missing file (opened as
+        // a new file, or its target deleted since): the name is taken by the
+        // link, as `:w` onto it from another buffer finds, and a plain `:w`
+        // would replace the link where the user meant to write through it.
+        if !force && same_file && ops::broken_link(path) {
+            anyhow::bail!("{} is a broken link — :w! to replace it", name_of(path));
+        }
         let opts = self.save_options(path, policy);
         let mut out = save::outgoing(self.rope.to_string(), &opts);
         // A buffer that refuses the edits (read-only mode, `:view`) is written
@@ -1278,6 +1285,41 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert!(std::fs::symlink_metadata(d.join("gone.md")).is_err());
         assert_eq!(b.path.as_deref(), Some(d.join("n.md").as_path()));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `shoin link.md` on a link to a missing file, then `:w`: refused, as
+    /// `:w link.md` from another buffer is, and the link is left as it was.
+    /// `:w!` writes the file, as `:w! link.md` would.
+    #[cfg(unix)]
+    #[test]
+    fn its_own_broken_link_is_not_replaced_without_bang() {
+        let d = dir("own-dangling");
+        let link = d.join("link.md");
+        std::os::unix::fs::symlink(d.join("gone.md"), &link).unwrap();
+        let mut b = Buffer::open(link.clone(), &[]).unwrap();
+        b.replace_all("text\n");
+        let err = b.save(policy(), false).unwrap_err().to_string();
+        assert_eq!(err, "link.md is a broken link — :w! to replace it");
+        let err = b.save_as(link.clone(), policy(), false).unwrap_err().to_string();
+        assert!(err.contains("broken link"), "got: {err}");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(d.join("gone.md")).is_err(), "nothing at the far end");
+        assert!(b.modified);
+
+        // A link that works is written through, as before.
+        std::fs::write(d.join("gone.md"), "old\n").unwrap();
+        b.save(policy(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("gone.md")).unwrap(), "text\n");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+
+        // Its target deleted while it is open: refused again; `:w!` writes.
+        std::fs::remove_file(d.join("gone.md")).unwrap();
+        b.replace_all("more\n");
+        assert!(b.save(policy(), false).is_err());
+        b.save(policy(), true).unwrap();
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "more\n");
+        assert!(!b.modified);
         std::fs::remove_dir_all(&d).ok();
     }
 

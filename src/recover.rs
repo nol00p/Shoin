@@ -15,6 +15,16 @@
 //! already taken. Each is written in full under a `.partial` name first, so a
 //! dump cut off part way never leaves a recovery file missing its end.
 //!
+//! A dump that is killed outright (`SIGKILL`) leaves that `.partial` file
+//! behind. It may hold the only copy of most of the text, so nothing deletes
+//! it: opening the file names it with the recovery files, as cut off. A later
+//! dump removes one only when its process is gone and its text is whole under
+//! a recovery name too (it was cut off between the two).
+//!
+//! A file name too long to take these endings (names stop at 255 bytes) is
+//! shortened in them, with a hash of the whole name so two long names that
+//! start the same way do not share recovery files.
+//!
 //! The panic hook has no `App` to read, so the event loop keeps a process-wide
 //! [`REGISTRY`] of the modified buffers up to date through [`tick`]. A rope
 //! clone is a reference-count bump that shares its chunks, and it is taken
@@ -102,29 +112,62 @@ fn notice<'a>(buffers: impl Iterator<Item = &'a Buffer>) -> Option<String> {
             continue;
         }
         checked.insert(path.to_path_buf());
-        // Two stats for a file with no recovery file, the common case: the
-        // folder is listed only when the first or second name is there. A
+        // Two stats for the recovery files, the common case: the folder is
+        // listed for them only when the first or second name is there. A
         // lone `-3` left after deleting both is not announced, but a new crash
         // re-takes the free plain name (`dump_to`), so the newest always is.
-        if !beside_nth(path, 1).exists() && !beside_nth(path, 2).exists() {
-            continue;
-        }
+        // A cut-off `.partial` carries its dump's pid, so it can only be
+        // found by a listing: one per file, once per session.
+        let files = if beside_nth(path, 1).exists() || beside_nth(path, 2).exists() {
+            recovery_files(path)
+        } else {
+            Vec::new()
+        };
+        let cut = cut_off(path);
         // One notice per pass: any other file is looked at on the next one,
         // after this flash has had its turn.
-        match recovery_files(path).as_slice() {
-            [] => {}
-            [one] => return Some(format!("{} holds unsaved text from a crash", one.display())),
-            several => {
-                // Names only: they all sit beside the open file, and a full
-                // path each would push the later ones off a flash that is cut
-                // to the width of the screen.
-                let names: Vec<_> =
-                    several.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).collect();
-                return Some(format!("unsaved text from a crash, newest first: {}", names.join(", ")));
-            }
+        if let Some(text) = notice_text(&files, &cut) {
+            return Some(text);
         }
     }
     None
+}
+
+/// What opening a file says about the recovery files beside it, newest first,
+/// and the `.partial` files dumps left when they were cut off.
+fn notice_text(files: &[PathBuf], cut: &[PathBuf]) -> Option<String> {
+    // Names only when there are several: they all sit beside the open file,
+    // and a full path each would push the later ones off a flash that is cut
+    // to the width of the screen.
+    let names = |ps: &[PathBuf]| -> String {
+        let names: Vec<_> = ps.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).collect();
+        names.join(", ")
+    };
+    match (files, cut) {
+        ([], []) => None,
+        ([one], []) => Some(format!("{} holds unsaved text from a crash", one.display())),
+        ([], [one]) => Some(format!("{} holds unsaved text from a crash, cut off part way", one.display())),
+        (files, []) => Some(format!("unsaved text from a crash, newest first: {}", names(files))),
+        ([], cut) => Some(format!("unsaved text from a crash, cut off part way: {}", names(cut))),
+        (files, cut) => Some(format!(
+            "unsaved text from a crash, newest first: {}; cut off part way: {}",
+            names(files),
+            names(cut)
+        )),
+    }
+}
+
+/// The `.partial` files beside `path` that no running dump is writing, newest
+/// first: each is what a dump had written when it was killed.
+fn cut_off(path: &Path) -> Vec<PathBuf> {
+    let (dir, prefix) = partials_beside(path);
+    let mut found: Vec<_> = stale_partials(&dir, &prefix)
+        .into_iter()
+        .filter(|(pid, ..)| alive(*pid) != Some(true))
+        .map(|(_, p, meta)| (meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH), p))
+        .collect();
+    found.sort();
+    found.into_iter().rev().map(|(_, p)| p).collect()
 }
 
 /// Every recovery file beside `path`, newest first: `<file>.shoin-recover`
@@ -224,9 +267,138 @@ fn beside_nth(path: &Path, n: u32) -> PathBuf {
 /// unread recovery files, something else is wrong.
 const MAX_TRIES: u32 = 1000;
 
-/// `notes.md` → `notes.md.shoin-recover`, in the same folder.
+/// `notes.md` → `notes.md.shoin-recover`, in the same folder. A name too long
+/// to take that and the longest ending after it is shortened: see [`stem`].
 pub fn beside(path: &Path) -> PathBuf {
-    with_suffix(path, SUFFIX)
+    let name = path.file_name().unwrap_or_default();
+    let mut name = stem(name);
+    name.push(SUFFIX);
+    path.with_file_name(name)
+}
+
+/// The longest file name most file systems take, in bytes.
+const NAME_MAX: usize = 255;
+
+/// The room kept after `<file>.shoin-recover` for the longest ending a name
+/// gets: `.partial-<pid>`, where a pid takes ten digits at most (`-<n>` takes
+/// eleven).
+const ENDING: usize = PARTIAL.len() + 10;
+
+/// What a name is cut to when it is too long, with `~` and eight hex digits
+/// of a hash of the whole name after it: two long names that start the same
+/// way still get recovery names of their own.
+fn stem(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    let room = NAME_MAX - SUFFIX.len() - ENDING;
+    let bytes = name.as_encoded_bytes();
+    if bytes.len() <= room {
+        return name.to_os_string();
+    }
+    let tag = format!("~{:08x}", fnv1a(bytes));
+    let mut keep = room - tag.len();
+    match name.to_str() {
+        Some(s) => {
+            while !s.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            format!("{}{tag}", &s[..keep]).into()
+        }
+        #[cfg(unix)]
+        None => {
+            use std::os::unix::ffi::OsStringExt;
+            let mut cut = bytes[..keep].to_vec();
+            cut.extend_from_slice(tag.as_bytes());
+            std::ffi::OsString::from_vec(cut)
+        }
+        // Not UTF-8 off Unix: no safe place to cut. Left long, the dump
+        // goes to the state folder as before.
+        #[cfg(not(unix))]
+        None => name.to_os_string(),
+    }
+}
+
+/// 32-bit FNV-1a: the same on every build and every version of Rust, as a
+/// recovery name has to be found again by the next one.
+fn fnv1a(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5, |h, &b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
+}
+
+/// What a dump writes under before the text is whole: `<recovery
+/// name>.partial-<pid>`, and `recover.partial-<pid>` in the state folder.
+const PARTIAL: &str = ".partial-";
+
+fn partial_beside(path: &Path, pid: u32) -> PathBuf {
+    with_suffix(&beside(path), &format!("{PARTIAL}{pid}"))
+}
+
+/// The folder the `.partial` files beside `path` are in, and what their names
+/// start with before the pid.
+fn partials_beside(path: &Path) -> (PathBuf, Vec<u8>) {
+    let first = beside(path);
+    let dir = match first.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = first.file_name().unwrap_or_default().as_encoded_bytes();
+    (dir, [name, PARTIAL.as_bytes()].concat())
+}
+
+/// The `.partial` files in `dir` whose names are `prefix` and a pid, with the
+/// pid. Regular files only: a dump never makes anything else.
+fn stale_partials(dir: &Path, prefix: &[u8]) -> Vec<(u32, PathBuf, std::fs::Metadata)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let own = std::process::id();
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(digits) = file.as_encoded_bytes().strip_prefix(prefix) else { continue };
+        let Some(pid) = std::str::from_utf8(digits).ok().and_then(|d| d.parse::<u32>().ok()) else { continue };
+        // Not this process's own, which a dump of it may be writing right
+        // now, and only the names a dump makes: no leading zero.
+        if pid == own || digits.first() == Some(&b'0') {
+            continue;
+        }
+        match std::fs::symlink_metadata(dir.join(&file)) {
+            Ok(meta) if meta.is_file() => found.push((pid, dir.join(&file), meta)),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Whether process `pid` is running: `None` where that cannot be asked.
+fn alive(pid: u32) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        // Never 0 or a negative number: `kill` reads those as a group.
+        let pid = i32::try_from(pid).ok().filter(|p| *p > 0)?;
+        // SAFETY: signal 0 sends nothing; it only checks the pid.
+        if unsafe { sys::kill(pid, 0) } == 0 {
+            return Some(true);
+        }
+        // `EPERM`: running, as somebody else.
+        Some(std::io::Error::last_os_error().raw_os_error() != Some(sys::ESRCH))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Remove the `.partial` files in `dir` named `prefix` and a pid whose dump is
+/// over and whose text a recovery file holds too: it was cut off after its
+/// file was named and before the `.partial` name went. Any other is kept,
+/// since it may hold the only copy of the text, and [`cut_off`] names it.
+fn clear_stale_partials(dir: &Path, prefix: &[u8]) {
+    #[cfg(unix)]
+    for (pid, p, meta) in stale_partials(dir, prefix) {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 && alive(pid) == Some(false) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (dir, prefix);
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -259,9 +431,7 @@ static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// for a safety copy after a panic that leaves it running (a background
 /// thread, in a build that unwinds).
 ///
-/// The panic may have happened on another thread while the loop held the
-/// lock, so it is tried for a moment rather than waited on: a dump that gives
-/// up is better than a hook that never returns.
+/// The registry is not simply waited on: see [`lock_for_dump`].
 pub fn dump() {
     DUMPING.fetch_add(1, Ordering::SeqCst);
     dump_registry();
@@ -273,24 +443,58 @@ pub fn dump() {
 static DUMPING: AtomicU32 = AtomicU32::new(0);
 
 fn dump_registry() {
-    let mut tries = 0;
-    let reg = loop {
-        match REGISTRY.try_lock() {
-            Ok(reg) => break reg,
-            Err(TryLockError::Poisoned(e)) => break e.into_inner(),
-            Err(TryLockError::WouldBlock) if tries < 50 => {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(TryLockError::WouldBlock) => return,
-        }
-    };
+    let Some(reg) = lock_for_dump(&REGISTRY, &WRITING, std::time::Duration::from_millis(10)) else { return };
+    let _writing = Writing::start(&WRITING);
     dump_to(&reg, &state_dir(), &mut |p| WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).push(p.to_path_buf()));
 }
 
+/// Set while a dump holds the registry and writes: another dump that wants it
+/// waits for that one, however long it takes up to a cap, rather than giving
+/// up after the moment it gives anything else.
+static WRITING: AtomicBool = AtomicBool::new(false);
+
+/// Sets [`WRITING`] for as long as it lives, a dump that panics included.
+struct Writing<'a>(&'a AtomicBool);
+
+impl<'a> Writing<'a> {
+    fn start(flag: &'a AtomicBool) -> Writing<'a> {
+        flag.store(true, Ordering::SeqCst);
+        Writing(flag)
+    }
+}
+
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The registry for a dump, tried in `tick`s rather than waited on: a panic
+/// on a thread that holds it (the loop's [`tick`]) would never let it go, and
+/// a dump that gives up is better than a hook that never returns. Held by
+/// another dump (a safety copy that a signal came in on), it is waited for
+/// until that dump is done, up to two minutes; otherwise for 50 ticks.
+fn lock_for_dump<'a>(
+    reg: &'a Mutex<Vec<Snapshot>>,
+    writing: &AtomicBool,
+    tick: std::time::Duration,
+) -> Option<MutexGuard<'a, Vec<Snapshot>>> {
+    let mut idle = 0;
+    for _ in 0..12_000 {
+        match reg.try_lock() {
+            Ok(reg) => return Some(reg),
+            Err(TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) if writing.load(Ordering::SeqCst) => idle = 0,
+            Err(TryLockError::WouldBlock) if idle < 50 => idle += 1,
+            Err(TryLockError::WouldBlock) => return None,
+        }
+        std::thread::sleep(tick);
+    }
+    None
+}
+
 /// Write `snaps`, handing each file to `done` as soon as it is complete.
-fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) -> Vec<PathBuf> {
-    let mut written = Vec::new();
+fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) {
     // Shared by every unnamed buffer of this dump, and moved past any name a
     // dead editor with the same pid left behind.
     let mut unnamed = 0;
@@ -303,28 +507,27 @@ fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) -> Vec
             // it: see `recovery_files` for why.
             let next = existing(path).iter().map(|e| e.0).max().map_or(1, |n| n.saturating_add(1)).max(2);
             let numbers = std::iter::once(1).chain(next..next.saturating_add(MAX_TRIES));
-            let partial = with_suffix(&beside(path), &format!(".partial-{pid}"));
+            let (dir, prefix) = partials_beside(path);
+            clear_stale_partials(&dir, &prefix);
             let names = numbers.map(|n| beside_nth(path, n));
-            if let Some(target) = write_new(s, &partial, names) {
+            if let Some(target) = write_new(s, &partial_beside(path, pid), names) {
                 done(&target);
-                written.push(target);
                 continue;
             }
         }
         if std::fs::create_dir_all(state).is_err() {
             continue;
         }
+        clear_stale_partials(state, format!("recover{PARTIAL}").as_bytes());
         let names = std::iter::from_fn(|| {
             unnamed += 1;
             Some(state.join(format!("recover-{pid}-{unnamed}.md")))
         });
-        let partial = state.join(format!("recover.partial-{pid}"));
+        let partial = state.join(format!("recover{PARTIAL}{pid}"));
         if let Some(target) = write_new(s, &partial, names.take(MAX_TRIES as usize)) {
             done(&target);
-            written.push(target);
         }
     }
-    written
 }
 
 /// Write `s` in full to `partial`, then give it the first of `names` not
@@ -724,7 +927,7 @@ fn on_main_thread() -> bool {
 
 // ------------------------------------------------------------------ signals
 //
-// Three libc calls, declared here rather than pulled in through a crate: std
+// Four libc calls, declared here rather than pulled in through a crate: std
 // already links libc, and both signal numbers are fixed by POSIX (they are what
 // `kill -1` and `kill -15` mean on every Unix).
 
@@ -735,6 +938,8 @@ mod sys {
     /// `SIG_DFL`: the signal's default action, which for these two is to end
     /// the process.
     pub const DEFAULT: usize = 0;
+    /// "No such process": the same number on Linux, macOS and the BSDs.
+    pub const ESRCH: i32 = 3;
 
     use std::ffi::{c_int, c_void};
 
@@ -742,6 +947,7 @@ mod sys {
         /// `sighandler_t signal(int, sighandler_t)`; a handler is a pointer.
         pub fn signal(signum: c_int, handler: usize) -> usize;
         pub fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+        pub fn kill(pid: c_int, sig: c_int) -> c_int;
     }
 }
 
@@ -821,7 +1027,7 @@ mod tests {
             snap(Some(d.join("a.md")), "# A\n\nunsaved line\n", false),
             snap(Some(d.join("b.txt")), "one\ntwo\n", true),
         ];
-        let written = dump_to(&snaps, &d.join("state"), &mut |_| {});
+        let written = dump(&snaps, &d.join("state"));
         assert_eq!(written, vec![d.join("a.md.shoin-recover"), d.join("b.txt.shoin-recover")]);
         assert_eq!(std::fs::read_to_string(&written[0]).unwrap(), "# A\n\nunsaved line\n");
         assert_eq!(std::fs::read_to_string(&written[1]).unwrap(), "one\r\ntwo\r\n");
@@ -843,7 +1049,7 @@ mod tests {
             snap(None, "piped text\n", false),
             snap(Some(d.join("no-such-folder/c.md")), "c\n", false),
         ];
-        let written = dump_to(&snaps, &state, &mut |_| {});
+        let written = dump(&snaps, &state);
         let pid = std::process::id();
         assert_eq!(written, vec![state.join(format!("recover-{pid}-1.md")), state.join(format!("recover-{pid}-2.md"))]);
         assert_eq!(std::fs::read_to_string(&written[0]).unwrap(), "piped text\n");
@@ -891,7 +1097,9 @@ mod tests {
     }
 
     fn dump(snaps: &[Snapshot], state: &Path) -> Vec<PathBuf> {
-        dump_to(snaps, state, &mut |_| {})
+        let mut written = Vec::new();
+        dump_to(snaps, state, &mut |p| written.push(p.to_path_buf()));
+        written
     }
 
     fn set_mtime(p: &Path, t: std::time::SystemTime) {
@@ -1041,11 +1249,11 @@ mod tests {
         let d = dir("progress");
         let mut seen = Vec::new();
         let snaps = [snap(Some(d.join("a.md")), "a\n", false), snap(Some(d.join("b.md")), "b\n", false)];
-        let written = dump_to(&snaps, &d, &mut |p| {
+        dump_to(&snaps, &d, &mut |p| {
             assert!(p.is_file(), "named only once complete");
             seen.push(p.to_path_buf());
         });
-        assert_eq!(seen, written);
+        assert_eq!(seen, vec![d.join("a.md.shoin-recover"), d.join("b.md.shoin-recover")]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1183,6 +1391,127 @@ mod tests {
         let text = notice([&b].into_iter()).expect("a notice");
         assert!(text.starts_with("unsaved text from a crash, newest first: g.md.shoin-recover-21"), "{text}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A pid no process has: a child that has been waited for.
+    #[cfg(unix)]
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert_eq!(alive(pid), Some(false));
+        pid
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dump_that_was_killed_leaves_a_partial_that_is_named_and_kept() {
+        let d = dir("killed");
+        let path = d.join("k.md");
+        std::fs::write(&path, "saved\n").unwrap();
+        // Killed while it wrote: nothing else holds this text.
+        let dead = partial_beside(&path, dead_pid());
+        std::fs::write(&dead, "most of the te").unwrap();
+        // Being written by a running dump right now (pid 1 is always there).
+        assert_eq!(alive(1), Some(true));
+        let running = partial_beside(&path, 1);
+        std::fs::write(&running, "in progress").unwrap();
+        let b = Buffer::open(path.clone(), &[]).unwrap();
+        let text = notice([&b].into_iter()).expect("a notice");
+        assert_eq!(text, format!("{} holds unsaved text from a crash, cut off part way", dead.display()));
+
+        // A crash after it: both named, the cut-off one apart.
+        let written = dump(&[snap(Some(path.clone()), "whole\n", false)], &d.join("state"));
+        assert_eq!(written, vec![beside(&path)]);
+        assert_eq!(std::fs::read_to_string(&dead).unwrap(), "most of the te", "never deleted");
+        assert_eq!(std::fs::read_to_string(&running).unwrap(), "in progress", "nor a running dump's");
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            notice_text(&recovery_files(&path), &cut_off(&path)).unwrap(),
+            format!("unsaved text from a crash, newest first: k.md.shoin-recover; cut off part way: {}", name(&dead))
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_partial_whose_text_a_recovery_file_holds_goes_once_its_dump_is_over() {
+        let d = dir("linked");
+        let path = d.join("l.md");
+        let state = d.join("state");
+        // Cut off between naming the file and removing the `.partial`.
+        let first = dump(&[snap(Some(path.clone()), "one\n", false)], &state);
+        let dead = partial_beside(&path, dead_pid());
+        std::fs::hard_link(&first[0], &dead).unwrap();
+        let running = partial_beside(&path, 1);
+        std::fs::hard_link(&first[0], &running).unwrap();
+        // The same in the state folder.
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("recover-1-1.md"), "x\n").unwrap();
+        let dead_unnamed = state.join(format!("recover.partial-{}", dead_pid()));
+        std::fs::hard_link(state.join("recover-1-1.md"), &dead_unnamed).unwrap();
+
+        dump(&[snap(Some(path.clone()), "two\n", false), snap(None, "three\n", false)], &state);
+        assert!(!dead.exists() && !dead_unnamed.exists(), "a second name for a whole file goes");
+        assert!(running.exists(), "a running dump's is left to it");
+        assert_eq!(std::fs::read_to_string(&first[0]).unwrap(), "one\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_name_too_long_for_the_endings_is_shortened_in_them() {
+        let d = dir("long");
+        // 250 bytes, with a two-byte character across the place it is cut.
+        // It is cut to 213 bytes, and the `é` takes the 213th and 214th.
+        let long = |end: &str| format!("{}é{}{end}", "a".repeat(212), "b".repeat(250 - 214 - end.len()));
+        let (a, b) = (d.join(long("-one.md")), d.join(long("-two.md")));
+        assert_eq!(a.file_name().unwrap().len(), 250);
+        for p in [&a, &b] {
+            std::fs::write(p, "saved\n").unwrap();
+        }
+        let state = d.join("state");
+        let first = dump(&[snap(Some(a.clone()), "1\n", false)], &state);
+        let second = dump(&[snap(Some(a.clone()), "2\n", false)], &state);
+        let other = dump(&[snap(Some(b.clone()), "b\n", false)], &state);
+        assert_eq!(first, vec![beside(&a)], "beside the file, not in the state folder");
+        assert_eq!(second, vec![beside_nth(&a, 2)]);
+        assert_eq!(other, vec![beside(&b)], "a name of its own");
+        assert!(!state.exists());
+        let longest = with_suffix(&beside_nth(&a, u32::MAX), "");
+        assert!(longest.file_name().unwrap().len() <= NAME_MAX);
+        assert!(partial_beside(&a, u32::MAX).file_name().unwrap().len() <= NAME_MAX);
+        assert_eq!(recovery_files(&a), vec![second[0].clone(), first[0].clone()]);
+        assert_eq!(recovery_files(&b), vec![other[0].clone()]);
+        // Short names are as they were.
+        assert_eq!(beside(&d.join("n.md")), d.join("n.md.shoin-recover"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_dump_waits_for_another_dump_holding_the_registry() {
+        static REG: Mutex<Vec<Snapshot>> = Mutex::new(Vec::new());
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let tick = std::time::Duration::from_millis(1);
+        for writing in [true, false] {
+            let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+            let holder = std::thread::spawn(move || {
+                let _reg = REG.lock().unwrap();
+                // A safety copy writing, or the loop's tick stuck in a panic.
+                let _w = writing.then(|| Writing::start(&FLAG));
+                held.0.send(()).unwrap();
+                let _ = release.1.recv();
+            });
+            held.1.recv().unwrap();
+            // Released long after the 50 ticks anything else gets.
+            let releaser = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                release.0.send(()).unwrap();
+            });
+            let got = lock_for_dump(&REG, &FLAG, tick).is_some();
+            assert_eq!(got, writing, "waited for the other dump only");
+            releaser.join().unwrap();
+            holder.join().unwrap();
+        }
     }
 
     #[test]
