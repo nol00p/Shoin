@@ -207,6 +207,12 @@ impl Held {
                 // A quoted list item, heading, fence, rule or table row keeps
                 // its own line; only quoted text runs on into the next.
                 let prose = k == BlockKind::Paragraph && !has_cell_separator(body);
+                // Text at a shallower depth than quoted text goes on with
+                // it, and the deeper quote stays open: CommonMark's lazy
+                // continuation, `> > a` then `> b` being one paragraph.
+                if prose && self.prose && depth < self.quote {
+                    return self.clone();
+                }
                 Held { quote: depth, prose, inner }
             }
             // An unmarked line goes on with whatever it continues, a quote
@@ -971,6 +977,10 @@ mod tests {
             ("> x\\\n>\n> next\n", false),
             ("> x\\\n> > next\n", false),
             ("> x\\\nlazy\n", true),
+            ("> > x\\\n> next\n", true),
+            ("> > x\\\nnext\n", true),
+            ("> > x\\\n>\n> next\n", false),
+            ("> > x\\\n> - next\n", false),
             ("> a\nx\\\n> next\n", true),
             ("x\\\n> next\n", false),
             ("> - x\\\n> - next\n", false),
