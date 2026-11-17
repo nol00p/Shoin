@@ -229,9 +229,6 @@ fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
         out.extend(&chars[i..sp.outer.start]);
         let inner: String = chars[sp.inner.clone()].iter().collect();
         match sp.kind {
-            Inline::Bold | Inline::Italic | Inline::BoldItalic | Inline::Strikethrough | Inline::Highlight => {
-                out.push_str(&strip_in(&inner, md, in_link))
-            }
             Inline::Link => {
                 let text = strip_in(&inner, md, true);
                 match inline::destination(sp, line) {
@@ -251,6 +248,7 @@ fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
                 Some((_, label)) => out.push_str(label.trim()),
                 None => out.push_str(inner.trim()),
             },
+            k if super::holds_prose(k) => out.push_str(&strip_in(&inner, md, in_link)),
             _ => out.push_str(&inner),
         }
         i = sp.outer.end;

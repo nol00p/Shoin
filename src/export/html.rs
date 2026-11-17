@@ -619,9 +619,10 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
 ///
 /// `inline::scan` returns flat spans, so markup INSIDE a span — a link in
 /// bold, bold in a link — is reached by scanning that span's body again. Only
-/// prose bodies are: code, math, tags and an image's alt text are what they
-/// say. In a link's text a nested link is its text, since HTML forbids an
-/// anchor inside an anchor.
+/// prose bodies are (`export::holds_prose`, the list every walker shares;
+/// here each kind keeps its own arm for its tag): code, math, tags and an
+/// image's alt text are what they say. In a link's text a nested link is its
+/// text, since HTML forbids an anchor inside an anchor.
 fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: bool) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
@@ -754,12 +755,7 @@ pub(super) fn plain_text(line: &str, md: &MarkdownConfig) -> String {
         out.extend(&chars[i..sp.outer.start]);
         let inner: String = chars[sp.inner.clone()].iter().collect();
         match sp.kind {
-            Inline::Bold
-            | Inline::Italic
-            | Inline::BoldItalic
-            | Inline::Strikethrough
-            | Inline::Highlight
-            | Inline::Link => out.push_str(&plain_text(&inner, md)),
+            k if super::holds_prose(k) => out.push_str(&plain_text(&inner, md)),
             Inline::WikiLink => out.push_str(wiki_parts(&inner).2),
             // A tag reads as written, `#` and all.
             Inline::Tag => out.extend(&chars[sp.outer.clone()]),
