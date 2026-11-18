@@ -40,40 +40,55 @@ pub struct StyledSpan {
 /// It carries a POSITION, not pixels: the bytes stay in the render cache, and
 /// the painter looks them up by `line`/`index`. A frame with three big photos
 /// on it would otherwise clone three photos.
+///
+/// A box cut off by the top or bottom of the text area is recorded too, at
+/// its first VISIBLE row: `y` is that row, `skip` how many of the box's rows
+/// are above it, and `shown` how many are on screen from there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placement {
     pub x: u16,
     pub y: u16,
+    /// The whole box, in cells, cut off or not.
     pub cols: u16,
     pub rows: u16,
-    /// The rope line holding the `![[…]]`, and which row of its expansion.
+    /// Rows of the box above the screen, and rows of it on screen.
+    pub skip: u16,
+    pub shown: u16,
+    /// The rope line holding the `![[…]]`, and which row of its expansion
+    /// holds the picture (its `Row::Image`, whichever row is first on screen).
     pub line: usize,
     pub index: usize,
+    /// The picture's `image::kitty_id`, so the painter knows which pictures a
+    /// frame still shows without the cache that held them.
+    pub id: u32,
 }
 
 impl Placement {
-    /// Whether the whole box is on screen.
+    /// Whether every row of the box is on screen.
+    pub fn whole(&self) -> bool {
+        self.skip == 0 && self.shown == self.rows
+    }
+
+    /// Whether the visible part of the box is inside the terminal.
     ///
-    /// A picture that does not fit is not drawn AT ALL. Neither graphics
-    /// protocol clips: a box running off the bottom is painted over whatever
-    /// is down there, and iTerm2 scrolls the screen to make room for it, which
-    /// shifts every row above. Scrolling a picture in from the bottom edge is
-    /// exactly when that happens — so it waits until it fits.
-    ///
-    /// Running off the TOP needs no guard here: the frame only records a
-    /// placement when the picture's first row is itself on screen.
+    /// A picture cut off at the SIDE is not drawn at all, nor is one whose
+    /// rows run past the terminal's last row: neither protocol clips, and
+    /// iTerm2 scrolls the screen to make room, which shifts every row above.
+    /// The frame already cuts `shown` at the bottom of the text area, so the
+    /// second case is a guard, not the rule.
     pub fn fits_in(&self, term: (u16, u16)) -> bool {
         let (cols, rows) = term;
-        self.y + self.rows <= rows && self.x + self.cols <= cols
+        self.y + self.shown <= rows && self.x + self.cols <= cols
     }
 
     /// Whether this picture shares any cell with `r` — a spotlight box, which
-    /// was summoned to be read and therefore outranks it.
+    /// was summoned to be read and therefore outranks it. Only the rows on
+    /// screen count: a box cut off at the bottom does not reach past it.
     pub fn overlaps(&self, r: ratatui::layout::Rect) -> bool {
         self.x < r.x + r.width
             && r.x < self.x + self.cols
             && self.y < r.y + r.height
-            && r.y < self.y + self.rows
+            && r.y < self.y + self.shown
     }
 }
 
@@ -82,7 +97,7 @@ mod tests {
     use super::Placement;
 
     fn at(x: u16, y: u16, cols: u16, rows: u16) -> Placement {
-        Placement { x, y, cols, rows, line: 0, index: 0 }
+        Placement { x, y, cols, rows, skip: 0, shown: rows, line: 0, index: 0, id: 1 }
     }
 
     /// A spotlight box is summoned to be read, so a picture under it stands
@@ -98,6 +113,11 @@ mod tests {
         assert!(!pic.overlaps(Rect { x: 50, y: 5, width: 10, height: 10 }), "just to the right");
         assert!(!pic.overlaps(Rect { x: 10, y: 15, width: 40, height: 3 }), "just below");
         assert!(!pic.overlaps(Rect { x: 10, y: 0, width: 40, height: 5 }), "just above");
+
+        // Cut off after three rows: what lies below those is not its.
+        let cut = Placement { shown: 3, ..pic };
+        assert!(!cut.overlaps(Rect { x: 20, y: 8, width: 30, height: 3 }), "past its last row");
+        assert!(cut.overlaps(Rect { x: 20, y: 7, width: 30, height: 3 }));
     }
 
     #[test]
@@ -111,5 +131,18 @@ mod tests {
         // The bottom edge is the case that matters: iTerm2 SCROLLS to make
         // room, which moves every row above the picture.
         assert!(!at(0, 23, 10, 2).fits_in(term));
+    }
+
+    /// A box cut off at the top or bottom is not whole, but its visible part
+    /// fits; one cut off at the side still does not fit.
+    #[test]
+    fn a_cut_off_picture_fits_by_its_visible_rows() {
+        let term = (80, 24);
+        let top = Placement { skip: 4, shown: 6, ..at(0, 0, 60, 10) };
+        assert!(!top.whole() && top.fits_in(term));
+        let bottom = Placement { shown: 3, ..at(0, 21, 60, 10) };
+        assert!(!bottom.whole() && bottom.fits_in(term));
+        assert!(at(0, 0, 60, 10).whole());
+        assert!(!Placement { shown: 3, ..at(40, 21, 60, 10) }.fits_in(term), "cut at the side");
     }
 }

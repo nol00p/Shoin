@@ -102,6 +102,9 @@ See [Reading](reading.md#print-a-note).
 - With the kitty graphics protocol (kitty, Ghostty) only PNG pictures are
   drawn; a JPEG or GIF keeps its box and caption. The iTerm2 protocol
   (iTerm2, WezTerm, VS Code) draws all three.
+- A picture cut off by the top or bottom of the screen shows the part that is
+  on screen with the kitty protocol. With the iTerm2 protocol, its box shows
+  an outline and its caption until the whole picture is on screen again.
 - A cycle of embeds is a hard error naming the loop, and an unresolved link
   leaves a visible placeholder rather than a silent hole in your export.
 - In an export, an embedded picture becomes `![name](path)`, with the path
