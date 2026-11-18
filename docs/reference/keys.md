@@ -167,6 +167,7 @@ and the tree's rename, move and new prompts. A delete's `(y/N)` takes only
 | `Ctrl-u` | clear the line |
 | `Ctrl-w` `Alt-Backspace` | delete the last word |
 | `Ctrl-h` | backspace |
+| `Tab` `Shift-Tab` | in the `:` line, complete — see [Commands](commands.md#completing-with-tab) |
 
 Other control and Alt chords are ignored, never typed as their letter.
 

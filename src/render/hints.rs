@@ -62,6 +62,9 @@ pub fn hints(app: &App) -> Vec<Hint> {
             return list(&[("Enter", "confirm"), ("Ctrl-u", "clear"), ("Esc", "cancel")]);
         }
         Mode::Command(_) => {
+            if let Some(matches) = app.completion_hints() {
+                return matches;
+            }
             return list(&[("Enter", "run"), ("Esc", "cancel"), (":help", "every command")]);
         }
         Mode::Search { .. } => {

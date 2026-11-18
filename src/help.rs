@@ -248,6 +248,16 @@ impl Help {
     }
 }
 
+/// The words `:help` opens a category with, sorted: what Tab completes
+/// after `:help`.
+pub fn topics() -> Vec<&'static str> {
+    let mut words: Vec<&str> =
+        CATEGORIES.iter().flat_map(|(_, words, _)| words.iter().copied()).filter(|w| !w.is_empty()).collect();
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
 /// The category a word names, if it names one.
 fn category_of(word: &str) -> Option<usize> {
     let w = word.to_lowercase();
@@ -505,7 +515,7 @@ const BASICS: &str = "
 Normal :: move around and run operators. Esc always comes back here
 Insert :: type: i a I A o O to start, Esc or jk to stop
 Visual :: select: v by character, V by line, or drag with the mouse. A drag while typing selects too; an operator or Esc goes back to typing
-Command :: : then a command, Enter to run it
+Command :: : then a command, Enter to run it. Tab completes the last word: a command, a path, an option, a help topic
 
 ## First keys
 i :: start typing

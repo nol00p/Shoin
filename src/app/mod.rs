@@ -186,6 +186,8 @@ pub struct App {
 
     pub config: Config,
     pub mode: Mode,
+    /// A Tab completion cycle on the `:` line, while one is under way.
+    pub(crate) completion: Option<complete::Completion>,
 
     /// Resolved colors. Built-in default until config theming lands (step 9).
     pub theme: Theme,
@@ -884,6 +886,7 @@ mod insert;
 mod prompts;
 mod search;
 mod commands;
+mod complete;
 
 impl App {
     pub fn new(
@@ -964,6 +967,7 @@ impl App {
             disk_epoch: 0,
             config,
             mode: Mode::Normal,
+            completion: None,
             flash: startup_flash,
             quit: false,
             cursor_shape: None,
@@ -1660,7 +1664,10 @@ impl App {
             Action::NormalMode => self.leave_visual(),
             Action::Visual => self.enter_visual(Mode::Visual),
             Action::VisualLine => self.enter_visual(Mode::VisualLine),
-            Action::Command => self.mode = Mode::Command(String::new()),
+            Action::Command => {
+                self.completion = None;
+                self.mode = Mode::Command(String::new());
+            }
             Action::SearchForward => {
                 self.mode = Mode::Search { query: String::new(), reverse: false }
             }
