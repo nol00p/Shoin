@@ -1,5 +1,79 @@
 use super::*;
 
+/// Every `:` command: its name, and the other (mostly shorter) names it
+/// answers to. `run_command` reads names through this table and Tab completes
+/// the first column, so a command missing here can be neither run nor
+/// completed.
+///
+/// Vim's abbreviations are here so muscle memory lands: `:u`, `:un`, `:und`,
+/// and `:red`. Not `:r` or `:re` — `:r` is `:read` in vim, and taking it for
+/// undo here would train the wrong reflex against every other editor.
+pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
+    ("align", &[]),
+    ("bdelete", &["bd"]),
+    ("bnext", &["bn"]),
+    ("bprevious", &["bp", "bprev"]),
+    ("buffer", &["b"]),
+    ("buffers", &["ls"]),
+    ("close", &["clo"]),
+    ("diff", &["diffsplit"]),
+    ("edit", &["e"]),
+    ("embed", &[]),
+    ("export", &[]),
+    ("fixlist", &[]),
+    ("focus", &[]),
+    ("help", &["h"]),
+    ("number", &["nu"]),
+    ("only", &["on"]),
+    ("q", &[]),
+    ("qall", &["qa", "Q"]),
+    ("redo", &["red"]),
+    ("reload", &[]),
+    ("revert", &[]),
+    ("saveas", &["sav"]),
+    ("set", &[]),
+    ("split", &["sp"]),
+    ("typewriter", &["tw"]),
+    ("undo", &["u", "un", "und"]),
+    ("view", &[]),
+    ("vsplit", &["vs", "vsp"]),
+    ("wq", &["x"]),
+    ("write", &["w"]),
+    ("zen", &[]),
+];
+
+/// The commands whose argument is a path, by their name in `COMMANDS`.
+pub(crate) const PATH_COMMANDS: &[&str] = &["edit", "saveas", "wq", "write"];
+
+/// Every `:set` option: its name, and the other names it answers to.
+/// `set_option` reads keys through this table and Tab completes the first
+/// column.
+pub(crate) const OPTIONS: &[(&str, &[&str])] = &[
+    ("align", &[]),
+    ("autoreload", &[]),
+    ("autosave", &[]),
+    ("autosave_interval", &["autosave_min"]),
+    ("clipboard", &["cb"]),
+    ("code_syntax", &["syntax"]),
+    ("conceal", &[]),
+    ("embed", &[]),
+    ("focus", &[]),
+    ("hints", &[]),
+    ("line_spacing", &["spacing"]),
+    ("measure", &["width"]),
+    ("mouse", &[]),
+    ("numbers", &["number", "nu"]),
+    ("typewriter", &["tw"]),
+];
+
+/// A typed name's entry in `table`, by its name or one of its other names.
+pub(crate) fn canonical(table: &[(&'static str, &[&str])], typed: &str) -> Option<&'static str> {
+    table
+        .iter()
+        .find(|(name, other)| *name == typed || other.contains(&typed))
+        .map(|(name, _)| *name)
+}
+
 impl App {
     pub(crate) fn run_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
@@ -7,63 +81,74 @@ impl App {
             Some((n, a)) => (n, a.trim()),
             None => (cmd, ""),
         };
+        if name.is_empty() {
+            return;
+        }
+        // NOT a forced `:e`: this editor spends `:e!` on the config. A command
+        // that re-reads the file needs its own name (`:revert`) rather than a
+        // second meaning for one that is taken.
+        if name == "e!" {
+            return self.reload_config();
+        }
+        // `!` is "I know what I'm doing": past the external-modification
+        // guard for a write, past unsaved changes for a quit. Only the
+        // commands below that take it accept it.
+        let (base, bang) = match name.strip_suffix('!') {
+            Some(b) => (b, true),
+            None => (name, false),
+        };
+        let Some(command) = canonical(COMMANDS, base) else {
+            return self.notify(format!("not a command: {name}"), FlashKind::Error);
+        };
 
-        match name {
-            "w" | "write" => {
-                self.write(if arg.is_empty() { None } else { Some(arg) }, false);
-            }
-            // `!` is "I know it changed, write anyway" — the only way past the
-            // external-modification guard.
-            "w!" | "write!" => {
-                self.write(if arg.is_empty() { None } else { Some(arg) }, true);
+        match (command, bang) {
+            ("write", force) => {
+                self.write(if arg.is_empty() { None } else { Some(arg) }, force);
             }
             // `:saveas` switches the buffer to the new file; `:w <path>` only
             // writes a copy there.
-            "sav" | "saveas" | "sav!" | "saveas!" => {
+            ("saveas", force) => {
                 if arg.is_empty() {
                     self.notify("usage: :saveas <path>", FlashKind::Error);
                 } else {
-                    self.save_as(arg, name.ends_with('!'));
+                    self.save_as(arg, force);
                 }
             }
-            "q" => self.try_quit(false),
+            ("q", force) => self.try_quit(force),
             // Capital Q leaves outright — the whole session, every buffer.
             // `qa`/`qall` are vim's spelling of the same thing.
-            "Q" | "qa" | "qall" => self.quit_all(false),
-            "Q!" | "qa!" | "qall!" => self.quit_all(true),
-            "sp" | "split" => self.split_pane(false),
-            "vs" | "vsp" | "vsplit" => self.split_pane(true),
-            "close" | "clo" => {
+            ("qall", force) => self.quit_all(force),
+            ("split", false) => self.split_pane(false),
+            ("vsplit", false) => self.split_pane(true),
+            ("close", false) => {
                 if !self.close_pane() {
                     self.notify("last pane — :q to quit", FlashKind::Info);
                 }
             }
-            "only" | "on" => self.only_pane(),
-            "view" => self.set_view(!self.view),
-            "bn" | "bnext" => self.cycle_buffer(true),
-            "bp" | "bprev" | "bprevious" => self.cycle_buffer(false),
-            "b" | "buffer" => {
+            ("only", false) => self.only_pane(),
+            ("view", false) => self.set_view(!self.view),
+            ("bnext", false) => self.cycle_buffer(true),
+            ("bprevious", false) => self.cycle_buffer(false),
+            ("buffer", false) => {
                 if arg.is_empty() {
                     self.notify(self.buffer_list(), FlashKind::Info);
                 } else {
                     self.switch_by_name(arg);
                 }
             }
-            "ls" | "buffers" => self.notify(self.buffer_list(), FlashKind::Info),
-            "bd" | "bdelete" => self.close_buffer(false),
-            "bd!" | "bdelete!" => self.close_buffer(true),
-            "e" | "edit" => {
+            ("buffers", false) => self.notify(self.buffer_list(), FlashKind::Info),
+            ("bdelete", force) => self.close_buffer(force),
+            ("edit", false) => {
                 if arg.is_empty() {
                     self.notify("usage: :e <path>", FlashKind::Error);
                 } else {
                     self.open_file(self.typed_path(arg));
                 }
             }
-            "q!" => self.try_quit(true),
             // With a path, `:wq` saves the buffer AS that file and then
             // quits: a copy (what `:w <path>` writes) would leave this file's
             // edits unsaved, and `:wq!` would then throw them away.
-            "wq" | "x" => {
+            ("wq", false) => {
                 if arg.is_empty() {
                     self.write(None, false);
                 } else {
@@ -73,7 +158,7 @@ impl App {
             }
             // The `!` forces the WRITE, not the quit: a write that fails
             // still keeps the editor open, or the unsaved text would be lost.
-            "wq!" | "x!" => {
+            ("wq", true) => {
                 let written = if arg.is_empty() {
                     self.write(None, true)
                 } else {
@@ -83,21 +168,13 @@ impl App {
                     self.try_quit(true);
                 }
             }
-            // Vim's abbreviations, so muscle memory lands: `:u`, `:un`, `:und`,
-            // `:undo`, and `:red`/`:redo`. Not `:r` or `:re` — `:r` is `:read`
-            // in vim, and taking it for undo here would train the wrong reflex
-            // against every other editor.
-            "u" | "un" | "und" | "undo" => self.undo_or_warn(),
-            "red" | "redo" => self.redo_or_warn(),
-            "reload" | "e!" => self.reload_config(),
-            // NOT `:e!`, which this editor already spends on the config. A
-            // command that re-reads the file needs its own name rather than a
-            // second meaning for one that is taken.
-            "diff" | "diffsplit" => self.open_diff(),
-            "revert" => self.revert(false),
-            "revert!" => self.revert(true),
-            "help" | "h" => self.open_help(arg),
-            "focus" => {
+            ("undo", false) => self.undo_or_warn(),
+            ("redo", false) => self.redo_or_warn(),
+            ("reload", false) => self.reload_config(),
+            ("diff", false) => self.open_diff(),
+            ("revert", force) => self.revert(force),
+            ("help", false) => self.open_help(arg),
+            ("focus", false) => {
                 let mode = if arg.is_empty() {
                     Some(self.focus.next())
                 } else {
@@ -111,23 +188,22 @@ impl App {
                     ),
                 }
             }
-            "typewriter" | "tw" => {
+            ("typewriter", false) => {
                 self.config.layout.typewriter = !self.config.layout.typewriter;
                 let on = if self.config.layout.typewriter { "on" } else { "off" };
                 self.notify(format!("typewriter {on}"), FlashKind::Info);
             }
-            "number" | "nu" => self.set_numbers(arg),
-            "align" => self.set_align(arg),
-            "export" => self.open_export(arg),
+            ("number", false) => self.set_numbers(arg),
+            ("align", false) => self.set_align(arg),
+            ("export", false) => self.open_export(arg),
             // §14.3. Also re-reads every target, so it doubles as the way to
             // refresh an expansion after editing the file it came from.
-            "embed" => self.set_embed_mode(arg),
-            "set" => self.set_option(arg),
-            "zen" => self.apply_action(Action::ToggleZen),
+            ("embed", false) => self.set_embed_mode(arg),
+            ("set", false) => self.set_option(arg),
+            ("zen", false) => self.apply_action(Action::ToggleZen),
             // Through `run`, so read-only mode refuses it like any edit.
-            "fixlist" => self.run(Command::bare(Action::FixList)),
-            "" => {}
-            other => self.notify(format!("not a command: {other}"), FlashKind::Error),
+            ("fixlist", false) => self.run(Command::bare(Action::FixList)),
+            _ => self.notify(format!("not a command: {name}"), FlashKind::Error),
         }
     }
 
@@ -231,15 +307,18 @@ impl App {
             Some((k, v)) => (k.trim(), v.trim()),
             None => (arg.trim(), ""),
         };
+        let Some(option) = canonical(OPTIONS, key) else {
+            return self.notify(format!("unknown option: {key}"), FlashKind::Error);
+        };
         let resolve = |v: &str, cur: bool| match v {
             "" => !cur,
             "on" | "true" | "1" | "yes" => true,
             _ => false,
         };
-        match key {
+        match option {
             // The text measure — `layout.measure` in the config file, and the
             // one setting a writer wants to try on rather than commit to.
-            "measure" | "width" => {
+            "measure" => {
                 let cur = self.config.layout.measure;
                 if val.is_empty() {
                     return self.notify(format!("measure={cur}"), FlashKind::Info);
@@ -258,7 +337,7 @@ impl App {
             }
             // Line height on a grid that has none: blank rows after each line.
             // Numeric, so like `measure` it reports rather than toggles.
-            "line_spacing" | "spacing" => {
+            "line_spacing" => {
                 let cur = self.config.layout.line_spacing;
                 if val.is_empty() {
                     return self.notify(format!("line_spacing={cur}"), FlashKind::Info);
@@ -298,7 +377,7 @@ impl App {
                     false => self.notify("autoreload off", FlashKind::Info),
                 };
             }
-            "clipboard" | "cb" => {
+            "clipboard" => {
                 let on = resolve(val, self.config.editor.clipboard);
                 self.config.editor.clipboard = on;
                 return match on {
@@ -309,7 +388,7 @@ impl App {
             // Minutes, so it reports rather than toggles — like `measure`.
             // Setting it does NOT turn autosave on: the interval is a
             // preference, switching it on is a decision.
-            "autosave_interval" | "autosave_min" => {
+            "autosave_interval" => {
                 use crate::fs::save::AutosaveInterval;
                 let cur = self.config.editor.autosave_interval;
                 if val.is_empty() {
@@ -333,7 +412,7 @@ impl App {
                     FlashKind::Info,
                 );
             }
-            "code_syntax" | "syntax" => {
+            "code_syntax" => {
                 self.config.markdown.code_syntax = resolve(val, self.config.markdown.code_syntax);
             }
             // The hint bar. Says which way it went: turned off, the row just
@@ -344,14 +423,14 @@ impl App {
                 let msg = if on { "hints on" } else { "hints off · [hints] enabled = false keeps it off" };
                 return self.notify(msg, FlashKind::Info);
             }
-            "typewriter" | "tw" => {
+            "typewriter" => {
                 self.config.layout.typewriter = resolve(val, self.config.layout.typewriter);
             }
             "conceal" => {
                 self.config.layout.conceal = resolve(val, self.config.layout.conceal);
             }
             "embed" => return self.set_embed_mode(val),
-            "numbers" | "number" | "nu" => return self.set_numbers(val),
+            "numbers" => return self.set_numbers(val),
             "align" => return self.set_align(val),
             "mouse" => {
                 self.config.input.mouse = resolve(val, self.config.input.mouse);
@@ -372,10 +451,8 @@ impl App {
                 }
                 return;
             }
-            other => {
-                self.notify(format!("unknown option: {other}"), FlashKind::Error);
-                return;
-            }
+            // Every name in `OPTIONS` has an arm above.
+            _ => return,
         }
         self.notify(format!("set {key}"), FlashKind::Info);
     }

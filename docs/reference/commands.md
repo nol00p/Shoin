@@ -2,6 +2,10 @@
 
 Type `:` and the command, then `Enter`.
 
+`Tab` completes the word at the end of the line: a command's name, a path
+after `:e`, `:w`, `:saveas` and `:wq`, an option after `:set`, a topic after
+`:help`. See [Completing with Tab](#completing-with-tab).
+
 ## Files
 
 | Command | Does |
@@ -71,3 +75,42 @@ Type `:` and the command, then `Enter`.
 | `:e!` `:reload` | re-read the config |
 | `:help [topic]` | help, a tab per category — topics: `basics`, `navigation`, `editing`, `writing`, `view`, `files`, `config`. `Tab` and `Shift-Tab` switch tab |
 | `:help <word>` | help opened at a key, command, setting or section: `:help gb`, `:help view`, `:help measure`, `:help tree`. Inside help, `/` searches every tab and `n` `N` move between matches |
+
+## Completing with `Tab`
+
+`Tab` puts the first match in place of the word being typed. `Tab` again
+puts the next, `Shift-Tab` the one before. Past the last match the line goes
+back to what you typed, and the next `Tab` starts the list again. Any other
+key keeps the line as it is and ends the list; `Enter` runs it, `Esc`
+cancels it.
+
+While you cycle, the hint bar lists the matches, the one on the line in
+brackets.
+
+| Typed after `:` | `Tab` gives |
+|---|---|
+| `bu` | `buffer`, then `buffers` |
+| `e no` | `e notes/`, then `e notes.md` |
+| `set au` | `set autoreload`, `set autosave`, `set autosave_interval` |
+| `help ed` | `help edit`, `help editing`, `help edition` |
+
+## Details
+
+- Matches are in alphabetical order, ignoring case. Folders and files are
+  mixed, and a folder ends in `/`.
+- Command names complete to their full name: `wr` gives `write`, and
+  nothing offers `w`. The short names still run.
+- A path is relative to the folder Shoin was started in, as `:e` reads it.
+  `~/` is your home folder, and `:e ~` completes to `:e ~/`.
+- Hidden files and folders are offered only when the typed name starts with
+  `.`.
+- A path may hold spaces: everything after the command is the word, so
+  `:e my no` completes to `:e my notes.md`.
+- When there is only one match, `Tab` takes it and the list ends. On a
+  folder, the next `Tab` lists what is inside it.
+- `Shift-Tab` before any `Tab` starts at the last match.
+- `Tab` on an empty line goes through every command.
+- With no match, `Tab` does nothing and says nothing.
+- `:set` completes the option, not its value: nothing completes after
+  `:set measure=` or `:set measure `.
+- The `:` line has no cursor to move: `Tab` always completes the last word.

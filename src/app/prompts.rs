@@ -4,6 +4,17 @@ impl App {
     // ---------------------------------------------------------------- command
 
     pub(super) fn on_key_command(&mut self, key: KeyEvent, mut buf: String) {
+        // Tab and Shift-Tab complete; any other key ends the cycle and keeps
+        // the line as it stands.
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                let forward = key.code == KeyCode::Tab && !shift;
+                self.mode = Mode::Command(self.complete(buf, forward));
+                return;
+            }
+            _ => self.completion = None,
+        }
         match field_key(key, &mut buf) {
             FieldKey::Cancel => {
                 self.mode = Mode::Normal;
