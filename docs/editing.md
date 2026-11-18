@@ -88,8 +88,41 @@ and Shift-Tab brings it back out, sub-items included, the same as `>al` and
 Tab a tab on list items too. A terminal paste goes in exactly as copied: no
 auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 
+## Folding
+
+`zc` folds the list item under the cursor, with its sub-items, into its first
+line. On a heading, or in the text under one, it folds the heading's section:
+everything up to the next heading of the same or a higher level. The folded
+line ends with ` … 5 lines`, the number of lines it hides.
+
+```
+  za        fold or unfold here       zR   unfold everything
+  zc  zo    fold · unfold             zM   fold every item and section
+```
+
+`j` and `k` step over a fold as one line. A search, `G`, `gg` or `:42` that
+lands inside a fold opens it. Folds last until you quit. They are not saved
+and don't change the file or its export.
+
 ## Details
 
+- `zc` folds the innermost item or section around the cursor that is still
+  open, and moves the cursor to its first line. Pressed again, it folds the
+  next one out. A fold inside a closed fold stays closed when the outer one
+  opens. An item with no sub-items or continuation lines, or a heading with
+  nothing under it, has nothing to fold.
+- A section's fold stops before the blank lines in front of the next heading,
+  so they stay on screen between the folded sections.
+- `dd`, `yy`, `cc`, `>>` and `V` take a closed fold whole, and `3dd` counts
+  it as one line. `p` on a folded line pastes below the whole fold.
+- Typing on a folded line keeps the fold; Insert mode opens it. Lines added
+  or removed above a fold move it along. A fold whose first line stops being
+  a list item or a heading goes away; changing a heading's level changes how
+  far its section reaches.
+- Folds belong to the document, so every pane showing it shows the same
+  folds.
+- A folded line that fills the text width has its ` … N lines` cut off at
+  the edge of the page.
 - A command repeats at most 99,999 times, however many digits you type. A
   count that is a line number (`150000G`) is not limited. A counted paste
   that would put in more than 16 MB is refused with `paste: too large`.

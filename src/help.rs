@@ -552,7 +552,7 @@ cat notes.md | shoin :: piped text, in an unnamed buffer: :w name.md saves it, :
 cat notes.md | shoin -p :: print piped text
 
 ## This help
-hint bar :: the bottom row shows the keys for right now, and after <leader>, g or Ctrl-w what can follow. :set hints off hides it; [hints] enabled = false for good
+hint bar :: the bottom row shows the keys for right now, and after <leader>, g, z or Ctrl-w what can follow. :set hints off hides it; [hints] enabled = false for good
 Tab Shift-Tab :: next · previous category; 1 to 7 jump to one
 j k :: scroll; d u half a page, g G top · bottom
 / :: search every category; n N next · previous match
@@ -570,6 +570,12 @@ W B E :: the same, with words split by spaces only
 { } :: previous · next paragraph
 gg G :: first · last line; with a count, that line
 H M L :: top · middle · bottom of the screen
+
+## Folds — a list item with its sub-items, or a heading's section
+za :: fold or unfold here
+zc zo :: fold · unfold; zc again folds the next one out
+zM zR :: fold every item and section · unfold everything
+> A folded line ends with … N lines. j k step over it; a search or G that lands inside opens it. dd takes the whole fold. Folds last until you quit and never change the file.
 
 ## Along the line
 f{c} t{c} :: to the next c · to just before it
