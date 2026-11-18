@@ -2457,6 +2457,153 @@ mod tests {
         (d, app)
     }
 
+    /// A scratch vault with a 400×400 PNG header, and an app editing a note
+    /// that embeds it under `before` lines and over `after` lines.
+    fn picture_note(before: usize, after: usize, proto: crate::image::Protocol) -> (std::path::PathBuf, App) {
+        let mut png = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89,
+        ];
+        png[16..20].copy_from_slice(&400u32.to_be_bytes());
+        png[20..24].copy_from_slice(&400u32.to_be_bytes());
+        let mut body = String::new();
+        for i in 0..before {
+            body.push_str(&format!("before {i}\n"));
+        }
+        body.push_str("![[photo.png]]\n");
+        for i in 0..after {
+            body.push_str(&format!("after {i}\n"));
+        }
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let d = std::env::temp_dir().join(format!("shoin-pic-{t}-{before}-{after}"));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("photo.png"), &png).unwrap();
+        let note = d.join("note.md");
+        std::fs::write(&note, body).unwrap();
+        let mut app = App::new(Config::default(), Some(note), None).unwrap();
+        pin_theme(&mut app);
+        app.embed_mode = crate::transclude::Mode::Short;
+        app.refresh_blocks();
+        app.image_protocol = proto;
+        (d, app)
+    }
+
+    fn placed(app: &App) -> Vec<crate::render::Placement> {
+        app.images.borrow().clone()
+    }
+
+    /// A picture scrolled half off the TOP is placed at the text area's first
+    /// row, with the rows above it counted; kitty draws that part, so its
+    /// cells stay blank for it.
+    #[test]
+    fn a_picture_cut_off_at_the_top_is_placed_at_the_first_row() {
+        let (d, mut app) = picture_note(0, 10, crate::image::Protocol::Kitty);
+        app.buffer.cursor = Cursor::new(10, 0);
+        // The active set is the App's to keep; nothing is revealed here.
+        app.active = crate::render::conceal::ActiveSet::none();
+        let buf = render_to(&app, 80, 24);
+        let p = placed(&app);
+        let screen: Vec<String> = (0..24).map(|y| row_text(&buf, y)).collect();
+        assert_eq!(p.len(), 1, "{p:?}\n{}", screen.join("\n"));
+        let p = p[0];
+        assert!(p.skip > 0, "{p:?}");
+        assert_eq!(p.shown, p.rows - p.skip, "the rest of it shows");
+        assert_eq!(p.index, 0, "keyed by the picture's own row");
+        assert!(!row_text(&buf, p.y).contains('\u{2502}'), "no outline under kitty");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Off the BOTTOM: placed at its own first row, with only the rows above
+    /// the bottom of the text area shown.
+    #[test]
+    fn a_picture_cut_off_at_the_bottom_shows_the_rows_that_fit() {
+        let (d, app) = picture_note(15, 2, crate::image::Protocol::Kitty);
+        let buf = render_to(&app, 80, 24);
+        let p = placed(&app)[0];
+        assert_eq!(p.skip, 0);
+        assert!(p.shown > 0 && p.shown < p.rows, "{p:?}");
+        assert!(p.y + p.shown <= buf.area().height);
+        assert!(!p.whole());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Taller than the text area: cut at both ends at once. Built by hand,
+    /// because the caret is never inside a box, and a box cut at both ends
+    /// leaves no row of the pane for it.
+    #[test]
+    fn a_picture_taller_than_the_screen_is_cut_at_both_ends() {
+        use crate::transclude::preview::{Expansion, Picture, Row};
+        let mut rows = vec![Row::Image(Picture { cols: 30, rows: 20, payload: vec![1], id: 9 })];
+        rows.extend((1..20).map(|_| Row::Reserved));
+        rows.push(Row::Caption("tall.png \u{b7} 300\u{d7}2000".into()));
+        let exp = Expansion { rows };
+        let mut app = app_with("x\n");
+        app.image_protocol = crate::image::Protocol::Kitty;
+        // Text area rows 1..9; the box's row 5 is drawn on row 1, so five of
+        // its rows are above the area and seven below it.
+        let rect = Rect { x: 4, y: 1, width: 60, height: 1 };
+        let row = picture_row(&app, &exp, 3, 5, rect, (1, 9), 80).unwrap();
+        assert_eq!(row.first, 0);
+        let p = placed(&app);
+        assert_eq!(
+            p,
+            [crate::render::Placement { x: 4, y: 1, cols: 30, rows: 20, skip: 5, shown: 8, line: 3, index: 0, id: 9 }]
+        );
+        assert!(row.label.is_none(), "kitty draws it: no outline");
+
+        // The next row of the same box records nothing more.
+        app.images.borrow_mut().clear();
+        let _ = picture_row(&app, &exp, 3, 6, Rect { y: 2, ..rect }, (1, 9), 80);
+        assert!(placed(&app).is_empty());
+
+        // Under iTerm2 the first visible row carries the caption, mid-box.
+        app.image_protocol = crate::image::Protocol::Iterm2;
+        let row = picture_row(&app, &exp, 3, 5, rect, (1, 9), 80).unwrap();
+        assert_eq!(row.label.as_deref(), Some("tall.png \u{b7} 300\u{d7}2000"));
+        assert_eq!(
+            outline_row(30, row.edge, row.label.as_deref()),
+            format!("\u{2502} tall.png \u{b7} 300\u{d7}2000 {}\u{2502}", " ".repeat(7)),
+            "the caption, then the box's width in blanks",
+        );
+        // Cut off at the side as well: today's blank box, no caption.
+        let row = picture_row(&app, &exp, 3, 5, Rect { x: 60, ..rect }, (1, 9), 80).unwrap();
+        assert!(row.label.is_none());
+    }
+
+    /// iTerm2 cannot draw part of a picture, so a cut box shows its outline
+    /// and its caption instead of staying empty.
+    #[test]
+    fn a_cut_off_picture_shows_its_caption_under_iterm2() {
+        let (d, app) = picture_note(15, 2, crate::image::Protocol::Iterm2);
+        let buf = render_to(&app, 80, 24);
+        let p = placed(&app)[0];
+        assert!(!p.whole());
+        let first = row_text(&buf, p.y);
+        assert!(first.contains("photo.png \u{b7} 400\u{d7}400"), "{first:?}");
+        assert!(first.contains('\u{256d}'), "the box's top edge: {first:?}");
+        assert!(row_text(&buf, p.y + 1).contains('\u{2502}'), "its sides below");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A picture wholly on screen is drawn as before: blank cells under a
+    /// pixel protocol, a whole placement, no caption in the box.
+    #[test]
+    fn a_whole_picture_is_unchanged() {
+        for proto in [crate::image::Protocol::Iterm2, crate::image::Protocol::Kitty] {
+            let (d, app) = picture_note(1, 2, proto);
+            let buf = render_to(&app, 80, 40);
+            let p = placed(&app)[0];
+            assert!(p.whole(), "{p:?}");
+            for y in p.y..p.y + p.rows {
+                let row = row_text(&buf, y);
+                assert!(!row.contains('\u{2502}') && !row.contains("photo"), "{y}: {row:?}");
+            }
+            assert!(row_text(&buf, p.y + p.rows).contains("photo.png"), "caption under it");
+            std::fs::remove_dir_all(&d).ok();
+        }
+    }
+
     /// SPEC §14.3: an `![[…]]` line draws its target in place…
     #[test]
     fn an_embed_expands_where_it_sits() {

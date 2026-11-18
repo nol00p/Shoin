@@ -82,12 +82,13 @@ impl Placement {
     }
 
     /// Whether this picture shares any cell with `r` — a spotlight box, which
-    /// was summoned to be read and therefore outranks it.
+    /// was summoned to be read and therefore outranks it. Only the rows on
+    /// screen count: a box cut off at the bottom does not reach past it.
     pub fn overlaps(&self, r: ratatui::layout::Rect) -> bool {
         self.x < r.x + r.width
             && r.x < self.x + self.cols
             && self.y < r.y + r.height
-            && r.y < self.y + self.rows
+            && r.y < self.y + self.shown
     }
 }
 
@@ -112,6 +113,11 @@ mod tests {
         assert!(!pic.overlaps(Rect { x: 50, y: 5, width: 10, height: 10 }), "just to the right");
         assert!(!pic.overlaps(Rect { x: 10, y: 15, width: 40, height: 3 }), "just below");
         assert!(!pic.overlaps(Rect { x: 10, y: 0, width: 40, height: 5 }), "just above");
+
+        // Cut off after three rows: what lies below those is not its.
+        let cut = Placement { shown: 3, ..pic };
+        assert!(!cut.overlaps(Rect { x: 20, y: 8, width: 30, height: 3 }), "past its last row");
+        assert!(cut.overlaps(Rect { x: 20, y: 7, width: 30, height: 3 }));
     }
 
     #[test]
