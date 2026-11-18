@@ -71,6 +71,14 @@ pub(crate) const OPTIONS: &[(&str, &[&str])] = &[
     ("typewriter", &["tw"]),
 ];
 
+/// The window and buffer commands of `COMMANDS`. Each ends the command under
+/// way, as their keys do (`App::end_recording`), whether or not it went
+/// anywhere, so none is ever the change `.` repeats. A new command that
+/// opens, closes or switches a buffer or pane goes here too.
+pub(crate) const WINDOW_COMMANDS: &[&str] = &[
+    "q", "qall", "wq", "split", "vsplit", "close", "only", "bnext", "bprevious", "buffer", "bdelete", "edit",
+];
+
 /// A typed name's entry in `table`, by its name or one of its other names.
 pub(crate) fn canonical(table: &[(&'static str, &[&str])], typed: &str) -> Option<&'static str> {
     table
@@ -209,6 +217,9 @@ impl App {
             // Through `run`, so read-only mode refuses it like any edit.
             ("fixlist", false) => self.run(Command::bare(Action::FixList)),
             _ => self.notify(format!("not a command: {name}"), FlashKind::Error),
+        }
+        if WINDOW_COMMANDS.contains(&command) {
+            self.end_recording();
         }
     }
 

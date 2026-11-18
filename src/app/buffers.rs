@@ -30,10 +30,10 @@ impl App {
             // left, not where this pane was in the last one.
             pane.cursor = cursor;
         }
+        // However it was reached, a switch is not a change `.` repeats, and
+        // it lands in Normal mode: out of a selection, out of an insert.
+        self.end_recording();
         self.mode = Mode::Normal;
-        self.anchor = None;
-        self.visual_resumes_insert = false;
-        self.pending.reset();
         // Coming back to a document re-reads its embeds: the notes they name
         // may have been written, or created, while it was out of sight.
         self.disk_changed();

@@ -253,7 +253,7 @@ impl App {
     /// else it does nothing, and says nothing.
     pub(super) fn auto_align_table(&mut self) {
         let auto = TableAlign::parse(&self.config.editor.table_align) == Some(TableAlign::Auto);
-        if auto && self.buffer.revision != self.dot_rev {
+        if auto && self.edited_since_mark() {
             self.align_table_at_cursor();
         }
     }

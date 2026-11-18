@@ -126,8 +126,10 @@ impl App {
             | Action::Insert
             | Action::Append
             | Action::DeleteChar
-            | Action::Redo
-            | Action::Repeat => {}
+            | Action::Redo => {}
+            // `.` in Visual does nothing, as in vim, and leaves no keys in
+            // the change the selection goes on to make.
+            Action::Repeat => self.drop_command_keys(),
             _ => return false,
         }
         true

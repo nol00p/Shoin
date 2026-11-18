@@ -9,8 +9,8 @@ impl App {
     /// place of the one it was made with, and is remembered that way, so a
     /// later `.` repeats it with the new count too.
     pub(super) fn repeat_dot_with(&mut self, count: Option<usize>) {
-        // A `.` that ended up inside `dot` (in Visual) must not replay itself
-        // forever.
+        // `.` is kept out of every recording, but a `.` reached from inside a
+        // replay must still not replay itself forever.
         if self.dot.is_empty() || self.replaying {
             return;
         }
@@ -22,13 +22,116 @@ impl App {
             match input {
                 Replay::Key(key) => self.on_key(key),
                 Replay::Paste(text) => self.on_paste(text),
+                Replay::Select { lines, cols, backwards } => self.replay_select(lines, cols, backwards),
             }
         }
         self.replaying = false;
         // Reached through `run` (`3.`, `1.`, `".`, a bound key), the keys
         // that asked for the repeat are not the change to repeat next: the
-        // replayed one is. Marking the revision as seen keeps them out.
-        self.dot_rev = self.buffer.revision;
+        // replayed one is. They are dropped, and the revision marked as seen.
+        self.drop_command_keys();
+        self.mark_dot();
+    }
+
+    /// Take the keys of the command under way back out of the recording: a
+    /// `.` is never part of a change, in Normal or in Visual.
+    pub(super) fn drop_command_keys(&mut self) {
+        if !self.replaying {
+            self.recording.truncate(self.command_start);
+        }
+    }
+
+    /// The document on screen and its revision now.
+    fn dot_mark(&self) -> DotMark {
+        DotMark { doc: self.id, rev: self.buffer.revision }
+    }
+
+    /// Start counting edits from here, in the current document.
+    pub(super) fn mark_dot(&mut self) {
+        self.dot_rev = self.dot_mark();
+    }
+
+    /// Whether the command under way edited. Only an edit to the document it
+    /// began in counts: a command that ends in another one (`:bn`, `gf`)
+    /// moved, whatever that document's revision happens to be.
+    pub(super) fn edited_since_mark(&self) -> bool {
+        self.dot_rev.doc == self.id && self.dot_rev.rev != self.buffer.revision
+    }
+
+    /// A window or buffer key ends the command under way, whether or not it
+    /// moves focus: a selection ends, as in vim, and nothing recorded so far
+    /// becomes the change `.` repeats. `.` keeps the change before it, and
+    /// repeats that in whatever document is current then.
+    ///
+    /// An insert session goes on: a click into another pane while typing
+    /// is the one way here from Insert, and the session's keys are its own.
+    pub(super) fn end_recording(&mut self) {
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+            // To Normal, even out of `-- (insert) VISUAL --`: the session it
+            // came from is over too.
+            self.visual_resumes_insert = false;
+            self.leave_visual();
+        }
+        if self.mode == Mode::Insert {
+            return;
+        }
+        self.pending.reset();
+        self.drag_extent = false;
+        if !self.replaying {
+            self.recording.clear();
+            self.mark_dot();
+        }
+    }
+
+    /// A drag that starts a selection from Normal starts a command, as `v`
+    /// would.
+    pub(super) fn open_drag_recording(&mut self) {
+        if self.replaying {
+            return;
+        }
+        self.recording.clear();
+        self.mark_dot();
+        self.drag_extent = true;
+    }
+
+    /// The first key into a dragged selection writes the selection into the
+    /// recording first, as a `Replay::Select`. That is how vim repeats a
+    /// Visual operator: over as much text again, from the cursor.
+    pub(super) fn describe_drag(&mut self) {
+        if !std::mem::take(&mut self.drag_extent) {
+            return;
+        }
+        let (Some(anchor), Mode::Visual) = (self.anchor, &self.mode) else {
+            return;
+        };
+        let cur = self.buffer.cursor;
+        let backwards = (cur.line, cur.col) < (anchor.line, anchor.col);
+        let (lo, hi) = if backwards { (cur, anchor) } else { (anchor, cur) };
+        let (lines, cols) = if lo.line == hi.line {
+            (0, hi.col - lo.col)
+        } else {
+            (hi.line - lo.line, hi.col)
+        };
+        self.recording.push(Replay::Select { lines, cols, backwards });
+    }
+
+    /// `Replay::Select`: the selection again, from the cursor. Its end stops
+    /// at the end of the text; `sync_after_input` clamps it as it does a
+    /// dragged one.
+    fn replay_select(&mut self, lines: usize, cols: usize, backwards: bool) {
+        let from = self.buffer.cursor;
+        let last = self.buffer.last_line();
+        let to = if lines == 0 {
+            Cursor::new(from.line, (from.col + cols).min(self.buffer.line_len(from.line)))
+        } else {
+            let line = (from.line + lines).min(last);
+            Cursor::new(line, cols.min(self.buffer.line_len(line)))
+        };
+        self.enter_visual(Mode::Visual);
+        let (anchor, cursor) = if backwards { (to, from) } else { (from, to) };
+        self.anchor = Some(anchor);
+        self.buffer.cursor = cursor;
+        self.sync_after_input();
     }
 
     // ----------------------------------------------------------------- normal

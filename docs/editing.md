@@ -193,5 +193,13 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   operator or `Esc` hands typing back. `:set mouse off` gives selection back
   to the terminal.
 - `:u`, `:undo`, `:red` and `:redo` work as well as `u` and `Ctrl-r`.
+- `.` repeats the last change in the document you are in now, wherever it
+  was made. Keys that switch documents or panes (`:bn`, `:e`, `gf`, `<C-^>`,
+  `:bd`, the `<C-w>` keys) are never the change, even when they are refused,
+  and in Visual mode they end the selection, as in Vim. `3.` repeats the
+  change with a count of 3, and so does every `.` after it. `.` in Visual
+  mode does nothing. A change made on a dragged selection repeats over as
+  much text from the cursor: as many characters, or as many lines down to
+  the same column.
 - Every key can be remapped, including whole verbs — see
   [Configuration](configuration.md#key-bindings).

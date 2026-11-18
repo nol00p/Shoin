@@ -128,6 +128,10 @@ pub enum FlashKind {
 pub struct BufferState {
     pub buffer: Buffer,
 
+    /// Never shared with another document, and never reused, so a buffer
+    /// revision can say which document it counts (see `DotMark`).
+    id: u64,
+
     /// Per-line block classification, parallel to the buffer. Rebuilt when the
     /// buffer revision changes; `block::invalidate_from` makes that
     /// incremental. SPEC.md §5.2.
@@ -145,7 +149,10 @@ pub struct BufferState {
 
 impl BufferState {
     fn new(buffer: Buffer, math: bool, tab_width: usize) -> BufferState {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         BufferState {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
             blocks: BlockCache::build(&buffer, math, tab_width),
             buffer,
             cache: RefCell::new(RenderCache::default()),
@@ -306,8 +313,15 @@ pub struct App {
     /// selection is dealt with by `on_key` itself, after the key; only when
     /// no key is under way (a mouse click) does `sync_after_input` end it.
     in_key: bool,
-    /// Buffer revision when the in-flight command began, to tell if it edited.
-    dot_rev: u64,
+    /// The document and its revision when the in-flight command began, to
+    /// tell if it edited.
+    dot_rev: DotMark,
+    /// Where the keys of the command under way start in `recording`: a `.`
+    /// in Visual takes its own keys back out.
+    command_start: usize,
+    /// A selection the mouse made, not yet written into `recording` as the
+    /// keys that would make it again.
+    drag_extent: bool,
     /// True while replaying `dot`, so the replay is not itself recorded.
     replaying: bool,
     /// A counted `3i`/`2o`: how many copies, whether each copy is a new
@@ -435,6 +449,22 @@ struct Register {
 enum Replay {
     Key(KeyEvent),
     Paste(String),
+    /// A selection the mouse made, made again from the cursor: as many
+    /// characters on (`lines == 0`), or as many lines down to column `cols`,
+    /// with the cursor at the start when it was dragged leftwards. Written
+    /// as a selection rather than as keys, so a remapped `l` or `o` cannot
+    /// change it, and an end past the last character survives.
+    Select { lines: usize, cols: usize, backwards: bool },
+}
+
+/// Where `.` measures "did this command edit?" from: a revision of ONE
+/// document. Revisions count per document, so a revision taken in one says
+/// nothing about another, and a command that ends in a different document
+/// than it began in edited nothing there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DotMark {
+    doc: u64,
+    rev: u64,
 }
 
 /// The last executed search, for `n`/`N` repeats and match highlighting.
@@ -568,7 +598,7 @@ fn with_count(keys: &[Replay], n: usize) -> Vec<Replay> {
     };
     let end = digits_end(at);
     match keys.get(end) {
-        Some(Replay::Paste(_)) | None => return keys.to_vec(),
+        Some(Replay::Paste(_) | Replay::Select { .. }) | None => return keys.to_vec(),
         Some(k) if matches!(plain(k), Some('v' | 'V')) => return keys.to_vec(),
         _ => {}
     }
@@ -946,7 +976,7 @@ impl App {
         } else {
             ConfigWatcher::new(config_explicit).ok().flatten()
         };
-        Ok(App {
+        let mut app = App {
             active: ActiveSet {
                 start: buffer.cursor.line,
                 end: buffer.cursor.line,
@@ -993,7 +1023,9 @@ impl App {
             dot: Vec::new(),
             recording: Vec::new(),
             in_key: false,
-            dot_rev: 0,
+            dot_rev: DotMark::default(),
+            command_start: 0,
+            drag_extent: false,
             replaying: false,
             insert_repeat: None,
             replaying_insert: false,
@@ -1015,7 +1047,10 @@ impl App {
             needs_redraw: true,
             disk_check_at: Instant::now() + DISK_POLL,
             autosave_at: autosave,
-        })
+        };
+        // Edits are counted from the first document as it opened.
+        app.mark_dot();
+        Ok(app)
     }
 
     pub fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<crate::recover::Ended> {
@@ -1373,10 +1408,7 @@ impl App {
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) && away && !self.in_key {
             // A mouse click: no key will see it end, so it ends here, and
             // its keys are not a change `.` repeats.
-            self.mode = Mode::Normal;
-            self.pending.reset();
-            self.recording.clear();
-            self.dot_rev = self.buffer.revision;
+            self.end_recording();
         }
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
             // The anchor stays inside the text, as the cursor does. A drag
@@ -1392,6 +1424,7 @@ impl App {
             self.anchor = None;
             self.visual_resumes_insert = false;
             self.visual_owner = None;
+            self.drag_extent = false;
         }
         self.active = self.active_set(self.anchor);
         // The focused pane remembers where it is, so leaving and coming back
@@ -1477,6 +1510,7 @@ impl App {
             return;
         }
 
+        let window = ends_command(&cmd.action);
         match cmd.action {
             Action::Move(Motion::RepeatFind { reverse }) => {
                 if let Some((m, n)) = self.find_again(reverse, count) {
@@ -1572,6 +1606,9 @@ impl App {
                 }
             }
             action => self.apply_action(action),
+        }
+        if window {
+            self.end_recording();
         }
         self.pending_register = None;
     }
@@ -1808,7 +1845,11 @@ impl App {
         if !self.replaying {
             if self.is_clean() {
                 self.recording.clear();
-                self.dot_rev = self.buffer.revision;
+                self.mark_dot();
+            }
+            self.describe_drag();
+            if self.pending.is_clean() {
+                self.command_start = self.recording.len();
             }
             self.recording.push(Replay::Key(key));
         }
@@ -1848,14 +1889,7 @@ impl App {
         // keeps the change before it. Moving again is `Alt-j` again.
         let tree = self.tree.as_ref().is_some_and(|t| t.focused);
         if selection.is_some_and(|owner| tree || owner != (self.focus_pane, self.current())) {
-            if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-                self.mode = Mode::Normal;
-            }
-            self.pending.reset();
-            if !self.replaying {
-                self.recording.clear();
-                self.dot_rev = self.buffer.revision;
-            }
+            self.end_recording();
         }
 
         // Seal the step unless we are still inserting.
@@ -1864,11 +1898,32 @@ impl App {
         }
 
         // Command finished (back to a clean boundary): if it edited, remember it.
-        if !self.replaying && self.is_clean() && self.buffer.revision != self.dot_rev {
+        if !self.replaying && self.is_clean() && self.edited_since_mark() {
             self.dot = std::mem::take(&mut self.recording);
         }
     }
 
+}
+
+/// Window, buffer and panel actions: each ends the command under way, whether
+/// or not it went anywhere (`App::end_recording`), so none of them is ever
+/// the change `.` repeats. The one list of them, for every way an action
+/// runs: the grammar, `[keys.*]` bindings in any mode.
+fn ends_command(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Window(_)
+            | Action::ToggleSplit { .. }
+            | Action::ClosePane
+            | Action::OnlyPane
+            | Action::FollowLink
+            | Action::AlternateBuffer
+            | Action::FindBuffer
+            | Action::FindFile { .. }
+            | Action::FileTree { .. }
+            | Action::Quit { .. }
+            | Action::WriteQuit
+    )
 }
 
 /// The marker prefix the next list item should open with: the same indent, the
