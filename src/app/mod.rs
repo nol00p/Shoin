@@ -144,9 +144,9 @@ pub struct BufferState {
 }
 
 impl BufferState {
-    fn new(buffer: Buffer, math: bool) -> BufferState {
+    fn new(buffer: Buffer, math: bool, tab_width: usize) -> BufferState {
         BufferState {
-            blocks: BlockCache::build(&buffer, math),
+            blocks: BlockCache::build(&buffer, math, tab_width),
             buffer,
             cache: RefCell::new(RenderCache::default()),
         }
@@ -952,7 +952,7 @@ impl App {
                 end: buffer.cursor.line,
             },
             theme: Theme::from_config(&config.theme).unwrap_or_default(),
-            docs: vec![BufferState::new(buffer, config.markdown.math)],
+            docs: vec![BufferState::new(buffer, config.markdown.math, config.editor.tab_width)],
             alternate: None,
             layout: Node::leaf(1, 0),
             focus_pane: 1,
@@ -1093,14 +1093,17 @@ impl App {
     /// line was reported (a wholesale buffer swap, or a cache that never
     /// matched the document's length) does it fall back to a full rebuild.
     pub(crate) fn refresh_blocks(&mut self) {
-        // `[markdown] math` decides what a `$$` line opens; a cache built
-        // under the other value is wrong everywhere, not just at an edit.
-        if self.blocks.math != self.config.markdown.math {
-            let math = self.config.markdown.math;
-            let i = self.current();
-            let doc = &mut self.docs[i];
-            doc.blocks = BlockCache::build(&doc.buffer, math);
-            doc.buffer.clear_dirty();
+        // `[markdown] math` decides what a `$$` line opens and `tab_width`
+        // how deep a tabbed line is; a cache built under other values is
+        // wrong everywhere, not just at an edit. Every document, since a
+        // split pane shows another one's kinds and a config reload (`:e!`)
+        // changes the settings for them all.
+        let (math, tab_width) = (self.config.markdown.math, self.config.editor.tab_width);
+        if !self.blocks.built_for(math, tab_width) {
+            for doc in self.docs.iter_mut().filter(|d| !d.blocks.built_for(math, tab_width)) {
+                doc.blocks = BlockCache::build(&doc.buffer, math, tab_width);
+                doc.buffer.clear_dirty();
+            }
             return;
         }
         if self.blocks.revision == self.buffer.revision {
@@ -1122,7 +1125,7 @@ impl App {
             None => {
                 let i = self.current();
                 let doc = &mut self.docs[i];
-                doc.blocks = BlockCache::build(&doc.buffer, self.config.markdown.math);
+                doc.blocks = BlockCache::build(&doc.buffer, self.config.markdown.math, self.config.editor.tab_width);
             }
         }
     }
@@ -1173,7 +1176,7 @@ impl App {
                 if self.config.markdown.math != was_math {
                     let math = self.config.markdown.math;
                     for doc in &mut self.docs {
-                        doc.blocks = BlockCache::build(&doc.buffer, math);
+                        doc.blocks = BlockCache::build(&doc.buffer, math, self.config.editor.tab_width);
                     }
                 }
                 self.clipboard.set_background(self.config.editor.clipboard_background);

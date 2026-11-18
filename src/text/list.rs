@@ -13,8 +13,9 @@
 //! Lines are classified by the block cache rather than re-parsed here, which is
 //! the one place the text layer reads a render type: `BlockKind` already knows
 //! fences, headings and list markers, and a second parser would drift from it.
-//! Indents, though, are measured here, in columns with a tab counting as
-//! `tab_width` — the cache's `depth` counts a tab as one.
+//! Indents are measured in columns with a tab counting as `tab_width`
+//! (`indent_cols`), as the cache measures them: a `Lists` and the cache it
+//! reads must be built with the same `tab_width`.
 //!
 //! Every function is pure over the buffer text and the kinds, and every range
 //! is a pair of line numbers, END INCLUSIVE, like `object::paragraph_bounds`.
@@ -27,18 +28,7 @@ use ropey::Rope;
 
 use super::buffer::Buffer;
 use crate::render::markdown::block::{item_text_col, leading_ws_cols, BlockCache, BlockKind, Marker};
-
-/// Leading whitespace in columns, a tab counting as `tab_width`. Matches how
-/// the renderer lays out a tabbed list (`render::layout::content_column`).
-pub fn indent_cols(line: &str, tab_width: usize) -> usize {
-    line.chars()
-        .map_while(|c| match c {
-            ' ' => Some(1),
-            '\t' => Some(tab_width.max(1)),
-            _ => None,
-        })
-        .sum()
-}
+pub use crate::render::markdown::block::indent_cols;
 
 /// One ordinal to rewrite: the digits at `cols` (chars) on `line` become
 /// `number`. The delimiter after them is left as it is.
@@ -569,8 +559,8 @@ impl<'a> Lists<'a> {
         }
         let mut buffer = Buffer::empty();
         buffer.rope = copy;
-        let entering = BlockCache::carry_before(self.buffer, first, math);
-        let cache = BlockCache::build_from(&buffer, math, entering);
+        let entering = BlockCache::carry_before(self.buffer, first, math, self.tab_width);
+        let cache = BlockCache::build_from(&buffer, math, self.tab_width, entering);
         let after = Lists::new(&buffer, &cache.kinds, self.tab_width);
         let same = |a: Option<&BlockKind>, b: Option<&BlockKind>| match (a, b) {
             (Some(BlockKind::ListItem { marker: m, .. }), Some(BlockKind::ListItem { marker: n, .. })) => m == n,
@@ -777,8 +767,113 @@ mod tests {
     /// Runs `f` against the lists of `text` with a tab width of 4.
     fn with<T>(text: &str, f: impl FnOnce(&Lists) -> T) -> T {
         let b = buf(text);
-        let cache = BlockCache::build(&b, true);
+        let cache = BlockCache::build(&b, true, 4);
         f(&Lists::new(&b, &cache.kinds, 4))
+    }
+
+    /// The classifier and `Lists`, both at `tw`, put every non-blank line of
+    /// `text` in the same number of items: how many the classifier still
+    /// has open after it, and the item `Lists` finds it in plus that item's
+    /// ancestors.
+    fn assert_agree(text: &str, tw: usize) {
+        let b = buf(text);
+        let cache = BlockCache::build(&b, true, tw);
+        let l = Lists::new(&b, &cache.kinds, tw);
+        for line in 0..b.line_count() {
+            if l.blank(line) {
+                continue;
+            }
+            let ours = l.item_at(line).map_or(0, |i| 1 + l.ancestors(i).count());
+            let classifier = BlockCache::carry_before(&b, line + 1, true, tw).items_open();
+            assert_eq!(ours, classifier, "line {line} of {text:?} at tab_width {tw}");
+        }
+    }
+
+    fn depths(text: &str, tw: usize) -> Vec<u8> {
+        let cache = BlockCache::build(&buf(text), true, tw);
+        cache
+            .kinds
+            .iter()
+            .filter_map(|k| match k {
+                BlockKind::ListItem { depth, .. } => Some(*depth),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The backlog case (2026-11-10): a fence 2 spaces in, under a tabbed
+    /// item. The classifier counted the tab as 1 column and put the fence in
+    /// `a`; `Lists` counted 4 and did not. Now both count 4.
+    #[test]
+    fn a_fence_under_a_tabbed_item_is_where_both_say() {
+        let t = "- top\n\t- a\n  ```\n  code\n  ```\n\t- b\n";
+        let b = buf(t);
+        let cache = BlockCache::build(&b, true, 4);
+        assert_eq!(cache.kinds[2], BlockKind::FenceOpen(String::new()));
+        let l = Lists::new(&b, &cache.kinds, 4);
+        assert_eq!(l.item_bounds(1), Some((1, 1)), "the fence is not in `a`");
+        assert_eq!(l.item_bounds(2), Some((0, 5)), "it is in `top`");
+        // The task's own example, with no item above: the fence is in none.
+        with("\t- a\n  ```\n  x\n  ```\n", |l| assert_eq!(l.item_bounds(1), None));
+        // Past the tab, the fence is in `a`, measured from its text column.
+        let t = "- top\n\t- a\n      ```\n      code\n      ```\n";
+        with(t, |l| assert_eq!(l.item_bounds(1), Some((1, 4))));
+        for tw in [2, 4, 8] {
+            assert_agree("- top\n\t- a\n  ```\n  code\n  ```\n\t- b\n", tw);
+            assert_agree("\t- a\n  ```\n  x\n  ```\n", tw);
+            assert_agree("- top\n\t- a\n      ```\n      code\n      ```\n", tw);
+        }
+    }
+
+    #[test]
+    fn a_tab_then_spaces_counts_the_tab_as_tab_width() {
+        let t = "- a\n\t  - b\n    - c\n";
+        assert_eq!(depths(t, 2), [0, 4, 4]);
+        assert_eq!(depths(t, 4), [0, 6, 4]);
+        assert_eq!(depths(t, 8), [0, 10, 4]);
+        // At 4 and 8, `c` is shallower than `b`: `a`'s child, not `b`'s.
+        with(t, |l| assert_eq!(l.parent(2), Some(0)));
+        for tw in [2, 4, 8] {
+            assert_agree(t, tw);
+        }
+    }
+
+    #[test]
+    fn spaces_then_a_tab_count_the_tab_as_tab_width() {
+        let t = "- a\n  \t- b\n      - c\n        more\n";
+        assert_eq!(depths(t, 2), [0, 4, 6]);
+        assert_eq!(depths(t, 4), [0, 6, 6]);
+        assert_eq!(depths(t, 8), [0, 10, 6]);
+        with(t, |l| assert_eq!(l.parent(2), Some(0), "siblings at 4"));
+        for tw in [2, 4, 8] {
+            assert_agree(t, tw);
+        }
+    }
+
+    #[test]
+    fn tabs_mixed_in_a_list_agree_at_every_tab_width() {
+        let texts = [
+            "- a\n\tmore\n\t- b\n\t\t- c\n\t  text\n  - d\n\n\t\t# H\n- e\n",
+            "1. one\n\t```\n\tcode\n\t```\n2. two\n \t- x\n\t\t$$\n\t\tx\n\t\t$$\n",
+            "- a\n\n\t- b\n\n  \t\t- c\n\n\t paragraph\n",
+        ];
+        for t in texts {
+            for tw in [1, 2, 3, 4, 8] {
+                assert_agree(t, tw);
+            }
+        }
+    }
+
+    /// Without a tab, `tab_width` changes nothing the classifier says.
+    #[test]
+    fn space_only_lists_do_not_depend_on_tab_width() {
+        let t = "- a\n  - b\n    - c\n      ```\n      x\n      ```\n   para\n10. j\n    ```\n    y\n    ```\n";
+        let four = BlockCache::build(&buf(t), true, 4);
+        for tw in [1, 2, 8] {
+            let other = BlockCache::build(&buf(t), true, tw);
+            assert_eq!(other.kinds, four.kinds);
+            assert_eq!(other.carry, four.carry);
+        }
     }
 
     #[test]
@@ -1254,7 +1349,7 @@ mod tests {
     /// `realigned` with another tab width.
     fn realigned_tw(text: &str, line: usize, tab_width: usize) -> (String, Vec<usize>) {
         let b = buf(text);
-        let cache = BlockCache::build(&b, true);
+        let cache = BlockCache::build(&b, true, tab_width);
         let r = Lists::new(&b, &cache.kinds, tab_width).realign(line, true).expect("in a list");
         let mut rope = b.rope.clone();
         for &(l, cols) in r.lines.iter().rev() {
@@ -1373,7 +1468,7 @@ mod tests {
         for seed in 1..200 {
             let text = random_lists(seed * 7919, 40);
             let b = buf(&text);
-            let cache = BlockCache::build(&b, true);
+            let cache = BlockCache::build(&b, true, 4);
             let (fwd, rev) = (Lists::new(&b, &cache.kinds, 4), Lists::new(&b, &cache.kinds, 4));
             let n = b.last_line();
             for l in (0..=n).filter(|&l| fwd.is_item(l)) {

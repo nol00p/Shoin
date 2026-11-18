@@ -35,7 +35,7 @@ fn app_with(unit: &str, cursor_line: usize) -> App {
     let mut app = App::new(Config::default(), None, None).unwrap();
     app.buffer.insert_str(Cursor::new(0, 0), &text);
     app.buffer.cursor = Cursor::new(cursor_line, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 

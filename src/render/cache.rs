@@ -608,7 +608,7 @@ mod tests {
         let mut app = App::new(Config::default(), None, None).unwrap();
         app.buffer.insert_str(Cursor::new(0, 0), text);
         app.buffer.cursor = Cursor::new(0, 0);
-        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
         app.buffer.clear_dirty();
         app
     }
@@ -625,6 +625,28 @@ mod tests {
         (0..200)
             .map(|i| format!("line {i} with some **bold** text\n"))
             .collect()
+    }
+
+    /// A new `tab_width` (a config reload) rebuilds the block kinds: a tab's depth, and so which
+    /// item a line is in, follows the new width on the next sync.
+    #[test]
+    fn changing_tab_width_rebuilds_the_block_cache() {
+        let mut app = app_with("- a\n\t- b\n     ```\n     x\n     ```\n");
+        let bounds = |app: &App| {
+            crate::text::list::Lists::new(&app.buffer, &app.blocks.kinds, app.config.editor.tab_width).item_bounds(1)
+        };
+        sync(&mut app);
+        assert!(matches!(app.blocks.kinds[1], BlockKind::ListItem { depth: 4, .. }));
+        assert_eq!(bounds(&app), Some((1, 4)), "5 columns is past `b` at 4");
+        app.config.editor.tab_width = 8;
+        sync(&mut app);
+        assert_eq!(app.blocks.tab_width, 8);
+        assert!(matches!(app.blocks.kinds[1], BlockKind::ListItem { depth: 8, .. }));
+        assert_eq!(bounds(&app), Some((1, 1)), "and short of `b` at 8");
+        assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, true, 8).kinds);
+        app.config.editor.tab_width = 2;
+        sync(&mut app);
+        assert!(matches!(app.blocks.kinds[1], BlockKind::ListItem { depth: 2, .. }));
     }
 
     /// The cache styles and conceals emphasis in a link's text.

@@ -22,24 +22,30 @@ pub struct Guides {
 
 /// One guide per completed indent level in a list item's leading whitespace.
 ///
-/// Columns are char offsets, which equal display columns while indentation is
-/// spaces (the default with `expand_tab`). Tabs are counted toward the level
-/// threshold as `tab_width` columns; mixing tabs into leading indent shifts the
-/// guides but never panics.
+/// Levels are `tab_width` columns, counted as the classifier counts them
+/// (`block::indent_cols`: a tab is `tab_width` columns). Each mark is the
+/// CHAR offset where its level starts, and the char there may be a tab; a
+/// level that starts inside a tab gets no mark, as the tab already covers it.
 pub fn guides_for(line: &str, block: &BlockKind, tab_width: usize) -> Guides {
     let mut marks = Vec::new();
     if !matches!(block, BlockKind::ListItem { .. }) {
         return Guides { marks };
     }
     let t = tab_width.max(1);
-    let ws = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-
+    let total = crate::render::markdown::block::indent_cols(line, t);
     let mut col = 0;
-    let mut depth = 0u8;
-    while col + t <= ws {
-        marks.push((col, depth));
-        depth = depth.wrapping_add(1);
-        col += t;
+    for (i, c) in line.chars().enumerate() {
+        let w = match c {
+            ' ' => 1,
+            '\t' => t,
+            _ => break,
+        };
+        // Only a complete level gets a guide: the stray columns past the last
+        // one are left.
+        if col % t == 0 && col + t <= total {
+            marks.push((i, (col / t) as u8));
+        }
+        col += w;
     }
     Guides { marks }
 }
@@ -109,6 +115,18 @@ mod tests {
         // 3 spaces, tab_width 2 -> one complete level; the stray column is left.
         let g = guides_for("   - x", &list(3), 2);
         assert_eq!(g.marks, vec![(0, 0)]);
+    }
+
+    /// Levels are counted in columns, a tab as `tab_width`, and marked on
+    /// the char their level starts at.
+    #[test]
+    fn a_tab_is_tab_width_columns_of_levels() {
+        assert_eq!(guides_for("\t\t- x", &list(8), 4).marks, vec![(0, 0), (1, 1)]);
+        assert_eq!(guides_for("\t  - x", &list(4), 2).marks, vec![(0, 0), (1, 1)]);
+        assert_eq!(guides_for("\t  - x", &list(6), 4).marks, vec![(0, 0)]);
+        // A level that starts inside a tab has no char of its own.
+        assert_eq!(guides_for(" \t- x", &list(5), 4).marks, vec![(0, 0)]);
+        assert_eq!(guides_for("\t- x", &list(8), 8).marks, vec![(0, 0)]);
     }
 
     #[test]

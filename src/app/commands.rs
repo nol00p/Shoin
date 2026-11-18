@@ -45,6 +45,10 @@ pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
 /// The commands whose argument is a path, by their name in `COMMANDS`.
 pub(crate) const PATH_COMMANDS: &[&str] = &["edit", "saveas", "wq", "write"];
 
+/// Widest `:set tab_width` will accept. A tab wider than this is not an
+/// indent anyone writes.
+const MAX_TAB_WIDTH: usize = 16;
+
 /// Every `:set` option: its name, and the other names it answers to.
 /// `set_option` reads keys through this table and Tab completes the first
 /// column.
@@ -63,6 +67,7 @@ pub(crate) const OPTIONS: &[(&str, &[&str])] = &[
     ("measure", &["width"]),
     ("mouse", &[]),
     ("numbers", &["number", "nu"]),
+    ("tab_width", &["ts"]),
     ("typewriter", &["tw"]),
 ];
 
@@ -351,6 +356,23 @@ impl App {
                 self.config.layout.line_spacing = n.min(crate::render::layout::MAX_LINE_SPACING);
                 let set = self.config.layout.line_spacing;
                 return self.notify(format!("line_spacing={set}"), FlashKind::Info);
+            }
+            // How many columns a tab counts: the indent unit of `>`, and how
+            // deep a tab-indented list item is. `refresh_blocks` sees the
+            // block caches no longer match and reclassifies every document.
+            "tab_width" => {
+                let cur = self.config.editor.tab_width;
+                if val.is_empty() {
+                    return self.notify(format!("tab_width={cur}"), FlashKind::Info);
+                }
+                let Ok(n) = val.parse::<usize>() else {
+                    return self.notify(format!("tab_width: {val:?} is not a number"), FlashKind::Error);
+                };
+                if !(1..=MAX_TAB_WIDTH).contains(&n) {
+                    return self.notify(format!("tab_width: 1 to {MAX_TAB_WIDTH}"), FlashKind::Error);
+                }
+                self.config.editor.tab_width = n;
+                return self.notify(format!("tab_width={n}"), FlashKind::Info);
             }
             // Reports on/off rather than falling through to the generic
             // "set autosave", which for a toggle says everything except which

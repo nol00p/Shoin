@@ -17,7 +17,9 @@
 //!     rather than a second, differently-opinionated highlighter.
 
 use crate::config::schema::MarkdownConfig;
-use crate::render::markdown::block::{classify, has_cell_separator, leading_ws_cols, BlockKind, Carry, Marker, Open};
+use crate::render::markdown::block::{
+    classify, has_cell_separator, indent_cols, leading_ws_cols, BlockKind, Carry, Marker, Open, COMMONMARK_TAB,
+};
 use crate::render::markdown::code::{self, Class, Cont, Lang};
 use crate::render::markdown::inline::{self, Inline};
 use crate::render::theme::{Color, Theme};
@@ -83,7 +85,7 @@ pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
 fn first_heading(text: &str, md: &MarkdownConfig) -> Option<String> {
     let mut carry = Carry::default();
     for (i, line) in text.lines().enumerate() {
-        let (kind, next) = classify(line, &carry, i == 0, md.math);
+        let (kind, next) = classify(line, &carry, i == 0, md.math, COMMONMARK_TAB);
         let in_list = next.in_list();
         carry = next;
         // A heading inside a list item heads that item, not the page.
@@ -188,7 +190,7 @@ impl<'a> Body<'a> {
     fn run(mut self, text: &str) -> String {
         let mut carry = Carry::default();
         for (i, line) in text.lines().enumerate() {
-            let (kind, next) = classify(line, &carry, i == 0, self.md.math);
+            let (kind, next) = classify(line, &carry, i == 0, self.md.math, COMMONMARK_TAB);
             // `tables = false` turns a table back into the prose it also is,
             // as the editor does.
             let kind = match kind {
@@ -222,9 +224,8 @@ impl<'a> Body<'a> {
             BlockKind::FrontMatter => {}
 
             BlockKind::FenceOpen(info) => {
-                let indent = leading_ws_cols(line);
-                self.open_block(indent);
-                self.open_fence(info, indent);
+                self.open_block(indent_cols(line, COMMONMARK_TAB));
+                self.open_fence(info, leading_ws_cols(line));
             }
             BlockKind::FenceBody { .. } => self.fence_line(line),
             BlockKind::FenceClose => self.close_fence(),
@@ -241,7 +242,7 @@ impl<'a> Body<'a> {
             }
 
             BlockKind::Heading(level) => {
-                self.open_block(leading_ws_cols(line));
+                self.open_block(indent_cols(line, COMMONMARK_TAB));
                 let body = line.trim_start().trim_start_matches('#').trim();
                 let id = self.unique_id(slug(&plain_text(body, self.md)));
                 let n = (*level).clamp(1, 6);
@@ -253,7 +254,7 @@ impl<'a> Body<'a> {
             }
 
             BlockKind::Rule => {
-                self.open_block(leading_ws_cols(line));
+                self.open_block(indent_cols(line, COMMONMARK_TAB));
                 self.out.push_str("<hr>\n");
             }
 
@@ -329,7 +330,7 @@ impl<'a> Body<'a> {
                 }
                 // Not lazy, it stays in the items it is indented deeper than.
                 if !self.lazy && self.quote == 0 {
-                    self.close_lists_from(leading_ws_cols(line));
+                    self.close_lists_from(indent_cols(line, COMMONMARK_TAB));
                 }
                 self.para.push(ParaLine::new(line.trim_start()));
             }
@@ -345,7 +346,7 @@ impl<'a> Body<'a> {
                     // indented deeper than, and the rest close: the same call
                     // `Lists::bounds` makes in the editor.
                     if !self.lazy {
-                        self.close_lists_from(leading_ws_cols(line));
+                        self.close_lists_from(indent_cols(line, COMMONMARK_TAB));
                     }
                 }
                 self.math_block.push(line.to_string());
@@ -609,8 +610,8 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// Open a fence whose info string is `info`, indented `indent` columns
-    /// in the line or the quote it sits in.
+    /// Open a fence whose info string is `info`, indented by `indent` space
+    /// or tab chars in the line or the quote it sits in.
     fn open_fence(&mut self, info: &str, indent: usize) {
         let lang = if self.md.code_syntax { Lang::from_info(info) } else { None };
         // The `language-x` class is emitted for ANY info string, known
@@ -1150,6 +1151,22 @@ mod tests {
 
     /// A fence indented under an item stays in it, so the list carries on
     /// and keeps its numbering; its lines lose the fence's indent.
+    /// Export reads a tab as CommonMark's 4 columns: under `- top`, `\t- a`
+    /// is a child at column 4, and a fence 2 columns in is in `top`, not in
+    /// `a` (until 2026-11 a tab counted 1 here and the fence went in `a`).
+    #[test]
+    fn a_tab_in_a_list_indent_is_four_columns() {
+        let got = body("- top\n\t- a\n  ```\n  x\n  ```\n");
+        assert!(got.contains("<li>a</li>\n</ul>\n<pre><code>x\n</code></pre>\n</li>\n</ul>"), "{got}");
+        // A tab at the start of the indent exports as 4 spaces would.
+        for (tabs, spaces) in [
+            ("- a\n\t  - b\n    - c\n", "- a\n      - b\n    - c\n"),
+            ("- a\n\t- b\n\t\t- c\n  ```\n  x\n  ```\n", "- a\n    - b\n        - c\n  ```\n  x\n  ```\n"),
+        ] {
+            assert_eq!(body(tabs), body(spaces), "{tabs:?}");
+        }
+    }
+
     #[test]
     fn a_fence_in_an_item_stays_in_it() {
         let got = body("1. step\n\n   ```\n   make\n     all\n   ```\n2. next\n");

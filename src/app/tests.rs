@@ -7,7 +7,7 @@ fn app_with(text: &str) -> App {
     let mut app = App::new(Config::default(), None, None).unwrap();
     app.buffer.insert_str(Cursor::new(0, 0), text);
     app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 
@@ -755,19 +755,19 @@ fn incremental_block_refresh_matches_full_build() {
     feed(&mut app, "jjI## ");
     esc(&mut app);
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 
     // Delete the fence opener — every following line's carry shifts.
     feed(&mut app, "jjdd");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
     assert_eq!(app.blocks.revision, app.buffer.revision);
 
     // Undo puts it back; undo bypasses `touch`, so it must mark its own
     // dirty line or the cache silently keeps the post-delete carries.
     app.buffer.undo();
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 }
 
 /// An edit that keeps the line count can change lines well below the
@@ -781,15 +781,15 @@ fn a_block_swap_below_the_top_refreshes_every_line_it_moved() {
     alt(&mut app, 'j');
     assert_eq!(text(&app), "intro\n\n9. j\n10. i\n    more\n");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 
     // The same through undo and redo, which edit the rope directly.
     feed(&mut app, "u");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
     app.buffer.redo();
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 
     // And an indent of several lines, which keeps the count too. The
     // setup's own edit is forgotten first, or the rescan would start at
@@ -798,7 +798,7 @@ fn a_block_swap_below_the_top_refreshes_every_line_it_moved() {
     app.refresh_blocks();
     feed(&mut app, "3jVj>");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 }
 
 /// `--zen` and `:zen` live on `App`, so a config reload cannot forget them,
@@ -2261,6 +2261,34 @@ fn set_measure_changes_the_text_width() {
     assert_eq!(app.config.layout.measure, 88, "…and so does an absurd one");
 }
 
+/// `:set tab_width N` changes the width live, and the block kinds and the
+/// list commands follow it at once: under `\t- b`, a fence 5 columns in is
+/// in `b` at 4 and out of it at 8.
+#[test]
+fn set_tab_width_reclassifies_tabbed_lists() {
+    let mut app = app_with("- a\n\t- b\n     ```\n     x\n     ```\n");
+    let bounds = |app: &mut App| {
+        app.refresh_blocks();
+        Lists::new(&app.buffer, &app.blocks.kinds, app.config.editor.tab_width).item_bounds(1)
+    };
+    assert_eq!(bounds(&mut app), Some((1, 4)));
+    cmd(&mut app, ":set tab_width 8");
+    assert_eq!(app.config.editor.tab_width, 8);
+    assert_eq!(bounds(&mut app), Some((1, 1)));
+    cmd(&mut app, ":set ts=2");
+    assert_eq!(app.config.editor.tab_width, 2, "`ts` is an alias, space or =");
+    bounds(&mut app);
+    assert!(matches!(app.blocks.kinds[1], BlockKind::ListItem { depth: 2, .. }));
+
+    // A number, not a toggle; bad values change nothing.
+    cmd(&mut app, ":set tab_width");
+    assert_eq!(app.flash.as_ref().and_then(|f| f.text.clone()).as_deref(), Some("tab_width=2"));
+    for bad in ["nope", "0", "17"] {
+        cmd(&mut app, &format!(":set tab_width={bad}"));
+        assert_eq!(app.config.editor.tab_width, 2, "{bad}");
+    }
+}
+
 /// `:number [relative|absolute]` — an explicit mode sets it directly, and
 /// with no argument it TOGGLES, returning to whichever mode was last
 /// chosen rather than defaulting to absolute (mirrors `:embed`).
@@ -2569,7 +2597,7 @@ fn fixlist_in_insert_is_one_step_and_keeps_the_session_grouped() {
     let mut app = App::new(cfg, None, None).unwrap();
     app.buffer.insert_str(Cursor::new(0, 0), &t);
     app.buffer.cursor = Cursor::new(9, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     feed(&mut app, "Axy");
     app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
     app.sync_after_input();
@@ -3457,7 +3485,7 @@ fn g_then_insert_on_a_file_with_a_trailing_newline_edits_the_last_line() {
         std::fs::write(&path, on_disk).unwrap();
         let mut app = App::new(Config::default(), None, None).unwrap();
         app.buffer = Buffer::open(path.clone(), &[]).unwrap();
-        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
 
         feed(&mut app, "G");
         assert_eq!(app.buffer.cursor.line, 1, "{on_disk:?}: `G` is on `two`");
@@ -4342,7 +4370,7 @@ fn app_with_keys(text: &str, bindings: &[(&str, &str)]) -> App {
     let mut app = App::new(cfg, None, None).unwrap();
     app.buffer.insert_str(Cursor::new(0, 0), text);
     app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 
