@@ -52,7 +52,9 @@ impl App {
         };
         // The span the range lies in. Only one that holds ALL of it: a
         // selection running out of a span (`_a_ b`) is not about that span.
-        let Some(span) = spans.iter().find(|s| s.outer.start <= start && end <= s.outer.end) else {
+        // The innermost, the last listed (`**[_word_](u)**` styles `word`
+        // italic in the link in the bold).
+        let Some(span) = spans.iter().rfind(|s| s.outer.start <= start && end <= s.outer.end) else {
             return self.wrap_inline(marker, start, end);
         };
         let has = match span.kind {
@@ -87,10 +89,10 @@ impl App {
     /// The emphasis spans the renderer styles on the line `[start, end)` sits
     /// on, as char indexes into the rope.
     ///
-    /// The renderer styles the top-level spans of a line and, inside a link's
-    /// text, one level more (`inline::scan_styled` then `to_styled`):
+    /// The renderer styles the top-level spans of a line, a link's text, and
+    /// the links in emphasis (`inline::scan_styled` then `to_styled`):
     /// `_word_` inside `**…**` or `==…==` shows its underscores, so it is not
-    /// emphasis here either, while `[_word_](u)` is. `None` where
+    /// emphasis here either, while `[_word_](u)` and `**[_word_](u)**` are. `None` where
     /// it styles nothing (`allows_inline`, with the same `[markdown] tables`
     /// override as `render::cache::build`) or the range crosses a line.
     fn emphasis_spans(&mut self, start: usize, end: usize) -> Option<Vec<EmphasisSpan>> {

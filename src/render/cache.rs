@@ -654,6 +654,39 @@ mod tests {
         assert_eq!(entry.cmap.display_text(&entry.source), "see docs");
     }
 
+    /// A code span, an escape and a tag in a link's text are styled and
+    /// concealed as outside one, and keep the link's color and underline.
+    #[test]
+    fn code_escapes_and_tags_in_a_links_text_are_styled() {
+        let mut app = app_with("[run `make` \\* #tag](u)\n");
+        sync(&mut app);
+        let cache = app.cache.borrow();
+        let entry = cache.entry(0).unwrap();
+        let at = |col: usize| entry.styled.iter().find(|s| s.range.contains(&col)).unwrap().style;
+        // `make`, the escaped `*`, then `tag`.
+        for (col, bg) in [(6, app.theme.code_bg), (13, crate::render::theme::Color::None), (16, app.theme.tag_bg)] {
+            let st = at(col);
+            assert_eq!(st.fg, app.theme.link, "{col}: {:?}", entry.styled);
+            assert_eq!(st.attrs.underline, app.theme.link_underline, "{col}");
+            assert_eq!(st.bg, bg, "{col}");
+        }
+        assert_eq!(entry.cmap.display_text(&entry.source), "run make * tag");
+    }
+
+    /// Emphasis in a link in emphasis: the link's color, both attributes.
+    #[test]
+    fn emphasis_in_a_link_in_emphasis_is_styled() {
+        let mut app = app_with("**see [_docs_](u)**\n");
+        sync(&mut app);
+        let cache = app.cache.borrow();
+        let entry = cache.entry(0).unwrap();
+        let d = entry.styled.iter().find(|s| s.range.contains(&9)).unwrap().style;
+        assert_eq!(d.fg, app.theme.link, "{:?}", entry.styled);
+        assert_eq!(d.attrs.bold, app.theme.bold_attr);
+        assert_eq!(d.attrs.italic, app.theme.italic_attr);
+        assert_eq!(entry.cmap.display_text(&entry.source), "see docs");
+    }
+
     /// A second frame with nothing changed parses nothing.
     #[test]
     fn an_unchanged_frame_parses_nothing() {

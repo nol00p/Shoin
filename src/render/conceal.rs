@@ -1176,21 +1176,29 @@ mod tests {
         assert_eq!(shown(r"an escaped \* star"), "an escaped * star");
     }
 
-    /// Emphasis, `~~` and `==` in a link's text hide their markers too.
+    /// Emphasis, `~~`, `==`, code spans, escapes and tags in a link's text
+    /// hide their markers too.
     #[test]
     fn markers_in_a_links_text_vanish() {
         assert_eq!(shown("a [**see** ~~old~~ ==new== _x_](u) b"), "a see old new x b");
+        assert_eq!(shown(r"a [run `make` \*now\* #tag](u) b"), "a run make *now* tag b");
+        assert_eq!(shown("[$\\alpha$ ok](u)"), "α ok");
+        // A `]` in a code span or escaped does not end the text.
+        assert_eq!(shown(r"[a `]` \] b](u)"), "a ] ] b");
+        // A wiki link or address in the text is the link's text, as written.
+        assert_eq!(shown("[see [[n]] <https://x.y>](u)"), "see [[n]] <https://x.y>");
     }
 
     /// A link, address or wiki link in emphasis hides its markers as one at
-    /// the top level does; what is in its text is not read again.
+    /// the top level does, and what is in a link's text hides its own.
     #[test]
     fn markers_of_a_link_in_emphasis_vanish() {
         assert_eq!(shown("**see [docs](u)**"), "see docs");
         assert_eq!(shown("*[a](u) b [c](v)*"), "a b c");
         assert_eq!(shown("_x [a](u)_ ~~[b](v)~~ ==[c](w) y=="), "x a b c y");
         assert_eq!(shown("**see <https://x.y> [[note]]**"), "see https://x.y note");
-        assert_eq!(shown("**see [_docs_](u)**"), "see _docs_");
+        assert_eq!(shown("**see [_docs_](u)**"), "see docs");
+        assert_eq!(shown("~~old [`x` \\*](u)~~"), "old x *");
     }
 
     #[test]

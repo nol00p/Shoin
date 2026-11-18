@@ -3945,9 +3945,11 @@ fn gi_and_gb_act_on_the_span_the_renderer_styles() {
         ("gb", "[**word** x](u)\n", "[word x](u)\n"),
         ("gi", "[**word** x](u)\n", "[***word*** x](u)\n"),
         ("gi", "[***word***](u)\n", "[**word**](u)\n"),
-        // Emphasis holding the link is the span drawn; the link's own
-        // underscores show, as anything inside emphasis does.
-        ("gi", "**[_word_](u)**\n", "***[_word_](u)***\n"),
+        // Emphasis in a link in emphasis is styled too, and is the span
+        // acted on; without it, the emphasis holding the link is.
+        ("gi", "**[_word_](u)**\n", "**[word](u)**\n"),
+        ("gb", "**[_word_](u)**\n", "**[___word___](u)**\n"),
+        ("gi", "**[word](u)**\n", "***[word](u)***\n"),
     ];
     for (keys, before, after) in cases {
         assert_eq!(toggled(keys, before), after, "{keys} on {before:?}");
