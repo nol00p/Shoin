@@ -50,6 +50,30 @@
   so a tab-indented list shows as deep as it nests (#140).
 - A wrapped line of a nested list item hung short of its text when indent
   guides were drawn (#140).
+- List commands work on a list inside a blockquote (`> - a`): `>al`
+  `<al` and the other shifts, `Alt-j` / `Alt-k`, renumbering, `:fixlist`,
+  the `al` `il` `aL` `iL` objects, Tab in Insert, and Enter, which
+  continues `> - a` with `> - `. The `>` markers stay as written, and a
+  list ends where its quote does (#144).
+- `:fixlist` in Visual re-indents every list the selection touches, as
+  one undo step (#144).
+- `iL` selects the list item under the cursor through the last item at
+  its level (#144).
+
+**Folding**
+
+- `za` `zc` `zo` `zM` `zR` fold a list item with its sub-items, or a
+  heading's section, to its first line, which ends with ` … N lines`.
+  `j` and `k` step over a fold; a search or jump into one opens it; `dd`
+  takes it whole. Folds last for the session and never change the file
+  (#143).
+
+**Pictures**
+
+- A picture cut off by the top or bottom of the screen is drawn in part
+  in kitty and Ghostty, sending the file once and only the crop after.
+  In iTerm2 and WezTerm its box shows an outline and its caption until
+  it is all on screen (#142).
 
 **Files**
 
