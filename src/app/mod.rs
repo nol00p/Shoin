@@ -128,6 +128,10 @@ pub enum FlashKind {
 pub struct BufferState {
     pub buffer: Buffer,
 
+    /// Never shared with another document, and never reused, so a buffer
+    /// revision can say which document it counts (see `DotMark`).
+    id: u64,
+
     /// Per-line block classification, parallel to the buffer. Rebuilt when the
     /// buffer revision changes; `block::invalidate_from` makes that
     /// incremental. SPEC.md §5.2.
@@ -145,7 +149,10 @@ pub struct BufferState {
 
 impl BufferState {
     fn new(buffer: Buffer, math: bool) -> BufferState {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         BufferState {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
             blocks: BlockCache::build(&buffer, math),
             buffer,
             cache: RefCell::new(RenderCache::default()),
@@ -306,8 +313,15 @@ pub struct App {
     /// selection is dealt with by `on_key` itself, after the key; only when
     /// no key is under way (a mouse click) does `sync_after_input` end it.
     in_key: bool,
-    /// Buffer revision when the in-flight command began, to tell if it edited.
-    dot_rev: u64,
+    /// The document and its revision when the in-flight command began, to
+    /// tell if it edited.
+    dot_rev: DotMark,
+    /// Where the keys of the command under way start in `recording`: a `.`
+    /// in Visual takes its own keys back out.
+    command_start: usize,
+    /// A selection the mouse made, not yet written into `recording` as the
+    /// keys that would make it again.
+    drag_extent: bool,
     /// True while replaying `dot`, so the replay is not itself recorded.
     replaying: bool,
     /// A counted `3i`/`2o`: how many copies, whether each copy is a new
@@ -435,6 +449,16 @@ struct Register {
 enum Replay {
     Key(KeyEvent),
     Paste(String),
+}
+
+/// Where `.` measures "did this command edit?" from: a revision of ONE
+/// document. Revisions count per document, so a revision taken in one says
+/// nothing about another, and a command that ends in a different document
+/// than it began in edited nothing there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DotMark {
+    doc: u64,
+    rev: u64,
 }
 
 /// The last executed search, for `n`/`N` repeats and match highlighting.
@@ -993,7 +1017,9 @@ impl App {
             dot: Vec::new(),
             recording: Vec::new(),
             in_key: false,
-            dot_rev: 0,
+            dot_rev: DotMark::default(),
+            command_start: 0,
+            drag_extent: false,
             replaying: false,
             insert_repeat: None,
             replaying_insert: false,
@@ -1370,10 +1396,7 @@ impl App {
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) && away && !self.in_key {
             // A mouse click: no key will see it end, so it ends here, and
             // its keys are not a change `.` repeats.
-            self.mode = Mode::Normal;
-            self.pending.reset();
-            self.recording.clear();
-            self.dot_rev = self.buffer.revision;
+            self.end_recording();
         }
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
             // The anchor stays inside the text, as the cursor does. A drag
@@ -1389,6 +1412,7 @@ impl App {
             self.anchor = None;
             self.visual_resumes_insert = false;
             self.visual_owner = None;
+            self.drag_extent = false;
         }
         self.active = self.active_set(self.anchor);
         // The focused pane remembers where it is, so leaving and coming back
@@ -1535,6 +1559,7 @@ impl App {
                 self.window_count = count;
                 self.window_command(c);
                 self.window_count = 1;
+                self.end_recording();
             }
             // Toggle symmetry: the binding that opens a split closes it again.
             // `<C-w>v` is the unconditional form, as in vim.
@@ -1544,15 +1569,26 @@ impl App {
                 } else {
                     self.split_pane(vertical);
                 }
+                self.end_recording();
             }
             Action::ClosePane => {
                 if !self.close_pane() {
                     self.notify("last pane — :q to quit", FlashKind::Info);
                 }
+                self.end_recording();
             }
-            Action::OnlyPane => self.only_pane(),
+            Action::OnlyPane => {
+                self.only_pane();
+                self.end_recording();
+            }
             // `3.` replaces the count the change was made with (vim's rule).
             Action::Repeat => self.repeat_dot_with((count > 1).then_some(count)),
+            // Window and buffer keys: run, then end the command, whether or not
+            // they moved anywhere (`end_recording`).
+            action @ (Action::FollowLink | Action::AlternateBuffer) => {
+                self.apply_action(action);
+                self.end_recording();
+            }
             action @ (Action::Insert
             | Action::Append
             | Action::InsertLineStart
@@ -1805,7 +1841,11 @@ impl App {
         if !self.replaying {
             if self.is_clean() {
                 self.recording.clear();
-                self.dot_rev = self.buffer.revision;
+                self.mark_dot();
+            }
+            self.describe_drag();
+            if self.pending.is_clean() {
+                self.command_start = self.recording.len();
             }
             self.recording.push(Replay::Key(key));
         }
@@ -1845,14 +1885,7 @@ impl App {
         // keeps the change before it. Moving again is `Alt-j` again.
         let tree = self.tree.as_ref().is_some_and(|t| t.focused);
         if selection.is_some_and(|owner| tree || owner != (self.focus_pane, self.current())) {
-            if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-                self.mode = Mode::Normal;
-            }
-            self.pending.reset();
-            if !self.replaying {
-                self.recording.clear();
-                self.dot_rev = self.buffer.revision;
-            }
+            self.end_recording();
         }
 
         // Seal the step unless we are still inserting.
@@ -1861,7 +1894,7 @@ impl App {
         }
 
         // Command finished (back to a clean boundary): if it edited, remember it.
-        if !self.replaying && self.is_clean() && self.buffer.revision != self.dot_rev {
+        if !self.replaying && self.is_clean() && self.edited_since_mark() {
             self.dot = std::mem::take(&mut self.recording);
         }
     }

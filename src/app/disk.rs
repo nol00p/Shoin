@@ -442,11 +442,10 @@ impl App {
     /// the reader's command: move the "did this command edit" mark past it, so
     /// `.` and the table alignment on leaving Insert see only the reader's.
     pub(super) fn claim_save_revisions(&mut self) {
-        let current = self.current();
-        for (i, doc) in self.docs.iter_mut().enumerate() {
+        for doc in self.docs.iter_mut() {
             let spent = std::mem::take(&mut doc.buffer.save_revisions);
-            if i == current {
-                self.dot_rev += spent;
+            if doc.id == self.dot_rev.doc {
+                self.dot_rev.rev += spent;
             }
         }
     }

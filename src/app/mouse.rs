@@ -104,6 +104,11 @@ impl App {
                     // the typing that resumes after it undo as one step, the
                     // same shape `cw` already has.
                     let resumes_insert = self.mode == Mode::Insert;
+                    // From Normal the drag starts a command, as `v` does. Out
+                    // of an insert session it is part of that session.
+                    if !resumes_insert {
+                        self.open_drag_recording();
+                    }
                     self.enter_visual(Mode::Visual);
                     self.visual_resumes_insert = resumes_insert;
                     // Naming the mode once, on the way in. The caret carries it

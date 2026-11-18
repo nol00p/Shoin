@@ -42,6 +42,8 @@ impl App {
         // the next frame through the usual revision check.
         self.active = self.active_set(None);
         self.touch_status();
+        // However it was reached, a switch is not a change `.` repeats.
+        self.end_recording();
     }
 
     /// `:bn` / `:bp` — the buffer list is a ring.

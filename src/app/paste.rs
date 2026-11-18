@@ -73,7 +73,7 @@ impl App {
         if !self.replaying {
             if self.is_clean() {
                 self.recording.clear();
-                self.dot_rev = self.buffer.revision;
+                self.mark_dot();
             }
             self.recording.push(Replay::Paste(text.clone()));
         }
@@ -94,7 +94,7 @@ impl App {
         } else {
             self.buffer.history.end_group();
         }
-        if !self.replaying && self.is_clean() && self.buffer.revision != self.dot_rev {
+        if !self.replaying && self.is_clean() && self.edited_since_mark() {
             self.dot = std::mem::take(&mut self.recording);
         }
     }

@@ -6617,3 +6617,226 @@ fn autosave_writes_after_a_reload_of_the_created_file() {
     assert!(!app.buffer.created_reported);
     std::fs::remove_dir_all(&d).ok();
 }
+
+// --- `.` across documents and panes ---
+//
+// A window or buffer key is never "the change": `.` repeats the last real
+// edit, in whatever document is current when it is pressed.
+
+/// The keys `.` would replay, as text: `"dw"`, `"vld"`.
+fn dot_keys(app: &App) -> String {
+    app.dot
+        .iter()
+        .map(|r| match r {
+            Replay::Key(k) => match k.code {
+                KeyCode::Char(c) if k.modifiers.contains(KeyModifiers::CONTROL) => format!("<C-{c}>"),
+                KeyCode::Char(c) => c.to_string(),
+                other => format!("<{other:?}>"),
+            },
+            Replay::Paste(t) => format!("<paste {t:?}>"),
+        })
+        .collect()
+}
+
+/// `dw` in one document, `:bn` to the next, `.`: the word goes in the
+/// second document too, and nobody switches buffers again.
+#[test]
+fn dot_after_bn_repeats_the_change_in_the_other_document() {
+    let dir = two_files();
+    let mut app = app_with("scratch\n");
+    app.open_file(dir.join("one.md"));
+    app.open_file(dir.join("two.md"));
+    ex(&mut app, "b one");
+    assert_eq!(shown(&app), "one.md");
+    feed(&mut app, "dw");
+    assert_eq!(text(&app), "one\n");
+    ex(&mut app, "bn");
+    assert_eq!(shown(&app), "two.md");
+    assert_eq!(dot_keys(&app), "dw", "the switch is not the change");
+    feed(&mut app, ".");
+    assert_eq!(shown(&app), "two.md", "`.` does not switch again");
+    assert_eq!(text(&app), "two\n");
+
+    // `:bp` and `:e` the same way.
+    ex(&mut app, "bp");
+    ex(&mut app, "e two.md");
+    assert_eq!(dot_keys(&app), "dw");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `gf` into a note, then `.`: the change made before the jump.
+#[test]
+fn dot_after_gf_repeats_the_change_in_the_linked_note() {
+    let (d, mut app) = vault("word [[target]]\n", &[("target.md", "alpha beta\n")]);
+    feed(&mut app, "dw");
+    assert_eq!(text(&app), "[[target]]\n");
+    cursor_on(&mut app, 0, "target");
+    feed(&mut app, "gf");
+    assert_eq!(shown(&app), "target.md");
+    assert_eq!(dot_keys(&app), "dw");
+    feed(&mut app, ".");
+    assert_eq!(shown(&app), "target.md");
+    assert_eq!(text(&app), "beta\n");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// `<C-^>` back to the note, then `.`: the change made in the note left.
+#[test]
+fn dot_after_ctrl_caret_repeats_the_change_in_the_alternate() {
+    let (d, mut app) = vault("one [[target]]\n", &[("target.md", "alpha beta\n")]);
+    cursor_on(&mut app, 0, "target");
+    feed(&mut app, "gf");
+    assert_eq!(shown(&app), "target.md");
+    feed(&mut app, "ciwgamma");
+    esc(&mut app);
+    assert_eq!(text(&app), "gamma beta\n");
+    ctrl(&mut app, '^');
+    assert_eq!(shown(&app), "note.md");
+    feed(&mut app, "0.");
+    assert_eq!(shown(&app), "note.md", "`.` does not go back again");
+    assert_eq!(text(&app), "gamma [[target]]\n");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// `<C-w>o` inside a selection: it ends the selection, as in vim, and
+/// neither its keys nor the selection's become the change `.` repeats.
+#[test]
+fn ctrl_w_o_in_visual_stays_out_of_dot() {
+    let mut app = app_with("abcdef\n");
+    app.split_pane(true);
+    app.split_pane(true);
+    feed(&mut app, "x");
+    feed(&mut app, "vl");
+    ctrl(&mut app, 'w');
+    feed(&mut app, "o");
+    assert_eq!(app.layout.ids().len(), 1);
+    assert_eq!(app.mode, Mode::Normal, "a window key ends the selection");
+    assert!(app.recording.is_empty(), "nothing left in flight");
+    feed(&mut app, ".");
+    assert_eq!(text(&app), "bdef\n", "`.` is still the `x`");
+    assert_eq!(dot_keys(&app), "x");
+}
+
+/// A `<C-w>q` refused on the last pane does the same.
+#[test]
+fn a_refused_ctrl_w_q_in_visual_stays_out_of_dot() {
+    let mut app = app_with("abcdef\n");
+    feed(&mut app, "x");
+    feed(&mut app, "v");
+    ctrl(&mut app, 'w');
+    feed(&mut app, "q");
+    assert_eq!(flash_text(&app), "last pane — :q to quit");
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.recording.is_empty());
+    feed(&mut app, "ld");
+    // `d` waits for a motion now, it has no selection to take.
+    esc(&mut app);
+    feed(&mut app, ".");
+    assert_eq!(dot_keys(&app), "x");
+    assert_eq!(text(&app), "bdef\n");
+}
+
+/// `3.` replays the change with the new count, as vim does, and is not a
+/// recording of its own: the next `.` repeats the counted change.
+#[test]
+fn a_counted_dot_is_not_recorded() {
+    let mut app = app_with("abcdefghij\n");
+    feed(&mut app, "x3.");
+    assert_eq!(text(&app), "efghij\n");
+    assert!(app.recording.is_empty(), "the `3.` keys are not kept");
+    assert_eq!(dot_keys(&app), "3x");
+    feed(&mut app, ".");
+    assert_eq!(text(&app), "hij\n");
+}
+
+/// `.` in Visual does nothing, as in vim, and does not end up in the
+/// change the selection makes.
+#[test]
+fn a_dot_in_visual_is_not_recorded() {
+    let mut app = app_with("abcdef\n");
+    feed(&mut app, "x");
+    feed(&mut app, "vl.");
+    assert_eq!(text(&app), "bcdef\n", "`.` in Visual is refused");
+    assert_eq!(app.mode, Mode::Visual);
+    feed(&mut app, "2.d");
+    assert_eq!(text(&app), "def\n");
+    assert_eq!(dot_keys(&app), "vld");
+    feed(&mut app, ".");
+    assert_eq!(text(&app), "f\n");
+}
+
+/// A selection made with the mouse, then `d`: `.` deletes as many
+/// characters again from the cursor, as vim repeats a Visual operator.
+#[test]
+fn dot_repeats_an_operator_on_a_dragged_selection() {
+    let mut app = mouse_app();
+    feed(&mut app, "l"); // a command before the drag, which `.` must not replay
+    press(&mut app, 8, 4);
+    drag(&mut app, 12, 4);
+    release(&mut app, 12, 4);
+    feed(&mut app, "d");
+    assert_eq!(app.buffer.line_text(2), "secondgraph here");
+    assert_eq!(dot_keys(&app), "v4ld");
+    feed(&mut app, ".");
+    assert_eq!(app.buffer.line_text(2), "second here");
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+/// Dragged leftwards, the cursor ends at the start of the selection, and
+/// the repeat keeps it there for a key that moves it after the drag.
+#[test]
+fn dot_repeats_a_leftward_drag_with_its_cursor_at_the_start() {
+    let mut app = mouse_app();
+    press(&mut app, 12, 4);
+    drag(&mut app, 8, 4);
+    release(&mut app, 8, 4);
+    feed(&mut app, "hd"); // the selection grows by one on the left
+    assert_eq!(app.buffer.line_text(2), "secongraph here");
+    assert_eq!(dot_keys(&app), "v4lohd");
+    // From `g`: the repeat takes "ngraph", one to the left and four on.
+    feed(&mut app, ".");
+    assert_eq!(app.buffer.line_text(2), "seco here");
+}
+
+/// A drag over lines repeats over as many lines, ending in the same
+/// column, as vim's Visual repeat does.
+#[test]
+fn dot_repeats_a_multi_line_drag() {
+    let mut app = app_with("abcdef\nghijkl\nmnopqr\nstuvwx\n");
+    app.term_size = (60, 12);
+    press(&mut app, 4, 2);
+    drag(&mut app, 4, 3);
+    release(&mut app, 4, 3);
+    assert_eq!(app.anchor, Some(Cursor::new(0, 2)));
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, 2));
+    feed(&mut app, "d");
+    assert_eq!(text(&app), "abjkl\nmnopqr\nstuvwx\n");
+    assert_eq!(dot_keys(&app), "vj02ld");
+    feed(&mut app, "j0.");
+    assert_eq!(text(&app), "abjkl\nvwx\n");
+}
+
+/// A split, a refused `:bn` and a closed buffer are not the change either.
+#[test]
+fn splits_and_closes_are_not_the_change() {
+    let mut app = app_with("abcdef\n");
+    feed(&mut app, "x");
+    ctrl(&mut app, 'w');
+    feed(&mut app, "v");
+    ex(&mut app, "bn");
+    assert_eq!(flash_text(&app), "only one buffer");
+    feed(&mut app, ".");
+    assert_eq!(app.layout.ids().len(), 2);
+    assert_eq!(text(&app), "cdef\n");
+
+    let dir = two_files();
+    let mut app = app_with("scratch\n");
+    app.open_file(dir.join("one.md"));
+    app.open_file(dir.join("two.md"));
+    feed(&mut app, "x");
+    ex(&mut app, "bd!");
+    assert_eq!(shown(&app), "one.md");
+    feed(&mut app, ".");
+    assert_eq!(text(&app), "ile one\n");
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -9,8 +9,8 @@ impl App {
     /// place of the one it was made with, and is remembered that way, so a
     /// later `.` repeats it with the new count too.
     pub(super) fn repeat_dot_with(&mut self, count: Option<usize>) {
-        // A `.` that ended up inside `dot` (in Visual) must not replay itself
-        // forever.
+        // `.` is kept out of every recording, but a `.` reached from inside a
+        // replay must still not replay itself forever.
         if self.dot.is_empty() || self.replaying {
             return;
         }
@@ -27,8 +27,104 @@ impl App {
         self.replaying = false;
         // Reached through `run` (`3.`, `1.`, `".`, a bound key), the keys
         // that asked for the repeat are not the change to repeat next: the
-        // replayed one is. Marking the revision as seen keeps them out.
-        self.dot_rev = self.buffer.revision;
+        // replayed one is. They are dropped, and the revision marked as seen.
+        self.drop_command_keys();
+        self.mark_dot();
+    }
+
+    /// Take the keys of the command under way back out of the recording: a
+    /// `.` is never part of a change, in Normal or in Visual.
+    pub(super) fn drop_command_keys(&mut self) {
+        if !self.replaying {
+            self.recording.truncate(self.command_start);
+        }
+    }
+
+    /// The document on screen and its revision now.
+    fn dot_mark(&self) -> DotMark {
+        DotMark { doc: self.id, rev: self.buffer.revision }
+    }
+
+    /// Start counting edits from here, in the current document.
+    pub(super) fn mark_dot(&mut self) {
+        self.dot_rev = self.dot_mark();
+    }
+
+    /// Whether the command under way edited. Only an edit to the document it
+    /// began in counts: a command that ends in another one (`:bn`, `gf`)
+    /// moved, whatever that document's revision happens to be.
+    pub(super) fn edited_since_mark(&self) -> bool {
+        self.dot_rev != self.dot_mark()
+    }
+
+    /// A window or buffer key ends the command under way, whether or not it
+    /// moves focus: a selection ends, as in vim, and nothing recorded so far
+    /// becomes the change `.` repeats. `.` keeps the change before it, and
+    /// repeats that in whatever document is current then.
+    ///
+    /// An insert session goes on: a click into another pane while typing
+    /// is the one way here from Insert, and the session's keys are its own.
+    pub(super) fn end_recording(&mut self) {
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+            self.mode = Mode::Normal;
+            self.anchor = None;
+            self.visual_resumes_insert = false;
+        }
+        if self.mode == Mode::Insert {
+            return;
+        }
+        self.pending.reset();
+        self.drag_extent = false;
+        if !self.replaying {
+            self.recording.clear();
+            self.mark_dot();
+        }
+    }
+
+    /// A drag that starts a selection from Normal starts a command, as `v`
+    /// would.
+    pub(super) fn open_drag_recording(&mut self) {
+        if self.replaying {
+            return;
+        }
+        self.recording.clear();
+        self.mark_dot();
+        self.drag_extent = true;
+    }
+
+    /// The first key into a dragged selection writes the selection into the
+    /// recording first, as the keys that make it again from the cursor: `v`,
+    /// then as many characters on, or as many lines down to the same column,
+    /// then `o` if the cursor was at the start. That is how vim repeats a
+    /// Visual operator: over as much text again, from the cursor.
+    pub(super) fn describe_drag(&mut self) {
+        if !std::mem::take(&mut self.drag_extent) {
+            return;
+        }
+        let (Some(anchor), Mode::Visual) = (self.anchor, &self.mode) else {
+            return;
+        };
+        let cur = self.buffer.cursor;
+        let backwards = (cur.line, cur.col) < (anchor.line, anchor.col);
+        let (lo, hi) = if backwards { (cur, anchor) } else { (anchor, cur) };
+        let counted = |n: usize, key: char| match n {
+            0 => String::new(),
+            1 => key.to_string(),
+            n => format!("{n}{key}"),
+        };
+        let mut keys = String::from("v");
+        if lo.line == hi.line {
+            keys += &counted(hi.col - lo.col, 'l');
+        } else {
+            keys += &counted(hi.line - lo.line, 'j');
+            keys.push('0');
+            keys += &counted(hi.col, 'l');
+        }
+        if backwards {
+            keys.push('o');
+        }
+        self.recording
+            .extend(keys.chars().map(|c| Replay::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
     }
 
     // ----------------------------------------------------------------- normal
