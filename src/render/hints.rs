@@ -94,7 +94,7 @@ pub fn hints(app: &App) -> Vec<Hint> {
             hint("j k", "scroll"),
             hint("/", "search"),
             hint("i", "edit"),
-            hint(&format!("{leader} v"), "edit"),
+            hint(&format!("{leader} v"), "toggle"),
             hint("q", "quit"),
         ];
     }
@@ -163,9 +163,10 @@ fn prefix_hints(prefix: char, visual: bool) -> Vec<Hint> {
 
 /// What can follow the keys typed so far, read from a `[keys.*]` table: one
 /// hint per next key. A next key that only starts longer sequences gets one
-/// hint for the lot, `f…`, named after what they share.
+/// hint for the lot, `f…`, named after what they share. Ordered by `BY_USE`,
+/// a group by its best-ranked member.
 fn sequence_hints(table: &std::collections::HashMap<String, String>, typed: &[Key], leader: &str) -> Vec<Hint> {
-    let mut finished: Vec<(String, String)> = Vec::new();
+    let mut finished: Vec<(String, String, usize)> = Vec::new();
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     for (keys, action) in table {
         if matches!(action.as_str(), "" | "none" | "nop") {
@@ -177,7 +178,7 @@ fn sequence_hints(table: &std::collections::HashMap<String, String>, typed: &[Ke
         }
         let next = key_label(&seq[typed.len()]);
         if seq.len() == typed.len() + 1 {
-            finished.push((next, label(action)));
+            finished.push((next, label(action), rank(action)));
         } else if let Some((_, actions)) = groups.iter_mut().find(|(k, _)| *k == next) {
             actions.push(action.clone());
         } else {
@@ -186,11 +187,55 @@ fn sequence_hints(table: &std::collections::HashMap<String, String>, typed: &[Ke
     }
     // A key that both finishes a binding and starts longer ones shows once,
     // as the binding: pressing it runs that.
-    groups.retain(|(k, _)| !finished.iter().any(|(f, _)| f == k));
-    let mut out: Vec<Hint> = finished;
-    out.extend(groups.into_iter().map(|(k, actions)| (format!("{k}…"), group_label(&actions))));
-    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()).then(a.0.cmp(&b.0)));
-    out
+    groups.retain(|(k, _)| !finished.iter().any(|(f, _, _)| f == k));
+    let mut out = finished;
+    out.extend(groups.into_iter().map(|(k, actions)| {
+        let best = actions.iter().map(|a| rank(a)).min().unwrap_or(usize::MAX);
+        (format!("{k}…"), group_label(&actions), best)
+    }));
+    // Most used first, so what doesn't fit drops off the end. Ties, and the
+    // actions the ranking doesn't know, go by key.
+    out.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then(a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+            .then(a.0.cmp(&b.0))
+    });
+    out.into_iter().map(|(k, d, _)| (k, d)).collect()
+}
+
+/// The actions a prefix can lead to, most used first, by the names `label`
+/// gives them (so every spelling of an action ranks the same). The shipped
+/// `<leader>` keys are all here; anything else ranks after them.
+const BY_USE: &[&str] = &[
+    "save",
+    "find",
+    "tree",
+    "help",
+    "buffers",
+    "zen",
+    "read-only",
+    "quit",
+    "bold",
+    "italic",
+    "split beside",
+    "split below",
+    "only this pane",
+    "close pane",
+    "focus",
+    "typewriter",
+    "numbers",
+    "conceal",
+    "align",
+    "find in ~",
+    "tree in ~",
+    "find in launch folder",
+    "tree in launch folder",
+];
+
+/// Where an action sits in `BY_USE`; past the end when it isn't there.
+fn rank(action: &str) -> usize {
+    let name = label(action);
+    BY_USE.iter().position(|n| *n == name).unwrap_or(BY_USE.len())
 }
 
 /// A key the way the docs write it: `Space`, `Ctrl-w`, `Alt-j`, `Tab`.
@@ -344,7 +389,9 @@ mod tests {
         assert!(keys(&hints(&app)).contains(&"again"), "operator pending");
         app.on_key(KeyEvent::new(Ct::Esc, KeyModifiers::NONE));
         app.set_view(true);
-        assert!(keys(&hints(&app)).contains(&"Space v"));
+        let h = hints(&app);
+        assert!(h.contains(&("i".into(), "edit".into())), "{h:?}");
+        assert!(h.contains(&("Space v".into(), "toggle".into())), "one edit, not two: {h:?}");
     }
 
     /// On the start screen (no file, nothing typed) the plain hints give way
@@ -378,6 +425,91 @@ mod tests {
         app.config.hints.enabled = true;
         app.set_zen(true);
         assert!(hints(&app).is_empty());
+    }
+
+    /// The bottom row as drawn at `w` columns.
+    fn bar(app: &App, w: u16) -> String {
+        let h = 24;
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+        let buf = t.backend().buffer().clone();
+        (0..w).map(|x| buf[(x, h - 1)].symbol().to_string()).collect()
+    }
+
+    fn app_with(keys_conf: &str) -> App {
+        let cfg = crate::config::parse(keys_conf).unwrap();
+        let mut app = App::new(cfg, None, None).unwrap();
+        app.buffer.insert_str(Cursor::new(0, 0), "some text\n");
+        app.buffer.cursor = Cursor::new(0, 0);
+        app
+    }
+
+    /// After the leader the most used keys come first, so at 80 columns the
+    /// ones that drop off are the rarely used ones, not `w save` and `z zen`.
+    #[test]
+    fn leader_hints_put_the_most_used_first() {
+        let mut app = app();
+        press(&mut app, ' ');
+        let h = hints(&app);
+        assert_eq!(
+            keys(&h)[..6],
+            ["w", "f…", "h…", "z", "v", "q"],
+            "{h:?}"
+        );
+        for w in [80, 100] {
+            let row = bar(&app, w);
+            assert!(row.contains("w save"), "{w}: {row:?}");
+            assert!(row.contains("z zen"), "{w}: {row:?}");
+            assert!(row.contains("f… files"), "{w}: {row:?}");
+        }
+        press(&mut app, 'f');
+        assert_eq!(keys(&hints(&app)), ["f", "e", "b", "F", "E"], "{:?}", hints(&app));
+    }
+
+    /// The same keymap gives the same order every time, whatever order the
+    /// table hands its entries over in.
+    #[test]
+    fn the_order_is_deterministic() {
+        let first = {
+            let mut app = app();
+            press(&mut app, ' ');
+            hints(&app)
+        };
+        for _ in 0..20 {
+            let mut app = app();
+            press(&mut app, ' ');
+            assert_eq!(hints(&app), first);
+        }
+    }
+
+    /// Bindings the ranking doesn't know go after the ranked ones, by key;
+    /// a group ranks by its best member; an unbound key is gone.
+    #[test]
+    fn user_bindings_rank_after_the_known_ones() {
+        let mut app = app_with(
+            "[keys.normal]\n\"<leader>z\" = \"none\"\n\"<leader>b\" = \"undo\"\n\
+             \"<leader>A\" = \"redo\"\n\"<leader>x\" = \"save\"\n\
+             \"<leader>ka\" = \"redo\"\n\"<leader>kb\" = \"toggle_zen\"\n",
+        );
+        press(&mut app, ' ');
+        let k: Vec<String> = keys(&hints(&app)).iter().map(|s| s.to_string()).collect();
+        assert!(!k.contains(&"z".to_string()), "{k:?}");
+        assert_eq!(k[..3], ["w", "x", "f…"], "two saves, by key: {k:?}");
+        assert_eq!(k.iter().position(|s| s == "k…"), Some(4), "k… ranks as zen: {k:?}");
+        assert_eq!(k[k.len() - 2..], ["A", "b"], "unknown last, by key: {k:?}");
+    }
+
+    /// A custom leader lists the same keys in the same order.
+    #[test]
+    fn a_custom_leader_keeps_the_order() {
+        let mut app = app_with("[input]\nleader = \",\"\n");
+        press(&mut app, ',');
+        let h = hints(&app);
+        assert_eq!(keys(&h)[..3], ["w", "f…", "h…"], "{h:?}");
+        assert!(bar(&app, 80).contains("z zen"));
+        app.on_key(KeyEvent::new(Ct::Esc, KeyModifiers::NONE));
+        app.set_view(true);
+        assert!(hints(&app).contains(&(", v".into(), "toggle".into())), "{:?}", hints(&app));
     }
 
     #[test]
