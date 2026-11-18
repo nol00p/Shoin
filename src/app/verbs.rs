@@ -23,6 +23,7 @@ impl App {
                 Replay::Key(key) => self.on_key(key),
                 Replay::Paste(text) => self.on_paste(text),
                 Replay::Select { lines, cols, backwards } => self.replay_select(lines, cols, backwards),
+                Replay::Insert => self.begin_insert_session(),
             }
         }
         self.replaying = false;
@@ -63,8 +64,9 @@ impl App {
     /// becomes the change `.` repeats. `.` keeps the change before it, and
     /// repeats that in whatever document is current then.
     ///
-    /// An insert session goes on: a click into another pane while typing
-    /// is the one way here from Insert, and the session's keys are its own.
+    /// An insert session is left alone: it ends in its own document first,
+    /// sealed and filed for `.` (`end_insert_session`), where focus leaves
+    /// it.
     pub(super) fn end_recording(&mut self) {
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
             // To Normal, even out of `-- (insert) VISUAL --`: the session it

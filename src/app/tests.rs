@@ -3019,7 +3019,7 @@ fn alt_j_after_leaving_visual_moves_one_item() {
 }
 
 /// A drag can leave the anchor on the empty line past the last newline;
-/// it is kept inside the text, and a move takes the real last line.
+/// it is kept on the last character, and a move takes the real last line.
 #[test]
 fn an_anchor_past_the_last_line_is_kept_inside_the_text() {
     let mut app = app_with("a\nbbb\nccc\n");
@@ -3028,14 +3028,13 @@ fn an_anchor_past_the_last_line_is_kept_inside_the_text() {
     feed(&mut app, "jv");
     app.anchor = Some(Cursor::new(app.buffer.last_line() + 1, 0));
     app.sync_after_input();
-    assert_eq!(app.anchor, Some(Cursor::new(2, 3)), "the last line's newline");
+    assert_eq!(app.anchor, Some(Cursor::new(2, 2)), "the last character");
     feed(&mut app, "K");
     assert_eq!(text(&app), "bbb\nccc\na\n");
-    assert_eq!(app.anchor, Some(Cursor::new(1, 3)));
+    assert_eq!(app.anchor, Some(Cursor::new(1, 2)));
     feed(&mut app, "d");
-    // Both moved lines were still selected, with the newline the drag
-    // went across.
-    assert_eq!(text(&app), "a\n");
+    // Both moved lines were still selected, up to the last character.
+    assert_eq!(text(&app), "\na\n");
 }
 
 /// A Visual session that a pane key ends is not a change `.` repeats:
@@ -6703,6 +6702,7 @@ fn dot_keys(app: &App) -> String {
             Replay::Select { lines, cols, backwards } => {
                 format!("<select {lines} {cols}{}>", if *backwards { " back" } else { "" })
             }
+            Replay::Insert => "<insert>".to_string(),
         })
         .collect()
 }
@@ -6971,3 +6971,245 @@ fn window_commands_are_commands() {
         assert!(super::commands::canonical(super::commands::COMMANDS, name) == Some(*name), "{name}");
     }
 }
+
+// ------------------------------------------- the final newline is never selected
+
+/// A drag that ends on the empty line past the last newline stops at the
+/// last character: `gb` wraps the text, not the newline after it.
+#[test]
+fn a_drag_onto_the_empty_last_line_stops_at_the_last_character() {
+    let mut app = mouse_app();
+    press(&mut app, 8, 4);
+    drag(&mut app, 0, 5);
+    release(&mut app, 0, 5);
+    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.buffer.cursor, Cursor::new(2, 20), "the last character");
+    feed(&mut app, "gb");
+    assert_eq!(text(&app), "# One\n\nsecond** paragraph here**\n");
+
+    // The same drag, then `y` and `d`.
+    let mut app = mouse_app();
+    press(&mut app, 8, 4);
+    drag(&mut app, 0, 5);
+    feed(&mut app, "y");
+    let yanked = app.registers.get(&'"').expect("the unnamed register").text.clone();
+    assert_eq!(yanked, " paragraph here");
+    let mut app = mouse_app();
+    press(&mut app, 8, 4);
+    drag(&mut app, 0, 5);
+    feed(&mut app, "d");
+    assert_eq!(text(&app), "# One\n\nsecond\n");
+}
+
+/// A drag that starts there is anchored on the last character too.
+#[test]
+fn a_drag_from_the_empty_last_line_starts_at_the_last_character() {
+    let mut app = mouse_app();
+    press(&mut app, 0, 5);
+    drag(&mut app, 8, 4);
+    release(&mut app, 8, 4);
+    assert_eq!(app.mode, Mode::Visual);
+    assert_eq!(app.anchor, Some(Cursor::new(2, 20)));
+    feed(&mut app, "gl");
+    assert_eq!(text(&app), "# One\n\nsecond[ paragraph here]()\n");
+}
+
+/// Keys reach the same end: `vG$` stops on the last character, and on a
+/// file whose last line is empty, that line's newline (the file's last) is
+/// left out of what the selection covers.
+#[test]
+fn a_keyboard_selection_never_covers_the_final_newline() {
+    let mut app = app_with("aa\nbb\n");
+    feed(&mut app, "vG$gb");
+    assert_eq!(text(&app), "**aa\nbb**\n");
+
+    let mut app = app_with("aa\n\n");
+    feed(&mut app, "vG$gb");
+    assert_eq!(text(&app), "**aa\n**\n");
+    let mut app = app_with("aa\n\n");
+    feed(&mut app, "vjd");
+    assert_eq!(text(&app), "\n");
+    let mut app = app_with("aa\n\n");
+    feed(&mut app, "vjy");
+    assert_eq!(app.registers.get(&'"').unwrap().text, "aa\n");
+    // Only the final newline selected: nothing to act on.
+    let mut app = app_with("aa\n\n");
+    feed(&mut app, "Gvgb");
+    assert_eq!(text(&app), "aa\n\n");
+    assert_eq!(app.mode, Mode::Normal);
+    let mut app = app_with("aa\n\n");
+    feed(&mut app, "Gvd");
+    assert_eq!(text(&app), "aa\n\n");
+}
+
+/// A file with no trailing newline: the selection runs to its last
+/// character, by keys or by a drag past the end.
+#[test]
+fn a_selection_in_a_file_without_a_trailing_newline() {
+    let mut app = app_with("aa\nbb");
+    feed(&mut app, "vG$gb");
+    assert_eq!(text(&app), "**aa\nbb**");
+
+    // Past the end of the last line; below it, a drag keeps the column
+    // it is level with, as in vim.
+    let mut app = app_with("# One\n\nsecond paragraph here");
+    app.term_size = (60, 12);
+    press(&mut app, 8, 4);
+    drag(&mut app, 50, 4);
+    feed(&mut app, "gb");
+    assert_eq!(text(&app), "# One\n\nsecond** paragraph here**");
+}
+
+/// An empty file, or one that is a single newline, has nothing to select:
+/// the writer verbs and operators leave it as it is.
+#[test]
+fn a_selection_in_an_empty_file_changes_nothing() {
+    for start in ["", "\n"] {
+        for keys in ["vgb", "vgl", "vd", "vgi", "v~"] {
+            let mut app = app_with(start);
+            feed(&mut app, keys);
+            esc(&mut app);
+            assert_eq!(text(&app), start, "{keys} on {start:?}");
+        }
+    }
+}
+
+// ------------------------------------- an insert session stays in its pane
+
+/// Press the left button on the first line of pane `id`, at its tenth cell.
+fn click_pane(app: &mut App, id: crate::render::pane::PaneId) {
+    let area = Rect { x: 0, y: 0, width: app.term_size.0, height: app.term_size.1 };
+    let col = (0..app.term_size.0)
+        .find(|&c| frame::pane_at(app, area, c, 2) == Some(id))
+        .expect("the pane is on screen");
+    press(app, col + 10, 2);
+    release(app, col + 10, 2);
+    assert_eq!(app.focus_pane, id, "the click focused the pane");
+}
+
+/// one.md in the left pane, two.md in the right, focus on the right.
+fn two_panes() -> (App, PathBuf, crate::render::pane::PaneId, crate::render::pane::PaneId) {
+    let dir = two_files();
+    let mut app = app_with("scratch\n");
+    app.term_size = (100, 20);
+    app.open_file(dir.join("one.md"));
+    app.split_pane(true);
+    app.open_file(dir.join("two.md"));
+    let ids = app.layout.ids();
+    let right = app.focus_pane;
+    let left = *ids.iter().find(|&&id| id != right).unwrap();
+    (app, dir, left, right)
+}
+
+fn doc_text(app: &App, name: &str) -> String {
+    let d = app
+        .docs
+        .iter()
+        .find(|d| d.buffer.path.as_ref().is_some_and(|p| p.ends_with(name)))
+        .expect("the document is open");
+    d.buffer.rope.to_string()
+}
+
+/// A click into another pane mid-insert ends the session there, as Esc
+/// would, and starts a new one where it landed: each pane's `u` takes back
+/// its own typing and nothing else.
+#[test]
+fn a_click_into_another_pane_mid_insert_starts_a_new_session() {
+    let (mut app, dir, left, right) = two_panes();
+    feed(&mut app, "iAB");
+    click_pane(&mut app, left);
+    assert_eq!(app.mode, Mode::Insert, "still inserting, in the pane clicked into");
+    assert_eq!(shown(&app), "one.md");
+    feed(&mut app, "XY");
+    esc(&mut app);
+    assert_eq!(doc_text(&app, "two.md"), "ABfile two\n");
+    let one = doc_text(&app, "one.md");
+    assert!(one.contains("XY"), "{one:?}");
+
+    feed(&mut app, "u");
+    assert_eq!(doc_text(&app, "one.md"), "file one\n", "the left pane's typing only");
+    assert_eq!(doc_text(&app, "two.md"), "ABfile two\n");
+    feed(&mut app, "u");
+    assert_eq!(doc_text(&app, "one.md"), "file one\n", "nothing more to undo here");
+
+    click_pane(&mut app, right);
+    assert_eq!(app.mode, Mode::Normal);
+    // The session there was not left open: Esc never moved its cursor
+    // back, and `u` takes back its typing as one step.
+    feed(&mut app, "u");
+    assert_eq!(doc_text(&app, "two.md"), "file two\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The session the click ended is the change `.` repeats, complete; the
+/// typing in the pane clicked into is a session of its own.
+#[test]
+fn dot_after_a_click_mid_insert_repeats_the_right_session() {
+    // Nothing typed after the click: `.` is the first session.
+    let (mut app, dir, left, _) = two_panes();
+    feed(&mut app, "iAB");
+    click_pane(&mut app, left);
+    esc(&mut app);
+    assert_eq!(dot_keys(&app), "iAB<Esc>");
+    feed(&mut app, "0.");
+    assert_eq!(doc_text(&app, "one.md"), "ABfile one\n");
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Typed after the click: `.` is that typing, nothing of the first.
+    let (mut app, dir, left, _) = two_panes();
+    feed(&mut app, "iAB");
+    click_pane(&mut app, left);
+    feed(&mut app, "XY");
+    esc(&mut app);
+    assert_eq!(dot_keys(&app), "<insert>XY<Esc>");
+    feed(&mut app, "0.");
+    assert!(doc_text(&app, "one.md").starts_with("XY"), "{:?}", doc_text(&app, "one.md"));
+    assert_eq!(doc_text(&app, "two.md"), "ABfile two\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Two panes on one document: the click still splits the typing into two
+/// sessions, two undo steps.
+#[test]
+fn a_click_into_another_pane_on_the_same_document_splits_the_undo() {
+    let mut app = app_with("one\n");
+    app.term_size = (100, 20);
+    app.split_pane(true);
+    let right = app.focus_pane;
+    let left = *app.layout.ids().iter().find(|&&id| id != right).unwrap();
+    feed(&mut app, "iAB");
+    click_pane(&mut app, left);
+    feed(&mut app, "XY");
+    esc(&mut app);
+    assert!(text(&app).contains("AB") && text(&app).contains("XY"), "{:?}", text(&app));
+    feed(&mut app, "u");
+    assert_eq!(text(&app), "ABone\n");
+    feed(&mut app, "u");
+    assert_eq!(text(&app), "one\n");
+}
+
+/// A key bound in `[keys.insert]` that switches documents in the pane ends
+/// the session the same way: sealed, and the change `.` repeats.
+#[test]
+fn a_document_switch_mid_insert_seals_the_session() {
+    let dir = two_files();
+    let mut cfg = Config::default();
+    cfg.keys.insert.insert("<C-g>".to_string(), "alternate_buffer".to_string());
+    let mut app = App::new(cfg, None, None).unwrap();
+    app.open_file(dir.join("one.md"));
+    app.open_file(dir.join("two.md"));
+    feed(&mut app, "iAB");
+    ctrl(&mut app, 'g');
+    assert_eq!(shown(&app), "one.md");
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(dot_keys(&app), "iAB<Esc>");
+    feed(&mut app, "x");
+    ctrl(&mut app, '^');
+    assert_eq!(shown(&app), "two.md");
+    // The typing is one step, and the `x` in one.md is not in it.
+    feed(&mut app, "u");
+    assert_eq!(doc_text(&app, "two.md"), "file two\n");
+    assert_eq!(doc_text(&app, "one.md"), "ile one\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+

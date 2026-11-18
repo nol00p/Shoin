@@ -13,16 +13,8 @@ impl App {
     /// word under the cursor, or the selection in Visual mode.
     pub(super) fn writer_toggle(&mut self, marker: &str) {
         let (start, end) = if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-            let anchor = self.anchor.unwrap_or(self.buffer.cursor);
-            let cur = self.buffer.cursor;
-            let (lo, hi) = if (anchor.line, anchor.col) <= (cur.line, cur.col) {
-                (anchor, cur)
-            } else {
-                (cur, anchor)
-            };
+            let (_, s, e) = self.charwise_selection();
             self.end_visual();
-            let s = self.buffer.char_index(lo);
-            let e = (self.buffer.char_index(hi) + 1).min(self.buffer.rope.len_chars());
             (s, e)
         } else {
             let cur = self.buffer.cursor;
@@ -34,6 +26,10 @@ impl App {
                 None => return,
             }
         };
+        // A selection of the final newline alone has no text to wrap.
+        if start >= end {
+            return;
+        }
         // The bold and italic toggles act on what the RENDERER styles, read
         // with its own scanner, and nothing else. That makes `_x_` and `__x__`
         // emphasis like the star forms, and `snake_case` or `a_b_c` plain text.
@@ -439,16 +435,8 @@ impl App {
     /// into the empty URL slot in Insert mode.
     pub(super) fn wrap_link(&mut self) {
         let (start, end) = if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-            let anchor = self.anchor.unwrap_or(self.buffer.cursor);
-            let cur = self.buffer.cursor;
-            let (lo, hi) = if (anchor.line, anchor.col) <= (cur.line, cur.col) {
-                (anchor, cur)
-            } else {
-                (cur, anchor)
-            };
+            let (_, s, e) = self.charwise_selection();
             self.end_visual();
-            let s = self.buffer.char_index(lo);
-            let e = (self.buffer.char_index(hi) + 1).min(self.buffer.rope.len_chars());
             (s, e)
         } else {
             let cur = self.buffer.cursor;

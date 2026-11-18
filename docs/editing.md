@@ -200,6 +200,15 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   Dragging while in Insert mode gives Vim's `-- (insert) VISUAL --`: an
   operator or `Esc` hands typing back. `:set mouse off` gives selection back
   to the terminal.
+- A selection never covers the file's final newline. A drag that starts or
+  ends on the empty line after it stops at the last character, so `gb`,
+  `d` or `y` act on the text only.
+- A click into another pane while in Insert mode ends the insert there, as
+  `Esc` would, but leaves the cursor where it is. Typing goes on in the pane
+  clicked into as a new insert: `u` in each pane takes back that pane's
+  typing only, and `.` repeats the last of the two. A key that switches
+  documents in Insert mode (one bound in `[keys.insert]`) ends the insert
+  the same way, in Normal mode.
 - `:u`, `:undo`, `:red` and `:redo` work as well as `u` and `Ctrl-r`.
 - `.` repeats the last change in the document you are in now, wherever it
   was made. Keys that switch documents or panes (`:bn`, `:e`, `gf`, `<C-^>`,
