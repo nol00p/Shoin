@@ -2261,6 +2261,34 @@ fn set_measure_changes_the_text_width() {
     assert_eq!(app.config.layout.measure, 88, "…and so does an absurd one");
 }
 
+/// `:set tab_width N` changes the width live, and the block kinds and the
+/// list commands follow it at once: under `\t- b`, a fence 5 columns in is
+/// in `b` at 4 and out of it at 8.
+#[test]
+fn set_tab_width_reclassifies_tabbed_lists() {
+    let mut app = app_with("- a\n\t- b\n     ```\n     x\n     ```\n");
+    let bounds = |app: &mut App| {
+        app.refresh_blocks();
+        Lists::new(&app.buffer, &app.blocks.kinds, app.config.editor.tab_width).item_bounds(1)
+    };
+    assert_eq!(bounds(&mut app), Some((1, 4)));
+    cmd(&mut app, ":set tab_width 8");
+    assert_eq!(app.config.editor.tab_width, 8);
+    assert_eq!(bounds(&mut app), Some((1, 1)));
+    cmd(&mut app, ":set ts=2");
+    assert_eq!(app.config.editor.tab_width, 2, "`ts` is an alias, space or =");
+    bounds(&mut app);
+    assert!(matches!(app.blocks.kinds[1], BlockKind::ListItem { depth: 2, .. }));
+
+    // A number, not a toggle; bad values change nothing.
+    cmd(&mut app, ":set tab_width");
+    assert_eq!(app.flash.as_ref().and_then(|f| f.text.clone()).as_deref(), Some("tab_width=2"));
+    for bad in ["nope", "0", "17"] {
+        cmd(&mut app, &format!(":set tab_width={bad}"));
+        assert_eq!(app.config.editor.tab_width, 2, "{bad}");
+    }
+}
+
 /// `:number [relative|absolute]` — an explicit mode sets it directly, and
 /// with no argument it TOGGLES, returning to whichever mode was last
 /// chosen rather than defaulting to absolute (mirrors `:embed`).

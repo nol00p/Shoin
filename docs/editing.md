@@ -174,7 +174,8 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 - A tab in an indent counts as `tab_width` columns wherever it sits, so
   `\t  - b` is 6 columns in at the default 4. The list commands, the
   bullets, the indent guides and which item a line or code block belongs
-  to all count it the same way, and change together when `tab_width` does.
+  to all count it the same way, and change together when `tab_width` does
+  (`:set tab_width=N`, 1 to 16, or `:set ts=N`).
   HTML and PDF export, like GitHub, always count a tab as 4 columns: with
   another `tab_width`, a tab-indented list can nest differently there, and
   `:fixlist` rewrites such tabs as spaces. At 4 they agree, except where
