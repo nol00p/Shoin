@@ -54,6 +54,12 @@ pub struct Buffer {
     /// program), and the save is refused without `!`. vim's W13.
     pub was_missing: bool,
 
+    /// Autosave has named this buffer's "created after you opened it"
+    /// refusal and stays quiet about it from then on. Cleared by autosave
+    /// once the file is gone again or `was_missing` is (`:w!`, a reload),
+    /// so a new occurrence is reported. `:w` reports it every time.
+    pub created_reported: bool,
+
     /// Unsaved changes present. Derived from `saved_revision`, never set
     /// directly, so undoing back to the last saved state clears it.
     pub modified: bool,
@@ -152,7 +158,15 @@ impl Buffer {
             read_only: false,
             words: std::cell::RefCell::new(None),
             was_missing: false,
+            created_reported: false,
         }
+    }
+
+    /// Opened on a missing file, not saved or reloaded since, and something
+    /// is at the path now: what a save refuses as created after opening it.
+    /// `exists` follows links, as the save does.
+    pub fn created_since_open(&self) -> bool {
+        self.was_missing && self.path.as_deref().is_some_and(Path::exists)
     }
 
     /// UTF-8 only. Invalid bytes are refused rather than lossily converted —
@@ -191,6 +205,7 @@ impl Buffer {
             read_only: false,
             words: std::cell::RefCell::new(None),
             was_missing: false,
+            created_reported: false,
         })
     }
 
