@@ -28,6 +28,7 @@ use crate::app::{App, BufferState};
 use crate::config::schema::{GlyphConfig, MarkdownConfig};
 use crate::render::conceal::{ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
+use crate::render::hidden::{self, Hidden};
 use crate::render::layout::{content_column, no_wrap, wrap_hanging, RowSource, VisualRow};
 use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
@@ -170,6 +171,9 @@ pub struct RenderCache {
     /// First visual row of each line, plus a final total-rows sentinel. Always
     /// `entries.len() + 1` long after a sync.
     row_starts: Vec<usize>,
+    /// The lines that take no rows in the current row index
+    /// (`render::hidden`): closed folds today.
+    hidden: Hidden,
     /// The buffer revision at which every entry was last verified against its
     /// line. `None` means the entries and the document may have diverged, which
     /// is the only state that has to pay for the verification walk.
@@ -344,16 +348,35 @@ impl RenderCache {
         self.row_starts.clear();
         self.row_starts.reserve(n + 1);
 
+        self.hidden = hidden::of(&doc.folds);
+        let ranges = self.hidden.ranges();
+        // The next run of hidden lines at or below `line`, walked alongside
+        // rather than searched per line.
+        let mut next = 0usize;
         let mut rows = 0usize;
         for line in 0..n {
             let concealed = conceal_on && !(current && app.active.contains(line));
             self.concealed.push(concealed);
             self.row_starts.push(rows);
+            while next < ranges.len() && ranges[next].end <= line {
+                next += 1;
+            }
+            let run = ranges.get(next);
+            if run.is_some_and(|r| r.start <= line) {
+                // Zero rows: the lines a closed fold stands for.
+                continue;
+            }
             // An embed expands only when it is NOT the active line — SPEC §2's
             // rule, applied to embeds exactly as it applies to `**bold**`.
             // That is also what keeps the cursor from ever being inside one.
             rows += content_rows(self.entries[line].as_deref(), concealed);
-            rows += spacer_rows(spacing, doc, line, n);
+            // Spacing goes between a line and the next one SHOWN, so before
+            // a hidden run it is the spacing the run's last line would take.
+            let last = match run {
+                Some(r) if r.start == line + 1 => r.end - 1,
+                _ => line,
+            };
+            rows += spacer_rows(spacing, doc, last, n);
         }
         self.row_starts.push(rows);
     }
@@ -430,6 +453,12 @@ impl RenderCache {
     /// it. Columns index the DISPLAY text, which for the cursor's own line —
     /// always in the active set — equals the source.
     pub fn locate(&self, line: usize, col: usize) -> (usize, usize) {
+        // A hidden line has no row: it is where the line shown for it is.
+        // Only another pane's cursor can be on one.
+        let (line, col) = match self.hidden.shown(line) {
+            l if l != line => (l, 0),
+            _ => (line, col),
+        };
         let Some(entry) = self.entry(line) else {
             return (0, 0);
         };

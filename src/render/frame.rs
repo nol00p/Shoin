@@ -322,6 +322,8 @@ fn render_pane(
     // Its chars are collected once too: each row is a window into them, and a
     // long line wraps to many rows.
     let mut current: Option<(usize, DisplayLine, Vec<char>)> = None;
+    // The lines closed folds hide, to say how many after each fold's line.
+    let folded = crate::render::hidden::of(&doc.folds);
     // The cursor line's chars, kept when the loop moves past it, for placing
     // the caret below without collecting the line a second time.
     let mut cursor_chars: Option<Vec<char>> = None;
@@ -408,6 +410,13 @@ fn render_pane(
                 }
             }
         }
+        // A closed fold's line ends by saying what it stands for. Past a row
+        // that fills the measure it is clipped, like any overflow.
+        if is_last_row {
+            if let Some(run) = folded.run(row.line() + 1) {
+                spans.push(Span::styled(fold_label(run.len()), Style::default().fg(app.theme.text_dim.to_ratatui())));
+            }
+        }
         // Last, after the stretch, which counts one char per char.
         let mut line = Line::from(tabs_as_spaces(spans, cfg.editor.tab_width));
         if let Some(a) = alignment {
@@ -431,7 +440,7 @@ fn render_pane(
                 width: lay.number_gutter - 1,
                 height: 1,
             };
-            render_line_number(frame, app, gutter, numbers, row.line(), cursor.line);
+            render_line_number(frame, app, gutter, numbers, row.line(), cursor.line, &folded);
         }
     }
 
@@ -784,9 +793,19 @@ fn number_gutter_width(mode: NumberMode, line_count: usize, margin_left: u16) ->
 /// blank column of air before it. Only the row that STARTS a buffer line
 /// gets one — a wrapped continuation carries no number, the way a reader
 /// wrapping their eyes down a paragraph in Vim finds it blank too.
-fn render_line_number(frame: &mut Frame, app: &App, gutter: Rect, mode: NumberMode, line: usize, cursor_line: usize) {
+fn render_line_number(
+    frame: &mut Frame,
+    app: &App,
+    gutter: Rect,
+    mode: NumberMode,
+    line: usize,
+    cursor_line: usize,
+    folded: &crate::render::hidden::Hidden,
+) {
+    // Relative numbers count what `j` and `k` count: a closed fold is one line.
     let n = if mode == NumberMode::Relative {
-        line.abs_diff(cursor_line)
+        let (a, b) = (line.min(cursor_line), line.max(cursor_line));
+        b - a - folded.count_in(a..b)
     } else {
         line + 1
     };
@@ -2048,6 +2067,14 @@ fn stretch_spans(spans: Vec<Span<'static>>, gaps: &[(usize, u16)]) -> Vec<Span<'
 /// stand-in, dimmed, so the reader sees something is there without taking it
 /// for text. It stays one char for one, so the cells still line up with the
 /// columns the caret, a click and `stretch_spans` count.
+/// What a closed fold's line ends with: how many lines it hides.
+pub fn fold_label(hidden: usize) -> String {
+    match hidden {
+        1 => " … 1 line".to_string(),
+        n => format!(" … {n} lines"),
+    }
+}
+
 fn window_spans(chars: &[char], styled: &[StyledSpan], start: usize, end: usize) -> Vec<Span<'static>> {
     let end = end.min(chars.len());
     let first = styled.partition_point(|sp| sp.range.end <= start);
