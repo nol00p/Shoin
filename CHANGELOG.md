@@ -49,6 +49,21 @@
   a fence the quote leaves open included; a tab after `>` counts as the
   marker's space, as in CommonMark (#125).
 
+**Command line**
+
+- `Tab` and `Shift-Tab` on the `:` line complete a command's name, a path
+  after `:e` `:w` `:saveas` `:wq`, an option after `:set` and a topic
+  after `:help`, cycling through the matches as vim does; the hint bar
+  lists them (#133).
+
+**Help**
+
+- The hint bar after `<leader>` lists the most used keys first, so at
+  80–100 columns it keeps `w save` and `z zen` and drops the rarely used
+  toggles instead (#132).
+- In read-only view the hint bar reads `i edit` and `<leader> v toggle`,
+  not `edit` twice (#132).
+
 ## 0.2.4
 
 **Math**
