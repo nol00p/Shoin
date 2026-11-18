@@ -99,6 +99,7 @@ brackets.
 | `set autosave=` | `set autosave=off`, `set autosave=on` |
 | `align ` | `align left`, `align center`, `align right`, `align justified` |
 | `export ` | `export md`, `export txt`, `export html`, `export pdf` |
+| `export html ` | `export html justify` |
 | `b no` | each open buffer whose name holds `no` |
 
 ## Details
@@ -129,5 +130,6 @@ brackets.
   buffer first, so `:b a.md` opens `a.md` even when `data.md` was opened
   before it. Two buffers with the same name are offered once and `:b` goes
   to the first; reach the other by its number from `:ls`, as in `:b 3`.
-- `:export` completes the format, not `justify`.
+- `:export` offers `justify` after `txt` or `html`, the formats it applies
+  to. Typed first, `justify` is followed by those two formats only.
 - The `:` line has no cursor to move: `Tab` always completes the last word.

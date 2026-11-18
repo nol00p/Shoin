@@ -10,7 +10,10 @@
 //! `:number` and `:export`. Each list is the one the command itself reads
 //! (`commands.rs`), so the two cannot drift apart.
 
-use super::commands::{canonical, command_values, option_values, COMMANDS, OPTIONS, PATH_COMMANDS};
+use super::commands::{
+    canonical, command_values, export_justifies, option_values, COMMANDS, EXPORT_VALUES, JUSTIFY_WORDS, OPTIONS,
+    PATH_COMMANDS,
+};
 use super::*;
 
 /// A completion cycle under way on the `:` line.
@@ -80,6 +83,9 @@ pub(crate) fn candidates(line: &str, base: &Path, buffers: &[String]) -> (usize,
     if command == "set" {
         return set_candidates(arg, start);
     }
+    if command == "export" {
+        return export_candidates(arg, start);
+    }
     // One word.
     if arg.contains(char::is_whitespace) {
         return (start, Vec::new(), false);
@@ -112,6 +118,41 @@ fn set_candidates(arg: &str, start: usize) -> (usize, Vec<String>, bool) {
     // In the order the command lists them, not sorted: off before on, and
     // a ladder (none · short · rec · full) reads in its own order.
     (value_start, starting_with(option_values(option), value), false)
+}
+
+/// After `:export`, which starts at `start`: the word being typed is a
+/// format or `justify`, each once. `justify` is offered after a format that
+/// takes it; typed first, only those formats follow.
+fn export_candidates(arg: &str, start: usize) -> (usize, Vec<String>, bool) {
+    use crate::export::Format;
+    let at = arg.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let (done, typed) = arg.split_at(at);
+    let none = (start + at, Vec::new(), false);
+    let mut format = None;
+    let mut justify = false;
+    // Read the words before as `open_export` reads them.
+    for tok in done.split_whitespace() {
+        if JUSTIFY_WORDS.contains(&tok.to_ascii_lowercase().as_str()) {
+            justify = true;
+        } else if format.is_none() {
+            match Format::parse(tok) {
+                Some(f) => format = Some(f),
+                None => return none,
+            }
+        } else {
+            return none;
+        }
+    }
+    let mut offer: Vec<&str> = Vec::new();
+    if format.is_none() {
+        let fits = |v: &str| !justify || Format::parse(v).is_some_and(export_justifies);
+        offer.extend(EXPORT_VALUES.iter().copied().filter(|v| fits(v)));
+    }
+    // Not on its own: `:export justify` exports Markdown, which refuses it.
+    if !justify && format.is_some_and(export_justifies) {
+        offer.push(JUSTIFY_WORDS[0]);
+    }
+    (start + at, starting_with(&offer, typed), false)
 }
 
 /// The values in `values` that start with `typed`, case aside, in the
@@ -331,7 +372,42 @@ mod tests {
         assert_eq!(words("embed "), ["none", "short", "rec", "full"]);
         assert_eq!(words("export "), ["md", "txt", "html", "pdf"]);
         assert_eq!(words("export H"), ["html"]);
-        assert!(words("export html j").is_empty(), "one word");
+    }
+
+    #[test]
+    fn export_completes_a_format_and_justify_in_either_order() {
+        assert!(words("export j").is_empty(), "alone it would export Markdown, which refuses it");
+        assert_eq!(words("export html "), ["justify"]);
+        assert_eq!(words("export TXT J"), ["justify"], "case aside");
+        assert_eq!(candidates("export html j", Path::new("/"), &[]).0, 12, "the last word is the word");
+        assert!(words("export pdf ").is_empty(), "pdf is not justified");
+        assert!(words("export md j").is_empty());
+        assert_eq!(words("export justify "), ["txt", "html"], "only what justifies");
+        assert_eq!(words("export justified h"), ["html"]);
+        assert!(words("export html justify ").is_empty(), "both given");
+        assert!(words("export nosuch ").is_empty());
+    }
+
+    /// What `:export` completes, it runs: the export prompt opens, no error.
+    #[test]
+    fn every_export_completion_is_accepted() {
+        let d = folder("export");
+        let file = d.join("note.md");
+        std::fs::write(&file, "text\n").unwrap();
+        let mut lines = vec!["export".to_string()];
+        let mut checked = 0;
+        while let Some(line) = lines.pop() {
+            for w in words(&format!("{line} ")) {
+                let next = format!("{line} {w}");
+                let mut app = App::new(Config::default(), Some(file.clone()), None).unwrap();
+                app.run_command(&next);
+                assert!(matches!(app.mode, Mode::Prompt(_)), ":{next} says {:?}", app.flash.and_then(|f| f.text));
+                checked += 1;
+                lines.push(next);
+            }
+        }
+        assert_eq!(checked, 4 + 2, "every format, and justify after txt and html");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -380,12 +456,6 @@ mod tests {
         for (name, _) in COMMANDS {
             for v in command_values(name) {
                 offered += 1;
-                // `:export` needs a saved file before it reads the format;
-                // its parser is what the command reads it with.
-                if *name == "export" {
-                    assert!(crate::export::Format::parse(v).is_some(), ":export {v}");
-                    continue;
-                }
                 assert_eq!(refused(&format!("{name} {v}")), None, ":{name} {v}");
             }
         }

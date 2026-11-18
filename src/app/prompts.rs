@@ -174,7 +174,7 @@ impl App {
         let mut justify = false;
         for tok in arg.split_whitespace() {
             match tok.to_ascii_lowercase().as_str() {
-                "justify" | "justified" => justify = true,
+                t if super::commands::JUSTIFY_WORDS.contains(&t) => justify = true,
                 _ if format_tok.is_none() => format_tok = Some(tok),
                 _ => return self.notify(format!("export: unexpected {tok:?}"), FlashKind::Error),
             }
@@ -189,7 +189,7 @@ impl App {
                 }
             },
         };
-        if justify && !matches!(format, Format::Html | Format::Text) {
+        if justify && !super::commands::export_justifies(format) {
             return self.notify("export: justify only applies to html or txt", FlashKind::Error);
         }
         let Some(src) = self.buffer.path.clone() else {

@@ -93,6 +93,16 @@ pub(crate) const NUMBER_VALUES: &[&str] = &["off", "relative", "absolute"];
 /// The formats `:export` takes (`export::Format::parse`).
 pub(crate) const EXPORT_VALUES: &[&str] = &["md", "txt", "html", "pdf"];
 
+/// The words that ask `:export` to justify, in either place beside the
+/// format. The first is the one Tab offers.
+pub(crate) const JUSTIFY_WORDS: &[&str] = &["justify", "justified"];
+
+/// Whether `:export` can justify `format`: plain text and HTML only.
+pub(crate) fn export_justifies(format: crate::export::Format) -> bool {
+    use crate::export::Format;
+    matches!(format, Format::Html | Format::Text)
+}
+
 /// The values a `:set` option takes, by its name in `OPTIONS`: on and off
 /// for a toggle, the named choices for the rest. A number has none to list.
 pub(crate) fn option_values(option: &str) -> &'static [&'static str] {
@@ -109,14 +119,14 @@ pub(crate) fn option_values(option: &str) -> &'static [&'static str] {
 }
 
 /// The values a command's argument takes, by its name in `COMMANDS`, for
-/// the commands that take a word from a fixed list.
+/// the commands that take one word from a fixed list. `:export` takes two
+/// (`EXPORT_VALUES`, `JUSTIFY_WORDS`) and completes them on its own.
 pub(crate) fn command_values(command: &str) -> &'static [&'static str] {
     match command {
         "focus" => FOCUS_VALUES,
         "align" => ALIGN_VALUES,
         "embed" => EMBED_VALUES,
         "number" => NUMBER_VALUES,
-        "export" => EXPORT_VALUES,
         _ => &[],
     }
 }
