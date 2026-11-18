@@ -276,7 +276,7 @@ impl<'a> Body<'a> {
                 self.out.push_str("<hr>\n");
             }
 
-            BlockKind::Quote(depth) => {
+            BlockKind::Quote(_) => {
                 let body = super::quote_body(line);
                 // Quoted text runs on from quoted text at the same depth, as
                 // CommonMark reads it; anything else starts afresh. The rule
@@ -287,7 +287,9 @@ impl<'a> Body<'a> {
                 self.flush_table();
                 self.flush_math_block();
                 self.close_lists();
-                self.open_quote(*depth);
+                // The depth the line is read at, which a lazy line takes
+                // from the deeper quote it continues.
+                self.open_quote(self.held.quote);
                 // A bare `>` only separates the quote's paragraphs.
                 if !body.trim().is_empty() {
                     self.para.push(ParaLine::new(body));
@@ -617,9 +619,10 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
 ///
 /// `inline::scan` returns flat spans, so markup INSIDE a span — a link in
 /// bold, bold in a link — is reached by scanning that span's body again. Only
-/// prose bodies are: code, math, tags and an image's alt text are what they
-/// say. In a link's text a nested link is its text, since HTML forbids an
-/// anchor inside an anchor.
+/// prose bodies are (`export::holds_prose`, the list every walker shares;
+/// here each kind keeps its own arm for its tag): code, math, tags and an
+/// image's alt text are what they say. In a link's text a nested link is its
+/// text, since HTML forbids an anchor inside an anchor.
 fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: bool) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
@@ -752,12 +755,7 @@ pub(super) fn plain_text(line: &str, md: &MarkdownConfig) -> String {
         out.extend(&chars[i..sp.outer.start]);
         let inner: String = chars[sp.inner.clone()].iter().collect();
         match sp.kind {
-            Inline::Bold
-            | Inline::Italic
-            | Inline::BoldItalic
-            | Inline::Strikethrough
-            | Inline::Highlight
-            | Inline::Link => out.push_str(&plain_text(&inner, md)),
+            k if super::holds_prose(k) => out.push_str(&plain_text(&inner, md)),
             Inline::WikiLink => out.push_str(wiki_parts(&inner).2),
             // A tag reads as written, `#` and all.
             Inline::Tag => out.extend(&chars[sp.outer.clone()]),
@@ -1206,6 +1204,33 @@ mod tests {
         // A paragraph before the quote is not swallowed by it.
         let got = body("para\n> one\n");
         assert!(got.contains("<p>para</p>\n<blockquote>\n<p>one</p>"), "{got}");
+    }
+
+    /// Text at a shallower depth than the quoted paragraph it follows goes
+    /// on with it (CommonMark's lazy continuation): the inner quote stays
+    /// open. A bare `>` ends the paragraph first, so the text after it is
+    /// the outer quote's own; so does quoted text that is not text.
+    #[test]
+    fn shallower_quoted_text_continues_the_inner_paragraph() {
+        let inner = |p: &str| format!("<blockquote>\n<blockquote>\n<p>{p}</p>\n</blockquote>\n</blockquote>\n");
+        for (md, want) in [
+            ("> > a\n> b\n", inner("a b")),
+            ("> > a\nb\n", inner("a b")),
+            ("> > a\n> b\n> c\n", inner("a b c")),
+            ("> > a\n> b\n> > c\n", inner("a b c")),
+            ("> > > a\n> b\n> > c\n", "<blockquote>\n<blockquote>\n<blockquote>\n<p>a b c</p>\n</blockquote>\n</blockquote>\n</blockquote>\n".into()),
+            ("> > a\n>\n> b\n", "<blockquote>\n<blockquote>\n<p>a</p>\n</blockquote>\n<p>b</p>\n</blockquote>\n".into()),
+            ("> > a\n> >\n> b\n", "<blockquote>\n<blockquote>\n<p>a</p>\n</blockquote>\n<p>b</p>\n</blockquote>\n".into()),
+            ("> > a\n\n> b\n", "<blockquote>\n<blockquote>\n<p>a</p>\n</blockquote>\n</blockquote>\n<blockquote>\n<p>b</p>\n</blockquote>\n".into()),
+            ("> > a\n> - b\n", "<blockquote>\n<blockquote>\n<p>a</p>\n</blockquote>\n<p>- b</p>\n</blockquote>\n".into()),
+            ("> > a\n> # b\n", "<blockquote>\n<blockquote>\n<p>a</p>\n</blockquote>\n<p># b</p>\n</blockquote>\n".into()),
+            // Deeper is a new quote inside, as before.
+            ("> a\n> > b\n", "<blockquote>\n<p>a</p>\n<blockquote>\n<p>b</p>\n</blockquote>\n</blockquote>\n".into()),
+        ] {
+            let got = body(md);
+            assert_eq!(got, want, "{md:?}");
+            well_formed(&got).unwrap();
+        }
     }
 
     /// Only quoted TEXT runs on: a quoted list item, heading, fence, table

@@ -575,7 +575,7 @@ fn render_embed_row(
             // so by SPEC §2 it always shows its finished form, and an embedded
             // `# Heading` must read as a heading rather than as its source.
             let md = &app.config.markdown;
-            let inline = crate::render::markdown::inline::scan(text, md);
+            let inline = crate::render::markdown::inline::scan_styled(text, md);
             let styled = crate::render::markdown::style_line_with(
                 text,
                 block.clone(),
