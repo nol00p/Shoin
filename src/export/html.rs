@@ -207,7 +207,15 @@ impl<'a> Body<'a> {
 
     fn line(&mut self, line: &str, kind: &BlockKind, math_continues: bool) {
         let held = std::mem::take(&mut self.held);
-        self.held = held.next(line, kind, self.md.math);
+        let (next, quoted) = held.step(line, kind, self.md.math);
+        self.held = next;
+        // A fence the line does not carry on ends before it. Only a quoted
+        // one can end this way: the quote that holds it ends, and CommonMark
+        // closes the fence with it.
+        let carries = |k: &BlockKind| matches!(k, BlockKind::FenceBody { .. } | BlockKind::FenceClose);
+        if self.fence.is_some() && !carries(kind) && !quoted.as_ref().is_some_and(|q| carries(&q.kind)) {
+            self.close_fence();
+        }
         match kind {
             // Front matter is metadata for tools, not text for readers — the
             // same call plain text makes.
@@ -216,37 +224,10 @@ impl<'a> Body<'a> {
             BlockKind::FenceOpen(info) => {
                 let indent = leading_ws_cols(line);
                 self.open_block(indent);
-                let lang = if self.md.code_syntax { Lang::from_info(info) } else { None };
-                // The `language-x` class is emitted for ANY info string, known
-                // or not: it is what a reader's own stylesheet, or a highlighter
-                // they run over the page later, looks for.
-                let word = info.split_whitespace().next().unwrap_or("");
-                let class = match word.is_empty() {
-                    true => String::new(),
-                    false => format!(" class=\"language-{}\"", escape_attr(word)),
-                };
-                self.out.push_str(&format!("<pre><code{class}>"));
-                self.fence = Some((lang, Cont::None, indent));
+                self.open_fence(info, indent);
             }
-            BlockKind::FenceBody { .. } => {
-                // The state is taken from the fence we opened, not from the
-                // kind: an exported document is walked from the top, so this
-                // walk's own lexer state is the authoritative one.
-                let (lang, cont, indent) = self.fence.unwrap_or((None, Cont::None, 0));
-                // As in CommonMark, a fence indented N columns takes up to N
-                // columns of indent off each of its lines: code nested in an
-                // item lines up with the item, not the page.
-                let strip = leading_ws_cols(line).min(indent);
-                let line: String = line.chars().skip(strip).collect();
-                let (html, next) = highlight(&line, lang, cont);
-                self.out.push_str(&html);
-                self.out.push('\n');
-                self.fence = Some((lang, next, indent));
-            }
-            BlockKind::FenceClose => {
-                self.out.push_str("</code></pre>\n");
-                self.fence = None;
-            }
+            BlockKind::FenceBody { .. } => self.fence_line(line),
+            BlockKind::FenceClose => self.close_fence(),
 
             BlockKind::Blank => {
                 // A blank line ends a paragraph, a quote and a table — but NOT
@@ -277,22 +258,21 @@ impl<'a> Body<'a> {
             }
 
             BlockKind::Quote(_) => {
-                let body = super::quote_body(line);
-                // Quoted text runs on from quoted text at the same depth, as
-                // CommonMark reads it; anything else starts afresh. The rule
-                // is shared with plain text (`Held::joins`).
-                if !held.joins(line, kind, None, self.md) {
-                    self.flush_para();
-                }
-                self.flush_table();
-                self.flush_math_block();
-                self.close_lists();
-                // The depth the line is read at, which a lazy line takes
-                // from the deeper quote it continues.
-                self.open_quote(self.held.quote);
-                // A bare `>` only separates the quote's paragraphs.
-                if !body.trim().is_empty() {
-                    self.para.push(ParaLine::new(body));
+                let Some(q) = quoted else { return };
+                match &q.kind {
+                    // A fence in a quote is code in it, as in CommonMark:
+                    // its lines are read past the quote's markers.
+                    BlockKind::FenceOpen(info) => {
+                        self.flush_para();
+                        self.flush_table();
+                        self.flush_math_block();
+                        self.close_lists();
+                        self.open_quote(q.depth);
+                        self.open_fence(info, leading_ws_cols(&q.body));
+                    }
+                    BlockKind::FenceBody { .. } => self.fence_line(&q.body),
+                    BlockKind::FenceClose => self.close_fence(),
+                    _ => self.quote_text(&held, line, kind, q.body.trim_start()),
                 }
             }
 
@@ -342,6 +322,11 @@ impl<'a> Body<'a> {
             BlockKind::Paragraph => {
                 self.flush_table();
                 self.flush_math_block();
+                // After a quoted fence there is no quoted text for the line
+                // to continue: the quote ends.
+                if held.code {
+                    self.close_quote();
+                }
                 // Not lazy, it stays in the items it is indented deeper than.
                 if !self.lazy && self.quote == 0 {
                     self.close_lists_from(leading_ws_cols(line));
@@ -592,14 +577,72 @@ impl<'a> Body<'a> {
     }
 
     fn close_all(&mut self) {
+        // A document may simply END inside a fence — an unterminated block is
+        // valid Markdown and the editor renders it as code to the last line, so
+        // the page has to close the block the document did not, before the
+        // quote or item it sits in.
+        self.close_fence();
         self.flush_para();
         self.flush_table();
         self.flush_math_block();
         self.close_quote();
         self.close_lists();
-        // A document may simply END inside a fence — an unterminated block is
-        // valid Markdown and the editor renders it as code to the last line, so
-        // the page has to close the block the document did not.
+    }
+
+    /// A quote line that is not code: `body` is its text past the markers.
+    fn quote_text(&mut self, held: &super::Held, line: &str, kind: &BlockKind, body: &str) {
+        // Quoted text runs on from quoted text at the same depth, as
+        // CommonMark reads it; anything else starts afresh. The rule
+        // is shared with plain text (`Held::joins`).
+        if !held.joins(line, kind, None, self.md) {
+            self.flush_para();
+        }
+        self.flush_table();
+        self.flush_math_block();
+        self.close_lists();
+        // The depth the line is read at, which a lazy line takes
+        // from the deeper quote it continues.
+        self.open_quote(self.held.quote);
+        // A bare `>` only separates the quote's paragraphs.
+        if !body.trim().is_empty() {
+            self.para.push(ParaLine::new(body));
+        }
+    }
+
+    /// Open a fence whose info string is `info`, indented `indent` columns
+    /// in the line or the quote it sits in.
+    fn open_fence(&mut self, info: &str, indent: usize) {
+        let lang = if self.md.code_syntax { Lang::from_info(info) } else { None };
+        // The `language-x` class is emitted for ANY info string, known
+        // or not: it is what a reader's own stylesheet, or a highlighter
+        // they run over the page later, looks for.
+        let word = info.split_whitespace().next().unwrap_or("");
+        let class = match word.is_empty() {
+            true => String::new(),
+            false => format!(" class=\"language-{}\"", escape_attr(word)),
+        };
+        self.out.push_str(&format!("<pre><code{class}>"));
+        self.fence = Some((lang, Cont::None, indent));
+    }
+
+    /// One line of the open fence: past the quote's markers, for a quoted one.
+    fn fence_line(&mut self, line: &str) {
+        // The state is taken from the fence we opened, not from the
+        // kind: an exported document is walked from the top, so this
+        // walk's own lexer state is the authoritative one.
+        let (lang, cont, indent) = self.fence.unwrap_or((None, Cont::None, 0));
+        // As in CommonMark, a fence indented N columns takes up to N
+        // columns of indent off each of its lines: code nested in an
+        // item lines up with the item, not the page.
+        let strip = leading_ws_cols(line).min(indent);
+        let line: String = line.chars().skip(strip).collect();
+        let (html, next) = highlight(&line, lang, cont);
+        self.out.push_str(&html);
+        self.out.push('\n');
+        self.fence = Some((lang, next, indent));
+    }
+
+    fn close_fence(&mut self) {
         if self.fence.take().is_some() {
             self.out.push_str("</code></pre>\n");
         }
@@ -1233,6 +1276,56 @@ mod tests {
         }
     }
 
+    /// A fence in a quote is code inside it, as CommonMark reads it: the
+    /// quote's markers and their one space go, the rest of each line is the
+    /// code, and the quote ending (a blank line, an unmarked line, a
+    /// shallower marker, the document) ends the fence with it.
+    #[test]
+    fn a_fence_in_a_quote_is_code_in_the_quote() {
+        let md = MarkdownConfig { code_syntax: false, ..MarkdownConfig::default() };
+        let body = |doc: &str| Body::new(&md, std::path::Path::new("")).run(doc);
+        let q = |inner: &str| format!("<blockquote>\n{inner}</blockquote>\n");
+        for (doc, want) in [
+            // Info string, a blank `>` line and an indent kept inside.
+            (
+                "> a\n> ```rust x\n> fn f() {\n>\n>     1 < 2\n> }\n> ```\n> b\n",
+                q("<p>a</p>\n<pre><code class=\"language-rust\">fn f() {\n\n    1 &lt; 2\n}\n</code></pre>\n<p>b</p>\n"),
+            ),
+            ("> ~~~\n> x\n> ~~~\n", q("<pre><code>x\n</code></pre>\n")),
+            // Nested quotes; a deeper marker inside the fence is code.
+            ("> > ```\n> > > x\n> > ```\n", q(&q("<pre><code>&gt; x\n</code></pre>\n"))),
+            ("> ```\n> > x\n> ```\n", q("<pre><code>&gt; x\n</code></pre>\n")),
+            // Left open, the quote closes it: at the end of the document,
+            // at a blank line, at an unmarked line, at a shallower marker.
+            ("> ```\n> x\n", q("<pre><code>x\n</code></pre>\n")),
+            ("> ```\n> x\n\n> y\n", q("<pre><code>x\n</code></pre>\n") + &q("<p>y</p>\n")),
+            ("> ```\n> x\ny\n", q("<pre><code>x\n</code></pre>\n") + "<p>y</p>\n"),
+            ("> > ```\n> > x\n> y\n", q(&(q("<pre><code>x\n</code></pre>\n") + "<p>y</p>\n"))),
+            // After a closed one, an unmarked line is not quoted text either.
+            ("> ```\n> ```\ny\n", q("<pre><code></code></pre>\n") + "<p>y</p>\n"),
+            // A tab after the marker counts to the tab stop: two columns left.
+            (">\t```\n>\t\tx\n>\t```\n", q("<pre><code>    x\n</code></pre>\n")),
+            // In a quoted list item, the code still comes out as code.
+            ("> - a\n>   ```\n>   x\n>   ```\n", q("<p>- a</p>\n<pre><code>x\n</code></pre>\n")),
+        ] {
+            assert_eq!(body(doc), want, "{doc:?}");
+            well_formed(&body(doc)).unwrap();
+        }
+        // Highlighted with `code_syntax`, as a fence outside a quote is.
+        let got = super::tests::body("> ```rust\n> fn f() {}\n> ```\n");
+        assert!(got.contains("<span class=\"k\">fn</span>"), "{got}");
+    }
+
+    /// A tab after `>` is the marker's space (and indent), not text.
+    #[test]
+    fn a_tab_after_a_quote_marker_is_not_text() {
+        let nested = "<blockquote>\n<blockquote>\n<p>a b</p>\n</blockquote>\n</blockquote>\n";
+        assert_eq!(body("> > a\n>\tb\n"), nested);
+        assert_eq!(body(">\ta\n>\t\tb\n"), "<blockquote>\n<p>a b</p>\n</blockquote>\n");
+        let md = MarkdownConfig::default();
+        assert_eq!(crate::export::plain::render(">\ta\n> >\tb\n", 60, false, &md), "> a\n> > b\n");
+    }
+
     /// Only quoted TEXT runs on: a quoted list item, heading, fence, table
     /// row or rule keeps its own line, as it did before quotes were joined.
     #[test]
@@ -1241,7 +1334,7 @@ mod tests {
             ("> - milk\n> - eggs\n", "<p>- milk</p>\n<p>- eggs</p>"),
             ("> # Title\n> text\n", "<p># Title</p>\n<p>text</p>"),
             ("> text\n> # Title\n", "<p>text</p>\n<p># Title</p>"),
-            ("> ```\n> a\n> b\n> ```\n", "<p>```</p>\n<p>a</p>\n<p>b</p>\n<p>```</p>"),
+            ("> ```\n> a\n> b\n> ```\n", "<pre><code>a\nb\n</code></pre>"),
             ("> | a | b |\n> |---|---|\n", "<p>| a | b |</p>\n<p>|---|---|</p>"),
             ("> text\n> ---\n> more\n", "<p>text</p>\n<p>---</p>\n<p>more</p>"),
             ("> 1. one\n> text\n", "<p>1. one</p>\n<p>text</p>"),
