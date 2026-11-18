@@ -1180,8 +1180,17 @@ mod tests {
     #[test]
     fn markers_in_a_links_text_vanish() {
         assert_eq!(shown("a [**see** ~~old~~ ==new== _x_](u) b"), "a see old new x b");
-        // Emphasis holding a link is one span: the link shows as written.
-        assert_eq!(shown("**see [docs](u)**"), "see [docs](u)");
+    }
+
+    /// A link, address or wiki link in emphasis hides its markers as one at
+    /// the top level does; what is in its text is not read again.
+    #[test]
+    fn markers_of_a_link_in_emphasis_vanish() {
+        assert_eq!(shown("**see [docs](u)**"), "see docs");
+        assert_eq!(shown("*[a](u) b [c](v)*"), "a b c");
+        assert_eq!(shown("_x [a](u)_ ~~[b](v)~~ ==[c](w) y=="), "x a b c y");
+        assert_eq!(shown("**see <https://x.y> [[note]]**"), "see https://x.y note");
+        assert_eq!(shown("**see [_docs_](u)**"), "see _docs_");
     }
 
     #[test]

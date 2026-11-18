@@ -640,6 +640,20 @@ mod tests {
         assert_eq!(entry.cmap.display_text(&entry.source), "bold text");
     }
 
+    /// The cache styles a link in emphasis as a link, bold still, and
+    /// conceals its address.
+    #[test]
+    fn a_link_in_emphasis_is_styled_and_concealed() {
+        let mut app = app_with("**see [docs](u)**\n");
+        sync(&mut app);
+        let cache = app.cache.borrow();
+        let entry = cache.entry(0).unwrap();
+        let d = entry.styled.iter().find(|s| s.range.contains(&7)).unwrap();
+        assert_eq!(d.style.fg, app.theme.link, "{:?}", entry.styled);
+        assert_eq!(d.style.attrs.bold, app.theme.bold_attr);
+        assert_eq!(entry.cmap.display_text(&entry.source), "see docs");
+    }
+
     /// A second frame with nothing changed parses nothing.
     #[test]
     fn an_unchanged_frame_parses_nothing() {
