@@ -3,8 +3,10 @@
 Type `:` and the command, then `Enter`.
 
 `Tab` completes the word at the end of the line: a command's name, a path
-after `:e`, `:w`, `:saveas` and `:wq`, an option after `:set`, a topic after
-`:help`. See [Completing with Tab](#completing-with-tab).
+after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
+`:set`, a topic after `:help`, an open buffer after `:b`, and the values of
+`:focus`, `:align`, `:embed`, `:number` and `:export`. See
+[Completing with Tab](#completing-with-tab).
 
 ## Files
 
@@ -94,11 +96,19 @@ brackets.
 | `e no` | `e notes/`, then `e notes.md` |
 | `set au` | `set autoreload`, `set autosave`, `set autosave_interval` |
 | `help ed` | `help edit`, `help editing`, `help edition` |
+| `set focus ` | `set focus off`, `set focus paragraph`, `set focus sentence` |
+| `set autosave=` | `set autosave=off`, `set autosave=on` |
+| `align ` | `align left`, `align center`, `align right`, `align justified` |
+| `export ` | `export md`, `export txt`, `export html`, `export pdf` |
+| `export html ` | `export html justify` |
+| `b no` | each open buffer whose name holds `no` |
 
 ## Details
 
-- Matches are in alphabetical order, ignoring case. Folders and files are
-  mixed, and a folder ends in `/`.
+- Names, paths and topics are in alphabetical order, ignoring case. Folders
+  and files are mixed, and a folder ends in `/`.
+- Values are in the order the command lists them, `off` before `on`.
+  Buffers are in the order they were opened.
 - Command names complete to their full name: `wr` gives `write`, and
   nothing offers `w`. The short names still run.
 - A path is relative to the folder Shoin was started in, as `:e` reads it.
@@ -112,6 +122,15 @@ brackets.
 - `Shift-Tab` before any `Tab` starts at the last match.
 - `Tab` on an empty line goes through every command.
 - With no match, `Tab` does nothing and says nothing.
-- `:set` completes the option, not its value: nothing completes after
-  `:set measure=` or `:set measure `.
+- After `:set`, a value completes once the option is followed by `=` or a
+  blank. A toggle offers `off` and `on`. An option that takes a number,
+  such as `measure` or `tab_width`, offers nothing.
+- A value completes ignoring case: `:align C` gives `:align center`.
+- `:b` matches anywhere in a buffer's name, ignoring case, as `:b` itself
+  does: `:b a.m` offers `data.md` and `a.md`. A whole name goes to its own
+  buffer first, so `:b a.md` opens `a.md` even when `data.md` was opened
+  before it. Two buffers with the same name are offered once and `:b` goes
+  to the first; reach the other by its number from `:ls`, as in `:b 3`.
+- `:export` offers `justify` after `txt` or `html`, the formats it applies
+  to. Typed first, `justify` is followed by those two formats only.
 - The `:` line has no cursor to move: `Tab` always completes the last word.

@@ -5,9 +5,15 @@
 //!
 //! What completes depends on where the word is: a command name first, then a
 //! path after the commands that take one (`PATH_COMMANDS`), an option after
-//! `:set`, a topic after `:help`.
+//! `:set` and then that option's values, a topic after `:help`, an open
+//! buffer's name after `:b`, and the values of `:focus`, `:align`, `:embed`,
+//! `:number` and `:export`. Each list is the one the command itself reads
+//! (`commands.rs`), so the two cannot drift apart.
 
-use super::commands::{canonical, COMMANDS, OPTIONS, PATH_COMMANDS};
+use super::commands::{
+    canonical, command_values, export_justifies, option_values, COMMANDS, EXPORT_VALUES, JUSTIFY_WORDS, OPTIONS,
+    PATH_COMMANDS,
+};
 use super::*;
 
 /// A completion cycle under way on the `:` line.
@@ -49,8 +55,9 @@ impl Completion {
 }
 
 /// What can complete the word at the end of `line`: where that word starts,
-/// and every match for it, sorted. Paths are looked up from `base`.
-pub(crate) fn candidates(line: &str, base: &Path) -> (usize, Vec<String>, bool) {
+/// and every match for it, sorted. Paths are looked up from `base`; `:b`
+/// offers the names in `buffers`.
+pub(crate) fn candidates(line: &str, base: &Path, buffers: &[String]) -> (usize, Vec<String>, bool) {
     let lead = line.len() - line.trim_start().len();
     let rest = &line[lead..];
     let Some(name_end) = rest.find(char::is_whitespace) else {
@@ -69,19 +76,103 @@ pub(crate) fn candidates(line: &str, base: &Path) -> (usize, Vec<String>, bool) 
         // A path may hold spaces: the whole argument is the word.
         return (start, paths(arg, base), true);
     }
-    // One word, and for `:set` only the key: `measure=` is a value.
-    if arg.contains(char::is_whitespace) || arg.contains('=') {
+    if command == "buffer" {
+        // So may a file name, and `:b` takes the whole argument too.
+        return (start, buffer_names(arg, buffers), false);
+    }
+    if command == "set" {
+        return set_candidates(arg, start);
+    }
+    if command == "export" {
+        return export_candidates(arg, start);
+    }
+    // One word.
+    if arg.contains(char::is_whitespace) {
         return (start, Vec::new(), false);
     }
-    let words: Vec<String> = match command {
-        "set" => OPTIONS.iter().map(|(name, _)| *name).filter(|n| n.starts_with(arg)).map(String::from).collect(),
-        "help" => {
-            let typed = arg.to_lowercase();
-            crate::help::topics().into_iter().filter(|t| t.starts_with(&typed)).map(String::from).collect()
-        }
-        _ => Vec::new(),
+    if command == "help" {
+        let typed = arg.to_lowercase();
+        let topics = crate::help::topics().into_iter().filter(|t| t.starts_with(&typed));
+        return (start, sorted(topics.map(String::from).collect()), false);
+    }
+    // In the command's own order, as `:set` offers them.
+    (start, starting_with(command_values(command), arg), false)
+}
+
+/// After `:set`, which starts at `start`: an option, or once the option is
+/// followed by `=` or a blank, one of its values.
+fn set_candidates(arg: &str, start: usize) -> (usize, Vec<String>, bool) {
+    // Split where `set_option` splits.
+    let Some(sep) = arg.find(['=', ' ', '\t']) else {
+        let names = OPTIONS.iter().map(|(name, _)| *name).filter(|n| n.starts_with(arg));
+        return (start, sorted(names.map(String::from).collect()), false);
     };
-    (start, sorted(words), false)
+    let value = arg[sep + 1..].trim_start();
+    let value_start = start + arg.len() - value.len();
+    let Some(option) = canonical(OPTIONS, &arg[..sep]) else {
+        return (value_start, Vec::new(), false);
+    };
+    if value.contains(char::is_whitespace) {
+        return (value_start, Vec::new(), false);
+    }
+    // In the order the command lists them, not sorted: off before on, and
+    // a ladder (none · short · rec · full) reads in its own order.
+    (value_start, starting_with(option_values(option), value), false)
+}
+
+/// After `:export`, which starts at `start`: the word being typed is a
+/// format or `justify`, each once. `justify` is offered after a format that
+/// takes it; typed first, only those formats follow.
+fn export_candidates(arg: &str, start: usize) -> (usize, Vec<String>, bool) {
+    use crate::export::Format;
+    let at = arg.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let (done, typed) = arg.split_at(at);
+    let none = (start + at, Vec::new(), false);
+    let mut format = None;
+    let mut justify = false;
+    // Read the words before as `open_export` reads them.
+    for tok in done.split_whitespace() {
+        if JUSTIFY_WORDS.contains(&tok.to_ascii_lowercase().as_str()) {
+            justify = true;
+        } else if format.is_none() {
+            match Format::parse(tok) {
+                Some(f) => format = Some(f),
+                None => return none,
+            }
+        } else {
+            return none;
+        }
+    }
+    let mut offer: Vec<&str> = Vec::new();
+    if format.is_none() {
+        let fits = |v: &str| !justify || Format::parse(v).is_some_and(export_justifies);
+        offer.extend(EXPORT_VALUES.iter().copied().filter(|v| fits(v)));
+    }
+    // Not on its own: `:export justify` exports Markdown, which refuses it.
+    if !justify && format.is_some_and(export_justifies) {
+        offer.push(JUSTIFY_WORDS[0]);
+    }
+    (start + at, starting_with(&offer, typed), false)
+}
+
+/// The values in `values` that start with `typed`, case aside, in the
+/// order given.
+fn starting_with(values: &[&str], typed: &str) -> Vec<String> {
+    let typed = typed.to_lowercase();
+    values.iter().filter(|v| v.starts_with(&typed)).map(|v| v.to_string()).collect()
+}
+
+/// The open buffers' names that hold `typed`, case aside, as `:b` matches
+/// them, in buffer order.
+fn buffer_names(typed: &str, buffers: &[String]) -> Vec<String> {
+    let lower = typed.to_lowercase();
+    let mut names: Vec<String> = Vec::new();
+    for name in buffers {
+        if name.to_lowercase().contains(&lower) && !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 /// The entries that complete a typed path, each as it would be typed: the
@@ -129,7 +220,8 @@ impl App {
         let mut c = match self.completion.take().filter(|c| c.line() == buf) {
             Some(c) => c,
             None => {
-                let (start, matches, paths) = candidates(&buf, &self.cwd());
+                let names: Vec<String> = self.docs.iter().map(|d| d.name()).collect();
+                let (start, matches, paths) = candidates(&buf, &self.cwd(), &names);
                 if matches.is_empty() {
                     return buf;
                 }
@@ -201,7 +293,7 @@ mod tests {
     }
 
     fn words(line: &str) -> Vec<String> {
-        candidates(line, Path::new("/nonexistent")).1
+        candidates(line, Path::new("/nonexistent"), &[]).1
     }
 
     /// A folder of its own under the system temp folder, emptied first.
@@ -216,7 +308,7 @@ mod tests {
     fn command_names_complete_from_the_table() {
         assert_eq!(words("b"), ["bdelete", "bnext", "bprevious", "buffer", "buffers"]);
         assert_eq!(words("  se"), ["set"], "leading blanks are skipped");
-        assert_eq!(candidates("  se", Path::new("/")).0, 2);
+        assert_eq!(candidates("  se", Path::new("/"), &[]).0, 2);
         assert_eq!(words("").len(), COMMANDS.len(), "an empty line offers every command");
         assert!(words("nosuch").is_empty());
     }
@@ -256,6 +348,181 @@ mod tests {
     }
 
     #[test]
+    fn set_values_complete_after_a_blank_or_an_equals() {
+        assert_eq!(words("set focus "), ["off", "paragraph", "sentence"], "in the command's own order");
+        assert_eq!(words("set focus=p"), ["paragraph"]);
+        assert_eq!(words("set focus  P"), ["paragraph"], "after any run of blanks, case aside");
+        assert_eq!(candidates("set focus=p", Path::new("/"), &[]).0, 10, "the value is the word");
+        assert_eq!(candidates("set focus  p", Path::new("/"), &[]).0, 11);
+        assert_eq!(words("set autosave="), ["off", "on"], "a toggle");
+        assert_eq!(words("set nu="), ["off", "relative", "absolute"], "by another name");
+        assert_eq!(words("set embed "), ["none", "short", "rec", "full"]);
+        assert!(words("set measure=").is_empty(), "a number has no list");
+        assert!(words("set tab_width ").is_empty());
+        assert!(words("set nosuch=").is_empty());
+        assert!(words("set focus=off x").is_empty(), "one value");
+    }
+
+    #[test]
+    fn command_values_complete() {
+        assert_eq!(words("align "), ["left", "center", "right", "justified"]);
+        assert_eq!(words("align c"), ["center"]);
+        assert_eq!(words("focus s"), ["sentence"]);
+        assert_eq!(words("nu r"), ["relative"]);
+        assert_eq!(words("embed "), ["none", "short", "rec", "full"]);
+        assert_eq!(words("export "), ["md", "txt", "html", "pdf"]);
+        assert_eq!(words("export H"), ["html"]);
+    }
+
+    #[test]
+    fn export_completes_a_format_and_justify_in_either_order() {
+        assert!(words("export j").is_empty(), "alone it would export Markdown, which refuses it");
+        assert_eq!(words("export html "), ["justify"]);
+        assert_eq!(words("export TXT J"), ["justify"], "case aside");
+        assert_eq!(candidates("export html j", Path::new("/"), &[]).0, 12, "the last word is the word");
+        assert!(words("export pdf ").is_empty(), "pdf is not justified");
+        assert!(words("export md j").is_empty());
+        assert_eq!(words("export justify "), ["txt", "html"], "only what justifies");
+        assert_eq!(words("export justified h"), ["html"]);
+        assert!(words("export html justify ").is_empty(), "both given");
+        assert!(words("export nosuch ").is_empty());
+    }
+
+    /// What `:export` completes, it runs: the export prompt opens, no error.
+    #[test]
+    fn every_export_completion_is_accepted() {
+        let d = folder("export");
+        let file = d.join("note.md");
+        std::fs::write(&file, "text\n").unwrap();
+        let mut lines = vec!["export".to_string()];
+        let mut checked = 0;
+        while let Some(line) = lines.pop() {
+            for w in words(&format!("{line} ")) {
+                let next = format!("{line} {w}");
+                let mut app = App::new(Config::default(), Some(file.clone()), None).unwrap();
+                app.run_command(&next);
+                assert!(matches!(app.mode, Mode::Prompt(_)), ":{next} says {:?}", app.flash.and_then(|f| f.text));
+                checked += 1;
+                lines.push(next);
+            }
+        }
+        assert_eq!(checked, 4 + 2, "every format, and justify after txt and html");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn buffer_names_complete_as_b_matches_them() {
+        let open: Vec<String> = ["notes.md", "data.md", "a.md", "Draft.md", "notes.md"].map(String::from).into();
+        let c = |line: &str| candidates(line, Path::new("/"), &open).1;
+        assert_eq!(c("b "), ["notes.md", "data.md", "a.md", "Draft.md"], "in buffer order, each once");
+        assert_eq!(c("b a.m"), ["data.md", "a.md"], "anywhere in the name, as :b finds it");
+        assert_eq!(c("buffer DR"), ["Draft.md"], "case aside");
+        assert!(c("b zzz").is_empty());
+        assert!(c("bn ").is_empty(), "only :b and :buffer");
+    }
+
+    /// Every value completion offers, the command takes: none of them is
+    /// refused with an error.
+    #[test]
+    fn every_offered_value_is_accepted() {
+        use super::super::commands::{NUMBER_OPTIONS, TOGGLE_VALUES};
+        let refused = |line: &str| {
+            let mut app = app();
+            app.run_command(line);
+            app.flash.filter(|f| matches!(f.kind, FlashKind::Error)).and_then(|f| f.text)
+        };
+        for (option, _) in OPTIONS {
+            let values = option_values(option);
+            assert!(
+                !values.is_empty() || NUMBER_OPTIONS.contains(option),
+                ":set {option} has no values and is not a number"
+            );
+            for v in values {
+                for sep in ["=", " "] {
+                    let line = format!("set {option}{sep}{v}");
+                    assert_eq!(refused(&line), None, ":{line}");
+                }
+            }
+        }
+        // A toggle's two values go two ways.
+        let mut app = app();
+        app.run_command("set mouse=on");
+        assert!(app.config.input.mouse);
+        app.run_command("set mouse=off");
+        assert!(!app.config.input.mouse);
+        assert_eq!(TOGGLE_VALUES, ["off", "on"]);
+
+        let mut offered = 0;
+        for (name, _) in COMMANDS {
+            for v in command_values(name) {
+                offered += 1;
+                assert_eq!(refused(&format!("{name} {v}")), None, ":{name} {v}");
+            }
+        }
+        assert!(offered > 0);
+        assert!(refused("align sideways").is_some(), "and the check can fail");
+    }
+
+    /// Each list names every choice once, by the name the command reports
+    /// it with.
+    #[test]
+    fn value_lists_cover_every_choice() {
+        use super::super::commands::{ALIGN_VALUES, EMBED_VALUES, EXPORT_VALUES, FOCUS_VALUES, NUMBER_VALUES};
+        use crate::render::align::TextAlign;
+        use crate::render::focus::FocusMode;
+        use crate::render::numbers::NumberMode;
+        let focus: Vec<_> = FOCUS_VALUES.iter().map(|v| FocusMode::parse(v).unwrap()).collect();
+        assert!(focus.iter().zip(FOCUS_VALUES).all(|(m, v)| m.label() == *v));
+        assert!(focus.contains(&focus[0].next()) && focus.contains(&focus[0].next().next()));
+        let align: Vec<_> = ALIGN_VALUES.iter().map(|v| TextAlign::parse(v).unwrap()).collect();
+        assert!(align.iter().zip(ALIGN_VALUES).all(|(m, v)| m.label() == *v));
+        let mut a = align[0];
+        for _ in 0..4 {
+            assert!(align.contains(&a));
+            a = a.next();
+        }
+        assert!(NUMBER_VALUES.iter().all(|v| NumberMode::parse(v).unwrap().label() == *v));
+        assert!(EMBED_VALUES.iter().all(|v| crate::transclude::Mode::parse(v).unwrap().name() == *v));
+        assert!(EXPORT_VALUES.iter().all(|v| crate::export::Format::parse(v).unwrap().extension() == *v));
+        let n = |l: &[&str]| l.iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(n(NUMBER_VALUES), 3);
+        assert_eq!(n(EMBED_VALUES), 4);
+        assert_eq!(n(EXPORT_VALUES), 4);
+    }
+
+    #[test]
+    fn tab_cycles_through_values_and_buffers() {
+        let mut app = app();
+        typed(&mut app, ":set focus ");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(line(&app), "set focus off");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(line(&app), "set focus paragraph");
+        press(&mut app, KeyCode::BackTab);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(line(&app), "set focus ", "back to what was typed");
+        press(&mut app, KeyCode::Esc);
+
+        // `:b` with three files open lands on the buffer it completed to,
+        // even when another one's name holds it.
+        let d = folder("buffers");
+        for f in ["data.md", "a.md", "zeta.md"] {
+            std::fs::write(d.join(f), "").unwrap();
+        }
+        let mut app = App::new(Config::default(), Some(d.join("data.md")), None).unwrap();
+        app.open_file(d.join("a.md"));
+        app.open_file(d.join("zeta.md"));
+        typed(&mut app, ":b a.");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(line(&app), "b data.md");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(line(&app), "b a.md");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.buffer.display_name(), "a.md");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn paths_complete_from_the_folder() {
         let d = folder("paths");
         std::fs::create_dir(d.join("notes")).unwrap();
@@ -264,16 +531,16 @@ mod tests {
         std::fs::write(d.join("Notebook.md"), "").unwrap();
         std::fs::write(d.join("a.md"), "").unwrap();
         std::fs::write(d.join(".hidden"), "").unwrap();
-        let c = |line: &str| candidates(line, &d).1;
+        let c = |line: &str| candidates(line, &d, &[]).1;
         assert_eq!(c("e "), ["a.md", "Notebook.md", "notes/"], "folders and files mixed, case aside");
         assert_eq!(c("e ."), [".hidden"], "hidden only after a typed dot");
         assert_eq!(c("w! no"), ["notes/"], "case counts in a name");
         assert_eq!(c("saveas notes/"), ["notes/day one.md", "notes/old/"]);
         assert_eq!(c("edit notes/day o"), ["notes/day one.md"], "a name with a space");
-        assert_eq!(candidates("edit notes/day o", &d).0, 5, "the whole argument is the word");
+        assert_eq!(candidates("edit notes/day o", &d, &[]).0, 5, "the whole argument is the word");
         assert!(c("e missing/").is_empty());
         let abs = format!("e {}/no", d.display());
-        assert_eq!(candidates(&abs, Path::new("/elsewhere")).1, [format!("{}/notes/", d.display())]);
+        assert_eq!(candidates(&abs, Path::new("/elsewhere"), &[]).1, [format!("{}/notes/", d.display())]);
         let _ = std::fs::remove_dir_all(&d);
     }
 

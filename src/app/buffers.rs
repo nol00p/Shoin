@@ -65,11 +65,14 @@ impl App {
                 return;
             }
         }
+        // A whole name first, so the name Tab completes lands on its own
+        // buffer: `a.md` is not `data.md`, opened before it.
         let lower = name.to_lowercase();
         let hit = self
             .docs
             .iter()
-            .position(|d| d.name().to_lowercase().contains(&lower));
+            .position(|d| d.name().to_lowercase() == lower)
+            .or_else(|| self.docs.iter().position(|d| d.name().to_lowercase().contains(&lower)));
         match hit {
             Some(i) => self.switch_to(i),
             None => self.notify(format!("no buffer matching {name:?}"), FlashKind::Error),
