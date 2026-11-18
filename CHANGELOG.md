@@ -13,6 +13,25 @@
 - Code spans, escapes, tags and math inside a link's text are styled and
   concealed as elsewhere, in the link's colour; so is emphasis in a link in
   emphasis. `gi` / `gb` act on the innermost emphasis (#129).
+- `.` repeats the last change in whatever document is current. It used
+  to repeat a buffer switch (`:bn`, `gf`, `<C-^>`, `:e`) made after the
+  change (#136).
+- Window and buffer keys end a selection, as in vim, and are never the
+  change `.` repeats, even when they go nowhere (`<C-w>o`, a refused
+  `<C-w>q`). Opening the finder or the file tree ends a selection too
+  (#136).
+- `.` after an operator on a selection made with the mouse repeats over
+  as much text from the cursor, as vim does. `3.` and `.` in Visual no
+  longer leave their own keys in the change (#136).
+
+**Lists**
+
+- A tab in a list's indent counts as `tab_width` columns in the
+  classifier too, so the indent guides, bullets, `al` / `il`, `>al`,
+  `Alt-j` and `:fixlist` agree on which item a line or code block is in.
+  A code block 2 columns in under `\t- a` was shown in the item and moved
+  as outside it. `\t\t- x` gets its indent guides. Changing `tab_width`
+  reclassifies open documents at once (#135).
 
 **Files**
 
@@ -48,6 +67,8 @@
 - A fenced block inside a quote exports as code, nested quotes, `~~~` and
   a fence the quote leaves open included; a tab after `>` counts as the
   marker's space, as in CommonMark (#125).
+- HTML and plain-text export count a tab in a list's indent as 4
+  columns, as CommonMark does; it was 1 (#135).
 
 **Command line**
 
