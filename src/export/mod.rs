@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::config::schema::{MarkdownConfig, TranscludeConfig};
-use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry};
+use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry, Open};
 use crate::render::markdown::inline::Inline;
 use crate::transclude::same_file;
 
@@ -134,15 +134,18 @@ pub fn write(
 
 /// Every local picture file `markdown` links to (`![alt](img/p.png)`),
 /// found from `base` the way HTML export finds them to carry them inside
-/// the page (`html::local_file`). Code, fenced blocks, front matter and math
-/// are not read, as in `rebase_images`; a remote address names no file.
+/// the page (`html::local_file`). Code, fenced blocks (quoted ones too),
+/// front matter and math are not read, as in `rebase_images`; a remote
+/// address names no file.
 fn linked_pictures(markdown: &str, base: &Path, md: &MarkdownConfig) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut carry = Carry::default();
+    let mut held = Held::default();
     for (i, line) in markdown.lines().enumerate() {
         let (kind, next) = classify(line, &carry, i == 0, md.math);
         carry = next;
-        if !matches!(
+        held = held.next(line, &kind, md.math);
+        if !held.code && !matches!(
             kind,
             BlockKind::FenceOpen(_)
                 | BlockKind::FenceBody { .. }
@@ -205,35 +208,62 @@ pub(crate) struct Held {
     quote: u8,
     prose: bool,
     inner: Carry,
+    /// The line read was a quoted fence's: its opening, its code or its
+    /// closing. Every walker that leaves code alone skips such a line.
+    pub(crate) code: bool,
+}
+
+/// A quote line as its quote reads it: the text past its markers, what that
+/// text is inside the quote, and the depth it is read at.
+pub(crate) struct Quoted {
+    pub(crate) body: String,
+    pub(crate) kind: BlockKind,
+    pub(crate) depth: u8,
 }
 
 impl Held {
     /// The state after `line`, of kind `kind`.
     pub(crate) fn next(&self, line: &str, kind: &BlockKind, math: bool) -> Held {
+        self.step(line, kind, math).0
+    }
+
+    /// The state after `line`, of kind `kind`, and for a quote line how its
+    /// quote reads it.
+    pub(crate) fn step(&self, line: &str, kind: &BlockKind, math: bool) -> (Held, Option<Quoted>) {
         match kind {
             BlockKind::Quote(depth) => {
                 let depth = (*depth).max(1);
+                // Inside a quoted fence a line that keeps the fence's markers
+                // is the fence's, whatever follows them: under `> ```` the
+                // line `> > x` is the code `> x`, as in CommonMark.
+                let fenced = self.quote > 0 && matches!(self.inner.open, Open::InFence { .. });
+                let depth = match fenced && depth > self.quote {
+                    true => self.quote,
+                    false => depth,
+                };
                 let inner = match depth == self.quote {
                     true => self.inner.clone(),
                     false => Carry::default(),
                 };
-                let body = quote_body(line);
-                let (k, inner) = classify(body, &inner, false, math);
+                let body = quote_strip(line, depth);
+                let (k, inner) = classify(&body, &inner, false, math);
                 // A quoted list item, heading, fence, rule or table row keeps
                 // its own line; only quoted text runs on into the next.
-                let prose = k == BlockKind::Paragraph && !has_cell_separator(body);
+                let prose = k == BlockKind::Paragraph && !has_cell_separator(&body);
+                let code = matches!(k, BlockKind::FenceOpen(_) | BlockKind::FenceBody { .. } | BlockKind::FenceClose);
                 // Text at a shallower depth than quoted text goes on with
                 // it, and the deeper quote stays open: CommonMark's lazy
                 // continuation, `> > a` then `> b` being one paragraph.
                 if prose && self.prose && depth < self.quote {
-                    return self.clone();
+                    return (self.clone(), Some(Quoted { body, kind: k, depth: self.quote }));
                 }
-                Held { quote: depth, prose, inner }
+                (Held { quote: depth, prose, inner, code }, Some(Quoted { body, kind: k, depth }))
             }
             // An unmarked line goes on with whatever it continues, a quote
-            // included: CommonMark's lazy continuation.
-            BlockKind::Paragraph => self.clone(),
-            _ => Held::default(),
+            // included: CommonMark's lazy continuation. A quoted fence is
+            // not text, so nothing continues it: the line ends the quote.
+            BlockKind::Paragraph if !self.code => (self.clone(), None),
+            _ => (Held::default(), None),
         }
     }
 
@@ -260,9 +290,43 @@ impl Held {
     }
 }
 
-/// A quote line's text, past its `>` markers.
-pub(crate) fn quote_body(line: &str) -> &str {
-    line.trim_start().trim_start_matches(['>', ' '])
+/// A quote line's text past its first `depth` markers, as CommonMark reads
+/// it: each `>` may be followed by one space or tab, and a tab counts as the
+/// columns to the next tab stop, so `>` and a tab leave two columns of
+/// indent. The indent left is written as spaces, since its columns no longer
+/// start where the line did. Spaces between markers are skipped the way
+/// `block::classify` counts the depth.
+pub(crate) fn quote_strip(line: &str, depth: u8) -> String {
+    let width = |c: char, col: usize| match c {
+        '\t' => 4 - col % 4,
+        _ => 1,
+    };
+    let mut col = 0;
+    let mut rest = line;
+    // The column the text starts at, past the last marker and its space.
+    let mut start = 0;
+    for _ in 0..depth {
+        let ws = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let Some(after) = rest[ws..].strip_prefix('>') else {
+            break;
+        };
+        col = rest[..ws].chars().fold(col, |c, ch| c + width(ch, c)) + 1;
+        rest = after;
+        start = col;
+        match rest.chars().next() {
+            Some(' ') => {
+                rest = &rest[1..];
+                col += 1;
+                start = col;
+            }
+            // One column of the tab is the marker's space; the rest is indent.
+            Some('\t') => start = col + 1,
+            _ => {}
+        }
+    }
+    let ws = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    let end = rest[..ws].chars().fold(col, |c, ch| c + width(ch, c));
+    format!("{}{}", " ".repeat(end.saturating_sub(start)), &rest[ws..])
 }
 
 /// `markdown` with every relative image path, written against `source`'s
@@ -289,11 +353,15 @@ fn rebase_images(markdown: &str, source: &Path, to: Option<&Path>, md: &Markdown
     };
     let mut out = String::with_capacity(markdown.len());
     let mut carry = Carry::default();
+    let mut held = Held::default();
     for (i, raw) in markdown.split_inclusive('\n').enumerate() {
         let line = raw.trim_end_matches(['\n', '\r']);
         let (kind, next) = classify(line, &carry, i == 0, md.math);
         carry = next;
+        held = held.next(line, &kind, md.math);
         match kind {
+            // A fence inside a quote is code too.
+            _ if held.code => out.push_str(raw),
             BlockKind::FenceOpen(_)
             | BlockKind::FenceBody { .. }
             | BlockKind::FenceClose
@@ -598,6 +666,54 @@ mod tests {
 
     /// A picture inside a link's text — the README badge — is rebased like
     /// any other; the link's own address is left as written.
+    /// A quote's markers go as CommonMark reads them: one space or tab after
+    /// each `>` is the marker's, and a tab counts to the next tab stop.
+    #[test]
+    fn a_quote_line_loses_its_markers_and_one_space_each() {
+        for (line, depth, want) in [
+            ("> a", 1, "a"),
+            (">a", 1, "a"),
+            (">  a", 1, " a"),
+            (">\ta", 1, "  a"),
+            (">\t\ta", 1, "      a"),
+            ("> >\ta", 2, "a"),
+            ("> > >   a", 3, "  a"),
+            ("  > a", 1, "a"),
+            ("\t> \ta", 1, "  a"),
+            ("> > a", 1, "> a"),
+            (">", 1, ""),
+            (">\t", 1, "  "),
+        ] {
+            assert_eq!(quote_strip(line, depth), want, "{line:?} at {depth}");
+        }
+    }
+
+    /// A quoted fence's lines are code to every walker that skips code; the
+    /// quote ends it, and text after it is not code.
+    #[test]
+    fn a_fence_in_a_quote_is_code_until_the_quote_ends() {
+        let code = |doc: &str| -> Vec<bool> {
+            let md = MarkdownConfig::default();
+            let (mut carry, mut held) = (Carry::default(), Held::default());
+            doc.lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    let (kind, next) = classify(line, &carry, i == 0, md.math);
+                    carry = next;
+                    held = held.next(line, &kind, md.math);
+                    held.code
+                })
+                .collect()
+        };
+        assert_eq!(code("> ```\n> a\n>\n> ```\n> b\n"), [true, true, true, true, false]);
+        assert_eq!(code("> ```\n> a\nb\n> c\n"), [true, true, false, false]);
+        assert_eq!(code("> ```\n> a\n\n> b\n"), [true, true, false, false]);
+        // Deeper markers inside the fence are its code; fewer end it.
+        assert_eq!(code("> ~~~\n> > a\n> ~~~\n"), [true, true, true]);
+        assert_eq!(code("> > ```\n> a\n"), [true, false]);
+        assert_eq!(code("```\n> a\n```\n> b\n"), [false, false, false, false]);
+    }
+
     #[test]
     fn a_badge_in_a_link_is_rebased() {
         let md = MarkdownConfig::default();
@@ -872,7 +988,7 @@ mod tests {
             &src,
             "# A\n\n![pic](img/p.png) and **![t](<my pic (1).png> \"A \\\"title\\\"\")**\n\n\
              ![web](https://x.y/p.png) ![abs](/abs/p.png) `![code](img/p.png)`\n\n\
-             ```\n![fenced](img/p.png)\n```\n",
+             ```\n![fenced](img/p.png)\n```\n\n> ```\n> ![quoted](img/p.png)\n> ```\n",
         )
         .unwrap();
         src
@@ -928,6 +1044,7 @@ mod tests {
         assert!(got.contains("![web](https://x.y/p.png) ![abs](/abs/p.png)"), "addresses stay: {got}");
         assert!(got.contains("`![code](img/p.png)`"), "code is text: {got}");
         assert!(got.contains("\n![fenced](img/p.png)\n"), "so is a fence: {got}");
+        assert!(got.contains("\n> ![quoted](img/p.png)\n"), "and a fence in a quote: {got}");
         // Every rewritten path names a real file from the export's folder.
         for rel in ["../../notes/img/p.png", "../../notes/my pic (1).png"] {
             assert!(d.join("out/deeper").join(rel).is_file(), "{rel}");

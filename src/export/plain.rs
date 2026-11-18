@@ -51,7 +51,17 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
 
     for (i, (line, kind)) in lines.iter().enumerate() {
         let before = std::mem::take(&mut held);
-        held = before.next(line, &as_prose(kind), md.math);
+        let (next, quoted) = before.step(line, &as_prose(kind), md.math);
+        held = next;
+        // A fence in a quote is code in it: its delimiters go and its code is
+        // indented inside the quote's marks, as a fence is outside one.
+        if let Some(q) = quoted.filter(|_| held.code) {
+            if let BlockKind::FenceBody { .. } = q.kind {
+                let prefix = "> ".repeat(q.depth as usize);
+                out.push(format!("{prefix}    {}", q.body).trim_end().to_string());
+            }
+            continue;
+        }
 
         match kind {
             // The fence delimiters go; the code between them is indented, which
@@ -111,9 +121,10 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
             }
             BlockKind::Rule => out.push("-".repeat(40)),
             BlockKind::Quote(depth) => {
-                let body = line.trim_start().trim_start_matches(['>', ' ']);
-                let prefix = "> ".repeat((*depth as usize).max(1));
-                out.push(format!("{prefix}{}", strip_inline(body, md)));
+                let depth = (*depth).max(1);
+                let body = super::quote_strip(line, depth);
+                let prefix = "> ".repeat(depth as usize);
+                out.push(format!("{prefix}{}", strip_inline(body.trim_start(), md)));
             }
             BlockKind::ListItem { marker, checked, depth } => {
                 let indent = " ".repeat(*depth as usize);
@@ -260,6 +271,15 @@ fn strip_in(line: &str, md: &MarkdownConfig, in_link: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fence in a quote is code: its delimiters go and its lines are
+    /// indented inside the quote's marks, untouched; the quote ends it.
+    #[test]
+    fn a_fence_in_a_quote_is_indented_code() {
+        let md = MarkdownConfig::default();
+        let doc = "> a\n> ```py\n> x = *1*\n>\n> ```\n> b\n\n> > ~~~\n> > > y\n> c\n";
+        assert_eq!(render(doc, 60, false, &md), "> a\n>     x = *1*\n>\n> b\n\n> >     > y\n> c\n");
+    }
 
     /// A picture's alt text is plain, and a badge in a link names its picture.
     #[test]
