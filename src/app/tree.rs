@@ -307,7 +307,7 @@ impl App {
         match Buffer::open(path.clone(), &self.config.markdown.plain_text_extensions) {
             Ok(mut buffer) => {
                 buffer.read_only = self.view;
-                self.docs.push(BufferState::new(buffer, self.config.markdown.math));
+                self.docs.push(BufferState::new(buffer, self.config.markdown.math, self.config.editor.tab_width));
                 self.switch_to(self.docs.len() - 1);
                 self.notify(format!("opened {}", self.shown(&path)), FlashKind::Info);
                 true

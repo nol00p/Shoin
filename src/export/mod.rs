@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::config::schema::{MarkdownConfig, TranscludeConfig};
-use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry, Open};
+use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry, Open, COMMONMARK_TAB};
 use crate::render::markdown::inline::Inline;
 use crate::transclude::same_file;
 
@@ -142,7 +142,7 @@ fn linked_pictures(markdown: &str, base: &Path, md: &MarkdownConfig) -> Vec<Path
     let mut carry = Carry::default();
     let mut held = Held::default();
     for (i, line) in markdown.lines().enumerate() {
-        let (kind, next) = classify(line, &carry, i == 0, md.math);
+        let (kind, next) = classify(line, &carry, i == 0, md.math, COMMONMARK_TAB);
         carry = next;
         held = held.next(line, &kind, md.math);
         if !held.code && !matches!(
@@ -246,7 +246,7 @@ impl Held {
                     false => Carry::default(),
                 };
                 let body = quote_strip(line, depth);
-                let (k, inner) = classify(&body, &inner, false, math);
+                let (k, inner) = classify(&body, &inner, false, math, COMMONMARK_TAB);
                 // A quoted list item, heading, fence, rule or table row keeps
                 // its own line; only quoted text runs on into the next.
                 let prose = k == BlockKind::Paragraph && !has_cell_separator(&body);
@@ -356,7 +356,7 @@ fn rebase_images(markdown: &str, source: &Path, to: Option<&Path>, md: &Markdown
     let mut held = Held::default();
     for (i, raw) in markdown.split_inclusive('\n').enumerate() {
         let line = raw.trim_end_matches(['\n', '\r']);
-        let (kind, next) = classify(line, &carry, i == 0, md.math);
+        let (kind, next) = classify(line, &carry, i == 0, md.math, COMMONMARK_TAB);
         carry = next;
         held = held.next(line, &kind, md.math);
         match kind {
@@ -698,7 +698,7 @@ mod tests {
             doc.lines()
                 .enumerate()
                 .map(|(i, line)| {
-                    let (kind, next) = classify(line, &carry, i == 0, md.math);
+                    let (kind, next) = classify(line, &carry, i == 0, md.math, COMMONMARK_TAB);
                     carry = next;
                     held = held.next(line, &kind, md.math);
                     held.code

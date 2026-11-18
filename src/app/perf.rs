@@ -23,7 +23,7 @@ fn app_with(text: &str) -> App {
     app.buffer.insert_str(Cursor::new(0, 0), text);
     app.buffer.cursor = Cursor::new(0, 0);
     app.buffer.history = Default::default();
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 

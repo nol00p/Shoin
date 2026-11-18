@@ -9,7 +9,7 @@
 //! by being underlined the way plain-text documents have always done it.
 
 use crate::config::schema::MarkdownConfig;
-use crate::render::markdown::block::{classify, BlockKind, Carry, Marker};
+use crate::render::markdown::block::{classify, BlockKind, Carry, Marker, COMMONMARK_TAB};
 use crate::render::markdown::inline;
 
 /// Convert a Markdown document to plain text.
@@ -36,7 +36,7 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
         .lines()
         .enumerate()
         .map(|(i, line)| {
-            let (kind, next) = classify(line, &carry, i == 0, md.math);
+            let (kind, next) = classify(line, &carry, i == 0, md.math, COMMONMARK_TAB);
             carry = next;
             (line, kind)
         })

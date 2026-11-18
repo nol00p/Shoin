@@ -2141,7 +2141,7 @@ mod tests {
         let mut app = App::new(Config::default(), None, None).unwrap();
         pin_theme(&mut app);
         app.buffer.insert_str(Cursor::new(0, 0), text);
-        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
         app
     }
 

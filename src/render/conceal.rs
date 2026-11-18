@@ -1126,7 +1126,7 @@ mod tests {
     /// then derive the map. `carry` sets the state entering the line, which is
     /// what tells a fence delimiter from a paragraph of backticks.
     fn map_in(line: &str, carry: &Carry) -> ConcealMap {
-        let (block, _) = classify(line, carry, false, true);
+        let (block, _) = classify(line, carry, false, true, 2);
         let cfg = MarkdownConfig { math: true, ..Default::default() };
         let spans = if block.allows_inline() {
             inline::scan_styled(line, &cfg)
@@ -1433,7 +1433,10 @@ mod tests {
     /// would shift the whole line, so tab-indented lines keep their whitespace.
     #[test]
     fn indent_guides_leave_tabs_alone() {
-        assert_eq!(shown("\t\t- tabbed"), "\t\t◦ tabbed");
+        // Two tabs are two levels (a tab is tab_width columns), so the bullet
+        // is the one `    - nested` wears.
+        assert_eq!(shown("\t\t- tabbed"), "\t\t• tabbed");
+        assert_eq!(shown("\t- tabbed"), "\t◦ tabbed");
     }
 
     #[test]

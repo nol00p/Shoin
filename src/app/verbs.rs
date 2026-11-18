@@ -246,7 +246,7 @@ impl App {
         self.buffer = buffer;
         // Built here, not by `refresh_blocks`: both buffers are at revision 0,
         // which it would take to mean nothing changed.
-        self.blocks = BlockCache::build(&self.buffer, self.config.markdown.math);
+        self.blocks = BlockCache::build(&self.buffer, self.config.markdown.math, self.config.editor.tab_width);
     }
 
     /// Turn zen mode on or off, remembering what it hid so leaving it restores

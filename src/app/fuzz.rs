@@ -29,7 +29,7 @@ fn app_with(text: &str) -> App {
     app.buffer.insert_str(Cursor::new(0, 0), text);
     app.buffer.cursor = Cursor::new(0, 0);
     app.buffer.history = Default::default();
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 
@@ -192,7 +192,7 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         app.quit = false;
         app.refresh_blocks();
         app.refresh_focus();
-        let fresh = BlockCache::build(&app.buffer, app.config.markdown.math);
+        let fresh = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
         if fresh.kinds != app.blocks.kinds || fresh.carry != app.blocks.carry {
             return Err(format!("step {step}: block cache differs from a rebuild\ntext: {:?}", text(&app)));
         }

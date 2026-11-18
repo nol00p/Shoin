@@ -162,16 +162,25 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   indent from the item's text, as GitHub does: under `10. ` a code block at
   column 4 is code, and one 4 or more columns past the text is plain text.
   One between the marker and the text, like a code block at column 3 under
-  `10.`, is still read as code. For this, a tab in the indent counts as one
-  column. HTML export keeps these blocks, and the text after them, in their
-  item.
+  `10.`, is still read as code. HTML export keeps these blocks, and the
+  text after them, in their item.
 - An item is its line, the lines that continue it (including an unindented
   "lazy" line right after it), and everything indented deeper below it, blank
   lines in between included. A blank line after an item is never part of it.
   An item is nested under the nearest less-indented item above it, the rule
   HTML export uses, so `- a` / `   - b` / `  - c` makes `b` and `c` both
   sub-items of `a`. A switch between `-` and `1.` at one depth starts a new
-  list. A tab counts as `tab_width` columns.
+  list.
+- A tab in an indent counts as `tab_width` columns wherever it sits, so
+  `\t  - b` is 6 columns in at the default 4. The list commands, the
+  bullets, the indent guides and which item a line or code block belongs
+  to all count it the same way, and change together when `tab_width` does
+  (`:set tab_width=N`, 1 to 16, or `:set ts=N`).
+  HTML and PDF export, like GitHub, always count a tab as 4 columns: with
+  another `tab_width`, a tab-indented list can nest differently there, and
+  `:fixlist` rewrites such tabs as spaces. At 4 they agree, except where
+  spaces come before a tab (` \t- b`), which GitHub counts to its tab stop
+  at 4 and Shoin as 5.
 - Shoin's operators and motions are checked against Vim's behaviour, down to
   edge cases such as `dw` on a line's last word, `cw` on a word's last
   character and `d}` stopping at a blank line. The [Changelog](../CHANGELOG.md)
