@@ -1513,7 +1513,7 @@ mod drawn {
         for sep in ["\u{85}", "\x0b", "\x0c", "\r", "\x07", "\x1b"] {
             let mut app = App::new(Config::default(), None, None).unwrap();
             app.buffer.insert_str(Cursor::new(0, 0), &format!("abc{sep}def\n"));
-            app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+            app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
             app.buffer.cursor = Cursor::new(0, 6); // on the `f`
             let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();
             t.draw(|f| crate::render::frame::render(f, &app)).unwrap();

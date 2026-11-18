@@ -22,7 +22,7 @@ use super::link::Link;
 use super::Mode;
 use crate::config::schema::TranscludeConfig;
 use crate::render::layout::{char_window, wrap_chars};
-use crate::render::markdown::block::{classify, BlockKind, Carry};
+use crate::render::markdown::block::{classify, BlockKind, Carry, COMMONMARK_TAB};
 
 /// A picture an embed reserved room for. The bytes ride along already
 /// base64-encoded, because the terminal wants them that way on every frame it
@@ -115,7 +115,7 @@ pub fn expand(
     // right — and a wrapped row has to fit between them.
     let inner = measure.saturating_sub(if cfg.border { 4 } else { 0 }).max(8);
     for (i, line) in body.lines().enumerate() {
-        let (kind, next) = classify(line, &carry, i == 0, math);
+        let (kind, next) = classify(line, &carry, i == 0, math, COMMONMARK_TAB);
         carry = next;
         // Wrapped here rather than at draw time: each wrapped row has to be a
         // row the cache can count, or the scroll arithmetic goes wrong.

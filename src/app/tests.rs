@@ -7,7 +7,7 @@ fn app_with(text: &str) -> App {
     let mut app = App::new(Config::default(), None, None).unwrap();
     app.buffer.insert_str(Cursor::new(0, 0), text);
     app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 
@@ -755,19 +755,19 @@ fn incremental_block_refresh_matches_full_build() {
     feed(&mut app, "jjI## ");
     esc(&mut app);
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 
     // Delete the fence opener — every following line's carry shifts.
     feed(&mut app, "jjdd");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
     assert_eq!(app.blocks.revision, app.buffer.revision);
 
     // Undo puts it back; undo bypasses `touch`, so it must mark its own
     // dirty line or the cache silently keeps the post-delete carries.
     app.buffer.undo();
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 }
 
 /// An edit that keeps the line count can change lines well below the
@@ -781,15 +781,15 @@ fn a_block_swap_below_the_top_refreshes_every_line_it_moved() {
     alt(&mut app, 'j');
     assert_eq!(text(&app), "intro\n\n9. j\n10. i\n    more\n");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 
     // The same through undo and redo, which edit the rope directly.
     feed(&mut app, "u");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
     app.buffer.redo();
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 
     // And an indent of several lines, which keeps the count too. The
     // setup's own edit is forgotten first, or the rescan would start at
@@ -798,7 +798,7 @@ fn a_block_swap_below_the_top_refreshes_every_line_it_moved() {
     app.refresh_blocks();
     feed(&mut app, "3jVj>");
     app.refresh_blocks();
-    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math).kinds);
+    assert_eq!(app.blocks.kinds, BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width).kinds);
 }
 
 /// `--zen` and `:zen` live on `App`, so a config reload cannot forget them,
@@ -2569,7 +2569,7 @@ fn fixlist_in_insert_is_one_step_and_keeps_the_session_grouped() {
     let mut app = App::new(cfg, None, None).unwrap();
     app.buffer.insert_str(Cursor::new(0, 0), &t);
     app.buffer.cursor = Cursor::new(9, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     feed(&mut app, "Axy");
     app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
     app.sync_after_input();
@@ -3457,7 +3457,7 @@ fn g_then_insert_on_a_file_with_a_trailing_newline_edits_the_last_line() {
         std::fs::write(&path, on_disk).unwrap();
         let mut app = App::new(Config::default(), None, None).unwrap();
         app.buffer = Buffer::open(path.clone(), &[]).unwrap();
-        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
 
         feed(&mut app, "G");
         assert_eq!(app.buffer.cursor.line, 1, "{on_disk:?}: `G` is on `two`");
@@ -4342,7 +4342,7 @@ fn app_with_keys(text: &str, bindings: &[(&str, &str)]) -> App {
     let mut app = App::new(cfg, None, None).unwrap();
     app.buffer.insert_str(Cursor::new(0, 0), text);
     app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math);
+    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 
