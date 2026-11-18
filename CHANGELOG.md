@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+**Editing**
+
+- Emphasis, `~~…~~` and `==…==` inside a link's text are styled and
+  concealed, and `gi` / `gb` strip them there (#122).
+- `gf` follows a link inside emphasis (`**see [docs](u)**`) instead of
+  doing nothing (#122).
+
+**Files**
+
+- `:w` on a file that is a link to a missing file creates that file
+  through the link and keeps the link, as vim does. A loop of links, or a
+  link into a missing folder, is an error (#123).
+- `:w` on a file that was missing when you opened it, and has been created
+  since, is refused; `:w!` overwrites it, as vim warns (#123).
+- `:w other.md` onto a broken link says it is a broken link; `:w!` creates
+  the file the link names and keeps the link (#123).
+
+**Saving and recovery**
+
+- Opening a file names any `.shoin-recover.partial-*` beside it that a
+  killed dump left, as cut off part way. It is never deleted, even by a
+  later process with the same pid; only a duplicate of a finished recovery
+  file is removed (#123).
+- A file name too long for the recovery endings gets a shortened recovery
+  name beside the file; recovery files 0.2.4 wrote under the full name are
+  still found (#123).
+
+**Export**
+
+- `> > a` then `> b` (or an unmarked `b`) stays one paragraph inside the
+  inner quote, as CommonMark reads it (#121).
+
 ## 0.2.4
 
 **Math**
