@@ -83,7 +83,7 @@ pub fn scan_styled(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     }
     let mut out = Vec::with_capacity(spans.len());
     for sp in spans {
-        let keep: Option<fn(Inline) -> bool> = match sp.kind {
+        let keep: Option<Keep> = match sp.kind {
             Inline::Link => Some(is_prose_wrap),
             kind if is_prose_wrap(kind) => Some(is_link_like),
             _ => None,
@@ -102,6 +102,9 @@ pub fn scan_styled(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     }
     out
 }
+
+/// Which kinds a span's body is read for in `scan_styled`.
+type Keep = fn(Inline) -> bool;
 
 /// Emphasis, `~~` and `==`: what wraps prose and is styled in a link's text.
 fn is_prose_wrap(kind: Inline) -> bool {
@@ -1877,7 +1880,7 @@ mod tests {
             // text (emphasis) or an emphasis (a link), one level deep, the
             // spans held there in order; the styled cover stays gap-free.
             let styled = scan_styled(&line, &md());
-            let mut holder: Option<(Range<usize>, fn(Inline) -> bool)> = None;
+            let mut holder: Option<(Range<usize>, Keep)> = None;
             let mut prev_end = 0;
             let mut held_end = 0;
             for s in &styled {
@@ -1889,8 +1892,8 @@ mod tests {
                 }
                 assert!(s.outer.start >= prev_end, "{line:?}");
                 holder = match s.kind {
-                    Inline::Link => Some((s.inner.clone(), is_prose_wrap as fn(Inline) -> bool)),
-                    kind if is_prose_wrap(kind) => Some((s.inner.clone(), is_link_like as fn(Inline) -> bool)),
+                    Inline::Link => Some((s.inner.clone(), is_prose_wrap as Keep)),
+                    kind if is_prose_wrap(kind) => Some((s.inner.clone(), is_link_like as Keep)),
                     _ => None,
                 };
                 prev_end = s.outer.end;
