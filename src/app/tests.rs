@@ -6415,3 +6415,18 @@ fn a_paste_on_the_command_line_takes_its_first_line() {
     assert_eq!(app.mode, Mode::Command("set mouse".into()));
     assert_eq!(text(&app), "ab\n");
 }
+
+#[test]
+fn a_recovery_notice_waits_while_a_message_is_up() {
+    let mut app = app_with("text\n");
+    app.flash = None;
+    assert!(app.can_show_notice());
+    // The default status, shown briefly, holds no message to replace.
+    app.touch_status();
+    assert!(app.can_show_notice());
+    app.notify("unsaved text from a crash: a.md.shoin-recover", FlashKind::Error);
+    assert!(!app.can_show_notice(), "a second notice would replace the first a pass later");
+    app.flash.as_mut().unwrap().expires_at = Instant::now();
+    assert!(app.expire_flash());
+    assert!(app.can_show_notice(), "its turn once the first has timed out");
+}

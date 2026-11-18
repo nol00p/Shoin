@@ -1025,7 +1025,8 @@ impl App {
             }
             // Keep the crash-recovery copy of the unsaved buffers current, and
             // say so when an open file has a recovery file beside it.
-            if let Some(text) = crate::recover::tick(self.docs.iter().map(|d| &d.buffer)) {
+            let can_show = self.can_show_notice();
+            if let Some(text) = crate::recover::tick(self.docs.iter().map(|d| &d.buffer), can_show) {
                 self.notify(text, FlashKind::Error);
                 self.needs_redraw = true;
             }
@@ -1309,6 +1310,13 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// Whether a recovery notice may take the message line: not while a
+    /// message is up, so a second notice does not replace the first a pass
+    /// (100 ms) later. It waits for that one to time out or be cleared.
+    fn can_show_notice(&self) -> bool {
+        self.flash.as_ref().is_none_or(|f| f.text.is_none())
     }
 
     fn notify(&mut self, text: impl Into<String>, kind: FlashKind) {
