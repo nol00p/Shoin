@@ -348,7 +348,9 @@ impl App {
     ///
     /// The deadline is re-armed BEFORE the write and whatever the write does, so
     /// a file that cannot be saved — one something else has touched — is
-    /// reported once every interval and not once every tick.
+    /// reported once every interval and not once every tick. A file made at
+    /// the path after the buffer opened it missing is reported once in all
+    /// (see `autosave_now`).
     pub(super) fn autosave_tick(&mut self) -> bool {
         match self.autosave_at {
             Some(due) if Instant::now() >= due => {}
@@ -385,6 +387,14 @@ impl App {
         let mut refused: Option<String> = None;
         let (current, typing) = (self.current(), self.mode.allows_past_end());
         for (i, doc) in self.docs.iter_mut().enumerate() {
+            // A file made at the path after this buffer opened it missing is
+            // refused until the reader decides (`:w!`, `:revert!`). That is said
+            // once per buffer, not every interval; once it is no longer so
+            // (the file gone, saved over, reloaded) the next one is news.
+            let created = doc.buffer.created_since_open();
+            if !created {
+                doc.buffer.created_reported = false;
+            }
             if !doc.buffer.modified || doc.buffer.path.is_none() {
                 continue;
             }
@@ -394,14 +404,18 @@ impl App {
             // interval. The status marker already says the file diverged, and
             // saying it again on a timer buries whatever else the line had.
             // (Only reachable with `autoreload` on — nothing else sets this.)
-            if doc.buffer.conflict {
+            if doc.buffer.conflict || (created && doc.buffer.created_reported) {
                 continue;
             }
             match doc.buffer.save(policy, false) {
                 Ok(()) => written.push(doc.buffer.display_name()),
                 // The FIRST refusal: one line of status, and the rest of the
-                // documents still get their turn.
-                Err(e) if refused.is_none() => refused = Some(e.to_string()),
+                // documents still get their turn. A created-after refusal
+                // counts as said only when it is the one on the line.
+                Err(e) if refused.is_none() => {
+                    refused = Some(e.to_string());
+                    doc.buffer.created_reported = created;
+                }
                 Err(_) => {}
             }
         }
