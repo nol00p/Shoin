@@ -6430,3 +6430,188 @@ fn a_recovery_notice_waits_while_a_message_is_up() {
     assert!(app.expire_flash());
     assert!(app.can_show_notice(), "its turn once the first has timed out");
 }
+
+// ------------------------------------------- autosave: created after opening
+
+/// A scratch folder with nothing in it, for files that do not exist yet.
+fn empty_dir(tag: &str) -> std::path::PathBuf {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let d = std::env::temp_dir().join(format!("shoin-created-{tag}-{t}"));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// An app on `path`, which does not exist, holding the unsaved text "mine".
+fn app_on_missing(path: &std::path::Path) -> App {
+    let mut app = app_with("");
+    app.open_file(path.to_path_buf());
+    assert!(app.buffer.was_missing);
+    feed(&mut app, "imine");
+    esc(&mut app);
+    assert!(app.buffer.modified);
+    app
+}
+
+/// A file someone else made after the buffer opened it missing: autosave
+/// names the refusal once, then stays quiet every interval after, while
+/// `:w` still says it each time. The file is never touched.
+#[test]
+fn autosave_names_a_file_created_after_opening_it_once() {
+    let d = empty_dir("once");
+    let path = d.join("x.md");
+    let mut app = app_on_missing(&path);
+    std::fs::write(&path, "theirs\n").unwrap();
+
+    autosave_due(&mut app);
+    assert!(app.autosave_tick(), "the first refusal is said");
+    let msg = flash_text(&app);
+    assert_eq!(msg, "autosave: x.md was created after you opened it — :w! to overwrite");
+
+    for _ in 0..3 {
+        app.flash = None;
+        autosave_due(&mut app);
+        assert!(!app.autosave_tick(), "not again on the next interval");
+        assert_eq!(flash_text(&app), "");
+        assert!(app.autosave_at.is_some(), "still armed");
+    }
+
+    // `:w` is the reader asking: it answers every time.
+    for _ in 0..2 {
+        app.flash = None;
+        cmd(&mut app, ":w");
+        assert!(flash_text(&app).contains("x.md was created after you opened it"), "got: {}", flash_text(&app));
+    }
+    app.flash = None;
+    autosave_due(&mut app);
+    assert!(!app.autosave_tick(), "and :w does not make autosave say it again");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
+    assert!(app.buffer.modified);
+
+    // `:w!` settles it: the file is ours, and autosave writes as usual.
+    cmd(&mut app, ":w!");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine\n");
+    feed(&mut app, "A more");
+    esc(&mut app);
+    app.flash = None;
+    autosave_due(&mut app);
+    assert!(app.autosave_tick());
+    assert_eq!(flash_text(&app), "autosaved x.md");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine more\n");
+    assert!(!app.buffer.created_reported);
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// The file goes away again: the next autosave writes it, as nothing is
+/// in the way any more.
+#[test]
+fn autosave_writes_once_the_created_file_is_gone_again() {
+    let d = empty_dir("gone");
+    let path = d.join("x.md");
+    let mut app = app_on_missing(&path);
+    std::fs::write(&path, "theirs\n").unwrap();
+    autosave_due(&mut app);
+    assert!(app.autosave_tick());
+    assert!(app.buffer.created_reported);
+
+    std::fs::remove_file(&path).unwrap();
+    app.flash = None;
+    autosave_due(&mut app);
+    assert!(app.autosave_tick());
+    assert_eq!(flash_text(&app), "autosaved x.md");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine\n");
+    assert!(!app.buffer.created_reported);
+    assert!(!app.buffer.was_missing);
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// Gone while the buffer had nothing to save, then made again: that is a
+/// new file, and autosave names it again once.
+#[test]
+fn autosave_names_a_file_made_again_after_it_went_away() {
+    let d = empty_dir("again");
+    let path = d.join("x.md");
+    let mut app = app_on_missing(&path);
+    std::fs::write(&path, "theirs\n").unwrap();
+    autosave_due(&mut app);
+    assert!(app.autosave_tick());
+
+    // Undone to unmodified, so the tick with the file gone writes nothing.
+    feed(&mut app, "u");
+    assert!(!app.buffer.modified);
+    std::fs::remove_file(&path).unwrap();
+    app.flash = None;
+    autosave_due(&mut app);
+    assert!(!app.autosave_tick(), "nothing to save");
+    assert!(!app.buffer.created_reported, "but the situation changed");
+
+    feed(&mut app, "iagain");
+    esc(&mut app);
+    std::fs::write(&path, "theirs, again\n").unwrap();
+    autosave_due(&mut app);
+    assert!(app.autosave_tick(), "named again");
+    assert!(flash_text(&app).contains("x.md was created after you opened it"), "got: {}", flash_text(&app));
+    app.flash = None;
+    autosave_due(&mut app);
+    assert!(!app.autosave_tick(), "and once only");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs, again\n");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// Two such buffers: the line names the first. The second has not been
+/// said, so the next interval names it, and after that both are quiet.
+#[test]
+fn autosave_names_each_created_file_once() {
+    let d = empty_dir("two");
+    let (a, b) = (d.join("a.md"), d.join("b.md"));
+    let mut app = app_on_missing(&a);
+    app.open_file(b.clone());
+    feed(&mut app, "imine");
+    esc(&mut app);
+    std::fs::write(&a, "theirs\n").unwrap();
+    std::fs::write(&b, "theirs\n").unwrap();
+
+    let mut said = Vec::new();
+    for _ in 0..2 {
+        app.flash = None;
+        autosave_due(&mut app);
+        assert!(app.autosave_tick());
+        said.push(flash_text(&app));
+    }
+    said.sort();
+    assert!(said[0].contains("a.md was created after you opened it"), "got: {said:?}");
+    assert!(said[1].contains("b.md was created after you opened it"), "got: {said:?}");
+    app.flash = None;
+    autosave_due(&mut app);
+    assert!(!app.autosave_tick(), "both said");
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "theirs\n");
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "theirs\n");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// A reload (`:revert!`) takes the file and clears it; an edit after that is
+/// written by autosave like any other.
+#[test]
+fn autosave_writes_after_a_reload_of_the_created_file() {
+    let d = empty_dir("reload");
+    let path = d.join("x.md");
+    let mut app = app_on_missing(&path);
+    std::fs::write(&path, "theirs\n").unwrap();
+    autosave_due(&mut app);
+    assert!(app.autosave_tick());
+
+    cmd(&mut app, ":revert!");
+    assert_eq!(text(&app), "theirs\n");
+    assert!(!app.buffer.was_missing);
+    feed(&mut app, "A too");
+    esc(&mut app);
+    app.flash = None;
+    autosave_due(&mut app);
+    assert!(app.autosave_tick());
+    assert_eq!(flash_text(&app), "autosaved x.md");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs too\n");
+    assert!(!app.buffer.created_reported);
+    std::fs::remove_dir_all(&d).ok();
+}
