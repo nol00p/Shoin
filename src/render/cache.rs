@@ -501,7 +501,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     };
 
     let inline = if block.allows_inline() {
-        markdown::inline::scan(&source, &cfg.markdown)
+        markdown::inline::scan_styled(&source, &cfg.markdown)
     } else {
         Vec::new()
     };
@@ -625,6 +625,19 @@ mod tests {
         (0..200)
             .map(|i| format!("line {i} with some **bold** text\n"))
             .collect()
+    }
+
+    /// The cache styles and conceals emphasis in a link's text.
+    #[test]
+    fn emphasis_in_a_links_text_is_styled_and_concealed() {
+        let mut app = app_with("[**bold** text](u)\n");
+        sync(&mut app);
+        let cache = app.cache.borrow();
+        let entry = cache.entry(0).unwrap();
+        let b = entry.styled.iter().find(|s| s.range.contains(&3)).unwrap();
+        assert!(b.style.attrs.bold, "bold in the link: {:?}", entry.styled);
+        assert_eq!(b.style.attrs.underline, app.theme.link_underline);
+        assert_eq!(entry.cmap.display_text(&entry.source), "bold text");
     }
 
     /// A second frame with nothing changed parses nothing.

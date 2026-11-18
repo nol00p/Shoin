@@ -4084,9 +4084,10 @@ impl App {
     /// The emphasis spans the renderer styles on the line `[start, end)` sits
     /// on, as char indexes into the rope.
     ///
-    /// The renderer styles the TOP-LEVEL spans of a line only (`inline::scan`
-    /// then `to_styled`): `_word_` inside `**…**`, a link label or `==…==`
-    /// shows its underscores, so it is not emphasis here either. `None` where
+    /// The renderer styles the top-level spans of a line and, inside a link's
+    /// text, one level more (`inline::scan_styled` then `to_styled`):
+    /// `_word_` inside `**…**` or `==…==` shows its underscores, so it is not
+    /// emphasis here either, while `[_word_](u)` is. `None` where
     /// it styles nothing (`allows_inline`, with the same `[markdown] tables`
     /// override as `render::cache::build`) or the range crosses a line.
     fn emphasis_spans(&mut self, start: usize, end: usize) -> Option<Vec<EmphasisSpan>> {
@@ -4105,7 +4106,7 @@ impl App {
             return None;
         }
         let base = rope.line_to_char(line);
-        let spans = inline::scan(&self.buffer.line_text(line), &self.config.markdown)
+        let spans = inline::scan_styled(&self.buffer.line_text(line), &self.config.markdown)
             .into_iter()
             .filter(|s| matches!(s.kind, Inline::Italic | Inline::Bold | Inline::BoldItalic))
             .map(|s| EmphasisSpan {
@@ -7146,6 +7147,18 @@ mod tests {
         cursor_on(&mut app, 0, "sub/other.md");
         feed(&mut app, "gf");
         assert_eq!(shown(&app), "other.md");
+    }
+
+    /// A link inside emphasis is the one followed: the scan draws the
+    /// emphasis as one span, and `gf` reads it again for the link.
+    #[test]
+    fn gf_follows_a_link_inside_emphasis() {
+        for line in ["**see [the notes](sub/other.md)**\n", "_a ==b [the notes](sub/other.md)== c_\n"] {
+            let (_d, mut app) = vault(line, &[("sub/other.md", "# Other\n")]);
+            cursor_on(&mut app, 0, "notes");
+            feed(&mut app, "gf");
+            assert_eq!(shown(&app), "other.md", "{line:?}");
+        }
     }
 
     /// `gf` never launches anything. A URL is reported, and `gx` is named —
@@ -10638,11 +10651,11 @@ mod tests {
         text(&app)
     }
 
-    /// The renderer styles only the OUTER span of a line: `_word_` inside
-    /// `**…**` shows its underscores, so it is bold text, not italic. The
-    /// toggles follow that: they strip the outer span when it has the
-    /// emphasis, and otherwise lengthen its runs to three, the one
-    /// bold-and-italic the renderer draws.
+    /// The renderer styles only the OUTER span of a line, and inside a link's
+    /// text one level more: `_word_` inside `**…**` shows its underscores, so
+    /// it is bold text, not italic. The toggles follow that: they strip the
+    /// outer span when it has the emphasis, and otherwise lengthen its runs
+    /// to three, the one bold-and-italic the renderer draws.
     #[test]
     fn gi_and_gb_act_on_the_span_the_renderer_styles() {
         let cases = [
@@ -10657,8 +10670,16 @@ mod tests {
             ("gb", "_word_\n", "___word___\n"),
             ("gi", "***word***\n", "**word**\n"),
             ("gb", "___word___\n", "_word_\n"),
-            // A link label is styled as a link, its underscores shown.
-            ("gi", "[_word_](u)\n", "[*_word_*](u)\n"),
+            // Emphasis in a link's text is styled, so it is stripped there
+            // too, or lengthened.
+            ("gi", "[_word_](u)\n", "[word](u)\n"),
+            ("gb", "[see __word__ now](u)\n", "[see word now](u)\n"),
+            ("gb", "[**word** x](u)\n", "[word x](u)\n"),
+            ("gi", "[**word** x](u)\n", "[***word*** x](u)\n"),
+            ("gi", "[***word***](u)\n", "[**word**](u)\n"),
+            // Emphasis holding the link is the span drawn; the link's own
+            // underscores show, as anything inside emphasis does.
+            ("gi", "**[_word_](u)**\n", "***[_word_](u)***\n"),
         ];
         for (keys, before, after) in cases {
             assert_eq!(toggled(keys, before), after, "{keys} on {before:?}");
@@ -10712,6 +10733,9 @@ mod tests {
             ("gb", "_a_ b\n", (0, 4), "**_a_ b**\n"),
             ("gi", "a **word** b\n", (2, 9), "a ***word*** b\n"),
             ("gb", "a _word_ b\n", (2, 7), "a ___word___ b\n"),
+            // In a link's text, as outside one.
+            ("gi", "[a _word_ b](u)\n", (3, 8), "[a word b](u)\n"),
+            ("gb", "[a **word** b](u)\n", (5, 8), "[a word b](u)\n"),
         ];
         for (keys, before, (lo, hi), after) in cases {
             let mut app = app_with(before);

@@ -1129,7 +1129,7 @@ mod tests {
         let (block, _) = classify(line, carry, false, true);
         let cfg = MarkdownConfig { math: true, ..Default::default() };
         let spans = if block.allows_inline() {
-            inline::scan(line, &cfg)
+            inline::scan_styled(line, &cfg)
         } else {
             Vec::new()
         };
@@ -1174,6 +1174,14 @@ mod tests {
         assert_eq!(shown("a [[Wiki]] b"), "a Wiki b");
         assert_eq!(shown("tag #foo bar"), "tag foo bar");
         assert_eq!(shown(r"an escaped \* star"), "an escaped * star");
+    }
+
+    /// Emphasis, `~~` and `==` in a link's text hide their markers too.
+    #[test]
+    fn markers_in_a_links_text_vanish() {
+        assert_eq!(shown("a [**see** ~~old~~ ==new== _x_](u) b"), "a see old new x b");
+        // Emphasis holding a link is one span: the link shows as written.
+        assert_eq!(shown("**see [docs](u)**"), "see [docs](u)");
     }
 
     #[test]
