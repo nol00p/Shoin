@@ -33,6 +33,9 @@ pub struct Picture {
     pub rows: u16,
     /// Ready to hand to `image::draw`, or empty for a format no protocol takes.
     pub payload: Vec<u8>,
+    /// `image::kitty_id` of the payload, hashed once here rather than on
+    /// every frame.
+    pub id: u32,
 }
 
 /// One screen row of an expanded embed.
@@ -165,6 +168,7 @@ fn picture(path: &Path, label: String, cfg: &TranscludeConfig, measure: u16) -> 
     let mut out = vec![Row::Image(Picture {
         cols,
         rows,
+        id: crate::image::kitty_id(&bytes),
         // A format no protocol accepts still gets its box and its caption —
         // it just never gets pixels, so there is nothing to send.
         payload: if info.sendable { bytes } else { Vec::new() },
