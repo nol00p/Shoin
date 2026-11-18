@@ -30,7 +30,7 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 |---|---|
 | `:u` `:un` `:und` `:undo` | undo, like `u` |
 | `:red` `:redo` | redo, like `Ctrl-r` |
-| `:fixlist` | re-indent the list under the cursor so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
+| `:fixlist` | re-indent the list under the cursor, or every list a Visual selection touches, so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
 
 ## Buffers and panes
 

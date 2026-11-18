@@ -28,7 +28,9 @@ impl App {
             Some(BlockKind::ListItem { marker, checked, .. }) => {
                 Some(list_continuation(&line, *marker, *checked))
             }
-            Some(BlockKind::Quote(_)) => quote_continuation(&line),
+            Some(BlockKind::Quote(_)) => {
+                self.quote_list_continuation(at.line).or_else(|| quote_continuation(&line))
+            }
             _ => None,
         };
 
@@ -45,13 +47,21 @@ impl App {
         if line.chars().skip(prefix.chars().count()).all(char::is_whitespace)
             && at.col >= prefix.chars().count()
         {
+            // In a quote, the list ends and the quote goes on: the item's
+            // line keeps its markers, and so does the new one.
+            let quote = match &block {
+                Some(BlockKind::Quote(_)) => quote_continuation(&line).filter(|q| *q != prefix),
+                _ => None,
+            };
+            let keep = quote.as_deref().map_or("", str::trim_end);
             let start = self.buffer.char_index(Cursor::new(at.line, 0));
             let end = self.buffer.char_index(Cursor::new(at.line, line.chars().count()));
             self.buffer.delete_chars(start, end);
-            self.buffer.cursor = Cursor::new(at.line, 0);
-            let at = self.buffer.cursor;
-            if self.buffer.insert_str(at, "\n") {
-                self.buffer.cursor = Cursor::new(at.line + 1, 0);
+            self.buffer.insert_str(Cursor::new(at.line, 0), keep);
+            let at = Cursor::new(at.line, keep.chars().count());
+            let next = quote.unwrap_or_default();
+            if self.buffer.insert_str(at, &format!("\n{next}")) {
+                self.buffer.cursor = Cursor::new(at.line + 1, next.chars().count());
             }
             return;
         }

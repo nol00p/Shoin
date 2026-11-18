@@ -23,15 +23,6 @@
 - `.` after an operator on a selection made with the mouse repeats over
   as much text from the cursor, as vim does. `3.` and `.` in Visual no
   longer leave their own keys in the change (#136).
-- A selection never covers the file's final newline: a drag that starts
-  or ends on the empty line after it stops at the last character, so
-  `gb`, `gl`, `d` and `y` act on the text only (#139).
-- A click into another pane while in Insert mode ends the insert there,
-  as `Esc` would, and starts a new one in the pane clicked into: `u` in
-  each pane takes back that pane's typing only, and `.` repeats the last
-  insert (#139).
-- `j` and `k` keep the screen column across tabs and wide characters, as
-  in vim (#140).
 
 **Lists**
 
@@ -41,15 +32,6 @@
   A code block 2 columns in under `\t- a` was shown in the item and moved
   as outside it. `\t\t- x` gets its indent guides. Changing `tab_width`
   reclassifies open documents at once (#135).
-- `:set tab_width` (`:ts`) sets it from 1 to 16 and reclassifies at
-  once; `:set tab_width` alone shows it (#135). A value outside 1–16 in
-  the config file is reported on startup (#140).
-- A tab is drawn as `tab_width` blank cells wherever it is in a line,
-  code blocks included; it took no room. Wrapping, the cursor, clicks,
-  selection, indent guides and the embed preview count it the same way,
-  so a tab-indented list shows as deep as it nests (#140).
-- A wrapped line of a nested list item hung short of its text when indent
-  guides were drawn (#140).
 
 **Files**
 
@@ -94,10 +76,6 @@
   after `:e` `:w` `:saveas` `:wq`, an option after `:set` and a topic
   after `:help`, cycling through the matches as vim does; the hint bar
   lists them (#133).
-- `Tab` also completes values: a `:set` option's values after `=` or a
-  blank, the arguments of `:focus`, `:align`, `:embed`, `:number` and
-  `:export` (with `justify`), and open buffers after `:b` (#138).
-- `:b <name>` prefers a buffer whose whole name matches (#138).
 
 **Help**
 
@@ -106,9 +84,6 @@
   toggles instead (#132).
 - In read-only view the hint bar reads `i edit` and `<leader> v toggle`,
   not `edit` twice (#132).
-- After the leader, `g`, `Ctrl-w` or an operator, the hint bar shows over
-  the status line, so the Visual leader hints (`b bold`, `i italic`) show
-  right after `v` (#138).
 
 ## 0.2.4
 

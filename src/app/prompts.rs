@@ -19,10 +19,12 @@ impl App {
             FieldKey::Cancel => {
                 self.mode = Mode::Normal;
                 self.flash = None;
+                self.command_selection = None;
             }
             FieldKey::Submit => {
                 self.mode = Mode::Normal;
                 self.run_command(&buf);
+                self.command_selection = None;
             }
             FieldKey::Stay => self.mode = Mode::Command(buf),
         }
