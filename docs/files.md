@@ -168,6 +168,12 @@ version and then the file's, in the order shown on screen.
   state folder) and given its name when complete: if Shoin is killed during
   the write, the `.partial` file is all that is left, never a recovery file
   that is missing its end.
+- A `.partial` file left beside a file is named, as cut off part way, when
+  you open that file. One in the state folder belongs to no file, so Shoin
+  names it with its folder once per session, after any notice about the
+  files you opened. Nothing deletes a `.partial` file that may hold the only
+  copy of your text. In a folder you can write to but not list, a `.partial`
+  file is not found.
 - Only a newline ends a line. A form feed, a lone `\r` or a Unicode line
   separator (U+2028) stays inside its line and is saved as it was. A form
   feed, a lone `\r` and other control characters show as nothing on screen.
