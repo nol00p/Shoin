@@ -365,7 +365,9 @@ impl App {
             last = self.idx_to_cursor(end - 1);
         }
         if matches!(op, Operator::Indent | Operator::Outdent) && matches!(obj, 'l' | 'L') {
-            return self.shift_list(op == Operator::Outdent, obj == 'L', first.line, last.line);
+            // `iL` shifts its items as `al` shifts one: they nest under the
+            // item before them, or leave their parent.
+            return self.shift_list(op == Operator::Outdent, obj == 'L' && around, first.line, last.line);
         }
         if linewise {
             self.operate_linewise(op, first.line, last.line);
@@ -378,6 +380,11 @@ impl App {
     fn object_bounds(&mut self, obj: char, around: bool) -> Option<(Cursor, Cursor, bool)> {
         // The list objects read line kinds, which must describe this text.
         self.refresh_blocks();
+        if matches!(obj, 'l' | 'L') {
+            if let Some(found) = self.quote_list_object(obj, around) {
+                return found;
+            }
+        }
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
         let range = object::resolve(&self.buffer, &lists, obj, around)?;
         if range.end <= range.start {

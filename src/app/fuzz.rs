@@ -66,6 +66,7 @@ const DOCS: &[&str] = &[
     "日本語のテキスト、全角。🙂 emoji 👨‍👩‍👧 family\n\tTabbed\tline\n    - indented item\nA very long line that goes on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on.\n",
     "---\ntitle: fm\n---\n# After front matter\n![[missing-note]]\n![[missing.png]]\n![alt](nothing.png)\n\n1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. j\n    ```\n    code in ten\n    ```\n    - sub\n\n$$ unclosed\n\n``` unclosed fence\nstill code\n",
     "| only | header |\n| - | - |\n\n|x|\n|-|\n|\\||\n\n> - quoted list\n> > nested quote\n\n-\n- \n1.\n* * *\n   ***\n#\n## \n###### six\n####### seven\n",
+    "> ---\n> - a\n>   - a1\n>\t- b\n>- c\n> 1. x\n> 2. y\n> > - deeper\n>\n> 10. j\n>    - k\nlazy\n\n- out\n  > - in an item\n",
     "a\u{2028}b\u{c}c\rd\n\u{feff}bom\n\u{200b}zero width\u{301}combining\n",
 ];
 

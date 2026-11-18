@@ -2780,6 +2780,261 @@ fn fixlist_is_refused_read_only_and_works_on_a_key() {
     assert_eq!(text(&app), t);
 }
 
+// ------------------------------------------------- lists inside a blockquote
+
+fn hit(app: &mut App, code: KeyCode) {
+    app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    app.sync_after_input();
+}
+
+#[test]
+fn a_list_in_a_quote_indents_and_outdents_behind_its_markers() {
+    let t = "> - a\n> - b\n> > - c\n";
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(1, 4);
+    // Nothing nests yet, so the step is `tab_width`.
+    feed(&mut app, ">al");
+    assert_eq!(text(&app), "> - a\n>     - b\n> > - c\n");
+    assert_eq!(app.buffer.cursor, Cursor::new(1, 8), "on the same character");
+    feed(&mut app, "<al");
+    assert_eq!(text(&app), t);
+    feed(&mut app, "u");
+    assert_eq!(text(&app), "> - a\n>     - b\n> > - c\n", "one undo step each");
+    // The first item has nothing to nest under, inside the quote as out.
+    let mut app = app_with(t);
+    feed(&mut app, ">al");
+    assert_eq!(text(&app), t);
+    assert_eq!(flash_text(&app), "nothing to indent under");
+    // A deeper quote is a list of its own.
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(2, 5);
+    feed(&mut app, ">al");
+    assert_eq!(flash_text(&app), "nothing to indent under");
+    // A quote line in no list is left alone, as a paragraph is.
+    let mut app = app_with("> text\n");
+    feed(&mut app, ">al");
+    assert_eq!(text(&app), "> text\n");
+}
+
+#[test]
+fn alt_j_in_a_quote_moves_items_and_leaves_the_markers() {
+    let t = "> - a\n>   - a1\n>- b\n> - c\n";
+    let mut app = app_with(t);
+    alt(&mut app, 'j');
+    // Each line keeps the markers it had; the text moves.
+    assert_eq!(text(&app), "> - b\n> - a\n>   - a1\n> - c\n");
+    assert_eq!(app.buffer.cursor, Cursor::new(1, 2));
+    alt(&mut app, 'j');
+    assert_eq!(text(&app), "> - b\n> - c\n> - a\n>   - a1\n");
+    alt(&mut app, 'j');
+    assert_eq!(flash_text(&app), "last item", "the quote ends the list");
+    feed(&mut app, "u");
+    assert_eq!(text(&app), "> - b\n> - a\n>   - a1\n> - c\n");
+}
+
+#[test]
+fn a_quote_ending_mid_list_ends_the_list() {
+    let t = "> - a\n> - b\n- c\n";
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(1, 2);
+    alt(&mut app, 'j');
+    assert_eq!(flash_text(&app), "last item");
+    assert_eq!(text(&app), t);
+    feed(&mut app, "dal");
+    assert_eq!(text(&app), "> - a\n- c\n");
+    // Lines with more markers are another container.
+    let mut app = app_with("> - a\n> > - b\n> - c\n");
+    alt(&mut app, 'j');
+    assert_eq!(flash_text(&app), "last item");
+}
+
+#[test]
+fn a_visual_move_in_a_quote_must_stay_in_it() {
+    let t = "> - a\n> - b\n\n- c\n";
+    let mut app = app_with(t);
+    feed(&mut app, "Vj");
+    alt(&mut app, 'j');
+    assert_eq!(flash_text(&app), "last item");
+    let mut app = app_with(t);
+    feed(&mut app, "Vjjj");
+    alt(&mut app, 'j');
+    assert_eq!(flash_text(&app), "selection leaves the quote");
+    assert_eq!(text(&app), t);
+    let mut app = app_with("> - a\n> - b\n> - c\n");
+    feed(&mut app, "Vj");
+    alt(&mut app, 'j');
+    assert_eq!(text(&app), "> - c\n> - a\n> - b\n");
+    assert_eq!(app.anchor.map(|a| a.line), Some(1), "the selection follows the items");
+}
+
+#[test]
+fn a_tab_after_the_marker_is_the_markers_space() {
+    // `>` and a tab: one column is the marker's space, the rest indent, so
+    // the tabbed line is a sub-item of `a` (tab_width 4: 3 columns in).
+    let t = "> - a\n>\t- b\n> - c\n";
+    let mut app = app_with(t);
+    feed(&mut app, "dal");
+    assert_eq!(text(&app), "> - c\n");
+    // Moved, the tab stays where the text after it does not change.
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(1, 3);
+    feed(&mut app, "<al");
+    assert_eq!(text(&app), "> - a\n> - b\n> - c\n");
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(2, 2);
+    feed(&mut app, ">al");
+    // `c`'s line has a space after its marker, and keeps it.
+    assert_eq!(text(&app), "> - a\n>\t- b\n>    - c\n");
+}
+
+#[test]
+fn an_ordered_list_in_a_quote_is_renumbered() {
+    let t = "> 1. a\n> 2. b\n> 3. c\n";
+    let mut app = app_with(t);
+    alt(&mut app, 'j');
+    assert_eq!(text(&app), "> 1. b\n> 2. a\n> 3. c\n");
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(1, 5);
+    feed(&mut app, ">al");
+    assert_eq!(text(&app), "> 1. a\n>     1. b\n> 2. c\n");
+    feed(&mut app, "u");
+    assert_eq!(text(&app), t, "renumbering is in the same step");
+}
+
+#[test]
+fn enter_in_a_quoted_list_continues_both() {
+    let mut app = app_with("> - a\n");
+    feed(&mut app, "A");
+    hit(&mut app, KeyCode::Enter);
+    feed(&mut app, "b");
+    hit(&mut app, KeyCode::Enter);
+    hit(&mut app, KeyCode::Enter);
+    feed(&mut app, "c");
+    esc(&mut app);
+    // An empty item ends the list, not the quote.
+    assert_eq!(text(&app), "> - a\n> - b\n>\n> c\n");
+    let mut app = app_with("> > 3. a\n");
+    feed(&mut app, "A");
+    hit(&mut app, KeyCode::Enter);
+    esc(&mut app);
+    assert_eq!(text(&app), "> > 3. a\n> > 4. \n");
+}
+
+#[test]
+fn tab_in_insert_indents_a_quoted_item() {
+    let mut app = app_with("> - a\n> - b\n");
+    app.buffer.cursor = Cursor::new(1, 0);
+    feed(&mut app, "A");
+    hit(&mut app, KeyCode::Tab);
+    assert_eq!(text(&app), "> - a\n>     - b\n");
+    assert_eq!(app.buffer.cursor, Cursor::new(1, 9));
+    app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    app.sync_after_input();
+    assert_eq!(text(&app), "> - a\n> - b\n");
+    // A plain quote line types a tab.
+    let mut app = app_with("> a\n");
+    feed(&mut app, "A");
+    hit(&mut app, KeyCode::Tab);
+    assert!(text(&app).starts_with("> a\t") || text(&app).starts_with("> a "), "{:?}", text(&app));
+}
+
+#[test]
+fn the_list_objects_work_in_a_quote() {
+    let t = "> - a\n>   - a1\n> - b\n> - c\n\nafter\n";
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(2, 3);
+    feed(&mut app, "yal");
+    assert_eq!(app.registers.get(&'"').map(|r| r.text.clone()), Some("> - b\n".into()));
+    app.buffer.cursor = Cursor::new(0, 3);
+    feed(&mut app, "dil");
+    assert_eq!(text(&app), ">   - a1\n> - b\n> - c\n\nafter\n");
+}
+
+#[test]
+fn fixlist_in_a_quote_re_indents_behind_the_markers() {
+    let t = "> 10. j\n>    - y\n";
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(1, 5);
+    ex(&mut app, "fixlist");
+    assert_eq!(text(&app), "> 10. j\n>     - y\n");
+    assert!(flash_text(&app).contains("re-indented 1 line"), "{}", flash_text(&app));
+    feed(&mut app, "u");
+    assert_eq!(text(&app), t);
+}
+
+#[test]
+fn fixlist_in_visual_re_indents_every_list_touched_in_one_step() {
+    let t = "10. j\n   - y\n\npara\n\n> 10. k\n>    - z\n\n11. m\n   - w\n".to_string();
+    let mut app = app_with(&t);
+    // From `10. j` to the quote: two lists (the second is not touched).
+    feed(&mut app, "V5j");
+    feed(&mut app, ":fixlist");
+    hit(&mut app, KeyCode::Enter);
+    assert_eq!(text(&app), t.replace("   - y", "    - y").replace(">    - z", ">     - z"));
+    assert!(flash_text(&app).contains("re-indented 2 lines"), "{}", flash_text(&app));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
+    feed(&mut app, "u");
+    assert_eq!(text(&app), t, "one undo step");
+    // A selection touching no list.
+    feed(&mut app, "4GV");
+    feed(&mut app, ":fixlist");
+    hit(&mut app, KeyCode::Enter);
+    assert_eq!(flash_text(&app), "not in a list");
+    assert_eq!(text(&app), t);
+    // `:` from Normal afterwards is the cursor's list only.
+    feed(&mut app, "9G");
+    ex(&mut app, "fixlist");
+    assert_eq!(text(&app), t.replace("   - w", "    - w"));
+    // Twice over lists already lined up.
+    feed(&mut app, "ggVG");
+    feed(&mut app, ":fixlist");
+    hit(&mut app, KeyCode::Enter);
+    feed(&mut app, "ggVG");
+    feed(&mut app, ":fixlist");
+    hit(&mut app, KeyCode::Enter);
+    assert_eq!(flash_text(&app), "lists already lined up");
+}
+
+#[test]
+fn inner_level_takes_the_item_through_its_last_sibling() {
+    let t = "- a\n- b\n  - b1\n- c\n  - c1\n\nafter\n";
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(1, 2);
+    feed(&mut app, "yiL");
+    assert_eq!(app.registers.get(&'"').map(|r| r.text.clone()), Some("- b\n  - b1\n- c\n  - c1\n".into()));
+    feed(&mut app, "diL");
+    assert_eq!(text(&app), "- a\n\nafter\n");
+    feed(&mut app, "u");
+    app.buffer.cursor = Cursor::new(1, 2);
+    feed(&mut app, "ciLx");
+    esc(&mut app);
+    assert_eq!(text(&app), "- a\nx\n\nafter\n");
+    // On a sub-item, its own level only.
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(2, 4);
+    feed(&mut app, "diL");
+    assert_eq!(text(&app), "- a\n- b\n- c\n  - c1\n\nafter\n");
+    let mut app = app_with(t);
+    app.buffer.cursor = Cursor::new(3, 0);
+    feed(&mut app, "viL");
+    assert_eq!(app.mode, Mode::VisualLine);
+    assert_eq!(app.anchor.map(|a| a.line), Some(3));
+    assert_eq!(app.buffer.cursor.line, 4);
+    // `>iL` nests the items under the one before them.
+    let mut app = app_with("- a\n- b\n- c\n");
+    app.buffer.cursor = Cursor::new(1, 0);
+    feed(&mut app, ">iL");
+    assert_eq!(text(&app), "- a\n    - b\n    - c\n");
+    feed(&mut app, "<iL");
+    assert_eq!(text(&app), "- a\n- b\n- c\n");
+    // In a quote too.
+    let mut app = app_with("> - a\n> - b\n> - c\n");
+    app.buffer.cursor = Cursor::new(1, 0);
+    feed(&mut app, "diL");
+    assert_eq!(text(&app), "> - a\n");
+}
+
 /// An item nested into a sub-list of its own starts it at 1, and the list
 /// it left closes the gap.
 #[test]

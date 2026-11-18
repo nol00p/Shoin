@@ -54,10 +54,11 @@ pub fn resolve(buffer: &Buffer, lists: &Lists, key: char, around: bool) -> Optio
         '{' | '}' | 'B' => pair(buffer, cursor, '{', '}', around),
         '<' | '>' => pair(buffer, cursor, '<', '>', around),
         // `al` is the item with its children, `il` without them. `aL` is the
-        // whole level; `iL` is not defined yet.
+        // whole level; `iL` the item through its last sibling.
         'l' if around => whole_lines(buffer, lists.item_bounds(cursor.line)?),
         'l' => whole_lines(buffer, lists.own_bounds(cursor.line)?),
         'L' if around => whole_lines(buffer, lists.level_bounds(cursor.line)?),
+        'L' => whole_lines(buffer, lists.rest_of_level_bounds(cursor.line)?),
         _ => None,
     }
 }
@@ -448,7 +449,12 @@ mod tests {
         // `aL` is every sibling, each with its children.
         let b = buf(t, 2, 0);
         assert_eq!(text_of(&b, obj(&b, 'L', true).unwrap()), "  - b\n  - c\n");
-        assert!(obj(&b, 'L', false).is_none(), "iL is not defined");
+        // `iL` is the item through its last sibling: `c` alone here.
+        assert_eq!(text_of(&b, obj(&b, 'L', false).unwrap()), "  - c\n");
+        let b = buf(t, 0, 2);
+        assert_eq!(text_of(&b, obj(&b, 'L', false).unwrap()), t, "ends where aL ends");
+        let b = buf(t, 3, 0);
+        assert_eq!(text_of(&b, obj(&b, 'L', false).unwrap()), "- d\n");
     }
 
     /// The last item of a file with no final newline ends at the text's end.

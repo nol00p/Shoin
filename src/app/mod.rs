@@ -46,7 +46,7 @@ use crate::export::Format;
 use crate::text::buffer::Buffer;
 use crate::text::cursor::Cursor;
 use crate::text::motion::{self, Motion};
-use crate::text::list::{self, Lists, RunError};
+use crate::text::list::{self, Lists, Quoted, RunError};
 use crate::text::object;
 use crate::text::table::{self, TableAlign};
 use crate::transclude::{compile, link};
@@ -269,6 +269,10 @@ pub struct App {
     clipboard: Box<dyn Clipboard>,
     /// Visual-mode selection anchor; `None` outside Visual/VisualLine.
     pub anchor: Option<Cursor>,
+    /// The lines a Visual selection covered when `:` was typed in it, as
+    /// anchor and cursor line, for a command that works on them
+    /// (`:fixlist`). `None` once the `:` line is done.
+    command_selection: Option<(usize, usize)>,
     /// Where the left button went down, while a drag out of it is still live
     /// and started in a text pane. `None` the rest of the time — including for
     /// a press in the file tree, which is how tree drags stay inert.
@@ -1019,6 +1023,7 @@ impl App {
             pending_register: None,
             clipboard,
             anchor: None,
+            command_selection: None,
             drag_from: None,
             visual_resumes_insert: false,
             visual_owner: None,
@@ -1730,6 +1735,7 @@ impl App {
             Action::VisualLine => self.enter_visual(Mode::VisualLine),
             Action::Command => {
                 self.completion = None;
+                self.command_selection = self.visual_anchor().map(|a| (a.line, self.buffer.cursor.line));
                 self.mode = Mode::Command(String::new());
             }
             Action::SearchForward => {

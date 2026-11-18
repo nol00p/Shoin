@@ -5,7 +5,20 @@ impl App {
     /// (or level) under the cursor, unless that would break the list's
     /// structure — then refuse, change nothing, and say why. The cursor stays
     /// on the same character of text.
+    ///
+    /// In a list inside a blockquote it works on the quote's lines with
+    /// their markers off (`in_quote`).
     pub(super) fn shift_list(&mut self, outdent: bool, level: bool, l1: usize, l2: usize) {
+        match self.list_quote(self.buffer.cursor.line) {
+            Some((q, cache)) if q.contains(l1) && q.contains(l2) => {
+                let (v1, v2) = (q.view_line(l1), q.view_line(l2));
+                self.in_quote((q, cache), |app| app.shift_list_in(outdent, level, v1, v2))
+            }
+            _ => self.shift_list_in(outdent, level, l1, l2),
+        }
+    }
+
+    fn shift_list_in(&mut self, outdent: bool, level: bool, l1: usize, l2: usize) {
         let width = self.config.editor.tab_width.max(1);
         let line = self.buffer.cursor.line;
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, width);
@@ -95,7 +108,25 @@ impl App {
     /// text, and the blank lines between them stay where they were. The
     /// cursor, and in Visual the anchor, follow the block on the same
     /// character.
+    ///
+    /// In a blockquote the moving lines leave their markers behind: each
+    /// line keeps the `>` it had. A selection must stay inside the quote.
     pub(super) fn move_list_item(&mut self, down: bool, count: usize) {
+        self.refresh_blocks();
+        let at = self.buffer.cursor.line;
+        let anchor = self.visual_anchor().map(|a| a.line);
+        let quote = self.list_quote(at).or_else(|| anchor.and_then(|a| self.list_quote(a)));
+        let span = |app: &Self, l: usize| Quoted::span(&app.blocks.kinds, l);
+        if quote.is_some() && anchor.is_some_and(|a| span(self, a) != span(self, at)) {
+            return self.notify("selection leaves the quote", FlashKind::Error);
+        }
+        match quote {
+            Some(q) => self.in_quote(q, |app| app.move_list_item_in(down, count)),
+            None => self.move_list_item_in(down, count),
+        }
+    }
+
+    fn move_list_item_in(&mut self, down: bool, count: usize) {
         self.refresh_blocks();
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
         let at = self.buffer.cursor;
@@ -233,10 +264,17 @@ impl App {
     /// `>al` / `<al` on the item under the cursor, from any mode — the
     /// `list_indent` / `list_outdent` actions and Insert-mode Tab.
     pub(super) fn shift_list_item(&mut self, outdent: bool) {
+        match self.list_quote(self.buffer.cursor.line) {
+            Some(q) => self.in_quote(q, |app| app.shift_list_item_in(outdent)),
+            None => self.shift_list_item_in(outdent),
+        }
+    }
+
+    fn shift_list_item_in(&mut self, outdent: bool) {
         self.refresh_blocks();
         let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
         match lists.item_bounds(self.buffer.cursor.line) {
-            Some((s, e)) => self.shift_list(outdent, false, s, e),
+            Some((s, e)) => self.shift_list_in(outdent, false, s, e),
             None => self.notify("not in a list", FlashKind::Error),
         }
     }
@@ -244,13 +282,74 @@ impl App {
     /// `:fixlist` / `fix_list`: re-indent the list under the cursor so that
     /// CommonMark tools read it the way Shoin shows it (`Lists::realign`).
     /// One undo step; the cursor stays on the same character of text.
+    ///
+    /// In Visual (or from a `:` typed in Visual) it re-indents every list the
+    /// selection touches: each touched line's top-level list, once, all in
+    /// the same undo step, and Visual ends as after `>`. A list inside a
+    /// blockquote is re-indented behind its markers.
     pub(super) fn fix_list(&mut self) {
         self.refresh_blocks();
-        let lists = Lists::new(&self.buffer, &self.blocks.kinds, self.config.editor.tab_width);
-        let Some(plan) = lists.realign(self.buffer.cursor.line, self.blocks.math) else {
+        let at = self.buffer.cursor;
+        let visual = self.visual_anchor().map(|a| (a.line, at.line)).or(self.command_selection);
+        let (top, bot) = visual.map_or((at.line, at.line), |(a, b)| (a.min(b), a.max(b)));
+        let bot = bot.min(self.buffer.last_line());
+        let (tw, math) = (self.config.editor.tab_width, self.config.markdown.math);
+
+        // Every quote the selection touches, with its view's kinds.
+        let mut quotes: Vec<(Quoted, BlockCache)> = Vec::new();
+        for l in top..=bot {
+            if quotes.iter().all(|(q, _)| !q.contains(l)) {
+                if let Some(q) = Quoted::around(&self.buffer, &self.blocks.kinds, l, tw) {
+                    let cache = BlockCache::build(&q.view, math, tw);
+                    quotes.push((q, cache));
+                }
+            }
+        }
+        // Each touched list's plan, in document lines. A line in a quote
+        // belongs to the quote's lists when it is in one, else to the
+        // document's (a quote inside an item belongs to the item).
+        let mut plans: Vec<(Option<usize>, list::Realign)> = Vec::new();
+        {
+            let doc = Lists::new(&self.buffer, &self.blocks.kinds, tw);
+            let views: Vec<Lists> = quotes.iter().map(|(q, c)| Lists::new(&q.view, &c.kinds, tw)).collect();
+            let mut seen = std::collections::BTreeSet::new();
+            for l in top..=bot {
+                let quoted = quotes.iter().position(|(q, _)| q.contains(l)).filter(|&i| {
+                    let q = &quotes[i].0;
+                    views[i].in_list(q.view_line(l))
+                });
+                let (lists, line) = match quoted {
+                    Some(i) => (&views[i], quotes[i].0.view_line(l)),
+                    None => (&doc, l),
+                };
+                let Some(first) = lists.list_top(line) else { continue };
+                if !seen.insert((quoted, first)) {
+                    continue;
+                }
+                let Some(mut plan) = lists.realign(line, math) else { continue };
+                if let Some(i) = quoted {
+                    let q = &quotes[i].0;
+                    for (line, _) in plan.lines.iter_mut() {
+                        *line = q.doc_line(*line);
+                    }
+                    for line in plan.skipped.iter_mut() {
+                        *line = q.doc_line(*line);
+                    }
+                }
+                plans.push((quoted, plan));
+            }
+        }
+        if visual.is_some() {
+            self.end_visual();
+            self.command_selection = None;
+        }
+        if plans.is_empty() {
             return self.notify("not in a list", FlashKind::Error);
-        };
-        let skipped = match plan.skipped.as_slice() {
+        }
+        let mut skipped_lines: Vec<usize> = plans.iter().flat_map(|(_, p)| p.skipped.iter().copied()).collect();
+        skipped_lines.sort_unstable();
+        let moves: usize = plans.iter().map(|(_, p)| p.lines.len()).sum();
+        let skipped = match skipped_lines.as_slice() {
             [] => String::new(),
             lines => {
                 let at: Vec<String> = lines.iter().map(|l| (l + 1).to_string()).collect();
@@ -263,9 +362,10 @@ impl App {
                 )
             }
         };
-        if plan.lines.is_empty() {
+        if moves == 0 {
+            let lined = if plans.len() == 1 { "list already lined up" } else { "lists already lined up" };
             return match skipped.is_empty() {
-                true => self.notify("list already lined up", FlashKind::Info),
+                true => self.notify(lined, FlashKind::Info),
                 false => self.notify(skipped, FlashKind::Info),
             };
         }
@@ -279,25 +379,144 @@ impl App {
         } else {
             self.buffer.history.begin_group(Some(at));
         }
-        for &(line, cols) in &plan.lines {
-            let start = self.buffer.rope.line_to_char(line);
-            let ws = leading_ws_cols(&self.buffer.line_text(line));
-            self.buffer.delete_chars(start, start + ws);
-            self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(cols));
+        for (quoted, plan) in &plans {
+            for &(line, cols) in &plan.lines {
+                match quoted {
+                    Some(i) => {
+                        let q = &quotes[*i].0;
+                        let text = q.base_text(line).trim_start_matches([' ', '\t']);
+                        let new = q.rewrite(line, &format!("{}{text}", " ".repeat(cols)));
+                        self.replace_line_text(line, &new);
+                    }
+                    None => {
+                        let start = self.buffer.rope.line_to_char(line);
+                        let ws = leading_ws_cols(&self.buffer.line_text(line));
+                        self.buffer.delete_chars(start, start + ws);
+                        self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(cols));
+                    }
+                }
+            }
         }
         if inserting {
             self.buffer.history.split();
         } else {
             self.buffer.history.end_group();
         }
-        let moved = self.buffer.line_len(at.line) as isize - before;
-        self.buffer.cursor = Cursor::new(at.line, (at.col as isize + moved).max(0) as usize);
-        let n = plan.lines.len();
-        let mut msg = format!("re-indented {n} line{}", if n == 1 { "" } else { "s" });
+        self.buffer.cursor = match visual {
+            Some(_) => Cursor::new(top, self.first_non_blank(top)),
+            None => {
+                let moved = self.buffer.line_len(at.line) as isize - before;
+                Cursor::new(at.line, (at.col as isize + moved).max(0) as usize)
+            }
+        };
+        let mut msg = format!("re-indented {moves} line{}", if moves == 1 { "" } else { "s" });
         if !skipped.is_empty() {
             msg = format!("{msg}; {skipped}");
         }
         self.notify(msg, FlashKind::Info);
+    }
+
+    /// The blockquote around `line` and its view's kinds, when `line` is in a
+    /// list inside it. A quote line in no list of its own (a quote inside a
+    /// list item, say) is left to the document's lists.
+    pub(super) fn list_quote(&mut self, line: usize) -> Option<(Quoted, BlockCache)> {
+        self.refresh_blocks();
+        let tw = self.config.editor.tab_width;
+        let q = Quoted::around(&self.buffer, &self.blocks.kinds, line, tw)?;
+        let cache = BlockCache::build(&q.view, self.config.markdown.math, tw);
+        let inside = Lists::new(&q.view, &cache.kinds, tw).in_list(q.view_line(line));
+        inside.then_some((q, cache))
+    }
+
+    /// Run `f`, a list command, on a quote's view: the buffer and its block
+    /// kinds are swapped for the view's while it runs, so the command sees a
+    /// plain list. Then each changed line goes back behind its own markers,
+    /// and the cursor and anchor follow it.
+    fn in_quote<T>(&mut self, (mut q, cache): (Quoted, BlockCache), f: impl FnOnce(&mut Self) -> T) -> T {
+        let mut view = std::mem::replace(&mut q.view, Buffer::empty());
+        view.cursor = q.to_view(self.buffer.cursor);
+        let anchor = self.anchor;
+        let doc = std::mem::replace(&mut self.buffer, view);
+        let blocks = std::mem::replace(&mut self.blocks, cache);
+        self.anchor = anchor.filter(|a| q.contains(a.line)).map(|a| q.to_view(a));
+        let out = f(self);
+        let view_anchor = self.anchor;
+        q.view = std::mem::replace(&mut self.buffer, doc);
+        self.blocks = blocks;
+        let view_cursor = q.view.cursor;
+
+        let rewrites = q.rewrites();
+        if !rewrites.is_empty() {
+            let open = !self.buffer.history.is_grouping() && !matches!(self.mode, Mode::Insert);
+            if open {
+                let at = self.buffer.cursor;
+                self.buffer.history.begin_group(Some(at));
+            }
+            for (line, text) in rewrites {
+                self.replace_line_text(line, &text);
+            }
+            if open {
+                self.buffer.history.end_group();
+            }
+        }
+        let back = |app: &Self, c: Cursor| q.to_doc(c, &app.buffer.line_text(q.doc_line(c.line)));
+        self.buffer.cursor = back(self, view_cursor);
+        self.anchor = match anchor {
+            // Outside the quote the view never had it: it stays, unless the
+            // command ended Visual.
+            Some(a) if !q.contains(a.line) => matches!(self.mode, Mode::Visual | Mode::VisualLine).then_some(a),
+            _ => view_anchor.map(|a| back(self, a)),
+        };
+        out
+    }
+
+    /// Make line `line` read `text`, changing only the chars between the
+    /// part they share at the start and the part they share at the end.
+    fn replace_line_text(&mut self, line: usize, text: &str) {
+        let old: Vec<char> = self.buffer.line_text(line).chars().collect();
+        let new: Vec<char> = text.chars().collect();
+        let pre = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suf = old[pre..]
+            .iter()
+            .rev()
+            .zip(new[pre..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let base = self.buffer.rope.line_to_char(line);
+        if old.len() - suf > pre {
+            self.buffer.delete_chars(base + pre, base + old.len() - suf);
+        }
+        let mid: String = new[pre..new.len() - suf].iter().collect();
+        if !mid.is_empty() {
+            self.buffer.insert_str(Cursor::new(line, pre), &mid);
+        }
+    }
+
+    /// The `l` and `L` objects on a list inside a blockquote: `None` when
+    /// the cursor is in no such list, else what the object resolves to, in
+    /// document lines.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn quote_list_object(&mut self, obj: char, around: bool) -> Option<Option<(Cursor, Cursor, bool)>> {
+        let (mut q, cache) = self.list_quote(self.buffer.cursor.line)?;
+        q.view.cursor = q.to_view(self.buffer.cursor);
+        let lists = Lists::new(&q.view, &cache.kinds, self.config.editor.tab_width);
+        let Some(range) = object::resolve(&q.view, &lists, obj, around).filter(|r| r.end > r.start) else {
+            return Some(None);
+        };
+        let s = q.doc_line(q.view.rope.char_to_line(range.start));
+        let e = q.doc_line(q.view.rope.char_to_line(range.end - 1));
+        Some(Some((Cursor::new(s, 0), Cursor::new(e, self.buffer.line_len(e)), true)))
+    }
+
+    /// What Enter opens the next line with on an item of a list inside a
+    /// blockquote: the line's markers, then the item's continuation.
+    pub(super) fn quote_list_continuation(&mut self, line: usize) -> Option<String> {
+        let (q, cache) = self.list_quote(line)?;
+        let v = q.view_line(line);
+        let Some(BlockKind::ListItem { marker, checked, .. }) = cache.kinds.get(v) else {
+            return None;
+        };
+        Some(format!("{}{}", q.markers(line), list_continuation(&q.view.line_text(v), *marker, *checked)))
     }
 
     /// Whether Insert-mode Tab acts on a list item: `editor.list_tab` is on
@@ -307,11 +526,11 @@ impl App {
         if !self.config.editor.list_tab {
             return false;
         }
-        self.refresh_blocks();
-        matches!(
-            self.blocks.kinds.get(self.buffer.cursor.line),
-            Some(BlockKind::ListItem { .. })
-        )
+        let line = self.buffer.cursor.line;
+        if let Some((q, cache)) = self.list_quote(line) {
+            return matches!(cache.kinds.get(q.view_line(line)), Some(BlockKind::ListItem { .. }));
+        }
+        matches!(self.blocks.kinds.get(line), Some(BlockKind::ListItem { .. }))
     }
 
     /// Put every ordered level containing one of `lines` back in sequence

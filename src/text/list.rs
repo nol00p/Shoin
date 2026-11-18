@@ -27,6 +27,7 @@ use std::ops::Range;
 use ropey::Rope;
 
 use super::buffer::Buffer;
+use super::cursor::Cursor;
 use crate::render::markdown::block::{item_text_col, leading_ws_cols, BlockCache, BlockKind, Marker};
 pub use crate::render::markdown::block::indent_cols;
 
@@ -159,6 +160,30 @@ impl<'a> Lists<'a> {
     pub fn level_bounds(&self, line: usize) -> Option<(usize, usize)> {
         let items = self.level_items(line);
         Some((*items.first()?, self.bounds(*items.last()?).1))
+    }
+
+    /// The item containing `line` through its last sibling, each with its
+    /// children — the `iL` range. It ends where `aL` ends; `aL` also takes
+    /// the siblings before the item.
+    pub fn rest_of_level_bounds(&self, line: usize) -> Option<(usize, usize)> {
+        let item = self.item_at(line)?;
+        Some((item, self.level_bounds(item)?.1))
+    }
+
+    /// Whether `line` is in a list: in an item, or a blank line between two
+    /// items of one list. What `realign` accepts.
+    pub fn in_list(&self, line: usize) -> bool {
+        self.item_at(line).is_some() || self.blank_inside(line).is_some()
+    }
+
+    /// The first item line of the top-level list around `line`, as `in_list`
+    /// counts it: which list `realign` re-indents.
+    pub fn list_top(&self, line: usize) -> Option<usize> {
+        let mut top = self.item_at(line).or_else(|| self.blank_inside(line))?;
+        while let Some(p) = self.parent_of(top) {
+            top = p;
+        }
+        self.level_items(top).first().copied()
     }
 
     /// The run of siblings that lines `top..=bot` touch, as the item lines
@@ -335,11 +360,7 @@ impl<'a> Lists<'a> {
     /// subtree, and so is one whose move would push code left of column 0.
     /// The rest is tried again.
     pub fn realign(&self, line: usize, math: bool) -> Option<Realign> {
-        let mut top = self.item_at(line).or_else(|| self.blank_inside(line))?;
-        while let Some(p) = self.parent_of(top) {
-            top = p;
-        }
-        let items = self.level_items(top);
+        let items = self.level_items(self.list_top(line)?);
         let first = *items.first()?;
         let end = self.bounds(*items.last()?).1;
         let mut skip: BTreeSet<usize> = BTreeSet::new();
@@ -752,6 +773,232 @@ impl<'a> Lists<'a> {
     }
 }
 
+/// One blockquote's lines with their `>` markers taken off: where the list
+/// commands work on a list inside a quote (`> - a`). The rest of the editor
+/// sees those lines as quote lines, so `Lists` over the document finds no
+/// list there.
+///
+/// The quote is the run of lines around one line that have the same number
+/// of markers. A line with more or fewer, or with none, ends it, so a list in
+/// it never reaches past it.
+///
+/// Each line is cut after its last marker. A space after that marker goes
+/// with it. A tab gives one of its `tab_width` columns as the marker's space
+/// and the rest as indent, written as spaces in the view, as export reads it
+/// (#125). A command edits `view`; `rewrite` puts each changed line back
+/// behind the markers it had.
+pub struct Quoted {
+    /// The document line of the quote's first line.
+    pub first: usize,
+    /// The quote's text without its markers: a blank line, then one line per
+    /// document line, with no newline after the last. The blank line keeps
+    /// a `---` on the quote's first line from reading as front matter.
+    pub view: Buffer,
+    depth: u8,
+    tab_width: usize,
+    /// Each line as the document has it, and as the view had it at first.
+    doc: Vec<String>,
+    base: Vec<String>,
+}
+
+/// Where a quote line is cut: `keep` chars up to and including its last
+/// marker, and what comes right after that marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cut {
+    keep: usize,
+    after: After,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum After {
+    Nothing,
+    Space,
+    Tab,
+}
+
+/// The cut of `line` after its `depth`-th marker, the markers counted the way
+/// the classifier counts a quote's depth: spaces may sit before and between
+/// them. `None` when it has fewer.
+fn cut(line: &str, depth: u8) -> Option<Cut> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = chars.iter().take_while(|c| c.is_whitespace()).count();
+    for n in 0..depth {
+        if n > 0 {
+            i += chars[i..].iter().take_while(|c| **c == ' ').count();
+        }
+        if chars.get(i) != Some(&'>') {
+            return None;
+        }
+        i += 1;
+    }
+    let after = match chars.get(i) {
+        Some(' ') => After::Space,
+        Some('\t') => After::Tab,
+        _ => After::Nothing,
+    };
+    Some(Cut { keep: i, after })
+}
+
+impl Quoted {
+    /// The quote around `line`, when `kinds` says it is a quote line.
+    pub fn around(buffer: &Buffer, kinds: &[BlockKind], line: usize, tab_width: usize) -> Option<Quoted> {
+        let (first, last) = Quoted::span(kinds, line)?;
+        let Some(BlockKind::Quote(depth)) = kinds.get(line) else {
+            return None;
+        };
+        let tab_width = tab_width.max(1);
+        let doc: Vec<String> = (first..=last).map(|l| buffer.line_text(l)).collect();
+        let base: Vec<String> = doc
+            .iter()
+            .map(|text| match cut(text, *depth) {
+                Some(c) => view_text(text, c, tab_width),
+                None => text.clone(),
+            })
+            .collect();
+        let mut view = Buffer::empty();
+        view.rope = Rope::from_str(&format!("\n{}", base.join("\n")));
+        Some(Quoted {
+            first,
+            view,
+            depth: *depth,
+            tab_width,
+            doc,
+            base,
+        })
+    }
+
+    /// The first and last document line of the quote around `line`, when
+    /// `kinds` says it is a quote line.
+    pub fn span(kinds: &[BlockKind], line: usize) -> Option<(usize, usize)> {
+        let kind = kinds.get(line).filter(|k| matches!(k, BlockKind::Quote(_)))?;
+        let mut first = line;
+        while first > 0 && kinds.get(first - 1) == Some(kind) {
+            first -= 1;
+        }
+        let mut last = line;
+        while kinds.get(last + 1) == Some(kind) {
+            last += 1;
+        }
+        Some((first, last))
+    }
+
+    /// The document line of the view's last line.
+    pub fn last(&self) -> usize {
+        self.first + self.doc.len() - 1
+    }
+
+    pub fn contains(&self, line: usize) -> bool {
+        (self.first..=self.last()).contains(&line)
+    }
+
+    /// The view line of document line `line`, inside the quote.
+    pub fn view_line(&self, line: usize) -> usize {
+        line - self.first + 1
+    }
+
+    /// The document line of view line `line`. The view's blank first line
+    /// stands for the quote's first line.
+    pub fn doc_line(&self, line: usize) -> usize {
+        self.first + line.saturating_sub(1)
+    }
+
+    /// The view line and column of a document position inside the quote. A
+    /// column among the markers is the view's column 0.
+    pub fn to_view(&self, at: Cursor) -> Cursor {
+        let i = at.line.saturating_sub(self.first).min(self.doc.len() - 1);
+        let col = match cut(&self.doc[i], self.depth) {
+            Some(c) => {
+                let (skip, pad) = self.shape(c);
+                if at.col < c.keep + skip {
+                    0
+                } else {
+                    at.col - c.keep - skip + pad
+                }
+            }
+            None => at.col,
+        };
+        Cursor::new(i + 1, col)
+    }
+
+    /// The document position of a view position, on the document line as
+    /// `text` now reads.
+    pub fn to_doc(&self, at: Cursor, text: &str) -> Cursor {
+        let line = self.doc_line(at.line);
+        let col = match cut(text, self.depth) {
+            Some(c) => {
+                let (skip, pad) = self.shape(c);
+                c.keep + skip + at.col.saturating_sub(pad)
+            }
+            None => at.col,
+        };
+        Cursor::new(line, col)
+    }
+
+    /// For a cut: how many chars after the marker the view leaves out, and
+    /// how many view columns stand for them.
+    fn shape(&self, c: Cut) -> (usize, usize) {
+        match c.after {
+            After::Nothing => (0, 0),
+            After::Space => (1, 0),
+            After::Tab => (1, self.tab_width - 1),
+        }
+    }
+
+    /// The lines whose view text changed, each as its document line and the
+    /// text that line now reads: its own markers, then the view's text.
+    pub fn rewrites(&self) -> Vec<(usize, String)> {
+        (0..self.doc.len())
+            .filter_map(|i| {
+                let now = self.view.line_text(i + 1);
+                (now != self.base[i]).then(|| (self.first + i, self.rewrite(self.first + i, &now)))
+            })
+            .collect()
+    }
+
+    /// Document line `line` with its view text replaced by `now`. The
+    /// markers stay as written. A tab after them stays while `now` still
+    /// starts with the columns it stood for; otherwise the marker's space is
+    /// written as a space.
+    pub fn rewrite(&self, line: usize, now: &str) -> String {
+        let doc = &self.doc[line - self.first];
+        let Some(c) = cut(doc, self.depth) else {
+            return now.to_string();
+        };
+        let markers: String = doc.chars().take(c.keep).collect();
+        let pad = " ".repeat(self.tab_width - 1);
+        match c.after {
+            After::Tab if now.starts_with(&pad) => format!("{markers}\t{}", &now[pad.len()..]),
+            _ if now.is_empty() => markers,
+            After::Nothing if !now.starts_with([' ', '\t']) => format!("{markers}{now}"),
+            _ => format!("{markers} {now}"),
+        }
+    }
+
+    /// The view text of document line `line` as the view first had it.
+    pub fn base_text(&self, line: usize) -> &str {
+        &self.base[line - self.first]
+    }
+
+    /// The markers a new line after document line `line` opens with: the
+    /// line's own, with the marker's space.
+    pub fn markers(&self, line: usize) -> String {
+        let doc = &self.doc[line - self.first];
+        let keep = cut(doc, self.depth).map_or(0, |c| c.keep);
+        let markers: String = doc.chars().take(keep).collect();
+        format!("{markers} ")
+    }
+}
+
+/// A quote line's text past the cut.
+fn view_text(line: &str, c: Cut, tab_width: usize) -> String {
+    let rest: String = line.chars().skip(c.keep).collect();
+    match c.after {
+        After::Nothing => rest,
+        After::Space => rest[1..].to_string(),
+        After::Tab => format!("{}{}", " ".repeat(tab_width - 1), &rest[1..]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +1046,57 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn quoted(text: &str, line: usize) -> Option<Quoted> {
+        let b = buf(text);
+        let cache = BlockCache::build(&b, true, 4);
+        Quoted::around(&b, &cache.kinds, line, 4)
+    }
+
+    #[test]
+    fn a_quote_view_takes_the_markers_off() {
+        let t = "para\n> - a\n>- b\n>\t- c\n  > > - d\n> - e\n";
+        let q = quoted(t, 2).unwrap();
+        assert_eq!((q.first, q.last()), (1, 3), "a deeper quote is another one");
+        assert_eq!(q.view.rope.to_string(), "\n- a\n- b\n   - c");
+        let q = quoted(t, 4).unwrap();
+        assert_eq!(q.view.rope.to_string(), "\n- d");
+        assert!(quoted(t, 0).is_none());
+        // The cursor maps both ways, a column among the markers to 0.
+        let q = quoted(t, 1).unwrap();
+        assert_eq!(q.to_view(Cursor::new(1, 0)), Cursor::new(1, 0));
+        assert_eq!(q.to_view(Cursor::new(1, 4)), Cursor::new(1, 2));
+        assert_eq!(q.to_view(Cursor::new(3, 2)), Cursor::new(3, 3));
+        assert_eq!(q.to_doc(Cursor::new(3, 3), ">\t- c"), Cursor::new(3, 2));
+        assert_eq!(q.to_doc(Cursor::new(2, 1), ">- b"), Cursor::new(2, 2));
+    }
+
+    #[test]
+    fn a_quote_line_goes_back_behind_its_own_markers() {
+        let q = quoted("> - a\n>- b\n>\t- c\n", 0).unwrap();
+        assert_eq!(q.rewrite(0, "    - a"), ">     - a");
+        // No space after the marker: one goes in only before an indent.
+        assert_eq!(q.rewrite(1, "  - b"), ">   - b");
+        assert_eq!(q.rewrite(1, "* b"), ">* b");
+        // A tab stays while its columns do.
+        assert_eq!(q.rewrite(2, "   * c"), ">\t* c");
+        assert_eq!(q.rewrite(2, "       - c"), ">\t    - c");
+        assert_eq!(q.rewrite(2, "- c"), "> - c");
+        assert_eq!(q.markers(2), "> ");
+        let q = quoted("x\n  > >   - a\n", 1).unwrap();
+        assert_eq!(q.rewrite(1, "- a"), "  > > - a");
+        assert_eq!(q.markers(1), "  > > ");
+    }
+
+    /// A `---` on a quote's first line is a rule in the view, as it is in
+    /// the quote, not front matter that swallows the list.
+    #[test]
+    fn a_rule_first_in_a_quote_is_no_front_matter() {
+        let q = quoted("> ---\n> - a\n> - b\n", 0).unwrap();
+        let cache = BlockCache::build(&q.view, true, 4);
+        let l = Lists::new(&q.view, &cache.kinds, 4);
+        assert_eq!(l.level_bounds(2), Some((2, 3)));
     }
 
     /// The backlog case (2026-11-10): a fence 2 spaces in, under a tabbed

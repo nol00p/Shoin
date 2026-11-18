@@ -41,10 +41,11 @@ Text objects work after an operator or in Visual mode: `iw`/`aw` for a word,
 
 A list item is a text object too. `al` is the item with its continuation
 lines and everything nested under it, `il` is the item without its sub-items,
-and `aL` is every item at the same level, each with its sub-items. So `>al`
+`aL` is every item at the same level, each with its sub-items, and `iL` is
+the item under the cursor through the last item at its level. So `>al`
 nests an item under the one above it and takes its sub-items along, `<al`
-brings it back out, `dal` deletes the whole item, and `>aL` indents a whole
-nested level at once.
+brings it back out, `dal` deletes the whole item, `>aL` indents a whole
+nested level at once, and `diL` deletes the rest of a list.
 
 `Alt-j` and `Alt-k` move the item under the cursor past the next or previous
 item, its sub-items travelling with it; `3 Alt-j` moves it past three. An
@@ -64,7 +65,12 @@ numbered lists so other tools read them as Shoin shows them.
 export read it the way Shoin shows it: whatever sits under an item moves to
 the column where the item's text starts, taking its own sub-items along. It
 only runs when you ask, on the whole list around the cursor, as one undo
-step. To put it on a key, bind `fix_list` under `[keys.normal]`.
+step. In Visual mode it re-indents every list the selection touches, still
+as one undo step. To put it on a key, bind `fix_list` under `[keys.normal]`.
+
+A list inside a blockquote (`> - a`) works the same way: every command
+above, Tab, and Enter, which continues `> - a` with `> - `. The `>`
+markers stay as written.
 
 In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
 line, so Enter, Tab, and typing starts a sub-item.
@@ -222,6 +228,22 @@ and don't change the file or its export.
   `:fixlist` rewrites such tabs as spaces. At 4 they agree, except where
   spaces come before a tab (` \t- b`), which GitHub counts to its tab stop
   at 4 and Shoin as 5.
+- A list inside a blockquote ends where the quote ends, and lines with more
+  or fewer `>` markers are another quote, so `> > - c` is not in the list
+  of `> - a`. Commands never add or remove a `>`: when an item moves, its
+  text moves and each line keeps the markers it had. A tab after the last
+  `>` counts as the marker's space plus `tab_width` − 1 columns of indent.
+  A line whose indent changes keeps that tab while the columns after it
+  stay the same; otherwise the tab becomes a space. In Visual, `Alt-j` and
+  `Alt-k` refuse a selection that leaves the quote. Enter on an empty item
+  in a quote ends the list and keeps the quote: the line becomes `>` and
+  the next one starts with `> `. A quote inside a list item that holds no
+  list of its own still belongs to the item.
+- `iL` on a sub-item takes that sub-item through the last one at its level,
+  and `>iL` nests them all under the item before them, as `>al` nests one.
+- `:fixlist` in Visual takes each touched line's whole top-level list, each
+  list once, and reports the lines moved and items left across all of them.
+  Visual ends as after `>`, with the cursor on the first selected line.
 - Shoin's operators and motions are checked against Vim's behaviour, down to
   edge cases such as `dw` on a line's last word, `cw` on a word's last
   character and `d}` stopping at a blank line. The [Changelog](../CHANGELOG.md)
