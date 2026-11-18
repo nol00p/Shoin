@@ -6634,6 +6634,9 @@ fn dot_keys(app: &App) -> String {
                 other => format!("<{other:?}>"),
             },
             Replay::Paste(t) => format!("<paste {t:?}>"),
+            Replay::Select { lines, cols, backwards } => {
+                format!("<select {lines} {cols}{}>", if *backwards { " back" } else { "" })
+            }
         })
         .collect()
 }
@@ -6776,7 +6779,7 @@ fn dot_repeats_an_operator_on_a_dragged_selection() {
     release(&mut app, 12, 4);
     feed(&mut app, "d");
     assert_eq!(app.buffer.line_text(2), "secondgraph here");
-    assert_eq!(dot_keys(&app), "v4ld");
+    assert_eq!(dot_keys(&app), "<select 0 4>d");
     feed(&mut app, ".");
     assert_eq!(app.buffer.line_text(2), "second here");
     assert_eq!(app.mode, Mode::Normal);
@@ -6792,7 +6795,7 @@ fn dot_repeats_a_leftward_drag_with_its_cursor_at_the_start() {
     release(&mut app, 8, 4);
     feed(&mut app, "hd"); // the selection grows by one on the left
     assert_eq!(app.buffer.line_text(2), "secongraph here");
-    assert_eq!(dot_keys(&app), "v4lohd");
+    assert_eq!(dot_keys(&app), "<select 0 4 back>hd");
     // From `g`: the repeat takes "ngraph", one to the left and four on.
     feed(&mut app, ".");
     assert_eq!(app.buffer.line_text(2), "seco here");
@@ -6811,7 +6814,7 @@ fn dot_repeats_a_multi_line_drag() {
     assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, 2));
     feed(&mut app, "d");
     assert_eq!(text(&app), "abjkl\nmnopqr\nstuvwx\n");
-    assert_eq!(dot_keys(&app), "vj02ld");
+    assert_eq!(dot_keys(&app), "<select 1 2>d");
     feed(&mut app, "j0.");
     assert_eq!(text(&app), "abjkl\nvwx\n");
 }
@@ -6839,4 +6842,66 @@ fn splits_and_closes_are_not_the_change() {
     feed(&mut app, ".");
     assert_eq!(text(&app), "ile one\n");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The repeat of a dragged selection does not go through the keymap: with
+/// `l` and `o` rebound in Visual it still covers the same text.
+#[test]
+fn a_dragged_selection_repeats_whatever_the_keymap() {
+    let mut app = mouse_app();
+    app.config.keys.visual.insert("l".into(), "nop".into());
+    app.config.keys.visual.insert("o".into(), "nop".into());
+    app.config.keys.normal.insert("v".into(), "nop".into());
+    app.keymap = Keymap::from_config(&app.config.keys, &app.config.input.leader).0;
+    press(&mut app, 12, 4);
+    drag(&mut app, 8, 4);
+    release(&mut app, 8, 4);
+    feed(&mut app, "d");
+    assert_eq!(app.buffer.line_text(2), "secondgraph here");
+    feed(&mut app, ".");
+    assert_eq!(app.buffer.line_text(2), "second here");
+}
+
+/// A command that ends in another document than it began in edited
+/// nothing: an empty insert session moved there by a click is not the
+/// change, and `.` keeps the one before it.
+#[test]
+fn a_session_that_ends_in_another_document_is_not_the_change() {
+    let dir = two_files();
+    let mut app = app_with("scratch\n");
+    app.open_file(dir.join("one.md"));
+    feed(&mut app, "x");
+    app.split_pane(true);
+    app.open_file(dir.join("two.md"));
+    let one_pane = app.layout.ids()[0];
+    feed(&mut app, "i");
+    app.focus_pane_id(one_pane);
+    assert_eq!(shown(&app), "one.md");
+    assert!(!app.edited_since_mark(), "a revision of two.md says nothing here");
+    esc(&mut app);
+    assert_eq!(dot_keys(&app), "x");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A window key bound in `[keys.insert]` and refused there (no link under
+/// the cursor) is not part of the insert session `.` repeats.
+#[test]
+fn a_refused_window_key_in_insert_stays_out_of_the_session() {
+    let mut cfg = Config::default();
+    cfg.keys.insert.insert("<C-g>".to_string(), "follow_link".to_string());
+    let mut app = App::new(cfg, None, None).unwrap();
+    feed(&mut app, "iab");
+    ctrl(&mut app, 'g');
+    feed(&mut app, "c");
+    esc(&mut app);
+    assert_eq!(text(&app), "abc");
+    assert_eq!(dot_keys(&app), "iabc<Esc>");
+}
+
+/// Every window command names a real command.
+#[test]
+fn window_commands_are_commands() {
+    for name in super::commands::WINDOW_COMMANDS {
+        assert!(super::commands::canonical(super::commands::COMMANDS, name) == Some(*name), "{name}");
+    }
 }

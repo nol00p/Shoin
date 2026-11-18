@@ -259,6 +259,24 @@ impl App {
         }
     }
 
+    /// A window or buffer key bound in `[keys.insert]`. Where it switched
+    /// documents it has ended the session already; where it did not (a
+    /// refused `gf`), the session goes on without it: the key is no part
+    /// of the change `.` or a count replays.
+    fn window_key_in_insert(&mut self, key: KeyEvent) {
+        if self.mode != Mode::Insert {
+            return self.end_recording();
+        }
+        if !self.replaying && matches!(self.recording.last(), Some(Replay::Key(k)) if *k == key) {
+            self.recording.pop();
+        }
+        if let Some(r) = self.insert_repeat.as_mut() {
+            if r.keys.last() == Some(&key) {
+                r.keys.pop();
+            }
+        }
+    }
+
     pub(super) fn on_key_insert(&mut self, key: KeyEvent) {
         self.record_insert_key(key);
         // `[keys.insert]` first — the same "config overrides, built-ins remain"
@@ -269,7 +287,11 @@ impl App {
             if let Some(Verb::Act(action)) = self.keymap.insert_key(k).cloned() {
                 self.escape_run = 0;
                 self.escape_since = None;
+                let window = ends_command(&action);
                 self.apply_action(action);
+                if window {
+                    self.window_key_in_insert(key);
+                }
                 return;
             }
         }

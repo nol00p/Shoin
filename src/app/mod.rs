@@ -449,6 +449,12 @@ struct Register {
 enum Replay {
     Key(KeyEvent),
     Paste(String),
+    /// A selection the mouse made, made again from the cursor: as many
+    /// characters on (`lines == 0`), or as many lines down to column `cols`,
+    /// with the cursor at the start when it was dragged leftwards. Written
+    /// as a selection rather than as keys, so a remapped `l` or `o` cannot
+    /// change it, and an end past the last character survives.
+    Select { lines: usize, cols: usize, backwards: bool },
 }
 
 /// Where `.` measures "did this command edit?" from: a revision of ONE
@@ -592,7 +598,7 @@ fn with_count(keys: &[Replay], n: usize) -> Vec<Replay> {
     };
     let end = digits_end(at);
     match keys.get(end) {
-        Some(Replay::Paste(_)) | None => return keys.to_vec(),
+        Some(Replay::Paste(_) | Replay::Select { .. }) | None => return keys.to_vec(),
         Some(k) if matches!(plain(k), Some('v' | 'V')) => return keys.to_vec(),
         _ => {}
     }
@@ -970,7 +976,7 @@ impl App {
         } else {
             ConfigWatcher::new(config_explicit).ok().flatten()
         };
-        Ok(App {
+        let mut app = App {
             active: ActiveSet {
                 start: buffer.cursor.line,
                 end: buffer.cursor.line,
@@ -1041,7 +1047,10 @@ impl App {
             needs_redraw: true,
             disk_check_at: Instant::now() + DISK_POLL,
             autosave_at: autosave,
-        })
+        };
+        // Edits are counted from the first document as it opened.
+        app.mark_dot();
+        Ok(app)
     }
 
     pub fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<crate::recover::Ended> {
@@ -1498,6 +1507,7 @@ impl App {
             return;
         }
 
+        let window = ends_command(&cmd.action);
         match cmd.action {
             Action::Move(Motion::RepeatFind { reverse }) => {
                 if let Some((m, n)) = self.find_again(reverse, count) {
@@ -1559,7 +1569,6 @@ impl App {
                 self.window_count = count;
                 self.window_command(c);
                 self.window_count = 1;
-                self.end_recording();
             }
             // Toggle symmetry: the binding that opens a split closes it again.
             // `<C-w>v` is the unconditional form, as in vim.
@@ -1569,26 +1578,15 @@ impl App {
                 } else {
                     self.split_pane(vertical);
                 }
-                self.end_recording();
             }
             Action::ClosePane => {
                 if !self.close_pane() {
                     self.notify("last pane — :q to quit", FlashKind::Info);
                 }
-                self.end_recording();
             }
-            Action::OnlyPane => {
-                self.only_pane();
-                self.end_recording();
-            }
+            Action::OnlyPane => self.only_pane(),
             // `3.` replaces the count the change was made with (vim's rule).
             Action::Repeat => self.repeat_dot_with((count > 1).then_some(count)),
-            // Window and buffer keys: run, then end the command, whether or not
-            // they moved anywhere (`end_recording`).
-            action @ (Action::FollowLink | Action::AlternateBuffer) => {
-                self.apply_action(action);
-                self.end_recording();
-            }
             action @ (Action::Insert
             | Action::Append
             | Action::InsertLineStart
@@ -1605,6 +1603,9 @@ impl App {
                 }
             }
             action => self.apply_action(action),
+        }
+        if window {
+            self.end_recording();
         }
         self.pending_register = None;
     }
@@ -1899,6 +1900,27 @@ impl App {
         }
     }
 
+}
+
+/// Window, buffer and panel actions: each ends the command under way, whether
+/// or not it went anywhere (`App::end_recording`), so none of them is ever
+/// the change `.` repeats. The one list of them, for every way an action
+/// runs: the grammar, `[keys.*]` bindings in any mode.
+fn ends_command(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Window(_)
+            | Action::ToggleSplit { .. }
+            | Action::ClosePane
+            | Action::OnlyPane
+            | Action::FollowLink
+            | Action::AlternateBuffer
+            | Action::FindBuffer
+            | Action::FindFile { .. }
+            | Action::FileTree { .. }
+            | Action::Quit { .. }
+            | Action::WriteQuit
+    )
 }
 
 /// The marker prefix the next list item should open with: the same indent, the

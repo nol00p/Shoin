@@ -22,6 +22,7 @@ impl App {
             match input {
                 Replay::Key(key) => self.on_key(key),
                 Replay::Paste(text) => self.on_paste(text),
+                Replay::Select { lines, cols, backwards } => self.replay_select(lines, cols, backwards),
             }
         }
         self.replaying = false;
@@ -54,7 +55,7 @@ impl App {
     /// began in counts: a command that ends in another one (`:bn`, `gf`)
     /// moved, whatever that document's revision happens to be.
     pub(super) fn edited_since_mark(&self) -> bool {
-        self.dot_rev != self.dot_mark()
+        self.dot_rev.doc == self.id && self.dot_rev.rev != self.buffer.revision
     }
 
     /// A window or buffer key ends the command under way, whether or not it
@@ -66,9 +67,10 @@ impl App {
     /// is the one way here from Insert, and the session's keys are its own.
     pub(super) fn end_recording(&mut self) {
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-            self.mode = Mode::Normal;
-            self.anchor = None;
+            // To Normal, even out of `-- (insert) VISUAL --`: the session it
+            // came from is over too.
             self.visual_resumes_insert = false;
+            self.leave_visual();
         }
         if self.mode == Mode::Insert {
             return;
@@ -93,9 +95,7 @@ impl App {
     }
 
     /// The first key into a dragged selection writes the selection into the
-    /// recording first, as the keys that make it again from the cursor: `v`,
-    /// then as many characters on, or as many lines down to the same column,
-    /// then `o` if the cursor was at the start. That is how vim repeats a
+    /// recording first, as a `Replay::Select`. That is how vim repeats a
     /// Visual operator: over as much text again, from the cursor.
     pub(super) fn describe_drag(&mut self) {
         if !std::mem::take(&mut self.drag_extent) {
@@ -107,24 +107,31 @@ impl App {
         let cur = self.buffer.cursor;
         let backwards = (cur.line, cur.col) < (anchor.line, anchor.col);
         let (lo, hi) = if backwards { (cur, anchor) } else { (anchor, cur) };
-        let counted = |n: usize, key: char| match n {
-            0 => String::new(),
-            1 => key.to_string(),
-            n => format!("{n}{key}"),
-        };
-        let mut keys = String::from("v");
-        if lo.line == hi.line {
-            keys += &counted(hi.col - lo.col, 'l');
+        let (lines, cols) = if lo.line == hi.line {
+            (0, hi.col - lo.col)
         } else {
-            keys += &counted(hi.line - lo.line, 'j');
-            keys.push('0');
-            keys += &counted(hi.col, 'l');
-        }
-        if backwards {
-            keys.push('o');
-        }
-        self.recording
-            .extend(keys.chars().map(|c| Replay::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+            (hi.line - lo.line, hi.col)
+        };
+        self.recording.push(Replay::Select { lines, cols, backwards });
+    }
+
+    /// `Replay::Select`: the selection again, from the cursor. Its end stops
+    /// at the end of the text; `sync_after_input` clamps it as it does a
+    /// dragged one.
+    fn replay_select(&mut self, lines: usize, cols: usize, backwards: bool) {
+        let from = self.buffer.cursor;
+        let last = self.buffer.last_line();
+        let to = if lines == 0 {
+            Cursor::new(from.line, (from.col + cols).min(self.buffer.line_len(from.line)))
+        } else {
+            let line = (from.line + lines).min(last);
+            Cursor::new(line, cols.min(self.buffer.line_len(line)))
+        };
+        self.enter_visual(Mode::Visual);
+        let (anchor, cursor) = if backwards { (to, from) } else { (from, to) };
+        self.anchor = Some(anchor);
+        self.buffer.cursor = cursor;
+        self.sync_after_input();
     }
 
     // ----------------------------------------------------------------- normal
