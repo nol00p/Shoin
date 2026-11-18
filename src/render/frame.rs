@@ -357,7 +357,8 @@ fn render_pane(
                 width: lay.measure,
                 height: 1,
             };
-            render_embed_row(frame, app, &cache, row.line(), index, r, bg);
+            let view = (text_area.y, text_area.y + lay.height);
+            render_embed_row(frame, app, &cache, row.line(), index, r, view, bg);
             leave(&mut current);
             continue;
         }
@@ -485,12 +486,122 @@ fn render_pane(
     Some(Position::new(x, text_area.y + screen_row as u16))
 }
 
+/// Which row of a picture's box one row is, for drawing its outline.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// One row of a picture's box, as `picture_row` found it.
+struct BoxRow {
+    /// The expansion row holding the picture.
+    first: usize,
+    cols: u16,
+    edge: Edge,
+    /// The caption to write in this row, when the picture is cut off where
+    /// this terminal can't show part of it and this is its first row on screen.
+    label: Option<String>,
+}
+
+/// Place row `index` of an embed in its picture's box, and record the
+/// picture's placement on the box's first visible row.
+///
+/// That row is the box's own first one when it is on screen, and the text
+/// area's top row when the box starts above it: a picture scrolled half off
+/// the top is still placed, with `skip` saying how much of it is gone.
+fn picture_row(
+    app: &App,
+    exp: &crate::transclude::preview::Expansion,
+    line: usize,
+    index: usize,
+    rect: Rect,
+    view: (u16, u16),
+    term_cols: u16,
+) -> Option<BoxRow> {
+    use crate::transclude::preview::Row;
+    let first = (0..=index).rev().find(|&j| matches!(exp.rows.get(j), Some(Row::Image(_))))?;
+    let Some(Row::Image(pic)) = exp.rows.get(first) else {
+        return None;
+    };
+    let rows = pic.rows as i32;
+    let at = (index - first) as i32;
+    let top = rect.y as i32 - at;
+    let skip = (view.0 as i32 - top).clamp(0, rows);
+    let shown = ((top + rows).min(view.1 as i32) - (top + skip)).max(0);
+    let lead = at == skip;
+    if lead {
+        app.images.borrow_mut().push(crate::render::Placement {
+            x: rect.x,
+            y: rect.y,
+            cols: pic.cols,
+            rows: pic.rows,
+            skip: skip as u16,
+            shown: shown as u16,
+            line,
+            index: first,
+            id: pic.id,
+        });
+    }
+    // Kitty draws the part of a picture that is on screen; iTerm2's protocol
+    // can only draw a whole one, so a cut-off box there shows its outline and
+    // caption until it is all on screen again. Cut off at the side, a picture
+    // is not drawn by either, and its box stays as it is.
+    let cut = skip > 0 || shown < rows;
+    let crops = app.image_protocol == crate::image::Protocol::Kitty;
+    let side = rect.x + pic.cols > term_cols;
+    let outlined = cut
+        && !crops
+        && !side
+        && app.image_protocol != crate::image::Protocol::None
+        && !pic.payload.is_empty();
+    // `Some` turns the outline on for every row of the box; the caption itself
+    // goes on its first row on screen.
+    let label = outlined.then(|| match exp.rows.get(first + pic.rows as usize) {
+        Some(Row::Caption(text)) if lead => text.clone(),
+        _ => String::new(),
+    });
+    let edge = if at == 0 {
+        Edge::Top
+    } else if at == rows - 1 {
+        Edge::Bottom
+    } else {
+        Edge::Middle
+    };
+    Some(BoxRow { first, cols: pic.cols, edge, label })
+}
+
+/// One row of a picture's outline, `w` cells wide, with `label` written in it
+/// when there is room — the outline a terminal that can't draw pixels shows.
+fn outline_row(w: usize, edge: Edge, label: Option<&str>) -> String {
+    let (l, r, fill) = match edge {
+        Edge::Top => ('\u{256d}', '\u{256e}', '\u{2500}'),
+        Edge::Middle => ('\u{2502}', '\u{2502}', ' '),
+        Edge::Bottom => ('\u{2570}', '\u{256f}', '\u{2500}'),
+    };
+    let inner = w.saturating_sub(2);
+    let label = label.filter(|t| !t.is_empty() && inner >= 4).map(|t| elide(t, inner - 2));
+    match label {
+        Some(t) => {
+            let rest = inner.saturating_sub(display_width(&t) as usize + 2);
+            let fill = fill.to_string().repeat(rest);
+            format!("{l} {t} {fill}{r}")
+        }
+        None => format!("{l}{}{r}", fill.to_string().repeat(inner)),
+    }
+}
+
 /// Draw one row of an expanded `![[…]]` (SPEC.md §14.3).
 ///
 /// The border and the label wear `theme.text_dim` so the embed reads as a
 /// quotation rather than as this document's own text — the reader needs to know
 /// at a glance which words they can edit. An unresolved embed wears
 /// `theme.error`, per §14.2.
+///
+/// `view` is the text area's first row and the row past its last, which is
+/// where a picture's box gets cut off.
+#[allow(clippy::too_many_arguments)]
 fn render_embed_row(
     frame: &mut Frame,
     app: &App,
@@ -498,14 +609,14 @@ fn render_embed_row(
     line: usize,
     index: usize,
     rect: Rect,
+    view: (u16, u16),
     bg: ratatui::style::Color,
 ) {
     use crate::transclude::preview::Row;
-    let Some(row) = cache
-        .entry(line)
-        .and_then(|e| e.embed.as_ref())
-        .and_then(|x| x.rows.get(index))
-    else {
+    let Some(exp) = cache.entry(line).and_then(|e| e.embed.as_ref()) else {
+        return;
+    };
+    let Some(row) = exp.rows.get(index) else {
         return;
     };
     let theme = &app.theme;
@@ -517,46 +628,16 @@ fn render_embed_row(
     // be something for the image to cover up.
     let pixels = app.image_protocol != crate::image::Protocol::None;
     let spans: Vec<Span> = match row {
-        Row::Image(pic) => {
-            app.images.borrow_mut().push(crate::render::Placement {
-                x: rect.x,
-                y: rect.y,
-                cols: pic.cols,
-                rows: pic.rows,
-                line,
-                index,
-            });
-            if pixels {
-                vec![Span::raw(" ".repeat(pic.cols as usize))]
+        Row::Image(_) | Row::Reserved => {
+            let Some(cut) = picture_row(app, exp, line, index, rect, view, frame.area().width) else {
+                return;
+            };
+            if pixels && cut.label.is_none() {
+                // Plain spaces: the picture is painted over them.
+                vec![Span::raw(if index == cut.first { " ".repeat(cut.cols as usize) } else { String::new() })]
             } else {
-                let w = (pic.cols as usize).min(width).max(2);
-                vec![Span::styled(
-                    format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(w - 2)),
-                    dim,
-                )]
-            }
-        }
-        Row::Reserved => {
-            if pixels {
-                vec![Span::raw("")]
-            } else {
-                // The last reserved row closes the box, so the outline needs to
-                // know where it ends — the expansion says.
-                let (w, last) = cache
-                    .entry(line)
-                    .and_then(|e| e.embed.as_ref())
-                    .map(|x| {
-                        let w = match x.rows.first() {
-                            Some(Row::Image(p)) => (p.cols as usize).min(width).max(2),
-                            _ => width.max(2),
-                        };
-                        let last = !matches!(x.rows.get(index + 1), Some(Row::Reserved));
-                        (w, last)
-                    })
-                    .unwrap_or((width.max(2), true));
-                let (l, r) = if last { ('\u{2570}', '\u{256f}') } else { ('\u{2502}', '\u{2502}') };
-                let fill = if last { "\u{2500}".repeat(w - 2) } else { " ".repeat(w - 2) };
-                vec![Span::styled(format!("{l}{fill}{r}"), dim)]
+                let w = (cut.cols as usize).min(width).max(2);
+                vec![Span::styled(outline_row(w, cut.edge, cut.label.as_deref()), dim)]
             }
         }
         // A label or message can carry a file name, and a file name a separator.

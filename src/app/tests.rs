@@ -37,7 +37,7 @@ fn a_moved_iterm2_picture_has_its_blank_cells_rewritten() {
     use ratatui::layout::Rect;
     let mut app = app_with("text\n");
     app.image_protocol = crate::image::Protocol::Iterm2;
-    let old = crate::render::Placement { x: 2, y: 1, cols: 3, rows: 2, line: 0, index: 0 };
+    let old = crate::render::Placement { x: 2, y: 1, cols: 3, rows: 2, skip: 0, shown: 2, line: 0, index: 0, id: 1 };
     *app.painted.borrow_mut() = (vec![old], (20, 5));
 
     let mut buf = Frame::empty(Rect::new(0, 0, 20, 5));
