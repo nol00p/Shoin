@@ -370,7 +370,9 @@ fn through_links(path: &Path) -> Result<PathBuf> {
         return Ok(real);
     }
     let mut at = path.to_path_buf();
-    for _ in 0..MAX_LINKS {
+    // One look more than there are links to follow: the 40th may lead to a
+    // file or a free name, which is no loop.
+    for _ in 0..=MAX_LINKS {
         match std::fs::symlink_metadata(&at) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 let target = std::fs::read_link(&at).with_context(|| format!("reading the link {}", at.display()))?;
@@ -388,7 +390,8 @@ fn through_links(path: &Path) -> Result<PathBuf> {
     anyhow::bail!("{} is a loop of links", path.display())
 }
 
-/// How many links in a chain a save follows: Linux's own limit.
+/// How many links in a chain a save follows: Linux's own limit, which
+/// follows 40 and refuses the 41st.
 const MAX_LINKS: u32 = 40;
 
 /// The rename route from scratch, for the one case that gave up its first
@@ -999,6 +1002,29 @@ mod tests {
         for p in ["deep.md", "self.md", "x.md", "y.md"] {
             assert!(std::fs::symlink_metadata(d.join(p)).unwrap().file_type().is_symlink());
         }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A chain of 40 links to a missing file is followed, as the system
+    /// follows one; a 41st makes it a loop.
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_of_forty_links_is_followed_and_forty_one_is_not() {
+        let d = dir("chain40");
+        let text = Rope::from_str("end\n");
+        // l0 → l1 → … → l39 → end.md: 40 links.
+        for i in 0..MAX_LINKS {
+            let next = if i + 1 == MAX_LINKS { "end.md".to_string() } else { format!("l{}", i + 1) };
+            std::os::unix::fs::symlink(next, d.join(format!("l{i}"))).unwrap();
+        }
+        write_atomic(&d.join("l0"), &text, &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("end.md")).unwrap(), "end\n");
+        std::fs::remove_file(d.join("end.md")).unwrap();
+        // One more in front: 41.
+        std::os::unix::fs::symlink("l0", d.join("first")).unwrap();
+        let err = format!("{:#}", write_atomic(&d.join("first"), &text, &opts(true, false)).unwrap_err());
+        assert!(err.contains("loop of links"), "{err}");
+        assert!(!d.join("end.md").exists());
         std::fs::remove_dir_all(&d).ok();
     }
 

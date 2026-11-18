@@ -1,7 +1,8 @@
 //! Crash recovery: the unsaved text of a dying editor goes to a file.
 //!
 //! Shoin writes nothing you did not ask for while it runs. The one exception is
-//! when it dies with unsaved work: a panic, `SIGTERM`, or `SIGHUP` (the terminal
+//! when it dies with unsaved work (and the tidying of what such a death left,
+//! below): a panic, `SIGTERM`, or `SIGHUP` (the terminal
 //! window closed). Then each modified buffer is written to
 //! `<file>.shoin-recover` beside its file, or to
 //! `$XDG_STATE_HOME/shoin/recover-<pid>-<n>.md` for a buffer with no name (or
@@ -22,8 +23,11 @@
 //! taken to be over when its process is gone, when the pid is ours and no
 //! dump of ours is writing, or when nothing has written to it for three
 //! minutes. The one `.partial` that does go is a second name for a recovery
-//! file (its dump was cut off between the two): a later dump removes it once
-//! all its own text is written, and opening the file does not name it.
+//! file whose dump is over (it was cut off between the two): its text is whole
+//! under the other name. A later dump removes it once all its own text is
+//! written, and opening the file removes it rather than naming it, the one
+//! thing opening a file ever deletes: once the user has deleted the recovery
+//! file, it would read as cut off.
 //!
 //! A file name too long to take these endings (names stop at 255 bytes) is
 //! shortened in them, with a hash of the whole name so two long names that
@@ -122,7 +126,13 @@ fn notice<'a>(buffers: impl Iterator<Item = &'a Buffer>) -> Option<String> {
         // costs the listing alone.
         let found = scan(path);
         let files = newest_first(found.recovery);
-        let cut = cut_off(found.partials, WRITING.load(Ordering::SeqCst));
+        let own_writing = WRITING.load(Ordering::SeqCst);
+        // A second name for a recovery file goes now, while that file is
+        // still there to prove its text whole: once the user deletes the
+        // recovery file, it would read as cut off.
+        let (twins, partials): (Vec<_>, Vec<_>) = found.partials.into_iter().partition(|(_, _, m)| duplicate(m));
+        clear_duplicates(twins, own_writing);
+        let cut = cut_off(partials, own_writing);
         // One notice per pass: any other file is looked at on the next one,
         // after this flash has had its turn.
         if let Some(text) = notice_text(&files, &cut) {
@@ -462,9 +472,9 @@ fn alive(pid: u32) -> Option<bool> {
 /// Remove each of `partials` that is a second name for a recovery file and
 /// whose dump is over. Any other is kept, since it may hold the only copy of
 /// the text, and opening the file names it.
-fn clear_duplicates(partials: Vec<Found>) {
+fn clear_duplicates(partials: Vec<Found>, own_writing: bool) {
     for (pid, p, meta) in partials {
-        if duplicate(&meta) && over(pid, &meta, false) {
+        if duplicate(&meta) && over(pid, &meta, own_writing) {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -608,7 +618,8 @@ fn dump_to(snaps: &[Snapshot], state: &Path, done: &mut dyn FnMut(&Path)) {
     folders.entry(state.to_path_buf()).or_default().push(b"recover".to_vec());
     for (dir, names) in folders {
         if let Some(found) = list(&dir, &names) {
-            clear_duplicates(found.partials);
+            // Our own `.partial` files are gone by now: none is ours.
+            clear_duplicates(found.partials, false);
         }
     }
 }
@@ -1568,7 +1579,20 @@ mod tests {
         assert!(cut_off(scan(&path).partials, false).is_empty(), "not named as cut off: its text is whole");
         let b = Buffer::open(path.clone(), &[]).unwrap();
         assert_eq!(notice([&b].into_iter()).unwrap(), format!("{} holds unsaved text from a crash", first[0].display()));
-        assert!(dead.exists(), "and opening the file deletes nothing");
+        // Opening the file removes it while the recovery file is there to
+        // vouch for it: deleted after that file, it would read as cut off.
+        assert!(!dead.exists(), "opening the file removes a second name whose dump is over");
+        assert!(running.exists(), "but not a running dump's");
+        assert_eq!(std::fs::read_to_string(&first[0]).unwrap(), "one\n");
+        std::fs::remove_file(&first[0]).unwrap();
+        assert!(cut_off(scan(&path).partials, false).is_empty(), "nothing reads as cut off after");
+
+        // Cut off again, for the dump's turn.
+        let first = dump(&[snap(Some(path.clone()), "one\n", false)], &state);
+        std::fs::hard_link(&first[0], &dead).unwrap();
+        // That dump cleared the state folder's: put it back.
+        assert!(!dead_unnamed.exists());
+        std::fs::hard_link(state.join("recover-1-1.md"), &dead_unnamed).unwrap();
 
         let snaps = [snap(Some(path.clone()), "two\n", false), snap(None, "three\n", false)];
         dump_to(&snaps, &state, &mut |_| {
@@ -1577,6 +1601,7 @@ mod tests {
         assert!(!dead.exists() && !dead_unnamed.exists(), "a second name for a whole file goes");
         assert!(running.exists(), "a running dump's is left to it");
         assert_eq!(std::fs::read_to_string(&first[0]).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(&running).unwrap(), "one\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
