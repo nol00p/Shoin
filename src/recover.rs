@@ -19,10 +19,12 @@
 //! A dump that is killed outright (`SIGKILL`) leaves that `.partial` file
 //! behind. It may hold the only copy of most of the text, so nothing deletes
 //! it or writes over it, not even a later process that has the same pid:
-//! opening the file names it with the recovery files, as cut off. A dump is
-//! taken to be over when its process is gone, when the pid is ours and no
-//! dump of ours is writing, or when nothing has written to it for three
-//! minutes. The one `.partial` that does go is a second name for a recovery
+//! opening the file names it with the recovery files, as cut off. One in the
+//! state folder belongs to no file: the first notice the editor has room for
+//! names that folder, once per session. A dump is taken to be over when its
+//! process is gone, when the pid is ours and no dump of ours is writing, or
+//! when nothing has written to it for three minutes (or its time is more than
+//! three minutes ahead of the clock). The one `.partial` that does go is a second name for a recovery
 //! file whose dump is over (it was cut off between the two): its text is whole
 //! under the other name. A later dump removes it once all its own text is
 //! written, and opening the file removes it rather than naming it, the one
@@ -91,12 +93,55 @@ static REGISTRY: Mutex<Vec<Snapshot>> = Mutex::new(Vec::new());
 /// looked for once per session rather than once per tick.
 static CHECKED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 
-/// Bring the registry up to date with `buffers`, and look for a recovery file
-/// beside any file not seen before: `Some` is the notice to show. The event
-/// loop calls this once per pass.
-pub fn tick<'a>(buffers: impl Iterator<Item = &'a Buffer> + Clone) -> Option<String> {
+/// Bring the registry up to date with `buffers`, and, when `can_show` (no
+/// message is up that a notice would replace), look for a recovery file
+/// beside any file not seen before, then once per session for `.partial`
+/// files in the state folder: `Some` is the notice to show. The event loop
+/// calls this once per pass.
+pub fn tick<'a>(buffers: impl Iterator<Item = &'a Buffer> + Clone, can_show: bool) -> Option<String> {
     refresh(buffers.clone());
-    notice(buffers)
+    if !can_show {
+        return None;
+    }
+    notice(buffers).or_else(|| state_once(&state_dir(), &STATE_CHECKED))
+}
+
+/// The state folder's notice, the first time only: after every open file has
+/// had its turn, so it never pushes theirs out.
+fn state_once(state: &Path, checked: &AtomicBool) -> Option<String> {
+    if checked.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    state_notice(state)
+}
+
+/// Whether the state folder has been looked at this session.
+static STATE_CHECKED: AtomicBool = AtomicBool::new(false);
+
+/// What the state folder says: the `.partial` files dumps left there when they
+/// were cut off. They belong to no file (a buffer with no name, or a folder
+/// that refused the write), so nothing else would ever name them; the notice
+/// names the folder, as there is no file to open beside it, and before the
+/// names, so a narrow screen still shows where to look. Its recovery files
+/// are not named: a dump that wrote one printed its path on the way out.
+fn state_notice(state: &Path) -> Option<String> {
+    let found = list(state, &[b"recover".to_vec()])?;
+    let cut = cut_off(found.partials, WRITING.load(Ordering::SeqCst));
+    if cut.is_empty() {
+        return None;
+    }
+    Some(format!("unsaved text from a crash in {}, cut off part way: {}", tilde(state).display(), names(&cut)))
+}
+
+/// `path` with `$HOME` written `~`, so a notice cut to the width of the
+/// screen keeps more of what tells the folders apart.
+fn tilde(path: &Path) -> PathBuf {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => PathBuf::from("~"),
+        Some(rest) => Path::new("~").join(rest),
+        None => path.to_path_buf(),
+    }
 }
 
 fn refresh<'a>(buffers: impl Iterator<Item = &'a Buffer>) {
@@ -144,18 +189,14 @@ fn notice<'a>(buffers: impl Iterator<Item = &'a Buffer>) -> Option<String> {
 
 /// What opening a file says about the recovery files beside it, newest first,
 /// and the `.partial` files dumps left when they were cut off.
+///
+/// The words come first and the files by name only: they all sit beside the
+/// open file, and the flash is cut to the width of the screen, so a full path
+/// (absolute, as the buffer holds it) would push out what the notice is about.
 fn notice_text(files: &[PathBuf], cut: &[PathBuf]) -> Option<String> {
-    // Names only when there are several: they all sit beside the open file,
-    // and a full path each would push the later ones off a flash that is cut
-    // to the width of the screen.
-    let names = |ps: &[PathBuf]| -> String {
-        let names: Vec<_> = ps.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).collect();
-        names.join(", ")
-    };
     match (files, cut) {
         ([], []) => None,
-        ([one], []) => Some(format!("{} holds unsaved text from a crash", one.display())),
-        ([], [one]) => Some(format!("{} holds unsaved text from a crash, cut off part way", one.display())),
+        ([one], []) => Some(format!("unsaved text from a crash: {}", names(std::slice::from_ref(one)))),
         (files, []) => Some(format!("unsaved text from a crash, newest first: {}", names(files))),
         ([], cut) => Some(format!("unsaved text from a crash, cut off part way: {}", names(cut))),
         (files, cut) => Some(format!(
@@ -164,6 +205,12 @@ fn notice_text(files: &[PathBuf], cut: &[PathBuf]) -> Option<String> {
             names(cut)
         )),
     }
+}
+
+/// The file names of `ps`, comma separated.
+fn names(ps: &[PathBuf]) -> String {
+    let names: Vec<_> = ps.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy()).collect();
+    names.join(", ")
 }
 
 /// The `.partial` files among `partials` whose dump is over and whose text is
@@ -183,8 +230,16 @@ fn cut_off(partials: Vec<Found>, own_writing: bool) -> Vec<PathBuf> {
 /// the pid is this process's and no dump of ours is writing (ours exist only
 /// while one is, so this one is an earlier process's that had the pid); or
 /// nothing has written to it for [`CUT_OFF_AFTER`], whatever has the pid now.
+///
+/// A time that far in the future counts as quiet too: a dump writes as it
+/// goes, so its file's time is the clock's now, give or take a network file
+/// system's skew. One that far ahead was stamped before the clock was set back
+/// (or by hand), and judged by its pid alone it would stay hidden behind
+/// whatever process has that pid now until the clock caught up.
 fn over(pid: u32, meta: &std::fs::Metadata, own_writing: bool) -> bool {
-    let quiet = meta.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > CUT_OFF_AFTER);
+    let now = std::time::SystemTime::now();
+    let quiet = meta.modified().ok().and_then(|t| now.duration_since(t).or_else(|_| t.duration_since(now)).ok());
+    let quiet = quiet.is_some_and(|age| age > CUT_OFF_AFTER);
     let gone = if pid == std::process::id() { !own_writing } else { alive(pid) != Some(true) };
     quiet || gone
 }
@@ -262,8 +317,12 @@ fn bases(path: &Path) -> Vec<PathBuf> {
 /// The recovery files and `.partial` files beside `path`, from one listing of
 /// its folder, which sees every number however many were deleted in between.
 /// A folder that lets you reach its files but not list them is asked name by
-/// name for the recovery files; its `.partial` files, named by a pid, stay
-/// unseen there.
+/// name for the recovery files; its `.partial` files stay unseen there. Each
+/// is named by the pid of the dump that wrote it, which is any number up to
+/// `pid_max` (4194304 on 64-bit Linux): asking for each would be millions of
+/// lookups on opening a file, and nothing records which pids dumped. A
+/// fixed name to look for would mean renaming what 0.2.4 and on leave, for
+/// folders that are rare in the first place (write and search, no read).
 fn scan(path: &Path) -> Beside {
     let bases = bases(path);
     let names: Vec<_> = bases.iter().filter_map(|b| b.file_name()).map(|n| n.as_encoded_bytes().to_vec()).collect();
@@ -1200,7 +1259,7 @@ mod tests {
         let n = Buffer::open(d.join("n.md"), &[]).unwrap();
         let m = Buffer::open(d.join("m.md"), &[]).unwrap();
         let first = notice([&n, &m].into_iter()).expect("a notice");
-        assert!(first.ends_with("n.md.shoin-recover holds unsaved text from a crash"), "{first}");
+        assert_eq!(first, "unsaved text from a crash: n.md.shoin-recover");
         let second = notice([&n, &m].into_iter()).expect("the other file's turn");
         assert!(second.contains("m.md.shoin-recover"), "{second}");
         assert_eq!(notice([&n, &m].into_iter()), None, "each named once per session");
@@ -1538,7 +1597,8 @@ mod tests {
         std::fs::write(&running, "in progress").unwrap();
         let b = Buffer::open(path.clone(), &[]).unwrap();
         let text = notice([&b].into_iter()).expect("a notice");
-        assert_eq!(text, format!("{} holds unsaved text from a crash, cut off part way", dead.display()));
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(text, format!("unsaved text from a crash, cut off part way: {}", name(&dead)));
         // Nothing written to it for longer than a dump lasts: cut off,
         // whatever process has that pid now.
         set_mtime(&running, std::time::SystemTime::now() - std::time::Duration::from_secs(600));
@@ -1550,7 +1610,6 @@ mod tests {
         assert_eq!(written, vec![beside(&path)]);
         assert_eq!(std::fs::read_to_string(&dead).unwrap(), "most of the te", "never deleted");
         assert_eq!(std::fs::read_to_string(&running).unwrap(), "in progress", "nor a running dump's");
-        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(
             notice_text(&recovery_files(&path), &cut_off(scan(&path).partials, false)).unwrap(),
             format!("unsaved text from a crash, newest first: k.md.shoin-recover; cut off part way: {}", name(&dead))
@@ -1578,7 +1637,7 @@ mod tests {
 
         assert!(cut_off(scan(&path).partials, false).is_empty(), "not named as cut off: its text is whole");
         let b = Buffer::open(path.clone(), &[]).unwrap();
-        assert_eq!(notice([&b].into_iter()).unwrap(), format!("{} holds unsaved text from a crash", first[0].display()));
+        assert_eq!(notice([&b].into_iter()).unwrap(), "unsaved text from a crash: l.md.shoin-recover");
         // Opening the file removes it while the recovery file is there to
         // vouch for it: deleted after that file, it would read as cut off.
         assert!(!dead.exists(), "opening the file removes a second name whose dump is over");
@@ -1602,6 +1661,84 @@ mod tests {
         assert!(running.exists(), "a running dump's is left to it");
         assert_eq!(std::fs::read_to_string(&first[0]).unwrap(), "one\n");
         assert_eq!(std::fs::read_to_string(&running).unwrap(), "one\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cut_off_partial_in_the_state_folder_is_named_once_with_its_folder() {
+        let d = dir("state-partial");
+        let state = d.join("state");
+        let checked = AtomicBool::new(false);
+        // No folder yet, or nothing cut off in it: nothing to say.
+        assert_eq!(state_notice(&state), None);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("recover-1-1.md"), "whole\n").unwrap();
+        assert_eq!(state_notice(&state), None, "a whole recovery file was named on the way out");
+        // A running dump's, and a second name for a whole file: not cut off.
+        std::fs::write(state.join("recover.partial-1"), "in progress").unwrap();
+        std::fs::hard_link(state.join("recover-1-1.md"), state.join(format!("recover.partial-{}", dead_pid()))).unwrap();
+        // Another file's, and names a dump never makes.
+        std::fs::write(state.join(format!("other.partial-{}", dead_pid())), "").unwrap();
+        std::fs::write(state.join("recover.partial-x"), "").unwrap();
+        assert_eq!(state_notice(&state), None);
+        // Killed while it wrote an unnamed buffer's text.
+        let dead = state.join(format!("recover.partial-{}", dead_pid()));
+        std::fs::write(&dead, "most of the te").unwrap();
+        let older = state.join(format!("recover.partial-{}.2", dead_pid()));
+        std::fs::write(&older, "older").unwrap();
+        set_mtime(&older, std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        let text = format!(
+            "unsaved text from a crash in {}, cut off part way: {}, {}",
+            tilde(&state).display(),
+            dead.file_name().unwrap().to_string_lossy(),
+            older.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(state_once(&state, &checked), Some(text));
+        assert_eq!(state_once(&state, &checked), None, "once per session");
+        assert_eq!(std::fs::read_to_string(&dead).unwrap(), "most of the te", "never deleted");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_under_home_is_named_from_tilde() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from) else { return };
+        assert_eq!(tilde(&home.join(".local/state/shoin")), Path::new("~/.local/state/shoin"));
+        assert_eq!(tilde(&home), Path::new("~"));
+        assert_eq!(tilde(Path::new("/elsewhere/shoin")), Path::new("/elsewhere/shoin"));
+        // Only a whole folder name counts: `/home/ann` is no prefix of `/home/anna`.
+        let mut sibling = home.clone().into_os_string();
+        sibling.push("x/state");
+        assert_eq!(tilde(Path::new(&sibling)), PathBuf::from(&sibling));
+    }
+
+    #[test]
+    fn a_notice_leads_with_its_words_and_names_files_without_their_folder() {
+        let d = dir(&format!("deep-{}", "folder/".repeat(20)));
+        let path = d.join("w.md");
+        std::fs::write(beside(&path), "x\n").unwrap();
+        let b = Buffer::open(path.clone(), &[]).unwrap();
+        let text = notice([&b].into_iter()).expect("a notice");
+        assert_eq!(text, "unsaved text from a crash: w.md.shoin-recover");
+        assert!(!text.contains("folder"), "{text}");
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("shoin-recover-{}-deep-folder", std::process::id())));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_partial_dated_far_in_the_future_counts_as_cut_off() {
+        let d = dir("future");
+        let path = d.join("f.md");
+        // Pid 1 is always running: only its time can say the dump is over.
+        let running = partial_beside(&path, 1);
+        std::fs::write(&running, "text").unwrap();
+        let now = std::time::SystemTime::now();
+        set_mtime(&running, now + std::time::Duration::from_secs(60));
+        assert!(cut_off(scan(&path).partials, false).is_empty(), "within a dump's span of now: judged by its pid");
+        set_mtime(&running, now + std::time::Duration::from_secs(3600));
+        assert_eq!(cut_off(scan(&path).partials, false), vec![running.clone()], "stamped before the clock went back");
+        set_mtime(&running, now - std::time::Duration::from_secs(3600));
+        assert_eq!(cut_off(scan(&path).partials, false), vec![running.clone()], "and in the past, as before");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1648,7 +1785,7 @@ mod tests {
         assert_eq!(recovery_files(&path), vec![old.clone()]);
         let b = Buffer::open(path.clone(), &[]).unwrap();
         let text = notice([&b].into_iter()).expect("a notice");
-        assert_eq!(text, format!("{} holds unsaved text from a crash", old.display()));
+        assert_eq!(text, format!("unsaved text from a crash: {}", old.file_name().unwrap().to_string_lossy()));
         // A new crash goes under the short name, and both are listed.
         let new = dump(&[snap(Some(path.clone()), "new\n", false)], &d.join("state"));
         assert_eq!(new, vec![beside(&path)]);
