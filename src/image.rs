@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn a_kitty_id_follows_the_bytes() {
-        assert_eq!(kitty_id(PNG_1X1), kitty_id(&PNG_1X1[..]));
+        assert_eq!(kitty_id(PNG_1X1), kitty_id(&PNG_1X1.iter().copied().collect::<Vec<u8>>()));
         assert_ne!(kitty_id(PNG_1X1), kitty_id(&PNG_1X1[..30]));
         assert_ne!(kitty_id(b""), 0, "0 means no id to kitty");
     }
