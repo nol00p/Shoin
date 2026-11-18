@@ -91,7 +91,8 @@ switches to that read-only view and back. See [Reading](reading.md).
 
 While you learn, the bottom row shows the keys that matter right now: in
 each mode, in the file tree, and after a key like `<leader>` or `g` that waits
-for another. `:set hints off` hides it for the session, and
+for another. The most used keys come first, so on a narrow terminal the
+rarely used ones are the ones cut off. `:set hints off` hides it for the session, and
 `enabled = false` under `[hints]` for good.
 
 `<leader>n` turns on line numbers. For Vim's relative numbers, which make counts
