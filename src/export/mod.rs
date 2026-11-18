@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::config::schema::{MarkdownConfig, TranscludeConfig};
 use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry};
+use crate::render::markdown::inline::Inline;
 use crate::transclude::same_file;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,24 +156,38 @@ fn linked_pictures(markdown: &str, base: &Path, md: &MarkdownConfig) -> Vec<Path
     out
 }
 
+/// Whether a span's body is prose, which can hold more markup: emphasis and
+/// a link's text. `inline::scan` returns flat spans, so every export walker
+/// scans these bodies again to reach a link in bold or a picture in a link;
+/// everything else (code, math, tags, a picture's alt text) is what it says.
+/// The one list the walkers share, with no catch-all: a new kind has to be
+/// placed here.
+fn holds_prose(kind: Inline) -> bool {
+    match kind {
+        Inline::Bold | Inline::Italic | Inline::BoldItalic | Inline::Strikethrough | Inline::Highlight | Inline::Link => true,
+        Inline::Code
+        | Inline::WikiLink
+        | Inline::Image
+        | Inline::Tag
+        | Inline::Autolink
+        | Inline::Escape
+        | Inline::Latex => false,
+    }
+}
+
 /// One line of `linked_pictures`, reaching into emphasis and link text.
 fn pictures_in(line: &str, base: &Path, md: &MarkdownConfig, out: &mut Vec<PathBuf>) {
-    use crate::render::markdown::inline::{self, Inline};
+    use crate::render::markdown::inline;
     let chars: Vec<char> = line.chars().collect();
     for sp in inline::scan(line, md) {
         let inner: String = chars[sp.inner.clone()].iter().collect();
         match sp.kind {
-            Inline::Bold
-            | Inline::Italic
-            | Inline::BoldItalic
-            | Inline::Strikethrough
-            | Inline::Highlight
-            | Inline::Link => pictures_in(&inner, base, md, out),
             Inline::Image => {
                 if let Some(file) = inline::destination(&sp, line).and_then(|(url, _)| html::local_file(&url, base)) {
                     out.push(file);
                 }
             }
+            k if holds_prose(k) => pictures_in(&inner, base, md, out),
             _ => {}
         }
     }
@@ -207,6 +222,12 @@ impl Held {
                 // A quoted list item, heading, fence, rule or table row keeps
                 // its own line; only quoted text runs on into the next.
                 let prose = k == BlockKind::Paragraph && !has_cell_separator(body);
+                // Text at a shallower depth than quoted text goes on with
+                // it, and the deeper quote stays open: CommonMark's lazy
+                // continuation, `> > a` then `> b` being one paragraph.
+                if prose && self.prose && depth < self.quote {
+                    return self.clone();
+                }
                 Held { quote: depth, prose, inner }
             }
             // An unmarked line goes on with whatever it continues, a quote
@@ -295,7 +316,7 @@ fn folder(path: &Path) -> Option<PathBuf> {
 
 /// One line of `rebase_images`, reaching into emphasis the way export does.
 fn rebase_line(line: &str, from: &Path, to: Option<&Path>, md: &MarkdownConfig) -> String {
-    use crate::render::markdown::inline::{self, Inline};
+    use crate::render::markdown::inline;
     let chars: Vec<char> = line.chars().collect();
     let mut out = String::new();
     let mut i = 0usize;
@@ -308,12 +329,7 @@ fn rebase_line(line: &str, from: &Path, to: Option<&Path>, md: &MarkdownConfig) 
         match sp.kind {
             // A link's text may hold a picture: the README badge
             // `[![alt](img)](url)`.
-            Inline::Bold
-            | Inline::Italic
-            | Inline::BoldItalic
-            | Inline::Strikethrough
-            | Inline::Highlight
-            | Inline::Link => {
+            k if holds_prose(k) => {
                 let inner: String = chars[sp.inner.clone()].iter().collect();
                 out.extend(&chars[sp.outer.start..sp.inner.start]);
                 out.push_str(&rebase_line(&inner, from, to, md));
@@ -588,6 +604,46 @@ mod tests {
         let from = Path::new("/notes");
         let got = rebase_line("[![ci](img/b.svg)](docs/x.md) and **![p](q.png)**", from, None, &md);
         assert_eq!(got, "[![ci](/notes/img/b.svg)](docs/x.md) and **![p](/notes/q.png)**");
+    }
+
+    /// The five export walkers reach into a span's body exactly when
+    /// `holds_prose` says it is prose: a picture inside emphasis or a
+    /// link's text is found, rebased, drawn and named by every one of them,
+    /// and one inside code or math by none.
+    #[test]
+    fn every_walker_reaches_into_the_same_spans() {
+        use crate::render::markdown::inline;
+        let md = MarkdownConfig::default();
+        let d = vault("prose-spans");
+        std::fs::write(d.join("pic.png"), b"x").unwrap();
+        let pic = "![p](pic.png)";
+        for (kind, line) in [
+            (Inline::Bold, format!("**{pic}**")),
+            (Inline::Italic, format!("*{pic}*")),
+            (Inline::BoldItalic, format!("***{pic}***")),
+            (Inline::Strikethrough, format!("~~{pic}~~")),
+            (Inline::Highlight, format!("=={pic}==")),
+            (Inline::Link, format!("[{pic}](u)")),
+            (Inline::Code, format!("`{pic}`")),
+            (Inline::Latex, format!("${pic}$")),
+        ] {
+            let spans = inline::scan(&line, &md);
+            assert_eq!(spans.first().map(|s| s.kind), Some(kind), "{line}");
+            let want = holds_prose(kind);
+
+            let mut found = Vec::new();
+            pictures_in(&line, &d, &md, &mut found);
+            assert_eq!(!found.is_empty(), want, "pictures_in {line}");
+            let moved = rebase_line(&line, Path::new("/notes"), None, &md);
+            assert_eq!(moved.contains("/notes/pic.png"), want, "rebase_line {line}: {moved}");
+            let page = html::render(&line, "t", &html::Page::default());
+            assert_eq!(page.contains("<img"), want, "inline_in {line}: {page}");
+            let plain = html::plain_text(&line, &md);
+            assert_eq!(!plain.contains("]("), want, "plain_text {line}: {plain}");
+            let txt = plain::render(&line, 72, false, &md);
+            assert_eq!(txt.contains("[image: p]"), want, "strip_in {line}: {txt}");
+        }
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
@@ -971,6 +1027,10 @@ mod tests {
             ("> x\\\n>\n> next\n", false),
             ("> x\\\n> > next\n", false),
             ("> x\\\nlazy\n", true),
+            ("> > x\\\n> next\n", true),
+            ("> > x\\\nnext\n", true),
+            ("> > x\\\n>\n> next\n", false),
+            ("> > x\\\n> - next\n", false),
             ("> a\nx\\\n> next\n", true),
             ("x\\\n> next\n", false),
             ("> - x\\\n> - next\n", false),
