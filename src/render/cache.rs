@@ -536,7 +536,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         && matches!(block, BlockKind::ListItem { .. })
     {
         let tw = cfg.editor.tab_width as u16;
-        (content_column(&source, tw), content_column(&concealed, tw))
+        (content_column(&source, tw, ""), content_column(&concealed, tw, &cfg.glyphs.indent_guide))
     } else {
         (0, 0)
     };
@@ -563,6 +563,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
                 measure,
                 app.embed_mode,
                 app.config.markdown.math,
+                app.config.editor.tab_width,
             )
         })
     } else {
@@ -577,8 +578,8 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         (no_wrap(&source), no_wrap(&concealed))
     } else {
         (
-            wrap_hanging(&source, measure, hang_raw),
-            wrap_hanging(&concealed, measure, hang_concealed),
+            wrap_hanging(&source, measure, hang_raw, cfg.editor.tab_width),
+            wrap_hanging(&concealed, measure, hang_concealed, cfg.editor.tab_width),
         )
     };
 

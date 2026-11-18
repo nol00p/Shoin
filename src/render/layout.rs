@@ -133,12 +133,12 @@ impl Layout {
 ///
 /// `hang` is clamped so a continuation row always keeps some width — a deeply
 /// indented item in a narrow pane must still wrap rather than loop forever.
-pub fn wrap_hanging(text: &str, measure: u16, hang: u16) -> Vec<(usize, usize)> {
+pub fn wrap_hanging(text: &str, measure: u16, hang: u16, tab: usize) -> Vec<(usize, usize)> {
     if hang == 0 {
-        return wrap_line(text, measure);
+        return wrap_line(text, measure, tab);
     }
     let hang = hang.min(measure.saturating_sub(MIN_WRAP_WIDTH));
-    let first = wrap_line(text, measure);
+    let first = wrap_line(text, measure, tab);
     if first.len() < 2 || hang == 0 {
         return first;
     }
@@ -148,7 +148,7 @@ pub fn wrap_hanging(text: &str, measure: u16, hang: u16) -> Vec<(usize, usize)> 
     let mut out = vec![(start, end)];
     let chars: Vec<char> = text.chars().collect();
     let rest: String = chars[end..].iter().collect();
-    for (a, b) in wrap_line(&rest, measure - hang) {
+    for (a, b) in wrap_line(&rest, measure - hang, tab) {
         out.push((end + a, end + b));
     }
     out
@@ -162,17 +162,29 @@ const MIN_WRAP_WIDTH: u16 = 8;
 ///
 /// Read off the DISPLAY text, not the source: a concealed `- [ ] ` is one
 /// checkbox cell wide and a revealed one is six, and the continuation has to
-/// follow whichever is on screen.
-pub fn content_column(text: &str, tab_width: u16) -> u16 {
+/// follow whichever is on screen. `guide` is the indent guide glyph a
+/// concealed line draws in its indent (empty for a raw line): it is indent,
+/// not the marker.
+pub fn content_column(text: &str, tab_width: u16, guide: &str) -> u16 {
     let mut width = 0u16;
     let mut chars = text.chars().peekable();
-    // Leading whitespace.
-    while let Some(c) = chars.peek() {
-        match c {
-            ' ' => width += 1,
-            '\t' => width += tab_width.max(1),
+    // Leading whitespace, guides included.
+    let mut rest = text;
+    loop {
+        if !guide.is_empty() && rest.starts_with(guide) {
+            width += display_width(guide);
+            for _ in guide.chars() {
+                chars.next();
+            }
+            rest = &rest[guide.len()..];
+            continue;
+        }
+        match chars.peek() {
+            Some(' ') => width += 1,
+            Some('\t') => width += tab_width.max(1),
             _ => break,
         }
+        rest = &rest[1..];
         chars.next();
     }
     // The marker itself: an ordinal runs to its `.`/`)`, anything else is one
@@ -216,15 +228,16 @@ pub fn content_column(text: &str, tab_width: u16) -> u16 {
 /// Word-boundary wrap of one line, returning char ranges.
 ///
 /// Measured in display cells via `unicode-width`, so CJK and emoji occupy their
-/// true width. Always returns at least one range, so an empty line still
-/// produces a row.
-pub fn wrap_line(text: &str, measure: u16) -> Vec<(usize, usize)> {
-    wrap_chars(&text.chars().collect::<Vec<_>>(), measure)
+/// true width, and a tab its `tab` cells. A row may break after a space or a
+/// tab. Always returns at least one range, so an empty line still produces a
+/// row.
+pub fn wrap_line(text: &str, measure: u16, tab: usize) -> Vec<(usize, usize)> {
+    wrap_chars(&text.chars().collect::<Vec<_>>(), measure, tab)
 }
 
 /// `wrap_line` for a line whose chars the caller already has, so a long line
 /// is not collected twice when its rows are then cut with `char_window`.
-pub fn wrap_chars(chars: &[char], measure: u16) -> Vec<(usize, usize)> {
+pub fn wrap_chars(chars: &[char], measure: u16, tab: usize) -> Vec<(usize, usize)> {
     if chars.is_empty() {
         return vec![(0, 0)];
     }
@@ -237,7 +250,7 @@ pub fn wrap_chars(chars: &[char], measure: u16) -> Vec<(usize, usize)> {
     let mut i = 0usize;
 
     while i < chars.len() {
-        let w = cell_width(chars[i]);
+        let w = cell_width(chars[i], tab);
         if width + w > max && i > start {
             // Break at the last space if there was one inside this row,
             // otherwise hard-break at the current character.
@@ -252,7 +265,7 @@ pub fn wrap_chars(chars: &[char], measure: u16) -> Vec<(usize, usize)> {
             i = brk;
             continue;
         }
-        if chars[i] == ' ' {
+        if matches!(chars[i], ' ' | '\t') {
             last_space = Some(i);
         }
         width += w;
@@ -290,11 +303,31 @@ pub fn stand_in(c: char) -> Option<char> {
 /// every screen measure — wrap, caret, click, conceal — goes through here so
 /// the measure follows the draw whatever the two say. Not for the file:
 /// `text::table` pads by unicode-width itself.
-pub fn cell_width(c: char) -> usize {
+///
+/// A tab is `tab` cells, a fixed width rather than the way to the next tab
+/// stop: the rule the classifier and the list commands count an indent by
+/// (`block::indent_cols`), so a tab-indented item is drawn as deep as it is
+/// nested. `expand_tabs` draws it as that many blank cells. A `tab` of 0 (a
+/// config file can say so) is 1, as the classifier reads it.
+pub fn cell_width(c: char, tab: usize) -> usize {
+    if c == '\t' {
+        return tab.max(1);
+    }
     match stand_in(c) {
         Some(g) => UnicodeWidthChar::width(g).unwrap_or(1),
         None => UnicodeWidthChar::width(c).unwrap_or(0),
     }
+}
+
+/// `text` with each tab replaced by the `tab` spaces it is measured as, for
+/// drawing: a tab must never reach the terminal buffer, where ratatui drops it
+/// (a control char) and every cell after it shifts left. Borrowed unchanged
+/// when there is no tab, which is nearly always.
+pub fn expand_tabs(text: &str, tab: usize) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\t') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(text.replace('\t', &" ".repeat(tab.max(1))))
 }
 
 
@@ -308,11 +341,36 @@ pub fn no_wrap(text: &str) -> Vec<(usize, usize)> {
     vec![(0, text.chars().count())]
 }
 
-/// The single funnel for measuring a line in display cells.
+/// The single funnel for measuring chrome text in display cells: prompts,
+/// labels, file names. A tab there measures 0: ratatui drops it.
 pub fn display_width(text: &str) -> u16 {
     text.chars()
-        .map(cell_width)
+        .filter(|&c| c != '\t')
+        .map(|c| cell_width(c, 0))
         .sum::<usize>() as u16
+}
+
+/// Document text in display cells, a tab counting `tab` (`cell_width`).
+pub fn text_width(text: &str, tab: usize) -> u16 {
+    text.chars()
+        .map(|c| cell_width(c, tab))
+        .sum::<usize>() as u16
+}
+
+/// The char under display cell `cell` of `chars`, counted from the first:
+/// every cell of a tab or a wide glyph lands on that char. A cell past the end
+/// answers `chars.len()`. A zero-width char takes no cell, so a click never
+/// lands on one but on the char it sits on.
+pub fn char_at_cell(chars: &[char], cell: usize, tab: usize) -> usize {
+    let mut at = 0usize;
+    for (i, &c) in chars.iter().enumerate() {
+        let w = cell_width(c, tab);
+        if cell < at + w {
+            return i;
+        }
+        at += w;
+    }
+    chars.len()
 }
 
 /// Scroll offset (in visual rows) such that the cursor stays visible, honoring
@@ -369,14 +427,19 @@ mod tests {
     /// The column a wrapped continuation hangs at, read off the DISPLAY form.
     #[test]
     fn content_column_measures_the_marker_run() {
-        assert_eq!(content_column("- item", 4), 2, "bullet plus its space");
-        assert_eq!(content_column("• item", 4), 2, "…concealed is the same width");
-        assert_eq!(content_column("12. item", 4), 4, "an ordinal is as wide as it reads");
-        assert_eq!(content_column("- [ ] task", 4), 6, "the raw checkbox prefix");
-        assert_eq!(content_column("☐ task", 4), 2, "…and the concealed one");
-        assert_eq!(content_column("  - nested", 4), 4, "indent counts toward it");
-        assert_eq!(content_column("\t- tabbed", 4), 6, "a tab is tab_width cells");
-        assert_eq!(content_column("- ", 4), 0, "a marker with no content is not a hang");
+        assert_eq!(content_column("- item", 4, ""), 2, "bullet plus its space");
+        assert_eq!(content_column("• item", 4, ""), 2, "…concealed is the same width");
+        assert_eq!(content_column("12. item", 4, ""), 4, "an ordinal is as wide as it reads");
+        assert_eq!(content_column("- [ ] task", 4, ""), 6, "the raw checkbox prefix");
+        assert_eq!(content_column("☐ task", 4, ""), 2, "…and the concealed one");
+        assert_eq!(content_column("  - nested", 4, ""), 4, "indent counts toward it");
+        assert_eq!(content_column("\t- tabbed", 4, ""), 6, "a tab is tab_width cells");
+        assert_eq!(content_column("- ", 4, ""), 0, "a marker with no content is not a hang");
+        // A concealed nested item draws guides in its indent; they are
+        // indent, not its marker.
+        assert_eq!(content_column("│   ◦ nested", 4, "│"), 6, "a guide is indent");
+        assert_eq!(content_column("│ │ • nested", 2, "│"), 6);
+        assert_eq!(content_column("│ ◦ nested", 2, ""), 2, "…not when there are none");
     }
 
     /// Rows after the first are wrapped at the narrower width, since the
@@ -384,8 +447,8 @@ mod tests {
     #[test]
     fn wrap_hanging_narrows_only_the_continuations() {
         let text = "- aaaa bbbb cccc dddd";
-        let flat = wrap_line(text, 12);
-        let hung = wrap_hanging(text, 12, 2);
+        let flat = wrap_line(text, 12, 4);
+        let hung = wrap_hanging(text, 12, 2, 4);
         assert_eq!(hung[0], flat[0], "the first row keeps the full measure");
         for (a, b) in &hung[1..] {
             let row: String = text.chars().skip(*a).take(b - a).collect();
@@ -402,7 +465,7 @@ mod tests {
     /// would wrap forever.
     #[test]
     fn wrap_hanging_keeps_a_usable_width() {
-        let rows = wrap_hanging("- aaaa bbbb cccc dddd eeee", 10, 9);
+        let rows = wrap_hanging("- aaaa bbbb cccc dddd eeee", 10, 9, 4);
         assert!(rows.len() > 1);
         assert!(rows.windows(2).all(|w| w[1].1 > w[0].1), "always makes progress");
     }

@@ -421,7 +421,7 @@ impl App {
     pub(super) fn find_again(&self, reverse: bool, count: usize) -> Option<(Motion, usize)> {
         let (target, forward, till) = self.last_find?;
         let m = Motion::FindChar { target, forward: forward ^ reverse, till };
-        let stays = till && motion::resolve(&self.buffer, m, count, 1, false).is_none();
+        let stays = till && motion::resolve(&self.buffer, m, count, 1, false, self.config.editor.tab_width).is_none();
         Some((m, if stays { count + 1 } else { count }))
     }
 

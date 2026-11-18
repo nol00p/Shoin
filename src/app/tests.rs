@@ -2283,10 +2283,47 @@ fn set_tab_width_reclassifies_tabbed_lists() {
     // A number, not a toggle; bad values change nothing.
     cmd(&mut app, ":set tab_width");
     assert_eq!(app.flash.as_ref().and_then(|f| f.text.clone()).as_deref(), Some("tab_width=2"));
-    for bad in ["nope", "0", "17"] {
+    for bad in ["nope", "0", "17", "x"] {
         cmd(&mut app, &format!(":set tab_width={bad}"));
         assert_eq!(app.config.editor.tab_width, 2, "{bad}");
+        assert!(matches!(app.flash.as_ref().map(|f| &f.kind), Some(FlashKind::Error)), "{bad}");
     }
+    for bad in ["0", "x"] {
+        cmd(&mut app, &format!(":set tab_width {bad}"));
+        assert_eq!(app.config.editor.tab_width, 2, "{bad}, with a space");
+    }
+}
+
+/// `:set tab_width N` redraws at once: a tab-indented item moves to its new
+/// depth on screen, its bullet with it, and the cache is not left at the old
+/// width.
+#[test]
+fn set_tab_width_redraws_tabbed_lines() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut app = app_with("top\n- a\n\t- b\n\tx\ty\n");
+    let draw = |app: &App| {
+        let mut t = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let at = |sym: &str| {
+            (0..8u16)
+                .flat_map(|y| (0..40u16).map(move |x| (x, y)))
+                .find(|&(x, y)| buf[(x, y)].symbol() == sym)
+                .map(|(x, _)| x)
+                .unwrap()
+        };
+        let a = at("\u{2022}"); // `a`'s bullet, at the item's left edge
+        (at("b") - a, at("x") - a, at("y") - at("x"))
+    };
+    assert_eq!(draw(&app), (6, 4, 5), "at 4: `b` 4 + 2 in, `x` a tab in, `y` a tab past it");
+    cmd(&mut app, ":set tab_width 2");
+    app.refresh_blocks(); // as the event loop does before every frame
+    assert_eq!(app.config.editor.tab_width, 2);
+    assert!(matches!(app.blocks.kinds[2], BlockKind::ListItem { depth: 2, .. }), "reclassified");
+    assert_eq!(draw(&app), (4, 2, 3), "at 2");
+    cmd(&mut app, ":set tab_width=8");
+    app.refresh_blocks();
+    assert_eq!(draw(&app), (10, 8, 9), "at 8");
 }
 
 /// `:number [relative|absolute]` — an explicit mode sets it directly, and
@@ -5879,7 +5916,8 @@ fn undo_of_a_visual_line_delete_returns_to_the_starting_line() {
     assert_eq!(text(&app), "aaa\nddd\n");
     feed(&mut app, "u");
     assert_eq!(text(&app), "aaa\nbbb\nccc\nddd\n");
-    assert_eq!(app.buffer.cursor, Cursor::new(1, 0));
+    // Position only: the cursor `j` left there also keeps its goal cell.
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, 0));
 }
 
 /// An operator-pending motion is a continuation too — `dw`'s `w` must not

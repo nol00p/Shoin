@@ -5,6 +5,7 @@
 
 use super::buffer::Buffer;
 use super::cursor::Cursor;
+use crate::render::layout::cell_width;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Motion {
@@ -85,12 +86,17 @@ pub fn char_class(c: char) -> u8 {
 /// rather than a cursor move. A few motions then reach where the cursor can
 /// never rest: `l` and `}` the line end past the last character, and `w`'s
 /// last step stops at the end of its line instead of crossing it.
+///
+/// `tab` is the cells a tab takes on screen (`tab_width`): the vertical
+/// motions keep the goal as a screen cell, as Vim does, so `j` from the `x` of
+/// `\tx` lands on the char drawn above or below it, not on the second char.
 pub fn resolve(
     buffer: &Buffer,
     motion: Motion,
     count: usize,
     page: usize,
     operator: bool,
+    tab: usize,
 ) -> Option<MotionResult> {
     let count = count.max(1);
     let cur = buffer.cursor;
@@ -292,10 +298,36 @@ pub fn resolve(
     // Vertical motions keep the goal column; everything else resets it.
     match motion {
         Up | Down | HalfPageDown | HalfPageUp | PageDown | PageUp => {
+            // The goal in cells: measured once, on the line the goal column
+            // was set on, then carried from line to line. Both walks read the
+            // rope only as far as the goal, so `j` on a long line stays cheap.
+            let cells = cur.goal_cells.unwrap_or_else(|| {
+                let len = buffer.line_len(cur.line);
+                let upto = cur.goal_col.min(len);
+                let past = cur.goal_col - upto; // a goal past the line's end
+                let line = buffer.rope.line(cur.line.min(last_line));
+                line.chars().take(upto).map(|c| cell_width(c, tab)).sum::<usize>().saturating_add(past)
+            });
+            let len = buffer.line_len(target.line);
+            let mut at = 0usize;
+            let col = buffer
+                .rope
+                .line(target.line.min(last_line))
+                .chars()
+                .take(len)
+                .position(|c| {
+                    at += cell_width(c, tab);
+                    cells < at
+                })
+                .unwrap_or(len);
+            target.col = col.min(len.saturating_sub(1));
             target.goal_col = cur.goal_col;
-            target.col = target.col.min(buffer.line_len(target.line).saturating_sub(1));
+            target.goal_cells = Some(cells);
         }
-        _ => target.goal_col = target.col,
+        _ => {
+            target.goal_col = target.col;
+            target.goal_cells = None;
+        }
     }
 
     // Position only: `Cursor`'s equality also compares the hidden goal column.
@@ -497,11 +529,11 @@ mod tests {
 
     /// Resolve and report `(line, col)`, or `None` when the motion cannot move.
     fn go(b: &Buffer, m: Motion, count: usize) -> Option<(usize, usize)> {
-        resolve(b, m, count, 10, false).map(|r| (r.target.line, r.target.col))
+        resolve(b, m, count, 10, false, 4).map(|r| (r.target.line, r.target.col))
     }
 
     fn kind(b: &Buffer, m: Motion) -> MotionKind {
-        resolve(b, m, 1, 10, false).expect("a motion").kind
+        resolve(b, m, 1, 10, false, 4).expect("a motion").kind
     }
 
     #[test]
@@ -591,7 +623,7 @@ mod tests {
     fn vertical_motions_keep_the_goal_column() {
         let b = buf("a long first line\nshort\nanother long line\n", 0, 15);
         // Down onto a short line clamps, but the GOAL is remembered.
-        let r = resolve(&b, Motion::Down, 1, 10, false).unwrap();
+        let r = resolve(&b, Motion::Down, 1, 10, false, 4).unwrap();
         assert_eq!((r.target.line, r.target.col), (1, 4));
         assert_eq!(r.target.goal_col, 15, "the goal survives the clamp");
         assert_eq!(r.kind, MotionKind::Linewise);
@@ -600,6 +632,30 @@ mod tests {
         let mut b2 = buf("a long first line\nshort\nanother long line\n", 1, 4);
         b2.cursor.goal_col = 15;
         assert_eq!(go(&b2, Motion::Down, 1), Some((2, 15)));
+    }
+
+    /// `j` and `k` keep the screen cell, a tab counting its `tab` cells:
+    /// from the `x` of `\tx` they land on the char drawn above or below it,
+    /// and any cell of a tab lands on the tab.
+    #[test]
+    fn vertical_motions_keep_the_screen_cell_across_tabs() {
+        let text = "\tx\nabcdefghij\n\t\tz\n";
+        let step = |b: &mut Buffer, m: Motion, tab: usize| {
+            let r = resolve(b, m, 1, 10, false, tab).unwrap();
+            b.cursor = r.target;
+            (r.target.line, r.target.col)
+        };
+        for (tab, below) in [(2, 2), (4, 4), (8, 8)] {
+            let mut b = buf(text, 0, 1); // on the `x`
+            assert_eq!(step(&mut b, Motion::Down, tab), (1, below), "tab {tab}");
+            // On to the line of two tabs: the `x`'s cell is the second's first.
+            assert_eq!(step(&mut b, Motion::Down, tab), (2, 1), "tab {tab}");
+            assert_eq!(step(&mut b, Motion::Up, tab), (1, below), "the goal is kept");
+            assert_eq!(step(&mut b, Motion::Up, tab), (0, 1), "and back on the `x`");
+        }
+        // From a char drawn inside a tab's cells, onto the tab.
+        let mut b = buf(text, 1, 2);
+        assert_eq!(step(&mut b, Motion::Up, 4), (0, 0));
     }
 
     #[test]

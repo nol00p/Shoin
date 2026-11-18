@@ -402,7 +402,7 @@ impl App {
                     kind: Inclusive,
                 })
             }
-            _ => motion::resolve(&self.buffer, m, count, page, true),
+            _ => motion::resolve(&self.buffer, m, count, page, true, self.config.editor.tab_width),
         };
         let Some(res) = res else {
             return;

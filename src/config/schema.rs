@@ -117,6 +117,11 @@ impl Default for CursorConfig {
     }
 }
 
+/// Widest `tab_width` `:set` will accept, and past which a config file's is
+/// named on startup. A tab wider than this is not an indent anyone writes,
+/// and it draws as that many cells.
+pub const MAX_TAB_WIDTH: usize = 16;
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct EditorConfig {

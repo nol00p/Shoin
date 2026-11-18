@@ -12,6 +12,13 @@ pub struct Cursor {
     /// Remembered column for vertical motion, so `j` over a short line and back
     /// returns to the original column. Reset by any horizontal motion or edit.
     pub goal_col: usize,
+
+    /// The same goal as a SCREEN cell, once a vertical motion has measured it:
+    /// `j` keeps the cell, not the char offset, so it lands under the char it
+    /// left from across a tab or a wide glyph. `None` until then, meaning
+    /// `goal_col` was set on this line and is measured here
+    /// (`motion::resolve`).
+    pub goal_cells: Option<usize>,
 }
 
 impl Cursor {
@@ -20,6 +27,7 @@ impl Cursor {
             line,
             col,
             goal_col: col,
+            goal_cells: None,
         }
     }
 
@@ -40,5 +48,6 @@ impl Cursor {
     pub fn set_col(&mut self, col: usize) {
         self.col = col;
         self.goal_col = col;
+        self.goal_cells = None;
     }
 }

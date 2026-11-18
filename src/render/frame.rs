@@ -20,7 +20,8 @@ use crate::render::markdown::block::BlockKind;
 use crate::render::splash;
 use crate::render::focus::FocusRegion;
 use crate::render::layout::{
-    char_window, display_width, scroll_offset, stand_in, Layout, VisualRow,
+    char_at_cell, char_window, display_width, expand_tabs, scroll_offset, stand_in, text_width, Layout,
+    VisualRow,
 };
 use crate::render::numbers::NumberMode;
 use crate::render::theme::Color as ThemeColor;
@@ -393,13 +394,14 @@ fn render_pane(
             TextAlign::Right => alignment = Some(Alignment::Right),
             TextAlign::Justified => {
                 let row_text = char_window(chars, row.start_col, row.end_col);
-                let gaps = align::justify_gaps(&row_text, r.width);
+                let gaps = align::justify_gaps(&row_text, r.width, cfg.editor.tab_width);
                 if !gaps.is_empty() {
                     spans = stretch_spans(spans, &gaps);
                 }
             }
         }
-        let mut line = Line::from(spans);
+        // Last, after the stretch, which counts one char per char.
+        let mut line = Line::from(tabs_as_spaces(spans, cfg.editor.tab_width));
         if let Some(a) = alignment {
             line = line.alignment(a);
         }
@@ -461,15 +463,16 @@ fn render_pane(
         TextAlign::Left => 0,
         TextAlign::Center | TextAlign::Right => {
             let row_text = char_window(&line_text, row_start, row_end);
-            align::align_offset(align, display_width(&row_text), row_width)
+            align::align_offset(align, text_width(&row_text, cfg.editor.tab_width), row_width)
         }
         TextAlign::Justified => {
             let row_text = char_window(&line_text, row_start, row_end);
-            let gaps = align::justify_gaps(&row_text, row_width);
+            let gaps = align::justify_gaps(&row_text, row_width, cfg.editor.tab_width);
             align::justify_offset(&gaps, cursor_offset)
         }
     };
-    let x = (text_area.x + display_width(&prefix) + hang + extra)
+    // On a tab, the caret is on its first cell.
+    let x = (text_area.x + text_width(&prefix, cfg.editor.tab_width) + hang + extra)
         .saturating_sub(shift)
         .min(rect.right().saturating_sub(1));
     Some(Position::new(x, text_area.y + screen_row as u16))
@@ -603,13 +606,14 @@ fn render_embed_row(
                 Vec::new()
             };
             let chars: Vec<char> = shown.chars().collect();
-            out.extend(window_spans(&chars, &spans, 0, chars.len()));
+            let tab = app.config.editor.tab_width;
+            out.extend(tabs_as_spaces(window_spans(&chars, &spans, 0, chars.len()), tab));
             // Pad to the closing bar so the box has a straight right edge. The
             // content was wrapped to fit between the bars, so this only ever
             // adds space — but it is measured in display cells, not chars, so a
             // CJK line does not push the edge out.
             if bordered {
-                let used = 2 + display_width(&shown) as usize;
+                let used = 2 + text_width(&shown, tab) as usize;
                 out.push(Span::styled(
                     " ".repeat(width.saturating_sub(used + 2)) + " \u{2502}",
                     dim,
@@ -799,7 +803,7 @@ fn gutter_shift(app: &App, cache: &RenderCache, lay: &Layout, line: usize, start
     let Some(entry) = cache.entry(line) else {
         return 0;
     };
-    entry.cmap.leading_shift(&entry.source).min(lay.margin_left)
+    entry.cmap.leading_shift(&entry.source, app.config.editor.tab_width).min(lay.margin_left)
 }
 
 /// The tree pane width for this frame (0 when closed), capped to half the width.
@@ -1008,6 +1012,8 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
     // than left blank, so a reader can tell "nothing here" from "an empty line
     // here" — which in Markdown is a meaningful difference.
     let filler = |w: usize| "\u{2504}".repeat(w);
+    // A tab in either side is drawn as the editor draws it.
+    let tab = app.config.editor.tab_width;
     let current = view.align.hunks.get(view.hunk).cloned();
 
     let mut lines: Vec<Line> = Vec::with_capacity(body.height as usize);
@@ -1056,7 +1062,7 @@ fn render_diff(frame: &mut Frame, app: &App, view: &crate::diff::DiffView, area:
          -> Vec<Span<'static>> {
             match line {
                 Some(n) => screen_spans(
-                    &pad(format!("{mark}{}", from.get(n).cloned().unwrap_or_default()), w),
+                    &pad(format!("{mark}{}", expand_tabs(from.get(n).map_or("", |l| l), tab)), w),
                     match keeps(live) {
                         true => Style::default().fg(colour),
                         false => Style::default().fg(dim).add_modifier(Modifier::CROSSED_OUT),
@@ -1390,25 +1396,34 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
     let is_last_row = vr.end_col >= display_text.len();
     let align = row_align(app.text_align, fenced || table, is_last_row);
     let row_width = lay.measure + shift - hang;
+    let tab = cfg.editor.tab_width;
+    let row_chars = &display_text[vr.start_col.min(display_text.len())..vr.end_col.min(display_text.len())];
+    // The click's cell within the row, before any `text_align` offset.
     let click_x = match align {
         TextAlign::Left => raw_click_x,
         TextAlign::Center | TextAlign::Right => {
-            let row_text = char_window(&display_text, vr.start_col, vr.end_col);
-            raw_click_x.saturating_sub(align::align_offset(align, display_width(&row_text), row_width))
+            let row_text: String = row_chars.iter().collect();
+            raw_click_x.saturating_sub(align::align_offset(align, text_width(&row_text, tab), row_width))
         }
         TextAlign::Justified => {
-            let row_text = char_window(&display_text, vr.start_col, vr.end_col);
-            let gaps = align::justify_gaps(&row_text, row_width);
-            align::unstretch_col(&gaps, raw_click_x)
+            let row_text: String = row_chars.iter().collect();
+            let gaps = align::justify_gaps(&row_text, row_width, tab);
+            align::unstretch_col(&gaps, raw_click_x, row_chars, tab)
         }
     };
-    let display_col = vr.start_col as u16 + click_x;
+    // Cells to chars: every cell of a tab or a wide glyph is that char. Past
+    // the end of a wrapped row is its last char, not the next row's first.
+    let mut display_col = vr.start_col + char_at_cell(row_chars, click_x as usize, tab);
+    if !is_last_row && display_col >= vr.end_col {
+        display_col = vr.end_col.saturating_sub(1).max(vr.start_col);
+    }
 
     let len = entry.source.chars().count();
     let src_col = if concealed {
-        entry.cmap.source_col(&entry.source, display_col).min(len)
+        let cell = text_width(&display_text[..display_col.min(display_text.len())].iter().collect::<String>(), tab);
+        entry.cmap.source_col(&entry.source, cell, tab).min(len)
     } else {
-        (display_col as usize).min(len)
+        display_col.min(len)
     };
 
     Some(Cursor::new(line, src_col))
@@ -1971,6 +1986,19 @@ fn window_spans(chars: &[char], styled: &[StyledSpan], start: usize, end: usize)
         }
     }
     out
+}
+
+/// Each tab in `spans` drawn as the `tab` blank cells it is measured as
+/// (`layout::cell_width`), in its span's style: a selected tab is a selected
+/// run of cells, and one in a code block wears the slab. Called on a row's
+/// finished spans, after `stretch_spans`, which counts one char per char.
+fn tabs_as_spaces(mut spans: Vec<Span<'static>>, tab: usize) -> Vec<Span<'static>> {
+    for sp in &mut spans {
+        if let std::borrow::Cow::Owned(wide) = expand_tabs(&sp.content, tab) {
+            sp.content = wide.into();
+        }
+    }
+    spans
 }
 
 /// `text` in one `style`, with each `stand_in` char split out and drawn as
@@ -3654,5 +3682,181 @@ mod tests {
         assert_eq!(screen_spans("plain", bold).len(), 1);
         assert_eq!(screen_spans("", bold).len(), 1);
     }
-}
 
+    /// The column of the first cell on row `y` that shows `sym`.
+    fn cell_of(buf: &ratatui::buffer::Buffer, y: u16, sym: &str) -> u16 {
+        (0..buf.area.width)
+            .find(|&x| buf[(x, y)].symbol() == sym)
+            .unwrap_or_else(|| panic!("{sym:?} not on row {y}: {:?}", row_text(buf, y)))
+    }
+
+    fn no_raw_tab(buf: &ratatui::buffer::Buffer) {
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                assert!(!buf[(x, y)].symbol().contains('\t'), "a raw tab at ({x}, {y})");
+            }
+        }
+    }
+
+    /// A tab draws as `tab_width` blank cells, wherever it sits in the line,
+    /// on the raw cursor line and on a concealed one alike, and the caret on
+    /// each char sits on the cell drawn for it: on a tab, its first cell.
+    #[test]
+    fn a_tab_draws_as_tab_width_cells() {
+        for tw in [2u16, 4, 8] {
+            let mut app = app_with("a\tb\tc\na\tb\tc\n");
+            app.config.editor.tab_width = tw as usize;
+            app.refresh_blocks();
+            for (col, sym, extra) in [(0, "a", 0), (1, "a", 1), (2, "b", 0), (3, "b", 1), (4, "c", 0)] {
+                app.buffer.cursor = Cursor::new(0, col);
+                let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();
+                t.draw(|f| render(f, &app)).unwrap();
+                let caret = t.get_cursor_position().unwrap();
+                let buf = t.backend().buffer().clone();
+                no_raw_tab(&buf);
+                for y in [caret.y, caret.y + 1] {
+                    let a = cell_of(&buf, y, "a");
+                    assert_eq!(cell_of(&buf, y, "b"), a + 1 + tw, "tab_width {tw}, row {y}");
+                    assert_eq!(cell_of(&buf, y, "c"), a + 2 + 2 * tw, "tab_width {tw}, row {y}");
+                    for x in a + 1..a + 1 + tw {
+                        assert_eq!(buf[(x, y)].symbol(), " ", "tab_width {tw}: the tab's cells are blank");
+                    }
+                }
+                assert_eq!(caret.x, cell_of(&buf, caret.y, sym) + extra, "tab_width {tw}, col {col}");
+            }
+        }
+    }
+
+    /// A tab-indented list draws as deep as it nests, with its guides on the
+    /// cells a space-indented one puts them on, and wraps under its text.
+    #[test]
+    fn a_tab_indented_list_draws_nested_with_its_guides() {
+        let tabbed = "top\n- a\n\t- b\n\t\t- c\n";
+        let spaced = "top\n- a\n    - b\n        - c\n";
+        let draw = |text: &str| {
+            let app = app_with(text);
+            let buf = render_to(&app, 40, 8);
+            (0..buf.area.height).map(|y| row_text(&buf, y)).collect::<Vec<_>>()
+        };
+        let rows = draw(tabbed);
+        assert_eq!(rows, draw(spaced), "tabs draw as the spaces they count as");
+        let b = rows.iter().find(|r| r.ends_with(" b")).unwrap().trim_start().to_string();
+        let c = rows.iter().find(|r| r.ends_with(" c")).unwrap().trim_start().to_string();
+        assert_eq!(b, "\u{2502}   \u{25e6} b", "a guide, then the bullet 4 cells in");
+        assert_eq!(c, "\u{2502}   \u{2502}   \u{2022} c");
+
+        // A wrapped item hangs under its text, guides or not.
+        let long = "bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj";
+        for text in [format!("top\n- a\n\t- {long}\n"), format!("top\n- a\n    - {long}\n")] {
+            let mut app = app_with(&text);
+            app.config.layout.measure = 30;
+            let buf = render_to(&app, 40, 10);
+            let first = (0..buf.area.height).find(|&y| row_text(&buf, y).contains("bbbb")).unwrap();
+            let lead = |y: u16| {
+                let row = row_text(&buf, y);
+                row.chars().count() - row.trim_start().chars().count()
+            };
+            let at_b = {
+                let row = row_text(&buf, first);
+                row[..row.find("bbbb").unwrap()].chars().count()
+            };
+            assert_eq!(lead(first + 1), at_b, "{text:?}: {:?}", row_text(&buf, first + 1));
+        }
+    }
+
+    /// A long line with tabs wraps by cells: no row runs past the measure,
+    /// and no row is drawn with a raw tab.
+    #[test]
+    fn a_line_with_tabs_wraps_by_cells() {
+        let long: String = (0..12).map(|i| format!("w{i:02}\tx ")).collect();
+        let mut app = app_with(&format!("top\n{long}\n"));
+        app.config.layout.measure = 24;
+        app.config.editor.tab_width = 4;
+        let buf = render_to(&app, 40, 20);
+        no_raw_tab(&buf);
+        let rows: Vec<String> = (0..buf.area.height).map(|y| row_text(&buf, y)).filter(|r| r.contains("w0") || r.contains("w1")).collect();
+        assert!(rows.len() > 2, "{rows:?}");
+        let left = rows.iter().map(|r| r.find('w').unwrap()).min().unwrap();
+        for r in &rows {
+            // Past the text, the scroll hint.
+            let used = r.trim_end_matches(['\u{2590}', ' ']).chars().count() - left;
+            assert!(used <= 24, "{used} cells: {r:?}");
+            // Each `wNN` is followed by the tab's 4 blank cells, then its `x`.
+            assert!(r.contains("    x"), "{r:?}");
+        }
+        // The layout agrees: every row fits the measure in cells.
+        let chars: Vec<char> = long.chars().collect();
+        for (a, b) in crate::render::layout::wrap_chars(&chars, 24, 4) {
+            let row: String = chars[a..b].iter().collect();
+            assert!(crate::render::layout::text_width(&row, 4) <= 24, "{row:?}");
+        }
+    }
+
+    /// A click on any cell of a tab lands on the tab, on a raw line and on a
+    /// concealed one; a click on the char after it lands there.
+    #[test]
+    fn a_click_on_any_cell_of_a_tab_lands_on_the_tab() {
+        for tw in [2u16, 4, 8] {
+            // Line 0 is the cursor's, raw; line 1 is concealed, its `**` hidden.
+            let mut app = app_with("x\tyz\n**b**\tyz\n");
+            app.config.editor.tab_width = tw as usize;
+            app.refresh_blocks();
+            app.buffer.cursor = Cursor::new(0, 0);
+            let area = Rect::new(0, 0, 40, 6);
+            let buf = render_to(&app, 40, 6);
+            for (line, first, tab_col) in [(0usize, "x", 1usize), (1, "b", 5)] {
+                let y = (0..buf.area.height).find(|&y| row_text(&buf, y).contains(first)).unwrap();
+                let x0 = cell_of(&buf, y, first);
+                for x in x0 + 1..x0 + 1 + tw {
+                    assert_eq!(
+                        locate_click(&app, area, x, y),
+                        Some(Cursor::new(line, tab_col)),
+                        "tab_width {tw}, line {line}, cell {}",
+                        x - x0
+                    );
+                }
+                assert_eq!(locate_click(&app, area, x0 + 1 + tw, y), Some(Cursor::new(line, tab_col + 1)), "the y");
+                assert_eq!(locate_click(&app, area, x0 + 2 + tw, y), Some(Cursor::new(line, tab_col + 2)), "the z");
+            }
+        }
+    }
+
+    /// A selection over a tab covers every cell of it.
+    #[test]
+    fn a_selection_over_a_tab_covers_its_cells() {
+        let mut app = app_with("a\tb\tc\n");
+        app.config.editor.tab_width = 4;
+        app.mode = Mode::Visual;
+        app.anchor = Some(Cursor::new(0, 1));
+        app.buffer.cursor = Cursor::new(0, 2);
+        let buf = render_to(&app, 40, 4);
+        let y = (0..buf.area.height).find(|&y| row_text(&buf, y).contains('a')).unwrap();
+        let a = cell_of(&buf, y, "a");
+        let sel = app.theme.selection.to_ratatui();
+        assert_ne!(buf[(a, y)].bg, sel, "`a` is not selected");
+        for x in a + 1..=a + 5 {
+            assert_eq!(buf[(x, y)].bg, sel, "cell {} of the tab and the b", x - a);
+        }
+        assert_ne!(buf[(a + 6, y)].bg, sel, "the second tab is not");
+    }
+
+    /// Justified text measures a tab as its cells: a click lands where the
+    /// stretched row drew the char.
+    #[test]
+    fn a_click_in_a_justified_row_with_a_tab_lands_on_its_char() {
+        let long = "a\tbb cc dd ee ff gg hh ii jj kk ll mm nn oo pp qq rr ss";
+        let mut app = app_with(&format!("{long}\ntop\n"));
+        app.text_align = crate::render::align::TextAlign::Justified;
+        app.config.layout.measure = 24;
+        app.buffer.cursor = Cursor::new(1, 0);
+        let area = Rect::new(0, 0, 40, 20);
+        let buf = render_to(&app, 40, 20);
+        no_raw_tab(&buf);
+        let y = (0..buf.area.height).find(|&y| row_text(&buf, y).contains("bb")).unwrap();
+        let row = row_text(&buf, y);
+        for (word, col) in [("bb", 2usize), ("cc", 5), ("dd", 8)] {
+            let x = row[..row.find(word).unwrap()].chars().count() as u16;
+            assert_eq!(locate_click(&app, area, x, y), Some(Cursor::new(0, col)), "{word}: {row:?}");
+        }
+    }
+}

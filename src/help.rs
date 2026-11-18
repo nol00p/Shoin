@@ -708,7 +708,7 @@ const VIEW: &str = "
 :set <key> [on|off] :: conceal · typewriter · mouse · focus · numbers · code_syntax · hints
 :set measure=72 :: the text width in columns; :set measure reads it
 :set line_spacing=1 :: blank rows between lines, 0 to 4
-:set tab_width=4 :: columns a tab counts, 1 to 16 (:set ts)
+:set tab_width=4 :: cells a tab counts and is drawn as, 1 to 16 (:set ts)
 
 ## Read-only — shoin -R, :view or <leader>v
 :view :: read-only on · off: every line concealed, no caret
