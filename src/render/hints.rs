@@ -170,6 +170,11 @@ fn prefix_hints(prefix: char, visual: bool) -> Vec<Hint> {
             ("w", "cycle"),
             ("> < + - =", "size"),
         ]),
+        'z' if !visual => list(&[
+            ("a", "toggle fold"),
+            ("c o", "close · open"),
+            ("M R", "close all · open all"),
+        ]),
         _ => list(&[("Esc", "cancel")]),
     }
 }
@@ -293,6 +298,11 @@ fn label(action: &str) -> String {
         "toggle_typewriter" | "typewriter" => "typewriter",
         "toggle_zen" | "zen" => "zen",
         "toggle_conceal" | "conceal" => "conceal",
+        "fold_toggle" => "toggle fold",
+        "fold_open" => "open fold",
+        "fold_close" => "close fold",
+        "fold_open_all" => "open all folds",
+        "fold_close_all" => "close all folds",
         "toggle_numbers" | "numbers" | "number" => "numbers",
         "cycle_align" | "align" => "align",
         "toggle_view" | "view" | "read_only" => "read-only",

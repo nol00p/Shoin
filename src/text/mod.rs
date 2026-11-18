@@ -5,6 +5,7 @@
 pub mod buffer;
 pub mod cursor;
 pub mod edit;
+pub mod fold;
 pub mod history;
 pub mod list;
 pub mod motion;

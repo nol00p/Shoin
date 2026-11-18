@@ -296,13 +296,102 @@ pub fn draw(protocol: Protocol, bytes: &[u8], cols: u16, rows: u16) -> String {
     }
 }
 
-/// Erase every image this session has drawn. Kitty images are objects that
-/// outlive the cells they were drawn over, so a scroll would otherwise leave
-/// them hanging; iTerm2 images are just cell contents, which the next frame
-/// overwrites by itself.
-pub fn clear(protocol: Protocol) -> String {
+// ------------------------------------------------------- kitty, by id
+//
+// The editor does not use `draw` for kitty. It sends each picture once, under
+// an id, and then only PLACES it — so a picture that scrolls a row, and shows
+// one row more or less of itself, costs a few dozen bytes instead of the file.
+// Every command carries `q=2`: a command with an id gets an answer by default,
+// and that answer arrives as INPUT, where it would be typed into the note.
+
+/// The id a picture is sent under: its bytes, hashed (FNV-1a). The same file
+/// embedded twice is sent once, and a file that changes on disk gets a new id,
+/// so a stale picture can never be placed for a fresh one. Never 0, which the
+/// protocol reads as "no id".
+pub fn kitty_id(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h.max(1)
+}
+
+/// Send `bytes` under `id` without showing them (`a=t`). Empty for anything
+/// but a PNG, as in `draw`.
+pub fn kitty_send(id: u32, bytes: &[u8]) -> String {
+    if png(bytes).is_none() {
+        return String::new();
+    }
+    let data = base64(bytes);
+    let mut out = String::new();
+    let chunks: Vec<&str> = data.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).unwrap_or("")).collect();
+    let last = chunks.len().saturating_sub(1);
+    for (i, chunk) in chunks.iter().enumerate() {
+        let more = u8::from(i != last);
+        if i == 0 {
+            out.push_str(&format!("\x1b_Ga=t,f=100,i={id},q=2,m={more};{chunk}\x1b\\"));
+        } else {
+            out.push_str(&format!("\x1b_Gm={more};{chunk}\x1b\\"));
+        }
+    }
+    out
+}
+
+/// A part of a picture, in its own pixels: `x`, `y` the top-left corner, `w`
+/// by `h` the size. What kitty's put command takes as its source rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Crop {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// The part of a `width` × `height` picture that shows when its box of `rows`
+/// rows has only `shown` rows on screen, starting `skip` rows down.
+///
+/// The picture is stretched over the whole box, so each row holds
+/// `height / rows` of its pixel rows, fractions and all; each edge is rounded
+/// to the nearest pixel row. The full width always shows: a picture cut off at
+/// the side is not drawn at all.
+pub fn crop(width: u32, height: u32, rows: u16, skip: u16, shown: u16) -> Crop {
+    if rows == 0 || height == 0 {
+        return Crop { x: 0, y: 0, w: width, h: height };
+    }
+    let edge = |r: u16| ((r.min(rows) as u64 * height as u64 + rows as u64 / 2) / rows as u64) as u32;
+    let y = edge(skip).min(height - 1);
+    let end = edge(skip.saturating_add(shown)).clamp(y + 1, height);
+    Crop { x: 0, y, w: width, h: end - y }
+}
+
+/// Show picture `id` at the cursor in a `cols` × `rows` box, the whole of it
+/// or only `crop` of it (`a=p`). `C=1` keeps the cursor where it is, as in
+/// `draw`.
+pub fn kitty_put(id: u32, cols: u16, rows: u16, crop: Option<Crop>) -> String {
+    if cols == 0 || rows == 0 {
+        return String::new();
+    }
+    let src = crop
+        .map(|c| format!(",x={},y={},w={},h={}", c.x, c.y, c.w, c.h))
+        .unwrap_or_default();
+    format!("\x1b_Ga=p,i={id},q=2,C=1,c={cols},r={rows}{src}\x1b\\")
+}
+
+/// Drop picture `id`'s pixels from the terminal's memory, and any place it is
+/// shown (`d=I`: the capital frees the data too).
+pub fn kitty_forget(id: u32) -> String {
+    format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
+}
+
+/// Take every picture off the screen, but keep their pixels (`d=a`, lower
+/// case), so each can be placed again without being sent again. Kitty
+/// pictures are objects that outlive the cells they were drawn over, so a
+/// scroll would otherwise leave them hanging; iTerm2 pictures are cell
+/// contents, which `App::unpaint_moved_pictures` takes care of.
+pub fn unplace(protocol: Protocol) -> String {
     match protocol {
-        Protocol::Kitty => "\x1b_Ga=d,d=A\x1b\\".to_string(),
+        Protocol::Kitty => "\x1b_Ga=d,d=a,q=2\x1b\\".to_string(),
         _ => String::new(),
     }
 }
@@ -448,6 +537,50 @@ mod tests {
         assert_eq!(seq.matches("\x1b_G").count(), 3, "three chunks");
         assert_eq!(seq.matches("m=1").count(), 2, "the first two say 'more'");
         assert!(seq.ends_with("m=0;\x1b\\") || seq.contains("m=0;"), "the last says 'done'");
+    }
+
+    /// The rows of a box that show, as the picture's own pixel rows: each box
+    /// row holds `height / rows` of them, and each edge rounds to the nearest.
+    #[test]
+    fn the_source_rectangle_is_the_rows_that_show() {
+        let c = |x, y, w, h| Crop { x, y, w, h };
+        // 600 px over 20 rows: 30 a row, no rounding.
+        assert_eq!(crop(800, 600, 20, 5, 15), c(0, 150, 800, 450), "cut off at the top");
+        assert_eq!(crop(800, 600, 20, 0, 7), c(0, 0, 800, 210), "cut off at the bottom");
+        assert_eq!(crop(800, 600, 20, 3, 10), c(0, 90, 800, 300), "both: taller than the screen");
+        assert_eq!(crop(800, 600, 20, 0, 20), c(0, 0, 800, 600), "all of it");
+        // 1000 px over 7 rows: 142.86 a row, so the edges round.
+        assert_eq!(crop(500, 1000, 7, 2, 5), c(0, 286, 500, 714), "top: 285.7 rounds up");
+        assert_eq!(crop(500, 1000, 7, 0, 3), c(0, 0, 500, 429), "bottom: 428.6 rounds up");
+        assert_eq!(crop(500, 1000, 7, 2, 3), c(0, 286, 500, 428), "both");
+        // 50 px over 9 rows: 5.56 a row.
+        assert_eq!(crop(120, 50, 9, 8, 1), c(0, 44, 120, 6), "the last row alone");
+        // Fewer pixel rows than box rows: never an empty rectangle.
+        assert_eq!(crop(4, 1, 3, 0, 1), c(0, 0, 4, 1));
+        assert_eq!(crop(4, 1, 3, 2, 1), c(0, 0, 4, 1));
+    }
+
+    /// The editor sends a kitty picture once under its id, then places it,
+    /// whole or cut, as often as it moves.
+    #[test]
+    fn kitty_pictures_are_sent_once_and_placed_by_id() {
+        let send = kitty_send(7, PNG_1X1);
+        assert_eq!(send, format!("\x1b_Ga=t,f=100,i=7,q=2,m=0;{}\x1b\\", base64(PNG_1X1)));
+        assert_eq!(kitty_send(7, b"GIF89a\x20\x00\x10\x00"), "", "PNG only, as in `draw`");
+
+        assert_eq!(kitty_put(7, 42, 20, None), "\x1b_Ga=p,i=7,q=2,C=1,c=42,r=20\x1b\\");
+        let cut = kitty_put(7, 42, 15, Some(crop(800, 600, 20, 5, 15)));
+        assert_eq!(cut, "\x1b_Ga=p,i=7,q=2,C=1,c=42,r=15,x=0,y=150,w=800,h=450\x1b\\");
+        assert_eq!(kitty_put(7, 42, 0, None), "", "nothing for no rows");
+
+        assert_eq!(kitty_forget(7), "\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+        assert_eq!(unplace(Protocol::Kitty), "\x1b_Ga=d,d=a,q=2\x1b\\", "lower case: pixels kept");
+        assert_eq!(unplace(Protocol::Iterm2), "");
+    }
+
+    #[test]
+    fn a_kitty_id_follows_the_bytes() {
+        assert_ne!(kitty_id(b""), 0, "0 means no id to kitty");
     }
 
     #[test]

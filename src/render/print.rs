@@ -89,7 +89,9 @@ fn pictures(app: &App) -> HashMap<u16, String> {
         else {
             continue;
         };
-        if pic.payload.is_empty() || p.rows == 0 {
+        // The page is as tall as the document, so every box is whole on it;
+        // a cut one is left from the one-row draw that measured the page.
+        if pic.payload.is_empty() || p.rows == 0 || !p.whole() {
             continue;
         }
         let up = p.rows - 1;

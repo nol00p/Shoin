@@ -84,7 +84,8 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
     trace.push(format!("<size {w}x{h}>"));
     // No space here: Space is the leader in Normal mode, and the leader opens
     // the file tree and other things that reach outside the temp folder.
-    let normal = "hjklwbeWBE0$^GggxXdDcCyYpPuoOiIaAvVJ~.;,nN{}()[]<>\"'`-+*#=|123456789fFtTrzgZ%&_/?hjklhjkldduu";
+    // `z` is there to fold: `za` `zc` `zo` `zM` `zR` come up as pairs too.
+    let normal = "zazczMzRzohjklwbeWBE0$^GggxXdDcCyYpPuoOiIaAvVJ~.;,nN{}()[]<>\"'`-+*#=|123456789fFtTrzgZ%&_/?hjklhjkldduu";
     let typed = "abc xyz\t-*#`[]()|$>1.!=~_\\\"jk日🙂";
     let ex = [
         "sp", "vs", "close", "only", "focus", "focus sentence", "typewriter", "number", "number relative", "align",
@@ -158,6 +159,12 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
                 Action::AlternateBuffer,
                 Action::FindFile { root: Root::Cwd },
                 Action::ToggleView,
+                Action::Fold(crate::input::action::FoldCmd::Toggle),
+                Action::Fold(crate::input::action::FoldCmd::Close),
+                Action::Fold(crate::input::action::FoldCmd::Open),
+                Action::Fold(crate::input::action::FoldCmd::CloseAll),
+                Action::Fold(crate::input::action::FoldCmd::CloseAll),
+                Action::Fold(crate::input::action::FoldCmd::OpenAll),
             ];
             let a = acts[rng.below(acts.len())].clone();
             trace.push(format!("<{a:?}>"));
@@ -200,6 +207,18 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         let c = app.buffer.cursor;
         if c.line >= app.buffer.line_count().max(1) || c.col > app.buffer.line_len(c.line) {
             return Err(format!("step {step}: cursor {c:?} out of bounds\ntext: {:?}", text(&app)));
+        }
+        // A closed fold never hides the cursor, and every fold is inside the
+        // text and still measures as an item or a section.
+        app.sync_folds();
+        let n = app.buffer.line_count();
+        for f in app.folds.closed() {
+            if f.end >= n || f.start >= f.end {
+                return Err(format!("step {step}: fold {f:?} outside {n} lines\ntext: {:?}", text(&app)));
+            }
+            if f.hides(c.line) && !insertish && app.blocks.revision == app.buffer.revision {
+                return Err(format!("step {step}: cursor {c:?} inside fold {f:?}\ntext: {:?}", text(&app)));
+            }
         }
         term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
         let _ = app.visible_pictures();

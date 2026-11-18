@@ -179,8 +179,28 @@ pub enum Action {
     /// sometimes launches a browser is a key you hesitate before pressing.
     OpenExternal,
 
+    /// `za` `zo` `zc` `zR` `zM` — fold a list item or a heading's section to
+    /// its first line, or open it again. Never an edit: the text is untouched.
+    Fold(FoldCmd),
+
     /// Recognized key, deliberately does nothing.
     Nop,
+}
+
+/// What a `z` fold key does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldCmd {
+    /// `za`: open the fold the cursor is on, else close the innermost one
+    /// around it.
+    Toggle,
+    /// `zo`
+    Open,
+    /// `zc`: the innermost fold around the cursor that is still open.
+    Close,
+    /// `zR`
+    OpenAll,
+    /// `zM`: every item and every section.
+    CloseAll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,6 +324,11 @@ impl Action {
             "split_horizontal" | "split" => Action::ToggleSplit { vertical: false },
             "close_pane" => Action::ClosePane,
             "only_pane" | "only" => Action::OnlyPane,
+            "fold_toggle" => Action::Fold(FoldCmd::Toggle),
+            "fold_open" => Action::Fold(FoldCmd::Open),
+            "fold_close" => Action::Fold(FoldCmd::Close),
+            "fold_open_all" => Action::Fold(FoldCmd::OpenAll),
+            "fold_close_all" => Action::Fold(FoldCmd::CloseAll),
             _ => {
                 if let Some(n) = name.strip_prefix("heading_") {
                     return n.parse::<u8>().ok().filter(|n| (1..=6).contains(n)).map(Action::SetHeading);

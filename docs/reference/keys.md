@@ -155,6 +155,17 @@ line. They have no key until you give them one:
 | `:` | the command line — see [Commands](commands.md) |
 | `Ctrl-^` `Ctrl-6` | back to the previous buffer |
 
+## Folds
+
+A fold shows a list item with its sub-items, or a heading's section, as its
+first line. See [Editing](../editing.md#folding).
+
+| Key | Does |
+|---|---|
+| `za` | open the fold under the cursor, or fold the innermost item or section around it |
+| `zc` `zo` | fold / unfold |
+| `zM` `zR` | fold every item and section / unfold everything |
+
 ## Command line, search and prompts
 
 The same keys in the `:` line, the `/` `?` search line, the finder's query
@@ -376,6 +387,11 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 | `cycle_align` | `align` | `<leader>a` | cycle text alignment |
 | `toggle_view` | `view` `read_only` | `<leader>v` | read-only mode on / off, as `:view` |
 | `help` | `shortcuts` | `<leader>hl` | the shortcuts page |
+| `fold_toggle` | | `za` | fold or unfold here |
+| `fold_close` | | `zc` | fold the innermost open item or section |
+| `fold_open` | | `zo` | unfold the fold under the cursor |
+| `fold_close_all` | | `zM` | fold every item and section |
+| `fold_open_all` | | `zR` | unfold everything |
 
 ### Panels and panes
 

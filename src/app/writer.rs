@@ -540,7 +540,10 @@ impl App {
     /// Delete/change/yank whole lines `l1..=l2`.
     pub(super) fn operate_linewise(&mut self, op: Operator, l1: usize, l2: usize) {
         let last = self.buffer.last_line();
-        let (a, b) = (l1.min(l2), l1.max(l2).min(last));
+        // A closed fold at either end is taken whole: `dd` on one deletes
+        // every line it stands for, as in vim.
+        let (a, b) = self.fold_hidden().widen(l1.min(l2), l1.max(l2));
+        let b = b.min(last);
         let start = self.buffer.rope.line_to_char(a);
         let end = if b < last {
             self.buffer.rope.line_to_char(b + 1)

@@ -134,7 +134,8 @@ impl App {
         reg.text = reg.text.repeat(count.max(1));
         if reg.linewise {
             let cur = self.buffer.cursor;
-            let line = if after { cur.line + 1 } else { cur.line };
+            // After a closed fold is after all of it, as in vim.
+            let line = if after { self.fold_hidden().last_of(cur.line) + 1 } else { cur.line };
             if line >= self.buffer.line_count() {
                 // Appending past the last line: add a separator newline first.
                 let end_line = self.buffer.line_count().saturating_sub(1);

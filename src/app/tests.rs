@@ -37,7 +37,7 @@ fn a_moved_iterm2_picture_has_its_blank_cells_rewritten() {
     use ratatui::layout::Rect;
     let mut app = app_with("text\n");
     app.image_protocol = crate::image::Protocol::Iterm2;
-    let old = crate::render::Placement { x: 2, y: 1, cols: 3, rows: 2, line: 0, index: 0 };
+    let old = crate::render::Placement { x: 2, y: 1, cols: 3, rows: 2, skip: 0, shown: 2, line: 0, index: 0, id: 1 };
     *app.painted.borrow_mut() = (vec![old], (20, 5));
 
     let mut buf = Frame::empty(Rect::new(0, 0, 20, 5));
@@ -56,6 +56,122 @@ fn a_moved_iterm2_picture_has_its_blank_cells_rewritten() {
     app.images.borrow_mut().clear();
     app.image_protocol = crate::image::Protocol::Kitty;
     assert!(app.unpaint_moved_pictures(&buf).is_empty());
+}
+
+/// Kitty gets a picture's bytes once, then only puts: cut at the top, the
+/// source rectangle is the rows that show; scrolled a row, the same id is put
+/// again with the new rectangle; gone from the screen, its pixels are freed.
+#[test]
+fn a_cut_off_kitty_picture_is_sent_once_and_put_by_the_rows_that_show() {
+    use crate::render::conceal::ActiveSet;
+    let d = std::env::temp_dir().join(format!("shoin-paint-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let mut png = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89,
+    ];
+    png[16..20].copy_from_slice(&400u32.to_be_bytes());
+    png[20..24].copy_from_slice(&600u32.to_be_bytes());
+    std::fs::write(d.join("photo.png"), &png).unwrap();
+    let body: String = std::iter::once("![[photo.png]]\n".to_string())
+        .chain((0..10).map(|i| format!("after {i}\n")))
+        .collect();
+    std::fs::write(d.join("note.md"), body).unwrap();
+    let mut app = App::new(Config::default(), Some(d.join("note.md")), None).unwrap();
+    app.embed_mode = crate::transclude::Mode::Short;
+    app.image_protocol = crate::image::Protocol::Kitty;
+    app.term_size = (80, 24);
+    let id = crate::image::kitty_id(&png);
+
+    // Draw with the caret on `line`, and return the placement and the bytes.
+    let paint = |app: &mut App, line: usize, height: u16| {
+        app.buffer.cursor = Cursor::new(line, 0);
+        app.active = ActiveSet::none();
+        app.term_size = (80, height);
+        app.refresh_blocks();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height)).unwrap();
+        t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+        let places = app.visible_pictures();
+        let out = app.picture_bytes(&places).unwrap_or_default();
+        *app.painted.borrow_mut() = (places.clone(), app.term_size);
+        (places, out)
+    };
+
+    let (places, out) = paint(&mut app, 10, 24);
+    assert_eq!(places.len(), 1, "{places:?}");
+    let p = places[0];
+    assert!(p.skip > 0 && p.shown == p.rows - p.skip, "cut off at the top: {p:?}");
+    assert_eq!(out.matches("a=t,").count(), 1, "sent once");
+    assert!(out.contains(&format!("\x1b_Ga=t,f=100,i={id},q=2,m=0;")));
+    let c = crate::image::crop(400, 600, p.rows, p.skip, p.shown);
+    assert_eq!((c.y + c.h, c.w), (600, 400), "down to the last pixel row, full width");
+    let put = format!(
+        "\x1b[{};{}H\x1b_Ga=p,i={id},q=2,C=1,c={},r={},x=0,y={},w=400,h={}\x1b\\",
+        p.y + 1,
+        p.x + 1,
+        p.cols,
+        p.shown,
+        c.y,
+        c.h
+    );
+    assert!(out.contains(&put), "{put:?} in {out:?}");
+    assert!(out.starts_with("\x1b7\x1b_Ga=d,d=a,q=2\x1b\\") && out.ends_with("\x1b8"));
+
+    // Scrolled up a row: one more row of it shows, and nothing is re-sent.
+    let top = app.focused_pane().unwrap().scroll.get();
+    app.focused_pane().unwrap().scroll.set(top - 1);
+    let (places, out) = paint(&mut app, 5, 24);
+    let q = places[0];
+    assert_eq!(q.skip + 1, p.skip, "{q:?}");
+    assert!(!out.contains("a=t,"), "only the crop changed: {out:?}");
+    assert!(out.contains(&format!("a=p,i={id},")) && !out.contains("d=I"));
+
+    // Unchanged: no bytes at all.
+    assert_eq!(app.picture_bytes(&places), None);
+
+    // A frame with no picture on it (the caret on the embed line, a scroll
+    // past it): taken down, and its pixels freed.
+    let out = app.picture_bytes(&[]).unwrap();
+    assert!(out.contains(&crate::image::kitty_forget(id)), "{out:?}");
+    assert!(!out.contains("a=p"));
+
+    // Under iTerm2 a cut picture is not painted; the frame shows its caption.
+    app.image_protocol = crate::image::Protocol::Iterm2;
+    *app.painted.borrow_mut() = (Vec::new(), (0, 0));
+    let (places, _) = paint(&mut app, 10, 24);
+    assert!(places.is_empty(), "{places:?}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// A whole kitty picture is put whole: no source rectangle.
+#[test]
+fn a_whole_kitty_picture_is_put_without_a_crop() {
+    let d = std::env::temp_dir().join(format!("shoin-paint-whole-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let mut png = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89,
+    ];
+    png[16..20].copy_from_slice(&800u32.to_be_bytes());
+    png[20..24].copy_from_slice(&200u32.to_be_bytes());
+    std::fs::write(d.join("photo.png"), &png).unwrap();
+    std::fs::write(d.join("note.md"), "top\n![[photo.png]]\nafter\n").unwrap();
+    let mut app = App::new(Config::default(), Some(d.join("note.md")), None).unwrap();
+    app.embed_mode = crate::transclude::Mode::Short;
+    app.image_protocol = crate::image::Protocol::Kitty;
+    app.term_size = (80, 24);
+    app.refresh_blocks();
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+    let places = app.visible_pictures();
+    let p = places[0];
+    assert!(p.whole(), "{p:?}");
+    let out = app.picture_bytes(&places).unwrap();
+    let id = crate::image::kitty_id(&png);
+    assert!(out.contains(&format!("\x1b_Ga=p,i={id},q=2,C=1,c={},r={}\x1b\\", p.cols, p.rows)), "{out:?}");
+    std::fs::remove_dir_all(&d).ok();
 }
 
 /// Read-only mode refuses every way of changing the text, and says so,

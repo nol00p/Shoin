@@ -145,6 +145,10 @@ pub struct BufferState {
     /// Per DOCUMENT, so switching buffers does not throw away the parse of the
     /// one you just left.
     pub cache: RefCell<RenderCache>,
+
+    /// The closed folds (`za`, `zM`). Per document, not per pane, because the
+    /// row index they shape is per document. Session only: never saved.
+    pub folds: crate::text::fold::Folds,
 }
 
 impl BufferState {
@@ -156,6 +160,7 @@ impl BufferState {
             blocks: BlockCache::build(&buffer, math, tab_width),
             buffer,
             cache: RefCell::new(RenderCache::default()),
+            folds: Default::default(),
         }
     }
 
@@ -917,6 +922,7 @@ mod fuzzy;
 mod verbs;
 mod writer;
 mod lists;
+mod folds;
 mod registers;
 mod visual;
 mod insert;
@@ -1410,6 +1416,7 @@ impl App {
         if self.view {
             self.clamp_reading_cursor();
         }
+        self.keep_cursor_out_of_folds();
         // The selection exists in Visual only, and only where it was made.
         // Every way out — Esc, an operator, `:`, `/`, Insert, another pane or
         // document, the file tree — lands here, so this is where its state is
@@ -1455,6 +1462,7 @@ impl App {
     }
 
     fn move_by(&mut self, m: Motion, count: usize) {
+        let Some(count) = self.fold_count(m, count) else { return };
         let page = self.viewport_height();
         if let Some(res) = motion::resolve(&self.buffer, m, count, page, false, self.config.editor.tab_width) {
             self.buffer.cursor = res.target;
@@ -1656,10 +1664,12 @@ impl App {
             return Motion::GotoLine(self.buffer.cursor.line);
         };
         let off = (self.config.editor.scroll_off as usize).min((last - first) / 2);
+        // Counted in shown lines, so none of them lands inside a closed fold
+        // (which would open it).
         Motion::GotoLine(match want {
-            Motion::ScreenTop => first + off,
-            Motion::ScreenMiddle => (first + last) / 2,
-            _ => last - off,
+            Motion::ScreenTop => self.shown_step(first, true, off).unwrap_or(first),
+            Motion::ScreenMiddle => self.fold_hidden().shown((first + last) / 2),
+            _ => self.shown_step(last, false, off).unwrap_or(last),
         })
     }
 
@@ -1674,13 +1684,15 @@ impl App {
             }
             Target::Motion(m) => {
                 let m = self.resolve_screen_motion(m);
+                let Some(count) = self.fold_count(m, count) else { return };
                 self.apply_operator(op, m, count);
             }
             Target::Object { key, around } => self.operate_object(op, key, around, count),
             Target::Line => {
+                // `3dd` counts a closed fold as one line.
                 let l1 = self.buffer.cursor.line;
-                let last = self.buffer.last_line();
-                self.operate_linewise(op, l1, l1.saturating_add(count.saturating_sub(1)).min(last));
+                let l2 = self.shown_step(l1, true, count.saturating_sub(1)).unwrap_or(l1);
+                self.operate_linewise(op, l1, l2);
             }
             Target::Selection => self.visual_operate(op),
         }
@@ -1781,6 +1793,7 @@ impl App {
             }
             Action::ToggleZen => self.set_zen(self.zen.is_none()),
             Action::ToggleView => self.set_view(!self.view),
+            Action::Fold(cmd) => self.fold(cmd),
             // Recognized, deliberately nothing — `"" = "nop"` unbinds a key.
             Action::Nop => {}
             // Handled in `run`, where the count they take is still in hand.
@@ -2027,6 +2040,9 @@ fn list_starts(lists: &Lists, lines: &[usize]) -> Vec<(Vec<usize>, u64)> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fold_tests;
 
 #[cfg(test)]
 mod fuzz;
