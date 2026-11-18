@@ -1,5 +1,6 @@
 //! The hint bar: the keys that matter right now, drawn in the status line's
-//! row whenever the status line has nothing to say.
+//! row whenever the status line has nothing to say, and over it while a key
+//! sequence is under way (`sequence_pending`).
 //!
 //! What "right now" means, most specific first: a prefix waiting for its next
 //! key (`Space`, `Space f`, `g`, `Ctrl-w`), an operator waiting for its range,
@@ -117,6 +118,15 @@ pub fn hints(app: &App) -> Vec<Hint> {
             hint(&format!("{leader} hl"), "help"),
         ],
     }
+}
+
+/// Whether a key sequence is under way: the leader or another prefix
+/// (`g`, `Ctrl-w`) waiting for its next key, or an operator for its range.
+/// The hint bar then takes the row from the status line, in every mode, and
+/// gives it back when the sequence ends.
+pub fn sequence_pending(app: &App) -> bool {
+    let pending = app.pending();
+    pending.prefix().is_some() || !pending.partial.is_empty() || pending.operator.is_some()
 }
 
 fn hint(keys: &str, does: &str) -> Hint {

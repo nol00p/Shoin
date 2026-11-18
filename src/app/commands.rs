@@ -71,6 +71,60 @@ pub(crate) const OPTIONS: &[(&str, &[&str])] = &[
     ("typewriter", &["tw"]),
 ];
 
+/// The words that turn a toggle option on; any other value turns it off.
+const ON_WORDS: &[&str] = &["on", "true", "1", "yes"];
+
+/// What `:set` offers for a toggle option.
+pub(crate) const TOGGLE_VALUES: &[&str] = &["off", "on"];
+
+/// The values `:focus` and `:set focus` take, as `FocusMode::parse` reads
+/// them and its labels name them.
+pub(crate) const FOCUS_VALUES: &[&str] = &["off", "paragraph", "sentence"];
+
+/// The values `:align` and `:set align` take (`TextAlign::parse`).
+pub(crate) const ALIGN_VALUES: &[&str] = &["left", "center", "right", "justified"];
+
+/// The values `:embed` and `:set embed` take (`transclude::Mode::parse`).
+pub(crate) const EMBED_VALUES: &[&str] = &["none", "short", "rec", "full"];
+
+/// The values `:number` and `:set numbers` take (`NumberMode::parse`).
+pub(crate) const NUMBER_VALUES: &[&str] = &["off", "relative", "absolute"];
+
+/// The formats `:export` takes (`export::Format::parse`).
+pub(crate) const EXPORT_VALUES: &[&str] = &["md", "txt", "html", "pdf"];
+
+/// The values a `:set` option takes, by its name in `OPTIONS`: on and off
+/// for a toggle, the named choices for the rest. A number has none to list.
+pub(crate) fn option_values(option: &str) -> &'static [&'static str] {
+    match option {
+        "focus" => FOCUS_VALUES,
+        "align" => ALIGN_VALUES,
+        "embed" => EMBED_VALUES,
+        "numbers" => NUMBER_VALUES,
+        "autoreload" | "autosave" | "clipboard" | "code_syntax" | "conceal" | "hints" | "mouse" | "typewriter" => {
+            TOGGLE_VALUES
+        }
+        _ => &[],
+    }
+}
+
+/// The values a command's argument takes, by its name in `COMMANDS`, for
+/// the commands that take a word from a fixed list.
+pub(crate) fn command_values(command: &str) -> &'static [&'static str] {
+    match command {
+        "focus" => FOCUS_VALUES,
+        "align" => ALIGN_VALUES,
+        "embed" => EMBED_VALUES,
+        "number" => NUMBER_VALUES,
+        "export" => EXPORT_VALUES,
+        _ => &[],
+    }
+}
+
+/// The options that take a number, which `option_values` has no list for.
+#[cfg(test)]
+pub(crate) const NUMBER_OPTIONS: &[&str] = &["autosave_interval", "line_spacing", "measure", "tab_width"];
+
 /// The window and buffer commands of `COMMANDS`. Each ends the command under
 /// way, as their keys do (`App::end_recording`), whether or not it went
 /// anywhere, so none is ever the change `.` repeats. A new command that
@@ -196,7 +250,7 @@ impl App {
                 match mode {
                     Some(m) => self.set_focus(m),
                     None => self.notify(
-                        format!("focus: off · paragraph · sentence, not {arg:?}"),
+                        format!("focus: {}, not {arg:?}", FOCUS_VALUES.join(" · ")),
                         FlashKind::Error,
                     ),
                 }
@@ -242,7 +296,7 @@ impl App {
                 Some(m) => m,
                 None => {
                     return self.notify(
-                        format!("embed: {arg:?} is not none, short, rec or full"),
+                        format!("embed: {}, not {arg:?}", EMBED_VALUES.join(" · ")),
                         FlashKind::Error,
                     )
                 }
@@ -273,7 +327,7 @@ impl App {
                 Some(m) => m,
                 None => {
                     return self.notify(
-                        format!("number: off · relative · absolute, not {arg:?}"),
+                        format!("number: {}, not {arg:?}", NUMBER_VALUES.join(" · ")),
                         FlashKind::Error,
                     )
                 }
@@ -302,7 +356,7 @@ impl App {
                 Some(a) => a,
                 None => {
                     return self.notify(
-                        format!("align: left · center · right · justified, not {arg:?}"),
+                        format!("align: {}, not {arg:?}", ALIGN_VALUES.join(" · ")),
                         FlashKind::Error,
                     )
                 }
@@ -328,8 +382,7 @@ impl App {
         };
         let resolve = |v: &str, cur: bool| match v {
             "" => !cur,
-            "on" | "true" | "1" | "yes" => true,
-            _ => false,
+            v => ON_WORDS.contains(&v),
         };
         match option {
             // The text measure — `layout.measure` in the config file, and the
@@ -478,7 +531,7 @@ impl App {
                 match mode {
                     Some(m) => self.set_focus(m),
                     None => self.notify(
-                        format!("focus: off · paragraph · sentence, not {val:?}"),
+                        format!("focus: {}, not {val:?}", FOCUS_VALUES.join(" · ")),
                         FlashKind::Error,
                     ),
                 }

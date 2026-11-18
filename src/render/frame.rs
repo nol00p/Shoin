@@ -105,10 +105,17 @@ pub fn render(frame: &mut Frame, app: &App) {
     // One for the whole window, not one per pane: it is a transient flash, and
     // repeating it beside itself would be noise. When it has nothing to say,
     // the hint bar takes the row: the keys that matter right now.
-    let status = if cfg.status.enabled { status_text(app) } else { None };
+    //
+    // While a key sequence is under way (the leader, `g`, `Ctrl-w`, an
+    // operator) the hints take it whatever the status has to say: the next
+    // key is what matters, and entering Visual, Insert or another buffer
+    // shows the status for a moment, which would hide them. The status comes
+    // back when the sequence ends, if it has not faded by then.
+    let hints = crate::render::hints::hints(app);
+    let sequence = crate::render::hints::sequence_pending(app) && !hints.is_empty();
+    let status = if cfg.status.enabled && !sequence { status_text(app) } else { None };
     // The row is a bar, in `status_bg`, whenever something is in it — so the
     // hints and a flash that replaces them sit on the same strip.
-    let hints = crate::render::hints::hints(app);
     if (status.is_some() || !hints.is_empty()) && area.height > STATUS_ROWS {
         let row = Rect { y: area.y + area.height - STATUS_ROWS, height: STATUS_ROWS, ..area };
         let bar = Style::default().bg(app.theme.status_bg.to_ratatui());
@@ -3550,6 +3557,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An app with the shipped keymap and a file, past the start screen, and
+    /// the bottom row of its frame.
+    fn keyed_app() -> App {
+        let cfg = crate::config::parse("").unwrap();
+        let mut app = App::new(cfg, None, None).unwrap();
+        app.buffer.insert_str(Cursor::new(0, 0), "some text here\n");
+        app.buffer.cursor = Cursor::new(0, 0);
+        app
+    }
+
+    fn key(app: &mut App, code: ratatui::crossterm::event::KeyCode) {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn bottom_row(app: &App) -> String {
+        let buf = render_to(app, 100, 12);
+        row_text(&buf, 11)
+    }
+
+    /// Entering Visual shows the status for a moment; the leader in that
+    /// moment takes the row for its hints, and the status comes back when
+    /// the sequence ends.
+    #[test]
+    fn a_pending_sequence_shows_its_hints_over_the_status() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = keyed_app();
+        key(&mut app, K::Char('v'));
+        let row = bottom_row(&app);
+        assert!(row.contains("words"), "Visual alone shows the status: {row:?}");
+
+        key(&mut app, K::Char(' '));
+        let row = bottom_row(&app);
+        assert!(row.contains("b bold"), "the leader's Visual hints: {row:?}");
+        assert!(!row.contains("words"), "not under the status: {row:?}");
+
+        key(&mut app, K::Esc);
+        let row = bottom_row(&app);
+        assert!(row.contains("words"), "the status is back: {row:?}");
+
+        // `g` in Visual, the same.
+        let mut app = keyed_app();
+        key(&mut app, K::Char('v'));
+        key(&mut app, K::Char('g'));
+        let row = bottom_row(&app);
+        assert!(row.contains("b i h k"), "{row:?}");
+    }
+
+    /// Leaving Insert shows the status too, and the leader straight after
+    /// it shows the Normal hints; an operator, its own.
+    #[test]
+    fn after_insert_the_leader_still_shows_its_hints() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = keyed_app();
+        key(&mut app, K::Char('i'));
+        key(&mut app, K::Esc);
+        assert!(bottom_row(&app).contains("words"), "Esc shows the status");
+        key(&mut app, K::Char(' '));
+        let row = bottom_row(&app);
+        assert!(row.contains("w save"), "{row:?}");
+        key(&mut app, K::Esc);
+        key(&mut app, K::Char('d'));
+        let row = bottom_row(&app);
+        assert!(row.contains("a motion"), "{row:?}");
+    }
+
+    /// With the hint bar off, a sequence leaves the status where it is.
+    #[test]
+    fn no_hints_no_takeover() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = keyed_app();
+        app.config.hints.enabled = false;
+        key(&mut app, K::Char('v'));
+        key(&mut app, K::Char(' '));
+        let row = bottom_row(&app);
+        assert!(row.contains("words"), "{row:?}");
     }
 
     /// Each separator is drawn as one dim `↵`, and the columns after it, the
