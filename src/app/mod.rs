@@ -1439,7 +1439,7 @@ impl App {
 
     fn move_by(&mut self, m: Motion, count: usize) {
         let page = self.viewport_height();
-        if let Some(res) = motion::resolve(&self.buffer, m, count, page, false) {
+        if let Some(res) = motion::resolve(&self.buffer, m, count, page, false, self.config.editor.tab_width) {
             self.buffer.cursor = res.target;
         }
     }

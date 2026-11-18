@@ -17,7 +17,7 @@ use crate::input::mode::Mode;
 use crate::text::cursor::Cursor;
 
 use super::indent;
-use super::layout::{cell_width, display_width};
+use super::layout::{cell_width, display_width, text_width};
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
 use super::theme::{Attrs, Color, Style, Theme};
@@ -172,10 +172,11 @@ impl ConcealMap {
     ///
     /// Takes the source line so visible characters are measured at their true
     /// width: a click past a CJK glyph or an emoji lands where it looks like it
-    /// should, not one column per char.
-    pub fn source_col(&self, source: &str, display_col: u16) -> usize {
+    /// should, not one column per char, and one on any cell of a tab (`tab`
+    /// cells) lands on the tab.
+    pub fn source_col(&self, source: &str, display_col: u16, tab: usize) -> usize {
         let chars: Vec<char> = source.chars().collect();
-        let cell = |c: char| cell_width(c) as u16;
+        let cell = |c: char| cell_width(c, tab) as u16;
 
         let mut disp: u16 = 0;
         let mut src = 0usize;
@@ -193,7 +194,7 @@ impl ConcealMap {
             match op {
                 Conceal::Hide(rr) => src = rr.end,
                 Conceal::Replace { range, text, .. } => {
-                    let w = display_width(text);
+                    let w = text_width(text, tab);
                     if display_col < disp + w {
                         return range.start;
                     }
@@ -297,9 +298,9 @@ impl ConcealMap {
     /// task's checkbox — and missing the later ones let the body text jump as
     /// the cursor arrived. The run ends at the first gap holding a non-blank
     /// character, which is where the body text begins.
-    pub fn leading_shift(&self, source: &str) -> u16 {
+    pub fn leading_shift(&self, source: &str, tab: usize) -> u16 {
         let chars: Vec<char> = source.chars().collect();
-        let width_of = |c: &char| cell_width(*c);
+        let width_of = |c: &char| cell_width(*c, tab);
 
         let mut shift = 0usize;
         let mut src = 0usize;
@@ -311,7 +312,7 @@ impl ConcealMap {
             let hidden: usize = chars[r.clone()].iter().map(width_of).sum();
             let shown = match op {
                 Conceal::Hide(_) => 0,
-                Conceal::Replace { text, .. } => display_width(text) as usize,
+                Conceal::Replace { text, .. } => text_width(text, tab) as usize,
             };
             shift += hidden.saturating_sub(shown);
             src = r.end;
@@ -913,7 +914,9 @@ fn bullet_for(depth: u8, ctx: &ConcealCtx) -> String {
 
 /// Depth-colored indent guides (SPEC §5.4): each completed indent level trades
 /// its first space for the guide glyph. One char for one char, so the conceal
-/// map costs nothing in width and every column downstream stays put.
+/// map costs nothing in width and every column downstream stays put. A level
+/// that starts on a tab trades the tab for the glyph padded with spaces to the
+/// tab's `tab_width` cells, so the cells stay put there too.
 ///
 /// The glyph carries NO style of its own — `indent::apply` has already colored
 /// those columns by depth in the styled spans, and a `plain` replacement
@@ -927,11 +930,20 @@ fn indent_guide_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &m
         return;
     }
     let line: String = chars.iter().collect();
+    let glyph = &ctx.glyphs.indent_guide;
     for (col, _depth) in indent::guides_for(&line, block, ctx.tab_width).marks {
-        // Never overwrite a tab: replacing it with a 1-cell glyph would move
-        // every column after it.
-        if chars.get(col) == Some(&' ') {
-            ops.push(Conceal::plain(col..col + 1, ctx.glyphs.indent_guide.clone()));
+        match chars.get(col) {
+            Some(' ') => ops.push(Conceal::plain(col..col + 1, glyph.clone())),
+            // The glyph alone would take a tab's cells back and move every
+            // column after it; padded, it fills them. A glyph wider than the
+            // tab leaves the tab be.
+            Some('\t') => {
+                let pad = ctx.tab_width.max(1).checked_sub(display_width(glyph) as usize);
+                if let Some(pad) = pad {
+                    ops.push(Conceal::plain(col..col + 1, format!("{glyph}{}", " ".repeat(pad))));
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -1429,14 +1441,19 @@ mod tests {
         }
     }
 
-    /// A tab is one char but many columns; swapping a 1-cell glyph in for it
-    /// would shift the whole line, so tab-indented lines keep their whitespace.
+    /// A tab is one char but `tab_width` cells; its guide is the glyph padded
+    /// to those cells, so a tab-indented item shows the guides a
+    /// space-indented one does, in the same cells.
     #[test]
-    fn indent_guides_leave_tabs_alone() {
-        // Two tabs are two levels (a tab is tab_width columns), so the bullet
-        // is the one `    - nested` wears.
-        assert_eq!(shown("\t\t- tabbed"), "\t\t• tabbed");
-        assert_eq!(shown("\t- tabbed"), "\t◦ tabbed");
+    fn indent_guides_fill_a_tab() {
+        // Two tabs are two levels (a tab is tab_width columns, 2 here), so
+        // the bullet is the one `    - nested` wears.
+        assert_eq!(shown("\t\t- tabbed"), "│ │ • tabbed");
+        assert_eq!(shown("\t- tabbed"), "│ ◦ tabbed");
+        assert_eq!(shown("\t\t- tabbed"), shown("    - tabbed"));
+        // A level that starts inside a tab has no guide of its own; the tab
+        // carries the one it starts.
+        assert_eq!(shown(" \t - odd"), "│\t • odd");
     }
 
     #[test]
@@ -1456,7 +1473,7 @@ mod tests {
     /// the cursor arrives. Every leading op counts toward it.
     #[test]
     fn leading_shift_covers_the_whole_marker_run() {
-        let shift = |line: &str| map(line).leading_shift(line);
+        let shift = |line: &str| map(line).leading_shift(line, 2);
         assert_eq!(shift("## Title"), 3, "`## ` is hidden outright");
         assert_eq!(shift("- item"), 0, "a bullet swaps one char for one");
         assert_eq!(shift("> quoted"), 0, "`> ` becomes a bar of the same width");
@@ -1474,13 +1491,13 @@ mod tests {
         // "## Title" conceals "## " -> display "Title".
         let line = "## Title";
         let m = map(line);
-        assert_eq!(m.source_col(line, 0), 3); // display 'T' -> source col 3
-        assert_eq!(m.source_col(line, 1), 4); // 'i' -> 4
+        assert_eq!(m.source_col(line, 0, 2), 3); // display 'T' -> source col 3
+        assert_eq!(m.source_col(line, 1, 2), 4); // 'i' -> 4
         // "a **bold** b" -> display "a bold b"; display col 2 = 'b' of bold.
         let line = "a **bold** b";
         let m = map(line);
-        assert_eq!(m.source_col(line, 0), 0); // 'a'
-        assert_eq!(m.source_col(line, 2), 4); // 'b' of bold is source col 4
+        assert_eq!(m.source_col(line, 0, 2), 0); // 'a'
+        assert_eq!(m.source_col(line, 2, 2), 4); // 'b' of bold is source col 4
     }
 
     /// Wide characters are measured in CELLS, so a click past a CJK glyph lands
@@ -1490,11 +1507,11 @@ mod tests {
         // "**b** 世界x": display "b 世界x" — 世 and 界 are two cells each.
         let line = "**b** 世界x";
         let m = map(line);
-        assert_eq!(m.source_col(line, 0), 2); // 'b'
-        assert_eq!(m.source_col(line, 2), 6); // 世 starts at display col 2
-        assert_eq!(m.source_col(line, 3), 6); // its second cell is still 世
-        assert_eq!(m.source_col(line, 4), 7); // 界
-        assert_eq!(m.source_col(line, 6), 8); // 'x'
+        assert_eq!(m.source_col(line, 0, 2), 2); // 'b'
+        assert_eq!(m.source_col(line, 2, 2), 6); // 世 starts at display col 2
+        assert_eq!(m.source_col(line, 3, 2), 6); // its second cell is still 世
+        assert_eq!(m.source_col(line, 4, 2), 7); // 界
+        assert_eq!(m.source_col(line, 6, 2), 8); // 'x'
     }
 
     /// A line separator is drawn as a one-cell `↵`, inside replaced text
@@ -1506,9 +1523,9 @@ mod tests {
         let line = "$\\alpha\u{2028}b$ x";
         assert_eq!(shown(line), "\u{3b1}\u{2028}b x");
         let m = map(line);
-        assert_eq!(m.source_col(line, 2), 1, "inside the math lands on its start");
-        assert_eq!(m.source_col(line, 3), 10, "the space after it");
-        assert_eq!(m.source_col(line, 4), 11, "the x");
+        assert_eq!(m.source_col(line, 2, 2), 1, "inside the math lands on its start");
+        assert_eq!(m.source_col(line, 3, 2), 10, "the space after it");
+        assert_eq!(m.source_col(line, 4, 2), 11, "the x");
     }
 
     #[test]

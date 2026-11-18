@@ -183,14 +183,15 @@ fn ordinal(line: &str) -> String {
 /// exactly, pushing each as its own output line.
 fn push_justified(out: &mut Vec<String>, body: &str, measure: u16) {
     let chars: Vec<char> = body.chars().collect();
-    let ranges = crate::render::layout::wrap_line(body, measure);
+    // A tab counts CommonMark's 4, the width export classifies with.
+    let ranges = crate::render::layout::wrap_line(body, measure, crate::render::markdown::block::COMMONMARK_TAB);
     let last = ranges.len() - 1;
     for (i, (start, end)) in ranges.into_iter().enumerate() {
         let row: String = chars[start..end].iter().collect();
         if i == last {
             out.push(row.trim_end().to_string());
         } else {
-            let gaps = crate::render::align::justify_gaps(&row, measure);
+            let gaps = crate::render::align::justify_gaps(&row, measure, crate::render::markdown::block::COMMONMARK_TAB);
             out.push(stretch(&row, &gaps));
         }
     }

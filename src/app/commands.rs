@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::schema::MAX_TAB_WIDTH;
 
 /// Every `:` command: its name, and the other (mostly shorter) names it
 /// answers to. `run_command` reads names through this table and Tab completes
@@ -44,10 +45,6 @@ pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
 
 /// The commands whose argument is a path, by their name in `COMMANDS`.
 pub(crate) const PATH_COMMANDS: &[&str] = &["edit", "saveas", "wq", "write"];
-
-/// Widest `:set tab_width` will accept. A tab wider than this is not an
-/// indent anyone writes.
-const MAX_TAB_WIDTH: usize = 16;
 
 /// Every `:set` option: its name, and the other names it answers to.
 /// `set_option` reads keys through this table and Tab completes the first
@@ -368,9 +365,11 @@ impl App {
                 let set = self.config.layout.line_spacing;
                 return self.notify(format!("line_spacing={set}"), FlashKind::Info);
             }
-            // How many columns a tab counts: the indent unit of `>`, and how
-            // deep a tab-indented list item is. `refresh_blocks` sees the
-            // block caches no longer match and reclassifies every document.
+            // How many columns a tab counts: the indent unit of `>`, how deep
+            // a tab-indented list item is, and the cells a tab is drawn as.
+            // `refresh_blocks` sees the block caches no longer match and
+            // reclassifies every document; the render cache's style key holds
+            // `tab_width`, so every line is re-measured and re-wrapped too.
             "tab_width" => {
                 let cur = self.config.editor.tab_width;
                 if val.is_empty() {

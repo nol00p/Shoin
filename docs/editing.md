@@ -176,6 +176,14 @@ auto-indent, no list continuation, and a `jk` in the pasted text stays text.
   bullets, the indent guides and which item a line or code block belongs
   to all count it the same way, and change together when `tab_width` does
   (`:set tab_width=N`, 1 to 16, or `:set ts=N`).
+- On screen a tab is `tab_width` blank cells, wherever it is in a line,
+  code blocks included. It is a fixed width, not the way to the next tab
+  stop: `a\tb` and `abc\tb` both put 4 blank cells before the `b` at the
+  default.
+  Wrapping, the caret, a click, a selection and `j` `k` all count it so. The
+  caret on a tab sits on its first cell, and a click on any of its cells
+  lands on it. A tab-indented item gets its indent guides on the tab's
+  cells, as a space-indented one does.
   HTML and PDF export, like GitHub, always count a tab as 4 columns: with
   another `tab_width`, a tab-indented list can nest differently there, and
   `:fixlist` rewrites such tabs as spaces. At 4 they agree, except where

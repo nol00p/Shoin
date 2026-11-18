@@ -179,6 +179,11 @@ pub fn validate(cfg: &Config) -> Vec<String> {
             "1 to 5 minutes",
         );
     }
+    {
+        let n = cfg.editor.tab_width;
+        let max = schema::MAX_TAB_WIDTH;
+        check("editor.tab_width", &n.to_string(), (1..=max).contains(&n), &format!("1 to {max} cells"));
+    }
     check(
         "layout.focus",
         &cfg.layout.focus,
@@ -546,6 +551,20 @@ mod tests {
         // 0 is the other end of the same mistake.
         let cfg = parse("[editor]\nautosave_interval = 0\n").unwrap();
         assert_eq!(validate(&cfg).len(), 1);
+    }
+
+    /// A `tab_width` `:set` would refuse is named on startup the same way,
+    /// and kept as written: 0 counts and draws as 1.
+    #[test]
+    fn an_impossible_tab_width_is_named_not_fatal() {
+        for n in [0, 17] {
+            let cfg = parse(&format!("[editor]\ntab_width = {n}\n")).unwrap();
+            assert_eq!(cfg.editor.tab_width, n, "kept as written");
+            let w = validate(&cfg);
+            assert_eq!(w.len(), 1, "{w:?}");
+            assert!(w[0].starts_with("editor.tab_width") && w[0].contains("1 to 16"), "{w:?}");
+        }
+        assert_eq!(crate::render::layout::cell_width('\t', 0), 1);
     }
 
     /// A misspelt setting is REPORTED. It still falls back, but silently

@@ -62,6 +62,7 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option after `:set`, a topic after
 |---|---|
 | `:set measure=72` | text width in columns (`:set measure` shows it) |
 | `:set line_spacing=1` | blank rows between lines, 0–4 |
+| `:set tab_width=4` | cells a tab counts and is drawn as, 1–16 (`:set ts`) |
 | `:set autosave [on\|off]` | write modified named buffers on a timer |
 | `:set autosave_interval=3` | minutes between autosaves, 1–5 |
 | `:set autoreload [on\|off]` | take outside changes when nothing is unsaved |

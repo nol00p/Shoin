@@ -82,6 +82,7 @@ pub fn expand(
     measure: u16,
     mode: Mode,
     math: bool,
+    tab: usize,
 ) -> Expansion {
     let label = link.label();
 
@@ -122,7 +123,9 @@ pub fn expand(
         // Sliced from one char vector: skipping to each row's start from the
         // line's beginning walked a long line once per row it wraps to.
         let chars: Vec<char> = line.chars().collect();
-        for (a, b) in wrap_chars(&chars, inner) {
+        // A tab is wrapped as the `tab` cells the frame draws it as, the
+        // screen's rule, though the kind above counts it as CommonMark's 4.
+        for (a, b) in wrap_chars(&chars, inner, tab) {
             rows.push(Row::Body(char_window(&chars, a, b), kind.clone()));
         }
     }
@@ -177,7 +180,9 @@ fn picture(path: &Path, label: String, cfg: &TranscludeConfig, measure: u16) -> 
 fn one_error(label: String, why: String, measure: u16) -> Expansion {
     let msg = format!("![[{label}]] — {why}");
     let chars: Vec<char> = msg.chars().collect();
-    let rows = wrap_chars(&chars, measure.max(8))
+    // Drawn by `screen_spans`, which leaves a tab out, so it is measured 0.
+    let chars: Vec<char> = chars.into_iter().filter(|&c| c != '\t').collect();
+    let rows = wrap_chars(&chars, measure.max(8), 1)
         .into_iter()
         .map(|(a, b)| Row::Error(char_window(&chars, a, b)))
         .collect();
@@ -218,14 +223,14 @@ mod tests {
         std::fs::write(d.join("frag.md"), "one\ntwo\n").unwrap();
         let link = Link::parse("frag").unwrap();
 
-        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true);
+        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true, 4);
         assert!(matches!(e.rows.first(), Some(Row::Top(l)) if l == "frag"));
         assert!(matches!(e.rows.last(), Some(Row::Bottom)));
         assert_eq!(body_text(&e), vec!["one", "two"]);
 
         // …and without one when the setting says so.
         let cfg = TranscludeConfig { border: false, ..Default::default() };
-        let e = expand(&link, &d.join("note.md"), &cfg, 72, Mode::Short, true);
+        let e = expand(&link, &d.join("note.md"), &cfg, 72, Mode::Short, true, 4);
         assert!(matches!(e.rows.first(), Some(Row::Body(_, _))));
         std::fs::remove_dir_all(&d).ok();
     }
@@ -236,7 +241,7 @@ mod tests {
     fn an_unresolved_embed_says_so_on_screen() {
         let d = vault("missing");
         let link = Link::parse("nope").unwrap();
-        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true);
+        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true, 4);
         assert_eq!(e.len(), 1, "short enough to fit one row");
         match &e.rows[0] {
             Row::Error(msg) => assert!(msg.contains("nope"), "{msg}"),
@@ -285,21 +290,21 @@ mod tests {
         let cfg = TranscludeConfig::default();
         let from = d.join("note.md");
 
-        let short = expand(&link, &from, &cfg, 72, Mode::Short, true);
+        let short = expand(&link, &from, &cfg, 72, Mode::Short, true, 4);
         let body = body_text(&short).join("\n");
         assert!(body.contains("outer text"));
         assert!(!body.contains("the innermost text"), "short stops at the target");
         assert!(body.contains("![[inner]]"), "…leaving the nested link as text");
         assert!(matches!(short.rows.first(), Some(Row::Top(_))), "short is framed");
 
-        let rec = expand(&link, &from, &cfg, 72, Mode::Rec, true);
+        let rec = expand(&link, &from, &cfg, 72, Mode::Rec, true, 4);
         let body = body_text(&rec).join("\n");
         assert!(body.contains("outer text"));
         assert!(body.contains("the innermost text"), "rec follows the nested embed");
         assert!(!body.contains("![[inner]]"), "…and consumes the link");
         assert!(matches!(rec.rows.first(), Some(Row::Top(_))), "rec is framed too");
 
-        let full = expand(&link, &from, &cfg, 72, Mode::Full, true);
+        let full = expand(&link, &from, &cfg, 72, Mode::Full, true, 4);
         let body = body_text(&full).join("\n");
         assert!(body.contains("the innermost text"), "full recurses like rec");
         assert!(
@@ -327,6 +332,7 @@ mod tests {
             72,
             Mode::Full,
             true,
+            4,
         ))
         .join("\n");
         let compiled = crate::transclude::compile::compile(&from, &cfg).unwrap();
@@ -351,7 +357,7 @@ mod tests {
         let cfg = TranscludeConfig::default();
         let from = d.join("note.md");
 
-        let e = expand(&link, &from, &cfg, 72, Mode::Short, true);
+        let e = expand(&link, &from, &cfg, 72, Mode::Short, true, 4);
         let body = body_text(&e).join("\n");
         assert!(body.contains("## Frag"), "demoted by heading_offset, as compile does");
         assert!(!body.contains("^abc"), "block ids go, as compile does");
@@ -376,7 +382,7 @@ mod tests {
         let d = vault("fence");
         std::fs::write(d.join("frag.md"), "```rust\nlet x = 1;\n```\nafter\n").unwrap();
         let link = Link::parse("frag").unwrap();
-        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true);
+        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true, 4);
 
         let kinds: Vec<&BlockKind> = e
             .rows
@@ -403,7 +409,7 @@ mod tests {
         let d = vault("empty");
         std::fs::write(d.join("frag.md"), "").unwrap();
         let link = Link::parse("frag").unwrap();
-        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true);
+        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true, 4);
         assert_eq!(e.len(), 3, "top, one blank body, bottom");
         std::fs::remove_dir_all(&d).ok();
     }
@@ -427,7 +433,7 @@ mod tests {
         let from = d.join("comp.md");
 
         let cfg = TranscludeConfig::default();
-        let e = expand(&Link::parse("photo.png").unwrap(), &from, &cfg, 60, Mode::Full, true);
+        let e = expand(&Link::parse("photo.png").unwrap(), &from, &cfg, 60, Mode::Full, true, 4);
 
         let first = e.rows.first().expect("a row");
         let Row::Image(pic) = first else {
@@ -468,6 +474,7 @@ mod tests {
             60,
             Mode::Full,
             true,
+            4,
         );
         assert!(matches!(e.rows.first(), Some(Row::Error(_))), "an error, not a box");
         std::fs::remove_dir_all(&d).ok();

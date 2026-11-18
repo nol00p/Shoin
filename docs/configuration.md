@@ -39,8 +39,8 @@ autoreload        = true  # take a file's changes back when it is edited
                           # elsewhere — only if you have nothing unsaved
 list_renumber     = true  # keep 1. 2. 3. in sequence when an item moves
 list_tab          = true  # Tab / Shift-Tab in Insert indent a list item
-tab_width         = 4     # columns a tab counts, and the indent step
-                          # (:set tab_width=N to change live)
+tab_width         = 4     # cells a tab counts and is drawn as, and the
+                          # indent step (:set tab_width=N to change live)
 table_align       = "auto" # line up a table's columns on leaving Insert;
                            # "manual" leaves it to ga
 
