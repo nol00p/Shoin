@@ -283,6 +283,7 @@ fn hard_break(line: &str, next: Option<&str>) -> bool {
 ///
 /// A symlink is written through to the file it names: renaming over the link
 /// itself would swap it for a regular file and leave the real one unedited.
+/// A link to a missing file makes that file, as vim does; see [`through_links`].
 pub fn write_atomic(path: &Path, rope: &Rope, opts: &SaveOptions) -> Result<SystemTime> {
     let text = outgoing(rope.chunks().collect(), opts).text;
     write_text(path, &text, opts.line_ending)
@@ -291,11 +292,8 @@ pub fn write_atomic(path: &Path, rope: &Rope, opts: &SaveOptions) -> Result<Syst
 /// `write_atomic` for text `outgoing` has already prepared, so a caller that
 /// needs that text too computes it once.
 pub fn write_text(path: &Path, text: &str, line_ending: LineEnding) -> Result<SystemTime> {
-    let resolved = path
-        .is_symlink()
-        .then(|| std::fs::canonicalize(path).ok())
-        .flatten();
-    let path = resolved.as_deref().unwrap_or(path);
+    let resolved = through_links(path)?;
+    let path = resolved.as_path();
 
     let text: std::borrow::Cow<str> = match line_ending {
         LineEnding::Crlf => text.replace('\n', "\r\n").into(),
@@ -355,6 +353,46 @@ pub fn write_text(path: &Path, text: &str, line_ending: LineEnding) -> Result<Sy
 
     finish_rename(path, dir, &tmp, created, &text, meta.as_ref())
 }
+
+/// The file a save to `path` writes: `path` itself, or the file at the end of
+/// the links it starts. A link to a missing file leads to where that file
+/// would be, so the save makes it and the link stays a link: replacing the
+/// link with a regular file is never what was meant. A chain is followed as
+/// the system follows one, up to [`MAX_LINKS`]: past that it is a loop, and
+/// an error. A folder on the way that is missing is left to the write to
+/// report: no folder is made.
+fn through_links(path: &Path) -> Result<PathBuf> {
+    if !path.is_symlink() {
+        return Ok(path.to_path_buf());
+    }
+    // A link that leads to a file: the real path, as before.
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return Ok(real);
+    }
+    let mut at = path.to_path_buf();
+    // One look more than there are links to follow: the 40th may lead to a
+    // file or a free name, which is no loop.
+    for _ in 0..=MAX_LINKS {
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&at).with_context(|| format!("reading the link {}", at.display()))?;
+                // A relative target is relative to the folder the link is in.
+                at = match at.parent() {
+                    Some(dir) if target.is_relative() => dir.join(target),
+                    _ => target,
+                };
+            }
+            Ok(_) => return Ok(at),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(at),
+            Err(e) => return Err(e).with_context(|| format!("following the link {}", path.display())),
+        }
+    }
+    anyhow::bail!("{} is a loop of links", path.display())
+}
+
+/// How many links in a chain a save follows: Linux's own limit, which
+/// follows 40 and refuses the 41st.
+const MAX_LINKS: u32 = 40;
 
 /// The rename route from scratch, for the one case that gave up its first
 /// temp file to look at the owner.
@@ -902,6 +940,91 @@ mod tests {
         write_atomic(&link, &Rope::from_str("new\n"), &opts(true, false)).unwrap();
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
         assert!(link.is_symlink(), "the link is still a link");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A link to a missing file is written through too: the file is made where
+    /// the link points, relative to the link's folder or absolute, through a
+    /// chain of links, and every link stays a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_missing_file_makes_it() {
+        use std::os::unix::fs::symlink;
+        let d = dir("dangling");
+        std::fs::create_dir(d.join("sub")).unwrap();
+        let text = Rope::from_str("new\n");
+        let is_link = |p: &Path| std::fs::symlink_metadata(p).unwrap().file_type().is_symlink();
+
+        // Relative: to the folder the link is in, not the working folder.
+        symlink("../gone.md", d.join("sub/rel.md")).unwrap();
+        write_atomic(&d.join("sub/rel.md"), &text, &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("gone.md")).unwrap(), "new\n");
+        assert!(is_link(&d.join("sub/rel.md")));
+
+        // Absolute.
+        symlink(d.join("abs-target.md"), d.join("abs.md")).unwrap();
+        write_atomic(&d.join("abs.md"), &text, &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("abs-target.md")).unwrap(), "new\n");
+        assert!(is_link(&d.join("abs.md")));
+
+        // A chain: a → b → sub/end.md, missing.
+        symlink("b.md", d.join("a.md")).unwrap();
+        symlink("sub/end.md", d.join("b.md")).unwrap();
+        let mtime = write_atomic(&d.join("a.md"), &text, &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("sub/end.md")).unwrap(), "new\n");
+        assert!(is_link(&d.join("a.md")) && is_link(&d.join("b.md")));
+        assert!(!changed_externally(&d.join("a.md"), Some(mtime)), "the mtime is the file's");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A loop of links, or a link into a missing folder, is an error: nothing
+    /// hangs, no folder is made, and the links are left as they were.
+    #[cfg(unix)]
+    #[test]
+    fn a_loop_of_links_or_a_missing_folder_is_an_error() {
+        use std::os::unix::fs::symlink;
+        let d = dir("loops");
+        let text = Rope::from_str("new\n");
+        symlink("self.md", d.join("self.md")).unwrap();
+        symlink("y.md", d.join("x.md")).unwrap();
+        symlink("x.md", d.join("y.md")).unwrap();
+        for p in ["self.md", "x.md"] {
+            let err = format!("{:#}", write_atomic(&d.join(p), &text, &opts(true, false)).unwrap_err());
+            assert!(err.contains("loop of links"), "{p}: {err}");
+        }
+        symlink("no-such-folder/n.md", d.join("deep.md")).unwrap();
+        let err = format!("{:#}", write_atomic(&d.join("deep.md"), &text, &opts(true, false)).unwrap_err());
+        assert!(err.contains("no-such-folder"), "{err}");
+        assert!(!d.join("no-such-folder").exists(), "no folder is made");
+        let mut names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        assert_eq!(names, ["deep.md", "self.md", "x.md", "y.md"], "nothing else made, no link replaced");
+        for p in ["deep.md", "self.md", "x.md", "y.md"] {
+            assert!(std::fs::symlink_metadata(d.join(p)).unwrap().file_type().is_symlink());
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A chain of 40 links to a missing file is followed, as the system
+    /// follows one; a 41st makes it a loop.
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_of_forty_links_is_followed_and_forty_one_is_not() {
+        let d = dir("chain40");
+        let text = Rope::from_str("end\n");
+        // l0 → l1 → … → l39 → end.md: 40 links.
+        for i in 0..MAX_LINKS {
+            let next = if i + 1 == MAX_LINKS { "end.md".to_string() } else { format!("l{}", i + 1) };
+            std::os::unix::fs::symlink(next, d.join(format!("l{i}"))).unwrap();
+        }
+        write_atomic(&d.join("l0"), &text, &opts(true, false)).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("end.md")).unwrap(), "end\n");
+        std::fs::remove_file(d.join("end.md")).unwrap();
+        // One more in front: 41.
+        std::os::unix::fs::symlink("l0", d.join("first")).unwrap();
+        let err = format!("{:#}", write_atomic(&d.join("first"), &text, &opts(true, false)).unwrap_err());
+        assert!(err.contains("loop of links"), "{err}");
+        assert!(!d.join("end.md").exists());
         std::fs::remove_dir_all(&d).ok();
     }
 

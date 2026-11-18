@@ -48,6 +48,12 @@ pub struct Buffer {
     /// mtime at open/save. Compared before writing to catch external edits.
     pub disk_mtime: Option<SystemTime>,
 
+    /// Opened on a file that did not exist yet, and not saved or reloaded
+    /// since: something that appears at the path before the first save was
+    /// made by somebody else (another buffer through a link, another
+    /// program), and the save is refused without `!`. vim's W13.
+    pub was_missing: bool,
+
     /// Unsaved changes present. Derived from `saved_revision`, never set
     /// directly, so undoing back to the last saved state clears it.
     pub modified: bool,
@@ -145,6 +151,7 @@ impl Buffer {
             save_revisions: 0,
             read_only: false,
             words: std::cell::RefCell::new(None),
+            was_missing: false,
         }
     }
 
@@ -158,6 +165,7 @@ impl Buffer {
             let mut b = Buffer::empty();
             b.syntax = open::syntax_for(&path, plain_text_exts);
             b.path = Some(path);
+            b.was_missing = true;
             return Ok(b);
         }
         let loaded = open::load(&path, plain_text_exts)?;
@@ -182,6 +190,7 @@ impl Buffer {
             save_revisions: 0,
             read_only: false,
             words: std::cell::RefCell::new(None),
+            was_missing: false,
         })
     }
 
@@ -225,12 +234,17 @@ impl Buffer {
         if !force && same_file && save::changed_externally(path, self.disk_mtime) {
             anyhow::bail!("{} changed on disk — :w! to overwrite", name_of(path));
         }
+        // Nor one that was missing when this buffer opened it and is there
+        // now: `exists` follows links, as the save does, so a file made at
+        // the far end of a link counts too. With no mtime of ours, the check
+        // above cannot see it.
+        if !force && same_file && self.was_missing && path.exists() {
+            anyhow::bail!("{} was created after you opened it — :w! to overwrite", name_of(path));
+        }
         // Nor one that is not ours at all: `:w notes.md` over an existing
         // notes.md would destroy it. vim's E13, and `:w!` the same way past.
-        // `taken`, not `exists`: a link to a missing file is still a name in
-        // use, and the save's rename would replace the link itself.
-        if !force && !same_file && ops::taken(path)? {
-            anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
+        if !force && !same_file {
+            refuse_taken(path)?;
         }
         let opts = self.save_options(path, policy);
         let mut out = save::outgoing(self.rope.to_string(), &opts);
@@ -245,6 +259,7 @@ impl Buffer {
         }
         let mtime = save::write_text(path, &out.text, opts.line_ending)?;
         self.disk_mtime = Some(mtime);
+        self.was_missing = false;
         // The write settled whichever divergence there was: this text IS the
         // file now. `:w!` is how a reader says "keep mine", so the marker has
         // to come down here rather than needing its own command.
@@ -339,8 +354,8 @@ impl Buffer {
     ///
     /// An existing file is refused without `force`, as `write_to` refuses it.
     pub fn write_copy(&self, path: &Path, policy: SavePolicy, force: bool) -> Result<()> {
-        if !force && ops::taken(path)? {
-            anyhow::bail!("{} exists — :w! to overwrite", name_of(path));
+        if !force {
+            refuse_taken(path)?;
         }
         // No line kept for the cursor: the buffer does not follow a copy.
         let opts = SaveOptions { keep_line: None, ..self.save_options(path, policy) };
@@ -391,6 +406,7 @@ impl Buffer {
             self.line_ending = loaded.line_ending;
             self.final_newline = loaded.final_newline;
             self.disk_mtime = mtime;
+            self.was_missing = false;
             self.conflict = false;
             return Ok(false);
         }
@@ -411,6 +427,7 @@ impl Buffer {
         self.final_newline = loaded.final_newline;
         self.syntax = loaded.syntax;
         self.disk_mtime = mtime;
+        self.was_missing = false;
         self.saved_state = self.history.state();
         self.modified = false;
         self.conflict = false;
@@ -558,6 +575,20 @@ impl Buffer {
 
 /// A path as the status line and error messages name it: the file name alone,
 /// falling back to the whole path when there isn't one.
+/// Refuse `:w other.md` onto a name already in use, as `:w!` would write
+/// over it. `taken`, not `exists`: a link to a missing file is a name in use
+/// too, by whoever made the link, and `:w!` writes through it, making the
+/// file the link names (the link stays). The message says which it is.
+fn refuse_taken(path: &Path) -> Result<()> {
+    if !ops::taken(path)? {
+        return Ok(());
+    }
+    if !path.exists() {
+        anyhow::bail!("{} is a broken link — :w! to write the file it names", name_of(path));
+    }
+    anyhow::bail!("{} exists — :w! to overwrite", name_of(path))
+}
+
 fn name_of(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1260,7 +1291,8 @@ mod tests {
     }
 
     /// `:w other.md` and `:saveas other.md` onto a link to a missing file are
-    /// refused like any taken name: the save's rename would replace the link.
+    /// refused like any taken name, and say it is a link. `:w!` writes
+    /// through it: the file the link names is made, and the link stays.
     #[cfg(unix)]
     #[test]
     fn a_dangling_link_is_not_written_over_without_bang() {
@@ -1272,12 +1304,108 @@ mod tests {
         b.save(policy(), false).unwrap();
 
         let err = b.write_copy(&link, policy(), false).unwrap_err().to_string();
-        assert!(err.contains("exists — :w! to overwrite"), "got: {err}");
+        assert_eq!(err, "other.md is a broken link — :w! to write the file it names");
         let err = b.save_as(link.clone(), policy(), false).unwrap_err().to_string();
-        assert!(err.contains("exists — :w! to overwrite"), "got: {err}");
+        assert!(err.contains("broken link — :w! to write the file it names"), "got: {err}");
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert!(std::fs::symlink_metadata(d.join("gone.md")).is_err());
         assert_eq!(b.path.as_deref(), Some(d.join("n.md").as_path()));
+
+        b.write_copy(&link, policy(), true).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("gone.md")).unwrap(), "text\n");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        // A file there now: the plain message.
+        let err = b.write_copy(&link, policy(), false).unwrap_err().to_string();
+        assert!(err.contains("other.md exists — :w! to overwrite"), "got: {err}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `shoin link.md` on a link to a missing file, then `:w`: the file is
+    /// made at the far end of the link, as vim does, and the link stays. Its
+    /// own file is not a name taken by somebody else: the guard against that
+    /// is for `:w other.md` (see `a_dangling_link_is_not_written_over_without_bang`).
+    #[cfg(unix)]
+    #[test]
+    fn its_own_broken_link_is_written_through() {
+        let d = dir("own-dangling");
+        let link = d.join("link.md");
+        std::os::unix::fs::symlink("gone.md", &link).unwrap();
+        let mut b = Buffer::open(link.clone(), &[]).unwrap();
+        b.replace_all("text\n");
+        b.save(policy(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("gone.md")).unwrap(), "text\n");
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("gone.md"), "the link is still a link");
+        assert!(!b.modified);
+
+        // Its target deleted while it is open: `:w` makes it again, and the
+        // mtime it records is the new file's, so the next `:w` is not
+        // refused as changed on disk.
+        std::fs::remove_file(d.join("gone.md")).unwrap();
+        b.replace_all("more\n");
+        b.save(policy(), false).unwrap();
+        b.replace_all("again\n");
+        b.save(policy(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("gone.md")).unwrap(), "again\n");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Opened on a missing file, which somebody else then makes: `:w` is
+    /// refused rather than writing over it unseen, and `:w!` writes. vim's W13.
+    #[test]
+    fn a_file_created_after_opening_it_missing_is_not_written_over() {
+        let d = dir("created");
+        let path = d.join("x.md");
+        let mut b = Buffer::open(path.clone(), &[]).unwrap();
+        b.replace_all("mine\n");
+        std::fs::write(&path, "another program's\n").unwrap();
+        let err = b.save(policy(), false).unwrap_err().to_string();
+        assert_eq!(err, "x.md was created after you opened it — :w! to overwrite");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "another program's\n");
+        b.save(policy(), true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine\n");
+        // From then on it is this buffer's file, and `:w` is plain again.
+        b.replace_all("more\n");
+        b.save(policy(), false).unwrap();
+
+        // A first save of its own clears it the same way.
+        let mut c = Buffer::open(d.join("y.md"), &[]).unwrap();
+        c.replace_all("one\n");
+        c.save(policy(), false).unwrap();
+        c.replace_all("two\n");
+        c.save(policy(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("y.md")).unwrap(), "two\n");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `link.md` → missing `gone.md`, both open: `:w` in `link.md` makes
+    /// `gone.md` through the link, and `:w` in the `gone.md` buffer then
+    /// refuses rather than writing over it. And the other way round.
+    #[cfg(unix)]
+    #[test]
+    fn two_buffers_on_one_missing_file_through_a_link_do_not_overwrite_each_other() {
+        let d = dir("two-on-one");
+        let (link, gone) = (d.join("link.md"), d.join("gone.md"));
+        std::os::unix::fs::symlink("gone.md", &link).unwrap();
+        let mut via_link = Buffer::open(link.clone(), &[]).unwrap();
+        let mut direct = Buffer::open(gone.clone(), &[]).unwrap();
+        via_link.replace_all("through the link\n");
+        direct.replace_all("direct\n");
+        via_link.save(policy(), false).unwrap();
+        let err = direct.save(policy(), false).unwrap_err().to_string();
+        assert!(err.contains("gone.md was created after you opened it"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&gone).unwrap(), "through the link\n");
+
+        std::fs::remove_file(&gone).unwrap();
+        let mut via_link = Buffer::open(link.clone(), &[]).unwrap();
+        let mut direct = Buffer::open(gone.clone(), &[]).unwrap();
+        via_link.replace_all("through the link\n");
+        direct.replace_all("direct\n");
+        direct.save(policy(), false).unwrap();
+        let err = via_link.save(policy(), false).unwrap_err().to_string();
+        assert!(err.contains("link.md was created after you opened it"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&gone).unwrap(), "direct\n");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         std::fs::remove_dir_all(&d).ok();
     }
 
