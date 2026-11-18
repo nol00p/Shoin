@@ -8,6 +8,11 @@
   concealed, and `gi` / `gb` strip them there (#122).
 - `gf` follows a link inside emphasis (`**see [docs](u)**`) instead of
   doing nothing (#122).
+- A link inside emphasis (`**see [docs](u)**`) is drawn as a link, in the
+  outer style, its address hidden away from the cursor (#126).
+- Code spans, escapes, tags and math inside a link's text are styled and
+  concealed as elsewhere, in the link's colour; so is emphasis in a link in
+  emphasis. `gi` / `gb` act on the innermost emphasis (#129).
 
 **Files**
 
@@ -28,11 +33,21 @@
 - A file name too long for the recovery endings gets a shortened recovery
   name beside the file; recovery files 0.2.4 wrote under the full name are
   still found (#123).
+- With autosave on, a file someone created after you opened it missing is
+  named once, not every interval; `:w` still says it each time (#127).
+- A cut-off `.partial` in the state folder (an unnamed buffer, or a folder
+  that refused the write) is named, with its folder, once per session. The
+  recovery notice leads with its words and names files without their
+  folder, writes `$HOME` as `~`, and waits while another message is up. A
+  `.partial` dated more than three minutes ahead counts as cut off (#128).
 
 **Export**
 
 - `> > a` then `> b` (or an unmarked `b`) stays one paragraph inside the
   inner quote, as CommonMark reads it (#121).
+- A fenced block inside a quote exports as code, nested quotes, `~~~` and
+  a fence the quote leaves open included; a tab after `>` counts as the
+  marker's space, as in CommonMark (#125).
 
 ## 0.2.4
 
