@@ -185,9 +185,52 @@ impl App {
         self.leave_insert();
     }
 
+    /// End the insert session in the current document as Esc would, but
+    /// with the cursor left where it is: focus is moving to another pane or
+    /// document (vim's rule for a click). The session's undo step is sealed
+    /// here, in its own document, and it becomes the change `.` repeats,
+    /// complete with its Esc.
+    pub(super) fn end_insert_session(&mut self) {
+        if self.mode != Mode::Insert {
+            return;
+        }
+        // A count is for typing that goes on; a click away ends it, as an
+        // arrow key does.
+        self.insert_repeat = None;
+        self.finish_insert(false);
+        if !self.replaying {
+            if self.edited_since_mark() {
+                self.recording.push(Replay::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+                self.dot = std::mem::take(&mut self.recording);
+            } else {
+                self.recording.clear();
+            }
+        }
+        self.buffer.history.end_group();
+    }
+
+    /// A new insert session at the cursor in the pane focus has moved to,
+    /// with an undo step of its own, recorded for `.` as `Replay::Insert`.
+    pub(super) fn begin_insert_session(&mut self) {
+        if !self.replaying {
+            self.recording = vec![Replay::Insert];
+            self.mark_dot();
+        }
+        let at = self.buffer.cursor;
+        self.buffer.history.begin_group(Some(at));
+        self.enter_insert();
+    }
+
     /// Esc, and everything that behaves like it: Normal mode with the cursor
     /// stepped back onto the last character it was sitting after.
     fn leave_insert(&mut self) {
+        self.finish_insert(true);
+    }
+
+    /// What every end of an insert session does, Esc or a click away:
+    /// Normal mode, a count's copies typed, an unused `cc` indent taken
+    /// back, the table aligned. Only Esc steps the cursor back.
+    fn finish_insert(&mut self, step_back: bool) {
         self.mode = Mode::Normal;
         self.escape_run = 0;
         self.escape_since = None;
@@ -203,7 +246,7 @@ impl App {
                 self.buffer.cursor = Cursor::new(line, 0);
             }
         }
-        if self.buffer.cursor.col > 0 {
+        if step_back && self.buffer.cursor.col > 0 {
             let col = self.buffer.cursor.col - 1;
             self.buffer.cursor.set_col(col);
         }
@@ -259,14 +302,12 @@ impl App {
         }
     }
 
-    /// A window or buffer key bound in `[keys.insert]`. Where it switched
-    /// documents it has ended the session already; where it did not (a
-    /// refused `gf`), the session goes on without it: the key is no part
-    /// of the change `.` or a count replays.
+    /// A window or buffer key bound in `[keys.insert]`, taken out of the
+    /// session before it runs: the key is no part of the change `.` or a
+    /// count replays. Where it switches documents it ends the session
+    /// (`end_insert_session`); where it does not (a refused `gf`), the
+    /// session goes on without it.
     fn window_key_in_insert(&mut self, key: KeyEvent) {
-        if self.mode != Mode::Insert {
-            return self.end_recording();
-        }
         if !self.replaying && matches!(self.recording.last(), Some(Replay::Key(k)) if *k == key) {
             self.recording.pop();
         }
@@ -288,9 +329,12 @@ impl App {
                 self.escape_run = 0;
                 self.escape_since = None;
                 let window = ends_command(&action);
-                self.apply_action(action);
                 if window {
                     self.window_key_in_insert(key);
+                }
+                self.apply_action(action);
+                if window && self.mode != Mode::Insert {
+                    self.end_recording();
                 }
                 return;
             }

@@ -51,13 +51,21 @@ impl App {
         let anchor = self.anchor.unwrap_or(self.buffer.cursor);
         let cursor = self.buffer.cursor;
         let linewise = matches!(self.mode, Mode::VisualLine);
-        self.end_visual();
         if linewise {
+            self.end_visual();
             self.operate_linewise(op, anchor.line, cursor.line);
-        } else {
-            // Visual selections are inclusive of the cursor character.
-            self.operate_charwise(op, anchor, cursor, true);
+            return;
         }
+        // Visual selections are inclusive of the cursor character, and stop
+        // short of the file's final newline.
+        let (lo, start, end) = self.charwise_selection();
+        self.end_visual();
+        if start == end {
+            // Nothing to act on; `c` still starts typing there.
+            return self.operate_charwise(op, lo, lo, false);
+        }
+        let hi = self.idx_to_cursor(end - 1);
+        self.operate_charwise(op, lo, hi, true);
     }
 
     /// The Visual meaning of a Normal-mode edit key, which the Visual table
@@ -156,13 +164,25 @@ impl App {
             };
             return (start, end, Cursor::new(a, 0), true);
         }
+        let (lo, start, end) = self.charwise_selection();
+        (start, end, lo, false)
+    }
+
+    /// A charwise selection: its first character's position, and the chars
+    /// `start..end` it covers, both ends included. The file's final newline
+    /// is never one of them, so an operator or a writer verb acts on the
+    /// text only; a selection of nothing else is empty (`start == end`).
+    pub(super) fn charwise_selection(&self) -> (Cursor, usize, usize) {
         let anchor = self.anchor.unwrap_or(self.buffer.cursor);
         let cur = self.buffer.cursor;
         let lo = if (anchor.line, anchor.col) <= (cur.line, cur.col) { anchor } else { cur };
         let hi = if lo == anchor { cur } else { anchor };
-        let start = self.buffer.char_index(lo);
-        let end = (self.buffer.char_index(hi) + 1).min(self.buffer.rope.len_chars());
-        (start, end, lo, false)
+        let rope = &self.buffer.rope;
+        let len = rope.len_chars();
+        let text_end = if len > 0 && rope.char(len - 1) == '\n' { len - 1 } else { len };
+        let start = self.buffer.char_index(lo).min(text_end);
+        let end = (self.buffer.char_index(hi) + 1).min(text_end).max(start);
+        (lo, start, end)
     }
 
     /// `~` and `r{c}` in Visual: rewrite every selected character but the

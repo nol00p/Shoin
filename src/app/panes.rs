@@ -90,11 +90,18 @@ impl App {
             return;
         }
         let cursor = pane.cursor;
+        // Typing goes on in the pane focus moves to, as a session of its own:
+        // the one here ends, as Esc would, with its own undo step.
+        let inserting = self.mode == Mode::Insert;
+        self.end_insert_session();
         self.focus_pane = id;
         // Restore where this pane was looking. `sync_after_input` clamps it,
         // which is what catches a saved position that edits elsewhere have run
         // off the end of.
         self.buffer.cursor = cursor;
+        if inserting {
+            self.begin_insert_session();
+        }
         // A selection belongs to the pane it was made in: `sync_after_input`
         // ends it here.
         self.sync_after_input();

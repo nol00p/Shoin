@@ -49,6 +49,7 @@ impl App {
                 let area = self.mouse_area();
                 // A click focuses the pane it landed in first — otherwise it
                 // would be mapped through the geometry of a different one.
+                let pane_before = self.focus_pane;
                 if let Some(id) = frame::pane_at(self, area, m.column, m.row) {
                     self.focus_pane_id(id);
                     if let Some(t) = self.tree.as_mut() {
@@ -57,6 +58,11 @@ impl App {
                 }
                 if let Some(cursor) = frame::locate_click(self, area, m.column, m.row) {
                     self.buffer.cursor = cursor;
+                    // Typing goes on here as a new session (`focus_pane_id`):
+                    // its undo step starts at the click.
+                    if self.mode == Mode::Insert && self.focus_pane != pane_before {
+                        self.buffer.history.begin_group(Some(cursor));
+                    }
                     // A click abandons any half-typed command.
                     self.pending.reset();
                     // ...and drops any selection, rather than extending it to

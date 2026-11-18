@@ -19,6 +19,9 @@ impl App {
         // buffer — goes through this one function, and each of them is a move
         // `<C-^>` should be able to undo.
         let from = self.current();
+        // An insert session ends in its own document, sealed, before the
+        // switch: the typing is a change `.` repeats, and an undo step there.
+        self.end_insert_session();
         if from != i {
             self.alternate = Some(from);
         }

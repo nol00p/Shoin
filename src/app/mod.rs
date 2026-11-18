@@ -455,6 +455,9 @@ enum Replay {
     /// as a selection rather than as keys, so a remapped `l` or `o` cannot
     /// change it, and an end past the last character survives.
     Select { lines: usize, cols: usize, backwards: bool },
+    /// Typing that went on in another pane after a click into it: a new
+    /// insert session at the cursor, whatever `i` is bound to.
+    Insert,
 }
 
 /// Where `.` measures "did this command edit?" from: a revision of ONE
@@ -598,7 +601,7 @@ fn with_count(keys: &[Replay], n: usize) -> Vec<Replay> {
     };
     let end = digits_end(at);
     match keys.get(end) {
-        Some(Replay::Paste(_) | Replay::Select { .. }) | None => return keys.to_vec(),
+        Some(Replay::Paste(_) | Replay::Select { .. } | Replay::Insert) | None => return keys.to_vec(),
         Some(k) if matches!(plain(k), Some('v' | 'V')) => return keys.to_vec(),
         _ => {}
     }
@@ -1381,7 +1384,13 @@ impl App {
     /// Clamp the cursor and recompute the active set after any input.
     fn sync_after_input(&mut self) {
         // Insert mode may sit on the empty line after a trailing newline (an
-        // Enter at the end of the text lands there); nothing else may.
+        // Enter at the end of the text lands there); nothing else may. A
+        // selection dragged onto that line ends on the last character, as
+        // the anchor of one dragged from it does (below): the newline before
+        // it is never selected.
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine) && self.buffer.cursor.line > self.buffer.last_line() {
+            self.buffer.cursor = self.last_char();
+        }
         let past_end = self.mode.allows_past_end();
         let last = if past_end {
             self.buffer.line_count().saturating_sub(1)
@@ -1412,13 +1421,10 @@ impl App {
         }
         if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
             // The anchor stays inside the text, as the cursor does. A drag
-            // that began on the empty line past the last newline keeps that
-            // newline: the anchor goes to the end of the last line, past its
-            // last character, as the newline itself.
-            let last = self.buffer.last_line();
-            let end = Cursor::new(last, self.buffer.line_len(last));
-            if self.anchor.is_some_and(|a| a.line > last) {
-                self.anchor = Some(end);
+            // that began on the empty line past the last newline starts on
+            // the last character, as in vim, which has no such line.
+            if self.anchor.is_some_and(|a| a.line > self.buffer.last_line()) {
+                self.anchor = Some(self.last_char());
             }
         } else {
             self.anchor = None;
@@ -1435,6 +1441,12 @@ impl App {
         if let Some(pane) = self.layout.pane_mut(id) {
             pane.cursor = cursor;
         }
+    }
+
+    /// The last character of the text, or the start of an empty last line.
+    fn last_char(&self) -> Cursor {
+        let last = self.buffer.last_line();
+        Cursor::new(last, self.buffer.line_len(last).saturating_sub(1))
     }
 
     fn move_by(&mut self, m: Motion, count: usize) {
