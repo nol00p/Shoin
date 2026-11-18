@@ -122,6 +122,9 @@ version and then the file's, in the order shown on screen.
   until `:w name.md` gives it one. See [Reading](reading.md#from-a-pipe).
 - A buffer with no filename yet is skipped by autosave, and the autosave clock
   restarts on every write.
+- When autosave can't save a file because someone created it after you
+  opened it missing, it says so once; `:w` says it each time and `:w!`
+  overwrites it.
 - A `touch` that changes no bytes is ignored, a file still being written is
   left for the next check, and a file that was deleted leaves the buffer alone
   — `:w` recreates it.
