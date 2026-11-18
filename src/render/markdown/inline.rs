@@ -65,16 +65,18 @@ fn scan_chars(chars: &[char], cfg: &MarkdownConfig) -> Vec<InlineSpan> {
 }
 
 /// What the editor styles on a line: `scan`'s spans and, right after each
-/// link, the emphasis, `~~` and `==` in its text (`[**see** docs](u)`), and
-/// right after each emphasis, `~~` or `==`, the links in it
-/// (`**see [docs](u)**`).
+/// span, what its body holds that the editor styles there too. A link's text
+/// is read as the top level is, except for links (``[**see** `x` \* #t](u)``):
+/// links do not nest, and a picture or address in the text is the outer
+/// link's. An emphasis, `~~` or `==` is read for the links in it
+/// (`**see [docs](u)**`), and those links' text again
+/// (`**see [_docs_](u)**`).
 ///
-/// The spans are in order of their start. Those after a link or an emphasis
-/// that start in its body lie wholly in it, and are the only ones that
-/// overlap another; the rest keep `scan`'s guarantees. One level only: a
-/// link's text is read for emphasis and an emphasis for links, but neither
-/// any deeper (`**a [_b_](u)**` shows the underscores, `**a _b_**` too), and
-/// an image's alt text is plain. Export reads `scan` and nests on its own.
+/// The spans are in order of their start. Those after a span that start in
+/// its body lie wholly in it, and are the only ones that overlap another;
+/// the rest keep `scan`'s guarantees. Emphasis is not read for emphasis or
+/// code, as at the top level (`**a _b_**` shows the underscores), and an
+/// image's alt text is plain. Export reads `scan` and nests on its own.
 pub fn scan_styled(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
     let chars: Vec<char> = line.chars().collect();
     let spans = scan_chars(&chars, cfg);
@@ -82,31 +84,41 @@ pub fn scan_styled(line: &str, cfg: &MarkdownConfig) -> Vec<InlineSpan> {
         return spans;
     }
     let mut out = Vec::with_capacity(spans.len());
+    styled_into(&chars, spans, false, cfg, &mut out);
+    out
+}
+
+/// `scan_styled`'s walk: each span in `spans`, then what its body holds.
+/// `in_link` is set inside a link's text, where no link is read.
+///
+/// A link's text holds no link and an emphasis no emphasis, so this goes
+/// three levels at most: emphasis, a link in it, emphasis in that.
+fn styled_into(chars: &[char], spans: Vec<InlineSpan>, in_link: bool, cfg: &MarkdownConfig, out: &mut Vec<InlineSpan>) {
     for sp in spans {
         let keep: Option<Keep> = match sp.kind {
-            Inline::Link => Some(is_prose_wrap),
-            kind if is_prose_wrap(kind) => Some(is_link_like),
+            Inline::Link => Some(|k| !is_link_like(k)),
+            kind if is_prose_wrap(kind) && !in_link => Some(is_link_like),
             _ => None,
         };
         let body = sp.inner.clone();
+        let link = sp.kind == Inline::Link;
         out.push(sp);
         if let Some(keep) = keep {
             let off = body.start;
-            out.extend(
-                scan_chars(&chars[body], cfg)
-                    .into_iter()
-                    .filter(|s| keep(s.kind))
-                    .map(|s| s.shifted(off)),
-            );
+            let held: Vec<InlineSpan> = scan_chars(&chars[body], cfg)
+                .into_iter()
+                .filter(|s| keep(s.kind))
+                .map(|s| s.shifted(off))
+                .collect();
+            styled_into(chars, held, in_link || link, cfg, out);
         }
     }
-    out
 }
 
 /// Which kinds a span's body is read for in `scan_styled`.
 type Keep = fn(Inline) -> bool;
 
-/// Emphasis, `~~` and `==`: what wraps prose and is styled in a link's text.
+/// Emphasis, `~~` and `==`: what wraps prose and is read for links.
 fn is_prose_wrap(kind: Inline) -> bool {
     matches!(
         kind,
@@ -965,9 +977,9 @@ pub fn to_styled(
 
 /// `to_styled` over `region` in the style `base`. The spans a link's text or
 /// an emphasis holds (`scan_styled` lists them after it) cover that body, in
-/// styles layered over the outer one's: in a link (`in_link`) they keep its
-/// color, so a bold word there still reads as a link, while a link in bold
-/// takes the link's color and stays bold.
+/// styles layered over the outer one's: in a link (`in_link`, at any depth)
+/// they keep its color, so a bold word or a code span there still reads as a
+/// link, while a link in bold takes the link's color and stays bold.
 fn cover(
     spans: &[InlineSpan],
     region: Range<usize>,
@@ -1006,7 +1018,7 @@ fn cover(
             .take_while(|s| sp.inner.start <= s.outer.start && s.outer.start < sp.inner.end)
             .count();
         if held > 0 {
-            cover(&spans[k..k + held], sp.inner.clone(), body, sp.kind == Inline::Link, theme, out);
+            cover(&spans[k..k + held], sp.inner.clone(), body, in_link || sp.kind == Inline::Link, theme, out);
             k += held;
         } else if sp.inner.end > sp.inner.start {
             out.push(StyledSpan {
@@ -1505,10 +1517,14 @@ mod tests {
         assert_eq!(at("==a **b [c](u) d** e==", "c"), Some((Inline::Link, Some("u".into()))));
         assert_eq!(at("*a [b [[n]] c](u)*", "n]"), Some((Inline::WikiLink, Some("n".into()))));
         assert_eq!(at("*a [b [[n]] c](u)*", "c]"), Some((Inline::Link, Some("u".into()))));
+        // A code span, an escape or a tag in a link's text is the link's.
+        for word in ["make", "\\*", "tag", "#"] {
+            assert_eq!(at("see [run `make` \\* #tag](u)", word), Some((Inline::Link, Some("u".into()))), "{word}");
+        }
     }
 
-    /// `scan_styled` adds the emphasis, `~~` and `==` in a link's text, right
-    /// after the link; `scan`, which export reads, stays flat.
+    /// `scan_styled` adds what a link's text holds, but links, right after
+    /// the link; `scan`, which export reads, stays flat.
     #[test]
     fn scan_styled_reads_a_links_text() {
         let cfg = md();
@@ -1531,9 +1547,26 @@ mod tests {
         // The spans are where they are in the line, not in the text.
         let sp = &scan_styled(line, &cfg)[1];
         assert_eq!((sp.outer.clone(), sp.inner.clone()), (3..10, 5..8));
-        // Only what wraps prose: not a code span, a tag, a wiki link or an
-        // address, and nothing in an image's alt text.
-        assert_eq!(styled("[`*a*` #t [[n]]](u)"), [(Inline::Link, "[`*a*` #t [[n]]](u)".into())]);
+        // Code spans, escapes, tags and math as at the top level, but no
+        // wiki link, address or picture: links do not nest.
+        assert_eq!(
+            styled(r"[`*a*` \* #t $x$ [[n]] https://x.y](u)"),
+            [
+                (Inline::Link, r"[`*a*` \* #t $x$ [[n]] https://x.y](u)".into()),
+                (Inline::Code, "`*a*`".into()),
+                (Inline::Escape, r"\*".into()),
+                (Inline::Tag, "#t".into()),
+                (Inline::Latex, "$x$".into()),
+            ]
+        );
+        // An escaped marker in the text is not one.
+        assert_eq!(
+            styled(r"[\*a* `b`](u)"),
+            [(Inline::Link, r"[\*a* `b`](u)".into()), (Inline::Escape, r"\*".into()), (Inline::Code, "`b`".into())]
+        );
+        // Emphasis in the text is not read for code or emphasis, as at the
+        // top level.
+        assert_eq!(styled("[**a `b` _c_**](u)"), [(Inline::Link, "[**a `b` _c_**](u)".into()), (Inline::Bold, "**a `b` _c_**".into())]);
         assert_eq!(styled("![**a**](x.png)"), [(Inline::Image, "![**a**](x.png)".into())]);
         assert_eq!(
             styled("[![**a**](b.svg) *c*](u)"),
@@ -1541,11 +1574,18 @@ mod tests {
         );
         // A marker in the text pairs only in the text.
         assert_eq!(styled("[a *b](u) c*"), [(Inline::Link, "[a *b](u)".into())]);
-        // Emphasis holding a link lists the link after it, but not the
-        // link's own emphasis: one level.
+        // Emphasis holding a link lists the link after it, then what the
+        // link's text holds, but no further: emphasis there is not read for
+        // links.
         assert_eq!(
-            styled("**see [*docs*](u)**"),
-            [(Inline::Bold, "**see [*docs*](u)**".into()), (Inline::Link, "[*docs*](u)".into())]
+            styled("**see [*docs* `x` *[[n]]*](u)**"),
+            [
+                (Inline::Bold, "**see [*docs* `x` *[[n]]*](u)**".into()),
+                (Inline::Link, "[*docs* `x` *[[n]]*](u)".into()),
+                (Inline::Italic, "*docs*".into()),
+                (Inline::Code, "`x`".into()),
+                (Inline::Italic, "*[[n]]*".into()),
+            ]
         );
     }
 
@@ -1852,7 +1892,7 @@ mod tests {
     /// guarantees hold, and reading a destination never panics.
     #[test]
     fn link_soup_keeps_the_scanner_guarantees() {
-        let alphabet: Vec<char> = "[]()<>!\\\"' ahtps:/.é*_~=".chars().collect();
+        let alphabet: Vec<char> = "[]()<>!\\\"' ahtps:/.é*_~=`#$".chars().collect();
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         for _ in 0..3000 {
             // A step per line too: a length of 0 would leave the seed, and
@@ -1877,28 +1917,41 @@ mod tests {
                 prev_end = s.outer.end;
             }
             // `scan_styled`: a span overlaps another only inside a link's
-            // text (emphasis) or an emphasis (a link), one level deep, the
+            // text (no link) or an emphasis outside a link (a link), the
             // spans held there in order; the styled cover stays gap-free.
             let styled = scan_styled(&line, &md());
-            let mut holder: Option<(Range<usize>, Keep)> = None;
+            // The bodies the next span may lie in, outermost first: each
+            // with what it may hold, whether it is in a link, and where the
+            // last span held in it ended.
+            let mut holders: Vec<(Range<usize>, Keep, bool, usize)> = Vec::new();
             let mut prev_end = 0;
-            let mut held_end = 0;
             for s in &styled {
-                if let Some((body, keep)) = holder.as_ref().filter(|(b, _)| s.outer.start >= b.start && s.outer.start < b.end) {
-                    assert!(s.outer.end <= body.end && keep(s.kind), "{line:?}");
-                    assert!(s.outer.start >= held_end && s.outer.end > s.outer.start, "{line:?}");
-                    held_end = s.outer.end;
-                    continue;
+                while holders.last().is_some_and(|h| !h.0.contains(&s.outer.start)) {
+                    holders.pop();
                 }
-                assert!(s.outer.start >= prev_end, "{line:?}");
-                holder = match s.kind {
-                    Inline::Link => Some((s.inner.clone(), is_prose_wrap as Keep)),
-                    kind if is_prose_wrap(kind) => Some((s.inner.clone(), is_link_like as Keep)),
+                let in_link = match holders.last_mut() {
+                    Some((body, keep, in_link, held_end)) => {
+                        assert!(s.outer.end <= body.end && keep(s.kind), "{line:?}");
+                        assert!(s.outer.start >= *held_end && s.outer.end > s.outer.start, "{line:?}");
+                        *held_end = s.outer.end;
+                        *in_link
+                    }
+                    None => {
+                        assert!(s.outer.start >= prev_end, "{line:?}");
+                        prev_end = s.outer.end;
+                        false
+                    }
+                };
+                let keep: Option<Keep> = match s.kind {
+                    Inline::Link => Some(|k| !is_link_like(k)),
+                    kind if is_prose_wrap(kind) && !in_link => Some(is_link_like),
                     _ => None,
                 };
-                prev_end = s.outer.end;
-                held_end = 0;
+                if let Some(keep) = keep {
+                    holders.push((s.inner.clone(), keep, in_link || s.kind == Inline::Link, 0));
+                }
             }
+            assert!(holders.len() <= 2, "{line:?}");
             let _ = span_at(&line, (seed % 24) as usize, &md());
             let theme = Theme::default();
             let base = StyledSpan { range: 0..len, style: Style::fg(theme.text) };
