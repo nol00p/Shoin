@@ -1,4 +1,4 @@
-//! Theme and color resolution. SPEC.md §8.1.
+//! Theme and color resolution.
 //!
 //! This is the ONLY module that inspects `COLORTERM`/`TERM`. Colors are
 //! authored as truecolor and downgraded here: 24-bit → nearest 256 index →
@@ -160,7 +160,7 @@ pub struct Theme {
     pub code_bg: Color,
     pub fence_bar: Color,
 
-    /// Syntax highlighting inside a fenced block (SPEC.md §5.3). Code the
+    /// Syntax highlighting inside a fenced block. Code the
     /// lexer does not classify keeps `text`, not `code` — a highlighted body
     /// reads as code because of the slab it sits on, and painting its ordinary
     /// identifiers green would leave nothing for the strings.
@@ -174,7 +174,7 @@ pub struct Theme {
     /// Operators and delimiters, which should recede rather than shout.
     pub syntax_punct: Color,
 
-    /// The conflict diff view (SPEC.md §10). Whole-line foregrounds, the way
+    /// The conflict diff view. Whole-line foregrounds, the way
     /// `git diff` colours them, rather than background tints: a background
     /// wash fights the concealment colours the left pane is already using.
     pub diff_add: Color,
@@ -315,7 +315,7 @@ impl Default for Theme {
 impl Theme {
     /// Resolve a `[theme]` config section into a full theme: start from a base
     /// (a named theme file, or the built-in default), overlay the config's
-    /// colors and style flags, then downgrade for the terminal. SPEC.md §8.1.
+    /// colors and style flags, then downgrade for the terminal.
     pub fn from_config(cfg: &crate::config::schema::ThemeConfig) -> Result<Theme> {
         let mut theme = Theme::authored(cfg)?;
         theme.adapt(detect_depth());
@@ -384,7 +384,7 @@ impl Theme {
     }
 
     /// Assign a color by its `[theme]` key name. Unknown keys are ignored, for
-    /// forward compatibility (SPEC.md §8).
+    /// forward compatibility.
     fn set_color(&mut self, key: &str, c: Color) {
         match key {
             "background" => self.background = c,

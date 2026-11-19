@@ -1,4 +1,4 @@
-//! Focus mode. SPEC.md §6.
+//! Focus mode.
 //!
 //! Non-focused text is drawn at `theme.text_dim`. Bounds are recomputed only
 //! when the cursor leaves the current region — not every frame.

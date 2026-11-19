@@ -5,7 +5,7 @@
 //! frame-time drawing over a genuinely empty, unnamed buffer, and the condition
 //! that shows it is recomputed every frame rather than stored (`active`). That
 //! is what makes it disappear the instant the first character lands, with no
-//! state to get out of step: SPEC §1's "chrome appears when you summon it and
+//! state to get out of step: the rule that "chrome appears when you summon it and
 //! leaves when you're done", applied to the one piece of chrome you never asked
 //! for.
 

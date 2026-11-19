@@ -1,5 +1,4 @@
 //! Pass A — per-line block classification with a cached state vector.
-//! SPEC.md §5.2.
 //!
 //! State crosses lines in two ways, both captured by `Carry`: the block a
 //! line may be inside (a fence, front matter, a table, a math block), and the
@@ -27,7 +26,7 @@ pub enum BlockKind {
     /// Opening fence, carrying its info string.
     FenceOpen(String),
     /// A line inside a fence, carrying what it takes to highlight it: the
-    /// language its opener named (SPEC.md §5.3) and the lexer state ENTERING
+    /// language its opener named and the lexer state ENTERING
     /// this line. Both are part of the kind because the render cache re-parses
     /// a line whose kind changed — which is exactly what must happen when an
     /// unterminated string above it opens or closes.
@@ -543,7 +542,7 @@ fn classify_block(
 
     // `|---|:--:|` — the delimiter row is what makes the lines around it a
     // table. The header ABOVE it is upgraded by `BlockCache`, which is the only
-    // place that can see backwards. SPEC.md §5.2.
+    // place that can see backwards.
     if is_table_delimiter(body) {
         return (BlockKind::Table, Open::InTable);
     }

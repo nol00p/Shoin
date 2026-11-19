@@ -1,4 +1,4 @@
-//! Markdown styling. SPEC.md §5.
+//! Markdown styling.
 //!
 //! Two passes:
 //!   A. `block` — per-line classification, CACHED, incrementally invalidated.
@@ -6,7 +6,7 @@
 //!
 //! Bespoke scanner rather than `pulldown-cmark`: we style the visible viewport
 //! only, must tolerate mid-edit invalid syntax, and must never reorder or drop
-//! source text. See SPEC.md §5.1 for the full rationale.
+//! source text.
 
 pub mod block;
 pub mod code;
@@ -49,7 +49,7 @@ pub fn style_line_with(
     // Whole-line blocks that carry no inline content.
     match &block {
         // A fence body in a language shoin knows is the one place inside a
-        // fence with structure worth showing. SPEC.md §5.3.
+        // fence with structure worth showing.
         BlockKind::FenceBody { lang: Some(lang), cont } if cfg.code_syntax => {
             return code_spans(line, len, *lang, *cont, theme)
         }
@@ -233,7 +233,7 @@ fn whole(len: usize, style: Style) -> Vec<StyledSpan> {
     }
 }
 
-/// The dimmed style markers wear on the active (raw) line. SPEC.md §5.2.
+/// The dimmed style markers wear on the active (raw) line.
 fn marker_style(theme: &Theme) -> Style {
     Style {
         fg: theme.text_dim,

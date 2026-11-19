@@ -1,6 +1,6 @@
-//! Syntax highlighting inside fenced code. SPEC.md §5.3.
+//! Syntax highlighting inside fenced code.
 //!
-//! The extension seam §5.3 reserved, filled without a dependency. `syntect`
+//! Built without a dependency. `syntect`
 //! and `tree-sitter` both carry a grammar database — megabytes of binary and a
 //! startup load — to answer a question this editor asks only about the handful
 //! of lines a fenced block occupies, and both come with their own theme model

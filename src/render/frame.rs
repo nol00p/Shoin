@@ -247,7 +247,7 @@ pub fn pane_area(app: &App, area: Rect) -> Rect {
 /// renders raw 1:1; every other line has its markers hidden. Then:
 ///   active set (known) → wrap on display width → scroll offset
 /// in that order, so a line re-expanding its markers as the cursor lands on it
-/// never scrolls itself off screen (SPEC.md §6, "Reveal shift").
+/// never scrolls itself off screen.
 ///
 /// The parse and the wrap come from the document's cache; only the rows
 /// actually on screen are turned into styled spans.
@@ -306,7 +306,7 @@ fn render_pane(
     // this, `scroll_offset`'s "stay put unless the cursor leaves the padded
     // zone" check always sees a stale baseline and re-derives from scratch
     // every frame, which reads as the viewport jumping around on navigation
-    // instead of scrolling smoothly (SPEC.md §6, "Reveal shift").
+    // instead of scrolling smoothly.
     pane.scroll.set(top);
 
     let text_area = Rect {
@@ -339,7 +339,7 @@ fn render_pane(
         .filter_map(|r| cache.row(r))
         .enumerate()
     {
-        // Line spacing (SPEC.md §6): a row with no line behind it. It is
+        // Line spacing: a row with no line behind it. It is
         // painted rather than skipped so it takes the pane's background —
         // skipping it would leave whatever the last frame drew there — and it
         // deliberately gets no fence slab or bar, because `spacer_rows` never
@@ -376,7 +376,7 @@ fn render_pane(
         let mut spans = window_spans(chars, &d.spans, row.start_col, row.end_col);
         let left = line_left(app, &cache, &lay, row.line(), row.start_col);
         // A wrapped list continuation is pushed right to sit under the item's
-        // content; the cache already wrapped it at the narrower width (SPEC §6).
+        // content; the cache already wrapped it at the narrower width.
         let hang = hang_x(app, &cache, &lay, &row);
         let r = Rect {
             x: rect.x + left + hang,
@@ -385,8 +385,8 @@ fn render_pane(
             height: 1,
         };
         // A fenced row's slab is painted by the ROW, not by its spans: the
-        // spans stop where the code does, and SPEC §5.3 asks for a flat
-        // background across the measure (SPEC §5.3).
+        // spans stop where the code does, and the background must be flat
+        // across the whole measure: the slab is what makes the block read as code.
         let fenced = in_fence(&cache, row.line());
         let row_bg = if fenced { app.theme.code_bg.to_ratatui() } else { bg };
 
@@ -596,12 +596,12 @@ fn outline_row(w: usize, edge: Edge, label: Option<&str>) -> String {
     }
 }
 
-/// Draw one row of an expanded `![[…]]` (SPEC.md §14.3).
+/// Draw one row of an expanded `![[…]]`.
 ///
 /// The border and the label wear `theme.text_dim` so the embed reads as a
 /// quotation rather than as this document's own text — the reader needs to know
 /// at a glance which words they can edit. An unresolved embed wears
-/// `theme.error`, per §14.2.
+/// `theme.error`.
 ///
 /// `view` is the text area's first row and the row past its last, which is
 /// where a picture's box gets cut off.
@@ -667,8 +667,9 @@ fn render_embed_row(
         Row::Body(text, block) => {
             // Styled AND CONCEALED with the document's own rules. An embedded
             // line is never the active line — it is not in this rope at all —
-            // so by SPEC §2 it always shows its finished form, and an embedded
-            // `# Heading` must read as a heading rather than as its source.
+            // so, like any line the cursor is not on, it always shows its
+            // finished form, and an embedded `# Heading` must read as a
+            // heading rather than as its source.
             let md = &app.config.markdown;
             let inline = crate::render::markdown::inline::scan_styled(text, md);
             let styled = crate::render::markdown::style_line_with(
@@ -814,7 +815,7 @@ fn render_line_number(
     frame.render_widget(Paragraph::new(Span::styled(format!("{n:>digits$}"), style)), gutter);
 }
 
-/// The colored left gutter bar beside a fenced row (SPEC.md §5.3).
+/// The colored left gutter bar beside a fenced row.
 ///
 /// It hangs in the LEFT MARGIN, one column outside the measure, for the same
 /// reason `stable_gutter` puts revealed markers there: a bar inside the measure
@@ -835,11 +836,11 @@ fn render_fence_bar(frame: &mut Frame, app: &App, row: Rect) {
     );
 }
 
-/// The 1-column vertical position indicator in the right margin (SPEC.md §6).
+/// The 1-column vertical position indicator in the right margin.
 ///
 /// Not a scrollbar: no trough, no arrows, and it is ABSENT whenever the whole
 /// document fits on screen — there is nothing to convey then, and a permanent
-/// rail is exactly the chrome SPEC §1 rules out. It appears only once the text
+/// rail is chrome nobody summoned. It appears only once the text
 /// overflows, which makes it read as information rather than furniture.
 ///
 /// It sits at the pane's own right edge, so in a split each pane answers for
@@ -1562,7 +1563,7 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
 
 /// A centered floating input for `:` commands — the spotlight box. Drawn last,
 /// over a `Clear`ed rect, owning no source↔screen mapping, so it never touches
-/// the concealment machinery. SPEC.md §6 (command entry).
+/// the concealment machinery.
 fn render_command_box(
     frame: &mut Frame,
     app: &App,
@@ -1860,7 +1861,7 @@ fn display_line_of(
     // Focus mode dims everything outside the current paragraph/sentence. It
     // follows the CURSOR, so it belongs to the focused pane only. Applied in
     // SOURCE coordinates so concealment's remap carries it through, and to both
-    // active and concealed lines alike. SPEC.md §6.
+    // active and concealed lines alike.
     if let Some(region) = app.focus_region.as_ref().filter(|_| focused) {
         apply_focus_dim(&mut styled, len, region, line);
     }
@@ -1883,7 +1884,8 @@ fn display_line_of(
     }
 
     // Raw 1:1 when the line is active, when the user turned concealment off, or
-    // for non-Markdown buffers — the SPEC §2 invariant plus its escape hatch.
+    // for non-Markdown buffers — the active-line invariant (`render::conceal`)
+    // plus its escape hatch.
     // The cache settled that when it built this frame's row index.
     if !cache.is_concealed(line) {
         // A Visual selection paints its background over the raw text.
@@ -2164,7 +2166,7 @@ fn screen_spans(text: &str, style: Style) -> Vec<Span<'static>> {
 
 /// The status line is hidden by default and appears only transiently — after a
 /// save, a mode change, or an error — then fades. Command entry has its own
-/// spotlight box (`render_command_box`), so it is not echoed here. SPEC.md §6.
+/// spotlight box (`render_command_box`), so it is not echoed here.
 fn status_text(app: &App) -> Option<String> {
     if matches!(app.mode, Mode::Command(_) | Mode::Search { .. }) || app.finder.is_some() {
         return None;
@@ -2655,7 +2657,7 @@ mod tests {
         }
     }
 
-    /// SPEC §14.3: an `![[…]]` line draws its target in place…
+    /// An `![[…]]` line draws its target in place…
     #[test]
     fn an_embed_expands_where_it_sits() {
         let (d, app) = composition("top\n\n![[frag]]\n\ntail\n", "# Frag\n\nfragment body\n");
@@ -2674,7 +2676,7 @@ mod tests {
     }
 
     /// …and shows its RAW source when the cursor is on it, exactly as
-    /// `**bold**` does. This is the §2 invariant applied to embeds, and it is
+    /// `**bold**` does. This is the active-line rule applied to embeds, and it is
     /// what keeps the cursor from ever being inside transcluded text.
     #[test]
     fn the_active_embed_line_shows_its_source() {
@@ -2694,7 +2696,7 @@ mod tests {
     #[test]
     fn embedded_markdown_is_concealed_like_any_other_line() {
         // The embed must not be on line 0 — that is where the cursor starts,
-        // and the active line renders raw by §2.
+        // and the active line renders raw.
         let (d, app) = composition("top\n![[frag]]\n", "# Frag title\n\nwith **bold** in it\n");
         let buf = render_to(&app, 80, 24);
         let all: String = (0..24).map(|y| row_text(&buf, y)).collect::<Vec<_>>().join("\n");
@@ -3056,7 +3058,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// SPEC §6: a wrapped list item's continuation lines up under the item's
+    /// A wrapped list item's continuation lines up under the item's
     /// content, not back at the left margin.
     #[test]
     fn a_wrapped_list_item_hangs_under_its_content() {
@@ -3296,7 +3298,7 @@ mod tests {
         assert_eq!(indent(&rows[first]), indent(&rows[first + 1]), "flush again");
     }
 
-    /// SPEC §5.3: a fenced body sits on a FLAT code background — across the
+    /// A fenced body sits on a FLAT code background — across the
     /// whole measure, not just as far as the code happens to reach — with a
     /// colored bar in the margin one column to its left.
     #[test]
@@ -3351,7 +3353,7 @@ mod tests {
     }
 
     /// A document that fits shows no indicator at all — it is information, not
-    /// furniture (SPEC §6: "no scrollbar").
+    /// furniture.
     #[test]
     fn scroll_hint_is_absent_when_the_document_fits() {
         let app = app_with("one\ntwo\nthree\n");
@@ -3565,7 +3567,8 @@ mod tests {
     }
 
     /// The cursor's line renders raw; the line below has its `#` concealed.
-    /// This is the SPEC §2 invariant, exercised through the full frame.
+    /// This is the active-line invariant from `render::conceal`, exercised
+    /// through the full frame.
     #[test]
     fn concealment_reveals_only_the_active_line() {
         let mut app = app_with("# One\n## Two\n");
@@ -3586,7 +3589,7 @@ mod tests {
         assert!(joined.contains("One"), "line 0 text should remain");
     }
 
-    /// Indent guides (SPEC §5.4) are a conceal op like any other, so they show
+    /// Indent guides are a conceal op like any other, so they show
     /// on inactive lines and give way to the raw source under the cursor —
     /// the same bargain every marker makes.
     #[test]
@@ -4044,8 +4047,9 @@ mod tests {
         assert!(row.contains("fn  x()  {}"), "spacing untouched: {row:?}");
     }
 
-    /// U+2028 and U+2029 sit inside a line since F05. A terminal given one
-    /// raw may break the row or draw nothing, so neither may reach a cell.
+    /// U+2028 and U+2029 sit inside a line, since lines break on `\n` only.
+    /// A terminal given one raw may break the row or draw nothing, so
+    /// neither may reach a cell.
     fn no_raw_separator(buf: &ratatui::buffer::Buffer) {
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
