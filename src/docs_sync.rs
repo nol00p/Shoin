@@ -137,11 +137,87 @@ fn section<'a>(page: &'a str, heading: &str) -> &'a str {
     rest.split_once("\n## ").map_or(rest, |(body, _)| body)
 }
 
+/// Read body rows from tables introduced by a matching header and delimiter.
+fn table_rows(page: &str) -> impl Iterator<Item = (&str, Vec<String>)> {
+    fn cells(line: &str) -> Option<Vec<String>> {
+        let line = line.trim();
+        // GFM splits cells before parsing inline code. A literal pipe in
+        // a code span therefore needs the same escape as one in plain text.
+        let mut pipes = line.match_indices('|').map(|(at, _)| at)
+            .filter(|&at| !line[..at].ends_with('\\')).peekable();
+        pipes.peek()?;
+        let mut start = usize::from(pipes.next_if_eq(&0).is_some());
+        let mut cells = Vec::new();
+        for at in pipes {
+            cells.push(line[start..at].trim().replace("\\|", "|"));
+            start = at + 1;
+        }
+        if start < line.len() || cells.is_empty() {
+            cells.push(line[start..].trim().replace("\\|", "|"));
+        }
+        Some(cells)
+    }
+
+    fn is_delimiter(cells: &[String], columns: usize) -> bool {
+        cells.len() == columns && cells.iter().all(|cell| {
+            let marks = cell.strip_prefix(':').unwrap_or(cell);
+            let marks = marks.strip_suffix(':').unwrap_or(marks);
+            !marks.is_empty() && marks.bytes().all(|mark| mark == b'-')
+        })
+    }
+
+    let mut lines = page.lines().peekable();
+    let mut in_table = false;
+    std::iter::from_fn(move || {
+        while let Some(line) = lines.next() {
+            let Some(row) = cells(line) else {
+                in_table = false;
+                continue;
+            };
+            if in_table {
+                return Some((line, row));
+            }
+            if lines.next_if(|next| cells(next).is_some_and(|delimiter| {
+                is_delimiter(&delimiter, row.len())
+            })).is_some() {
+                in_table = true;
+            }
+        }
+        None
+    })
+}
+
+#[test]
+fn table_rows_allow_optional_outer_pipes() {
+    let page = "Key | Does\n:--- | ---:\n| a | b |\na | b\na | b |\n| a | b";
+    let rows: Vec<_> = table_rows(page).map(|(_, cells)| cells).collect();
+    assert_eq!(rows, [["a", "b"]; 4]);
+}
+
+#[test]
+fn table_rows_keep_escaped_pipes_in_cells() {
+    let page = r"| Key | Does |
+| --- | --- |
+| `\|` | x\|y |
+x | y\|
+| `unescaped|pipe` | splits |";
+    let rows: Vec<_> = table_rows(page).map(|(_, cells)| cells).collect();
+    assert_eq!(rows, [vec!["`|`", "x|y"], vec!["x", "y|"], vec!["`unescaped", "pipe`", "splits"]]);
+}
+
+#[test]
+fn table_rows_end_at_blank_or_pipe_free_lines() {
+    let page = "A | B\n--- | ---\na | b\n\nignored | prose\n\n\
+                C | D\n--- | ---\nc | d\nonly \\| escaped\n| ignored | text |";
+    let rows: Vec<_> = table_rows(page).map(|(_, cells)| cells).collect();
+    assert_eq!(rows, [["a", "b"], ["c", "d"]]);
+}
+
 /// The command cell lists the canonical name and its aliases together.
 fn command_groups(page: &str) -> AliasGroups {
     let mut groups = BTreeSet::new();
-    for line in page.lines() {
-        let Some(cell) = line.strip_prefix('|').and_then(|row| row.split_once(" |").map(|(cell, _)| cell)) else { continue };
+    for (_, cells) in table_rows(page) {
+        let cell = &cells[0];
         // Force forms are checked by running the documented commands.
         let mut names = code_spans(cell).filter_map(|span| span.strip_prefix(':'))
             .filter_map(|span| span.split_whitespace().next())
@@ -154,10 +230,9 @@ fn command_groups(page: &str) -> AliasGroups {
 }
 
 fn option_groups(page: &str) -> AliasGroups {
-    section(page, "Settings").lines().filter_map(|line| {
-        let mut cells = line.strip_prefix('|')?.split('|');
-        let name = code_spans(cells.next()?).next()?;
-        let aliases = code_spans(cells.next()?).map(str::to_string).collect();
+    table_rows(section(page, "Settings")).filter_map(|(_, cells)| {
+        let name = code_spans(&cells[0]).next()?;
+        let aliases = cells.get(1).into_iter().flat_map(|cell| code_spans(cell)).map(str::to_string).collect();
         Some((name.to_string(), aliases))
     }).collect()
 }
@@ -353,10 +428,9 @@ fn documented_keys(page: &str) -> BTreeSet<(String, String)> {
         ("Lists", SHARED), ("Registers", SHARED), ("Folds", SHARED), ("Panes", SHARED),
     ] {
         let mut found_binding = false;
-        for line in section(page, heading).lines() {
-            let Some((cell, _)) = line.trim().strip_prefix('|').and_then(|row| row.split_once('|')) else { continue };
-            let cell = cell.trim();
-            if matches!(cell, "Key" | "---") || MOUSE_ROWS.contains(&(heading, cell))
+        for (line, cells) in table_rows(section(page, heading)) {
+            let cell = cells[0].as_str();
+            if MOUSE_ROWS.contains(&(heading, cell))
                 || (heading, cell) == ("Normal and Visual mode", COUNT_SYNTAX)
             {
                 continue;
@@ -827,8 +901,8 @@ fn documented_action_names() -> (String, BTreeSet<String>) {
         None => rest,
     };
     let mut names = BTreeSet::new();
-    for row in section.lines().filter(|l| l.starts_with('|')) {
-        for cell in row.split('|').skip(1).take(2) {
+    for (_, cells) in table_rows(section) {
+        for cell in cells.iter().take(2) {
             for (i, tok) in cell.split('`').enumerate() {
                 let is_name = !tok.is_empty()
                     && tok.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '!');
@@ -870,13 +944,10 @@ fn every_action_name_is_documented() {
 #[test]
 fn every_documented_help_topic_exists() {
     let page = read("docs/reference/commands.md");
-    let line = page.lines().find(|l| l.contains("`:help [topic]`")).expect("the :help row");
-    let topics: Vec<&str> = line
-        .splitn(3, '|')
-        .nth(2)
-        .into_iter()
-        .flat_map(code_spans)
-        .collect();
+    let (line, cells) = table_rows(&page)
+        .find(|(_, cells)| code_spans(&cells[0]).any(|span| span == ":help [topic]"))
+        .expect("the :help row");
+    let topics: Vec<_> = cells.get(1).into_iter().flat_map(|cell| code_spans(cell)).collect();
     assert!(!topics.is_empty(), "no topics found in: {line}");
     for topic in topics {
         assert!(Help::knows(topic), ":help {topic} opens nothing");
