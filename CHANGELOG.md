@@ -14,11 +14,11 @@
   concealed as elsewhere, in the link's colour; so is emphasis in a link in
   emphasis. `gi` / `gb` act on the innermost emphasis (#129).
 - `.` repeats the last change in whatever document is current. It used
-  to repeat a buffer switch (`:bn`, `gf`, `<C-^>`, `:e`) made after the
+  to repeat a buffer switch (`:bn`, `gf`, `Ctrl-^`, `:e`) made after the
   change (#136).
 - Window and buffer keys end a selection, as in vim, and are never the
-  change `.` repeats, even when they go nowhere (`<C-w>o`, a refused
-  `<C-w>q`). Opening the finder or the file tree ends a selection too
+  change `.` repeats, even when they go nowhere (`Ctrl-w o`, a refused
+  `Ctrl-w q`). Opening the finder or the file tree ends a selection too
   (#136).
 - `.` after an operator on a selection made with the mouse repeats over
   as much text from the cursor, as vim does. `3.` and `.` in Visual no
@@ -30,6 +30,10 @@
   as `Esc` would, and starts a new one in the pane clicked into: `u` in
   each pane takes back that pane's typing only, and `.` repeats the last
   insert (#139).
+- A tab is drawn as `tab_width` blank cells wherever it is in a line,
+  code blocks included; it took no room. Wrapping, the cursor, clicks,
+  selection, indent guides and the embed preview count it the same way,
+  so a tab-indented list shows as deep as it nests (#140).
 - `j` and `k` keep the screen column across tabs and wide characters, as
   in vim (#140).
 - `zt`, `zz` and `zb` scroll the cursor's line to the top, middle or
@@ -50,13 +54,9 @@
 - `:set tab_width` (`:ts`) sets it from 1 to 16 and reclassifies at
   once; `:set tab_width` alone shows it (#135). A value outside 1–16 in
   the config file is reported on startup (#140).
-- A tab is drawn as `tab_width` blank cells wherever it is in a line,
-  code blocks included; it took no room. Wrapping, the cursor, clicks,
-  selection, indent guides and the embed preview count it the same way,
-  so a tab-indented list shows as deep as it nests (#140).
 - A wrapped line of a nested list item hung short of its text when indent
   guides were drawn (#140).
-- List commands work on a list inside a blockquote (`> - a`): `>al`
+- List commands work on a list inside a blockquote (`> - a`): `>al`,
   `<al` and the other shifts, `Alt-j` / `Alt-k`, renumbering, `:fixlist`,
   the `al` `il` `aL` `iL` objects, Tab in Insert, and Enter, which
   continues `> - a` with `> - `. The `>` markers stay as written, and a
