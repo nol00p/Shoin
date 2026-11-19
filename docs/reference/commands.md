@@ -1,6 +1,7 @@
 # Commands
 
-Type `:` and the command, then `Enter`.
+Commands manage files, panes, and settings from the command line. Type `:`,
+the command, then `Enter`.
 
 `Tab` completes the word at the end of the line: a command's name, a path
 after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
@@ -12,15 +13,14 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 
 | Command | Does |
 |---|---|
-| `:w` `:write [path]` | save; with a path, write a copy there and keep editing this file (an unnamed buffer takes the name) |
-| `:saveas <path>` `:sav` | save to a path and edit that file from now on |
-| `:w!` | save over a file that changed on disk, or an existing file `:w <path>` refuses |
-| `:wq` `:x` | save and quit; `:wq!` even if the file changed |
+| `:write [path]` `:w` | save; with a path, write a copy there and keep editing this file. An unnamed buffer takes the name. Add `!` to overwrite a changed or existing file |
+| `:saveas <path>` `:sav` | save to a path and edit that file from now on. Add `!` to overwrite an existing file |
+| `:wq [path]` `:x` | save and quit. A path saves under that name. Add `!` to force the write. A failed forced write keeps the editor open |
 | `:q` | close this buffer; the last one quits |
 | `:q!` | the same, discarding changes |
-| `:Q` `:qa` | quit every buffer at once; `:Q!` `:qa!` discard changes |
-| `:e <path>` | open a file in a new buffer; `~/` is your home folder |
-| `:diff` | merge against the file on disk — see [Files](../files.md#merging-with-diff) |
+| `:qall` `:qa` `:Q` | quit every buffer. Add `!` to discard changes |
+| `:edit <path>` `:e` | open a file in a new buffer. `~/` is your home folder |
+| `:diff` `:diffsplit` | merge against the file on disk. See [Files](../files.md#merging-with-diff) |
 | `:revert` `:revert!` | re-read the file from disk; `!` discards unsaved changes |
 | `:export [md\|txt\|html\|pdf] [justify]` | write the finished document — see [Export](../export.md) |
 
@@ -37,12 +37,14 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 | Command | Does |
 |---|---|
 | `:ls` `:buffers` | list open buffers (▸ marks the current one) |
-| `:b <name>` `:b <n>` | switch by name fragment or number |
-| `:bn` `:bp` | next / previous buffer |
-| `:bd` `:bd!` | close this buffer (`!` discards changes) |
-| `:sp` `:vs` | split horizontally / vertically |
-| `:close` | close the focused pane |
-| `:only` | close every pane but this one |
+| `:buffer [name or number]` `:b` | switch by number or name fragment, preferring a whole name. Bare lists buffers |
+| `:bnext` `:bn` | switch to the next buffer |
+| `:bprevious` `:bp` `:bprev` | switch to the previous buffer |
+| `:bdelete` `:bd` | close this buffer. Add `!` to discard changes. The last buffer stays open |
+| `:split` `:sp` | split below |
+| `:vsplit` `:vs` `:vsp` | split beside |
+| `:close` `:clo` | close the focused pane |
+| `:only` `:on` | keep only the focused pane |
 
 ## View
 
@@ -50,7 +52,7 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 |---|---|
 | `:embed [none\|short\|rec\|full]` | how much of each `![[embed]]` to show; bare toggles |
 | `:focus [off\|paragraph\|sentence]` | dim all but the paragraph or sentence; bare cycles |
-| `:number [relative\|absolute]` | line numbers; bare toggles off and back |
+| `:number [off\|relative\|absolute]` `:nu` | set line numbers. Bare toggles off and back |
 | `:align [left\|center\|right\|justified]` | how lines sit in the column; bare cycles |
 | `:typewriter` `:tw` | typewriter scrolling |
 | `:zen` | hide all chrome |
@@ -60,26 +62,38 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 
 `:set <key> [value]` changes a setting for this session.
 
-| Command | Does |
-|---|---|
-| `:set measure=72` | text width in columns (`:set measure` shows it) |
-| `:set line_spacing=1` | blank rows between lines, 0–4 |
-| `:set tab_width=4` | cells a tab counts and is drawn as, 1–16 (`:set ts`) |
-| `:set autosave [on\|off]` | write modified named buffers on a timer |
-| `:set autosave_interval=3` | minutes between autosaves, 1–5 |
-| `:set autoreload [on\|off]` | take outside changes when nothing is unsaved |
-| `:set clipboard [on\|off]` | plain `y` `d` `p` use the system clipboard (`:set cb`) |
-| `:set conceal\|typewriter\|mouse\|focus\|numbers\|code_syntax\|hints [on\|off]` | toggle these; `hints` is the key-hint bar |
+| Option | Also | Values | Default | Does |
+|---|---|---|---|---|
+| `measure` | `width` | 8–65535 | 72 | text width in columns |
+| `line_spacing` | `spacing` | 0–4 | 0 | blank rows between lines. Higher values clamp to 4 |
+| `tab_width` | `ts` | 1–16 | 4 | cells per tab for display and indentation. Changes reclassify open documents |
+| `autosave` |  | on / off | off | write modified named buffers on a timer |
+| `autosave_interval` | `autosave_min` | 1–5 | 3 | minutes between autosaves |
+| `autoreload` |  | on / off | on | take outside changes when nothing is unsaved |
+| `clipboard` | `cb` | on / off | off | use the system clipboard for plain `y`, `d` and `p` |
+| `code_syntax` | `syntax` | on / off | on | highlight recognized fenced code |
+| `conceal` |  | on / off | on | hide Markdown markers away from the cursor |
+| `typewriter` | `tw` | on / off | off | keep the cursor line at a fixed height |
+| `mouse` |  | on / off | on | capture mouse clicks, drags and scrolling |
+| `hints` |  | on / off | on | show the key-hint bar |
+| `focus` |  | off / paragraph / sentence | off | dim text outside the focus |
+| `numbers` | `number` `nu` | off / relative / absolute | off | set the line-number gutter |
+| `align` |  | left / center / right / justified | left | align the text inside the column |
+| `embed` |  | none / short / rec / full | none | choose how embedded files expand |
+
+Use a space or `=` before a value, as in `:set ts 4`. With no value,
+numeric options show the current value. `align` and `focus` cycle.
+`embed` and `numbers` toggle off and back. Boolean options toggle.
 
 ## Config and help
 
 | Command | Does |
 |---|---|
 | `:e!` `:reload` | re-read the config |
-| `:help [topic]` | help, a tab per category — topics: `basics`, `navigation`, `editing`, `writing`, `view`, `files`, `config`. `Tab` and `Shift-Tab` switch tab |
-| `:help <word>` | help opened at a key, command, setting or section: `:help gb`, `:help view`, `:help measure`, `:help tree`. Inside help, `/` searches every tab and `n` `N` move between matches |
+| `:help [topic]` | open help. Topics include `basics`, `navigation`, `editing`, `writing`, `view`, `files`, `config`. `Tab` and `Shift-Tab` switch tabs |
+| `:h` `:help <word>` | help opened at a key, command, setting or section: `:help gb`, `:help view`, `:help measure`, `:help tree`. Inside help, `/` searches every tab and `n` `N` move between matches |
 
-## Completing with `Tab`
+## Completing with Tab
 
 `Tab` puts the first match in place of the word being typed. `Tab` again
 puts the next, `Shift-Tab` the one before. Past the last match the line goes
@@ -87,8 +101,8 @@ back to what you typed, and the next `Tab` starts the list again. Any other
 key keeps the line as it is and ends the list; `Enter` runs it, `Esc`
 cancels it.
 
-While you cycle, the hint bar lists the matches, the one on the line in
-brackets.
+With hints enabled, the bottom row lists the matches while you cycle.
+Brackets mark the current match.
 
 | Typed after `:` | `Tab` gives |
 |---|---|
@@ -104,6 +118,9 @@ brackets.
 | `b no` | each open buffer whose name holds `no` |
 
 ## Details
+
+- The force forms are `:write!` / `:w!`, `:saveas!` / `:sav!`, `:wq!` / `:x!`, `:qall!` / `:qa!` / `:Q!`, `:bdelete!` / `:bd!`,
+  `:q!` and `:revert!`. `:e!` reloads the config.
 
 - Names, paths and topics are in alphabetical order, ignoring case. Folders
   and files are mixed, and a folder ends in `/`.
@@ -125,6 +142,13 @@ brackets.
 - After `:set`, a value completes once the option is followed by `=` or a
   blank. A toggle offers `off` and `on`. An option that takes a number,
   such as `measure` or `tab_width`, offers nothing.
+- Boolean values `on`, `true`, `1` and `yes` turn an option on. Any
+  other nonempty value turns it off. The match is case-sensitive.
+- Value aliases for `align` are `l`, `centre`, `c`, `r`, `justify` and
+  `j`. For `focus` they are `none`, `para` and `sent`. For `embed` they
+  are `off`, `false`, `no`, `on`, `true`, `yes`, `recursive` and
+  `long`. For `numbers` they are `none`, `false`, `rel`, `rnu`, `abs`,
+  `nu`, `number`, `on` and `true`.
 - A value completes ignoring case: `:align C` gives `:align center`.
 - `:b` matches anywhere in a buffer's name, ignoring case, as `:b` itself
   does: `:b a.m` offers `data.md` and `a.md`. A whole name goes to its own
@@ -133,4 +157,6 @@ brackets.
   to the first; reach the other by its number from `:ls`, as in `:b 3`.
 - `:export` offers `justify` after `txt` or `html`, the formats it applies
   to. Typed first, `justify` is followed by those two formats only.
+  The same modifier accepts `justified`. Format aliases are `markdown`,
+  `text`, `htm` and `web`.
 - The `:` line has no cursor to move: `Tab` always completes the last word.

@@ -1,42 +1,43 @@
 # Keys
 
-Every key Shoin answers to, by mode. `<leader>` is the leader key: `Space`
-unless you remap it with `[input].leader`.
+Use these keys to move, edit, and manage files in each mode. `<leader>`
+is `Space` unless you remap it with `[input].leader`.
 Inside the editor, `<leader>hl` or `:help` shows the same keys by task, with
 search.
 
 ## Motions
 
-Motions take a count, such as `3w`.
+In Normal and Visual mode. Motions take a count, such as `3w`.
 
 | Key | Moves |
 |---|---|
-| `h` `j` `k` `l`, arrows | left / down / up / right |
+| `h` `j` `k` `l` / `Left` `Down` `Up` `Right` | left / down / up / right |
 | `w` `b` `e` | next word / previous word / end of word |
 | `W` `B` `E` | the same, by whitespace-delimited word |
 | `0` `^` `$` | line start / first non-blank / line end |
 | `{` `}` | previous / next paragraph |
-| `gg` `G` | first / last line (`G` with a count: that line) |
-| `f{c}` `t{c}` | find / till a character forward; `F` `T` backward |
+| `gg` `G` | first / last line (with a count, go to that line) |
+| `f{c}` `t{c}` `F{c}` `T{c}` | find / till a character forward / backward |
 | `;` `,` | repeat / reverse the last `f` or `t` |
 | `*` | search for the word under the cursor |
 | `H` `M` `L` | top / middle / bottom of the visible screen |
 | `Ctrl-d` `Ctrl-u` | half a page down / up |
 | `Ctrl-f` `Ctrl-b` | a full page down / up |
-| `Ctrl-e` `Ctrl-y` | scroll the page a line down / up; the cursor stays put |
+| `Ctrl-e` `Ctrl-y` | scroll the page a line down / up; the cursor stays put until it would leave the screen |
 | `zt` `zz` `zb` | scroll the cursor's line to the top / middle / bottom of the pane |
 
 ## Operators
 
-An operator takes a motion or a text object; doubled, it acts on the whole
-line.
+In Normal mode, an operator takes a motion or a text object. Doubling it
+acts on whole lines.
 
 | Key | Does |
 |---|---|
 | `d` `c` `y` | delete / change / yank — `dd` `cc` `yy` for the line |
-| `>` `<` | indent / outdent (`>>`, `>ip`); `>al` `<al` move a list item in or out with its sub-items |
-| `gu` `gU` | lowercase / uppercase (`guiw`, `gUU`) |
-| `D` `C` `Y` | delete / change / yank to the end of the line |
+| `>` `<` | indent / outdent. Use `>>` or `<<` for whole lines |
+| `gu` `gU` | lowercase / uppercase (`guiw`, `guu`, `gUU`) |
+| `D` `C` | delete / change to the end of the line |
+| `Y` | yank whole lines, like `yy` |
 | `x` `X` | delete the character under / before the cursor |
 | `r{c}` | replace the character under the cursor |
 | `~` | toggle case |
@@ -51,17 +52,17 @@ After an operator, or in Visual mode: `diw`, `ca(`, `vip`.
 
 | Object | Selects |
 |---|---|
-| `iw` `aw` | a word, without / with the space after it (`iW` `aW` by whitespace) |
+| `iw` `aw` | a word, without / with surrounding space |
+| `iW` `aW` | a whitespace-delimited word, without / with surrounding space |
 | `is` `as` | a sentence |
 | `ip` `ap` | a paragraph (linewise) |
-| `i"` `i'` `` i` `` | inside quotes; `a"` and so on include the quotes |
-| `i(` `i[` `i{` `i<` | inside brackets; `a(` and so on include them (`b` = `()`, `B` = `{}`) |
+| `i"` `i'` `` i` `` | inside quotes |
+| `a"` `a'` `` a` `` | with the quotes |
+| `i(` `i)` `i[` `i]` `i{` `i}` `i<` `i>` `ib` `iB` | inside brackets. `b` means `()` and `B` means `{}` |
+| `a(` `a)` `a[` `a]` `a{` `a}` `a<` `a>` `ab` `aB` | with the brackets |
 | `il` `al` | a list item, without / with its sub-items (linewise) |
 | `aL` | every item at the same level of a list, each with its sub-items (linewise) |
 | `iL` | the list item and every item after it at its level, with sub-items (linewise) |
-
-Brackets may span lines. `>` and `<` over a list object refuse a shift that
-would break the list — see [Editing](../editing.md#lists).
 
 ## Registers
 
@@ -69,14 +70,15 @@ would break the list — see [Editing](../editing.md#lists).
 |---|---|
 | `"a{cmd}` | use register `a`: `"ayy`, `"ap`, `"add` |
 | `"A{cmd}` | append to register `a` |
+| `""` | the unnamed register |
 | `"0` | the last yank — a delete never overwrites it |
 | `"1`–`"9` | the delete ring, newest first |
 | `"+` `"*` | the system clipboard: `"+yy`, `"+p` — see [Clipboard](../clipboard.md) |
 
 ## Writer verbs
 
-In Normal mode these act on the word under the cursor; in Visual mode, on the
-selection. Each is one undo step.
+Inline verbs act on the word under the cursor in Normal and on the
+selection in Visual. Each edit is one undo step.
 
 | Key | Does |
 |---|---|
@@ -84,8 +86,8 @@ selection. Each is one undo step.
 | `gt` | toggle a task checkbox (adds one to a plain list item) |
 | `ga` | align the table under the cursor (`editor.table_align = "auto"` also does it on leaving Insert) |
 | `gl` | wrap as a `[link](url)`, cursor in the URL |
-| `g1`–`g6` `g0` | set the heading level / strip it |
-| `gp` | start the next paragraph |
+| `g1` `g2` `g3` `g4` `g5` `g6` / `g0` | set the heading level / strip it |
+| `gp` | start the next paragraph in Insert |
 | `gf` | follow the link under the cursor — see [Notes](../notes.md) |
 | `gx` | open the link with the desktop |
 
@@ -108,22 +110,30 @@ and `list_indent` and `list_outdent` (Insert) — see
 
 ## Insert mode
 
+Enter Insert from Normal with `i` before or `a` after the cursor. Use
+`I` at the first non-blank or `A` at the end of the line. Use `o` to open
+a line below or `O` to open one above.
+
 | Key | Does |
 |---|---|
-| `i` `a` `I` `A` `o` `O` | insert / append / at line start / at line end / open below / open above |
 | `Esc` `Ctrl-c` `jk` | leave Insert (`jk` is `input.escape_alias`) |
 | `Ctrl-s` | save, and keep typing |
 | `Enter` | continue a list marker or quote; on an empty item, end the list |
-| `Tab` `Shift-Tab` | on a list item's line, indent / outdent the item with its sub-items (`editor.list_tab`); elsewhere `Tab` types a tab |
+| `Tab` `Shift-Tab` | on a list item's line, indent / outdent the item with its sub-items (`editor.list_tab`); elsewhere `Tab` types spaces or a tab, depending on `editor.expand_tab` |
+| `Backspace` `Delete` | delete before / under the cursor |
+| `Left` `Right` `Up` `Down` | move the cursor |
+| `Home` `End` | start / end of line |
+| `PageUp` `PageDown` | move half a page up / down |
 
 ## Visual mode
 
 | Key | Does |
 |---|---|
-| `v` `V` | start a charwise / linewise selection |
-| drag | charwise selection, from where the button went down |
-| `d` `c` `y` `x` | operate on the selection |
+| `v` `V` | start a charwise / linewise selection at the cursor |
+| drag | select by character, from where the button went down |
+| `d` `x` / `c` `s` / `y` | delete / change / yank the selection |
 | `o` | swap ends |
+| `Esc` | leave Visual |
 | `>` `<` `u` `U` | indent / outdent / lowercase / uppercase |
 | `i{obj}` `a{obj}` | select a text object (`viw`, `vap`) |
 | `p` `P` | replace the selection with the register; `p` puts what it replaced in the register, `P` keeps the register |
@@ -149,8 +159,10 @@ line. They have no key until you give them one:
 
 | Key | Does |
 |---|---|
-| `u` `Ctrl-r` | undo / redo |
-| `.` | repeat the last change |
+| `u` `Ctrl-r` | undo / redo in Normal |
+| `.` | repeat the last change in Normal |
+| `Esc` | cancel a count, operator or most pending sequences |
+| `1`–`9` | start a count. `0` can follow another digit |
 | `Ctrl-s` | save, as `:w` does |
 | `/` `?` `n` `N` | search forward / back, repeat / reverse |
 | `:` | the command line — see [Commands](commands.md) |
@@ -169,20 +181,20 @@ first line. See [Editing](../editing.md#folding).
 
 ## Command line, search and prompts
 
-The same keys in the `:` line, the `/` `?` search line, the finder's query
-and the tree's rename, move and new prompts. A delete's `(y/N)` takes only
-`y` as a yes; any other key is a no.
+These keys work in the `:` line, the `/` and `?` search lines, and
+the tree's rename, move and new prompts. The finder shares the editing
+keys and handles selection separately.
 
 | Key | Does |
 |---|---|
 | `Enter` | run, search, or answer |
-| `Esc` `Ctrl-c` | cancel; so does `Backspace` on an empty line |
+| `Esc` `Ctrl-c` `Ctrl-[` | cancel |
 | `Ctrl-u` | clear the line |
-| `Ctrl-w` `Alt-Backspace` | delete the last word |
-| `Ctrl-h` | backspace |
+| `Ctrl-w` `Alt-Backspace` `Ctrl-Backspace` | delete the last word |
+| `Backspace` `Ctrl-h` | delete the last character. On an empty line, cancel except in the finder |
 | `Tab` `Shift-Tab` | in the `:` line, complete — see [Commands](commands.md#completing-with-tab) |
 
-Other control and Alt chords are ignored, never typed as their letter.
+A tree delete prompt takes `y` or `Y` to confirm. Every other key cancels.
 
 ## Read-only
 
@@ -195,18 +207,18 @@ See [Reading](../reading.md#read-only).
 | `Ctrl-d` `Ctrl-u` | half a page down / up |
 | `gg` `G` | top / bottom |
 | `/` `?` `n` `N` | search |
-| `q` | quit |
-| `i` | switch to editing |
+| `q` | close the buffer. Quit if it is the last one |
+| `i` | switch to editing on entry to read-only or after a refused edit |
 | `<leader>v` | switch to editing (it also turns read-only on) |
 
-An edit is refused with "read-only — press i to edit". Yanking, panels, `gf`
-and `:w` still work.
+After moving or running another command, the first edit is refused with
+"read-only — press i to edit". Yanking, panels, `gf` and `:w` still work.
 
 ## Leader keys
 
 These are the shipped defaults in `keys.conf`, and they're built in. Remap
-them under `[keys.normal]` and `[keys.visual]`, or set one to `"none"` to
-remove it.
+them under `[keys.normal]` and `[keys.visual]` for their respective
+modes, or set one to `"none"` to remove it.
 
 | Key | Does |
 |---|---|
@@ -229,47 +241,66 @@ remove it.
 
 | Key | Does |
 |---|---|
-| `Ctrl-w` `h` `j` `k` `l` | move between panes |
-| `Ctrl-w` `v` `s` | split beside / below |
-| `Ctrl-w` `q` `o` `w` | close / keep only this / cycle |
-| `Ctrl-w` `>` `<` `+` `-` | wider / narrower / taller / shorter (takes a count) |
-| `Ctrl-w` `=` | equal sizes again |
+| `Ctrl-w h` `Ctrl-w j` `Ctrl-w k` `Ctrl-w l` / `Ctrl-w Left` `Ctrl-w Down` `Ctrl-w Up` `Ctrl-w Right` | move between panes |
+| `Ctrl-w v` `Ctrl-w s` | split beside / below |
+| `Ctrl-w q` `Ctrl-w c` / `Ctrl-w o` / `Ctrl-w w` | close / keep only this / cycle |
+| `Ctrl-w >` `Ctrl-w <` `Ctrl-w +` `Ctrl-w -` | wider / narrower / taller / shorter (takes a count) |
+| `Ctrl-w =` | equal sizes again |
 
 ## File tree
 
 | Key | Does |
 |---|---|
-| `j` `k` | move |
-| `l` `Enter` `o` | open a file or expand a folder |
-| `h` | collapse |
-| `g` `G` | top / bottom |
+| `j` `Down` / `k` `Up` | move down / up |
+| `l` `Enter` `o` `Right` | open a file or expand a folder |
+| `h` `Left` | collapse or go to the parent |
+| `g` `Home` / `G` `End` | top / bottom |
 | `R` | refresh |
 | `-` `=` | move the root up a level / into the selected folder |
 | `H` | show / hide dotfiles |
 | `a` | new file (end with `/` for a folder) |
 | `r` `m` `d` | rename / move / delete |
 | `<leader>hl` | the tree's keys, in `:help` — the leader keys work from the tree |
-| `q` | close the tree |
+| `q` `Esc` | close the tree |
+| `Ctrl-w l` `Ctrl-w w` `Ctrl-w j` `Ctrl-w k` / `Ctrl-w Right` `Ctrl-w Down` `Ctrl-w Up` | return to the editor |
 
 ## Fuzzy finder
 
 | Key | Does |
 |---|---|
 | type | narrow the list |
-| `Ctrl-n` `Ctrl-p`, arrows | next / previous match |
-| `Ctrl-u` `Ctrl-w` `Ctrl-h` | clear the query / delete its last word / backspace |
-| `Enter` `Esc` | open / close |
+| `Ctrl-n` `Ctrl-j` `Down` `Tab` / `Ctrl-p` `Ctrl-k` `Up` `Shift-Tab` | next / previous match |
+| `Ctrl-u` | clear the query |
+| `Ctrl-w` `Alt-Backspace` `Ctrl-Backspace` | delete its last word |
+| `Backspace` `Ctrl-h` | delete its last character |
+| `Enter` / `Esc` `Ctrl-c` `Ctrl-[` | open / close |
 
 ## :diff view
 
 | Key | Does |
 |---|---|
 | `n` `p` | next / previous difference |
-| `Tab` | cycle this difference: live → file → both |
+| `Tab` `Shift-Tab` | cycle this difference through live, file and both (either key) |
+| `j` `Down` / `k` `Up` | scroll a line down / up |
+| `Ctrl-d` `Ctrl-u` | scroll half a page down / up |
+| `g` `Home` / `G` `End` | scroll to the top / bottom |
 | `l` `f` `b` | set every difference to live / file / both |
 | `w` | commit the merge and write it |
 | `W` | in read-only mode: leave it, then commit and write |
 | `q` `Esc` | abort |
+
+## Help
+
+| Key | Does |
+|---|---|
+| `Tab` `Right` `l` / `Shift-Tab` `Left` `h` | next / previous category |
+| `1`–`7` | jump to a category |
+| `j` `Down` / `k` `Up` | scroll a line down / up |
+| `d` `PageDown` / `u` `PageUp` | scroll ten lines down / up |
+| `g` `Home` / `G` `End` | scroll to the top / bottom |
+| `/` | search all categories. `Enter` submits, `Ctrl-u` clears, `Backspace` deletes, and `Esc` cancels |
+| `n` `N` | next / previous search match |
+| `q` `Esc` | close help |
 
 ## Action names
 
@@ -280,8 +311,8 @@ See [Configuration](../configuration.md#key-bindings) for how bindings merge.
 
 ### Grammar
 
-These are pieces of the Vim grammar, not finished commands, so a key bound to
-one keeps its counts, text objects and doubled form: `"s" = "operator_delete"`
+A binding for a piece of the Vim grammar keeps its counts, text objects
+and doubled form. For example, `"s" = "operator_delete"`
 gives `ss`, `siw` and `2s3w`.
 
 | Name | Also | Default key | Does |
@@ -327,18 +358,18 @@ gives `ss`, `siw` and `2s3w`.
 | Name | Also | Default key | Does |
 |---|---|---|---|
 | `insert` `append` | | `i` `a` | Insert before / after the cursor |
-| `insert_line_start` `append_line_end` | | `I` `A` | Insert at the line's start / end |
+| `insert_line_start` `append_line_end` | | `I` `A` | Insert at the line's first non-blank / end |
 | `open_below` `open_above` | | `o` `O` | a new line below / above, in Insert |
 | `normal_mode` | `escape` | `Esc` | back to Normal |
 | `visual` `visual_line` | | `v` `V` | Visual charwise / linewise |
-| `delete_char` | | `x` | delete the character under the cursor |
+| `delete_char` | | `x` (Normal) | delete the character under the cursor |
 | `join_lines` | | `J` | join the next line onto this one |
 | `paste_after` | `paste` | `p` | paste after the cursor |
 | `paste_before` | | `P` | paste before the cursor |
 | `move_lines_down` | `move_line_down` | | move the selected lines (the cursor's line in Normal) down, keeping them selected |
 | `move_lines_up` | `move_line_up` | | the same, up |
-| `undo` `redo` | | `u` `Ctrl-r` | undo / redo |
-| `repeat` | | `.` | repeat the last change |
+| `undo` `redo` | | `u` `Ctrl-r` | undo / redo in Normal |
+| `repeat` | | `.` | repeat the last change in Normal |
 | `list_item_down` `list_item_up` | | `Alt-j` `Alt-k` | move the list item, or in Visual the selected items, past the next / previous one |
 | `list_indent` `list_outdent` | | `Tab` `Shift-Tab` (Insert) | indent / outdent the list item |
 | `fix_list` | `fixlist` | | re-indent the list under the cursor, like `:fixlist` |
@@ -356,7 +387,7 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 | `insert_link` | `link` | `gl` | wrap as a link, cursor in the URL |
 | `toggle_task` | `task` | `gt` | toggle a task checkbox |
 | `align_table` | `table` | `ga` | align the table under the cursor |
-| `heading_1` … `heading_6` | | `g1` … `g6` | set the heading level |
+| `heading_1` `heading_2` `heading_3` `heading_4` `heading_5` `heading_6` | | `g1` `g2` `g3` `g4` `g5` `g6` | set the heading level |
 | `clear_heading` | | `g0` | strip the heading |
 
 ### Files, search and commands
@@ -408,10 +439,10 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 | `file_tree_cwd` | `file_explorer_cwd` | | file tree in the folder Shoin was launched from |
 | `find_file_cwd` | `fuzzy_find_cwd` | | fuzzy finder in the folder Shoin was launched from |
 | `find_buffer` | `buffers` `switch_buffer` | `<leader>fb` | switch buffer |
-| `alternate_buffer` | `alternate` `alt_buffer` | `Ctrl-^` | back to the previous buffer |
+| `alternate_buffer` | `alternate` `alt_buffer` | `Ctrl-^` `Ctrl-6` | back to the previous buffer |
 | `split_vertical` | `vsplit` | `<leader>sv` | split beside, or close the split |
 | `split_horizontal` | `split` | `<leader>ss` | split below, or close the split |
-| `close_pane` | | `Ctrl-w q` | close this pane |
+| `close_pane` | | `Ctrl-w q` `Ctrl-w c` | close this pane |
 | `only_pane` | `only` | `<leader>so` | keep only this pane |
 
 ### Unbinding
@@ -419,3 +450,19 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 | Name | Also | Default key | Does |
 |---|---|---|---|
 | `none` | `nop` `""` | | nothing: removes a binding, shipped or built in |
+
+## Details
+
+- `zt` and `zb` leave `editor.scroll_off` lines at the edge when there is
+  room. `zt`, `zz` and `zb` have no effect in typewriter or read-only mode.
+- Normal and Visual share motions and prefixes except where a Visual entry
+  gives a different meaning. Shipped leader keys apply in Normal unless
+  listed in Visual. The tree accepts the Normal leader sequences.
+- `heading_1` through `heading_6` also accept a leading `+` or zeroes in
+  the numeric suffix, such as `heading_+1` or `heading_01`.
+- Brackets can span lines. Indent and outdent refuse a shift that would
+  break a list. See [Editing](../editing.md#lists).
+- The bottom hint bar shows keys for the current mode. A pending leader,
+  prefix or operator can show its continuations over the status line.
+  Leader hints put the most used keys first. Use `:set hints off` to hide
+  the bar for the session, or set `[hints] enabled = false` in your config.

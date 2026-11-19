@@ -1,32 +1,34 @@
 # Command line
 
-```
-shoin [FILE]
-shoin -R FILE
-shoin -p FILE [--pager]
-cat notes.md | shoin [-p]
+Open, print, or export Markdown from the shell with `shoin`.
 
-  --config <PATH>     use this config instead of the discovered one
-                      (with --init-config, write to THIS path instead)
-  --print-config      print the resolved config and exit
-  --init-config       write the shipped config into your config folder
-                      (~/.config/shoin, or $XDG_CONFIG_HOME/shoin) and exit
-  --force             let --init-config replace a config already there
-  --zen               start with every chrome affordance hidden
-  -R, --read-only     open read-only: every line concealed, edits refused,
-                      q quits
-  -p, --render [FILE] print the file as the editor shows it, styled, and exit
-                      (no FILE, or -, reads stdin)
-  --pager             with --render, page it through $PAGER when it is
-                      taller than the terminal (default: less -R)
-  --export <FILE>     export without starting the editor
-  --format <FORMAT>   md | txt | html | pdf          (default: md)
-  --justify           stretch html/txt to fill the measure (md, pdf: refused)
-  --out <PATH>        where --export writes
-  --stdout            print the export instead of writing it (text formats only)
-  -h, --help          print help
-  -V, --version       print version
+```text
+A no-clutter terminal Markdown editor
+
+Usage: shoin [OPTIONS] [FILE]
+
+Arguments:
+  [FILE]  File to open. Created on first save if it does not exist. `-`, or no file with text piped in, reads stdin into an unnamed buffer
+
+Options:
+      --config <PATH>    Use this config file instead of the discovered one
+  -R, --read-only        Open read-only: every line concealed, edits refused, `q` quits. `i` after the refusal message, or `:view`, switches to editing
+      --zen              Start with every chrome affordance hidden
+      --print-config     Print the resolved config and exit
+      --init-config      Write the shipped config into your config directory and exit. Refuses a directory that already holds one unless `--force` is given
+      --force            Let `--init-config` replace a config that is already there
+      --export <FILE>    Export this file's finished text and exit, without starting the TUI. Writes `<name>.<format>` unless `--out` or `--stdout` says otherwise
+      --format <FORMAT>  What `--export` writes: `md`, `txt`, `html` or `pdf`. [default: md]
+      --justify          Stretch every wrapped line but a paragraph's last to fill the measure. Only `--format html` and `--format txt` have a layout of their own to stretch
+      --out <PATH>       Where `--export` writes
+  -p, --render [<FILE>]  Print this file as the editor shows it, styled, and exit — a reader's view without opening the editor. Plain text when stdout is not a terminal, or when `NO_COLOR` is set. `-`, or no FILE at all, reads stdin: `curl …/README.md | shoin -p`
+      --pager            With `--render`, page the output through `$PAGER` (`less -R` when unset) when it is taller than the terminal
+      --stdout           Print the exported document instead of writing it, so `shoin --export notes.md --stdout | pandoc …` stays a one-shot pipeline. Text formats only — a PDF is not something to print to a terminal
+  -h, --help             Print help
+  -V, --version          Print version
 ```
+
+## Rendering
 
 `--render` draws the page the editor would, with every line concealed, at
 the terminal's width, and prints all of it. Front matter is left out, every
@@ -59,13 +61,16 @@ and embeds resolve from the working directory, as on a blank page.
 `shoin -R notes.md` opens a page to read rather than to edit. Every line is
 concealed, the cursor's too, and there's no caret: `j`/`k`, `Ctrl-d`/`Ctrl-u`,
 `G`/`gg` and search scroll the page, as in `less`. `q` quits. Yanking,
-panels, `gf` and `:w` still work; anything that would change the text is
-refused with "read-only — press i to edit", and `i` then switches to
-editing. `:view` turns the mode on and off from inside the editor. The keys
+panels, `gf` and `:w` still work. Press `i` as your first command to start
+editing. After moving or running another command, press `i` after the
+"read-only — press i to edit" message. `:view` toggles read-only. The keys
 are in the [key reference](keys.md#read-only), and
 [Reading](../reading.md#read-only) walks through it.
 
-## Other options
+## Details
+
+With `--init-config`, `--config` sets the destination. The default is
+`$XDG_CONFIG_HOME/shoin` or `~/.config/shoin`.
 
 Without `--out` or `--stdout`, `--export` writes `<name>.<format>` beside
 the file, or `<name>-export.<format>` when that is the file itself: Markdown
