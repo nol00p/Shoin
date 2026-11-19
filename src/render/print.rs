@@ -254,14 +254,11 @@ fn color(c: Color, bg: bool) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::render::markdown::block::BlockCache;
-    use crate::text::cursor::Cursor;
+    use crate::test_support;
 
     fn app_with(text: &str) -> App {
-        let mut app = App::new(Config::default(), None, None).unwrap();
+        let mut app = test_support::app_with(text);
         app.theme = crate::render::theme::Theme::authored(&app.config.theme).unwrap();
-        app.buffer.insert_str(Cursor::new(0, 0), text);
-        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
         app
     }
 

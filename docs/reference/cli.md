@@ -12,7 +12,7 @@ Arguments:
 
 Options:
       --config <PATH>    Use this config file instead of the discovered one
-  -R, --read-only        Open read-only: every line concealed, edits refused, `q` quits. `i` after the refusal message, or `:view`, switches to editing
+  -R, --read-only        Open read-only: every line concealed, edits refused, `q` quits. `:view` switches to editing at any time, and so does `i` as the first key or right after a refusal
       --zen              Start with every chrome affordance hidden
       --print-config     Print the resolved config and exit
       --init-config      Write the shipped config into your config directory and exit. Refuses a directory that already holds one unless `--force` is given

@@ -13,19 +13,10 @@
 //! ```
 
 use super::*;
-use crate::render::markdown::block::BlockCache;
+use crate::test_support::app_with_clean_history as app_with;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
-
-fn app_with(text: &str) -> App {
-    let mut app = App::new(Config::default(), None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
-    app.buffer.cursor = Cursor::new(0, 0);
-    app.buffer.history = Default::default();
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-    app
-}
 
 /// One keystroke and the frame after it, as the event loop runs them: the
 /// key, then the caches, then the draw (which syncs the render cache and

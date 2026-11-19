@@ -18,8 +18,7 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
 use crate::app::{App, Search};
-use crate::config::Config;
-use crate::render::markdown::block::BlockCache;
+use crate::test_support;
 use crate::text::cursor::Cursor;
 
 /// The slowest frame allowed in a release build. The target is 5 ms.
@@ -32,10 +31,8 @@ const PLAIN: &str = "plain words only here ok ";
 /// `first`, a 200 KB line of `unit`, `last`, with the cursor on `cursor_line`.
 fn app_with(unit: &str, cursor_line: usize) -> App {
     let text = format!("first\n{}\nlast\n", unit.repeat(200_000 / unit.len()));
-    let mut app = App::new(Config::default(), None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), &text);
+    let mut app = test_support::app_with(&text);
     app.buffer.cursor = Cursor::new(cursor_line, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app
 }
 

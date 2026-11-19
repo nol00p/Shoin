@@ -22,16 +22,8 @@
 
 use super::*;
 use crate::render::markdown::block::BlockCache;
+use crate::test_support::app_with_clean_history as app_with;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-fn app_with(text: &str) -> App {
-    let mut app = App::new(Config::default(), None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
-    app.buffer.cursor = Cursor::new(0, 0);
-    app.buffer.history = Default::default();
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-    app
-}
 
 fn text(app: &App) -> String {
     app.buffer.rope.to_string()

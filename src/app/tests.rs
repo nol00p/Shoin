@@ -1,15 +1,8 @@
 use super::*;
 use crate::fs::save::SavePolicy;
 use crate::render::markdown::block::BlockCache;
+use crate::test_support::{app_with, app_with_config};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-fn app_with(text: &str) -> App {
-    let mut app = App::new(Config::default(), None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
-    app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-    app
-}
 
 fn text(app: &App) -> String {
     app.buffer.rope.to_string()
@@ -4843,11 +4836,7 @@ fn app_with_keys(text: &str, bindings: &[(&str, &str)]) -> App {
     for (k, a) in bindings {
         cfg.keys.normal.insert(k.to_string(), a.to_string());
     }
-    let mut app = App::new(cfg, None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
-    app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-    app
+    app_with_config(text, cfg)
 }
 
 /// `move_lines_down` / `move_lines_up` bound in Visual, as people bind
@@ -7653,3 +7642,55 @@ fn a_document_switch_mid_insert_seals_the_session() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+
+/// An embed of a picture that is not there says so as a picture, and an
+/// embed of a missing note keeps calling it a note.
+#[test]
+fn an_embed_of_a_missing_picture_is_called_a_picture() {
+    let (_d, mut app) = vault("intro\n![[pics/shot.png]]\n![[fragments/next]]\n", &[]);
+    app.embed_mode = crate::transclude::Mode::Full;
+    assert_eq!(embed_rows(&mut app, 1), ["![[pics/shot.png]] — no picture called \"pics/shot.png\""]);
+    assert_eq!(embed_rows(&mut app, 2), ["![[fragments/next]] — no note called \"fragments/next\""]);
+}
+
+/// `gx` on a wiki link to a missing picture reports it as a picture.
+#[test]
+fn gx_on_a_missing_picture_names_it_a_picture() {
+    let (_d, mut app) = vault("see [[shot.webp]]\n", &[]);
+    cursor_on(&mut app, 0, "shot.webp");
+    feed(&mut app, "gx");
+    assert_eq!(flash_text(&app), "no picture called \"shot.webp\"");
+}
+
+/// The `:focus` and `:set focus` words are read whatever their case.
+#[test]
+fn focus_takes_its_word_in_any_case() {
+    let mut app = app_with("one\n");
+    for (cmd, want) in [
+        (":focus Paragraph", FocusMode::Paragraph),
+        (":focus SENTENCE", FocusMode::Sentence),
+        (":set focus=Off", FocusMode::Off),
+        (":set focus=PARA", FocusMode::Paragraph),
+    ] {
+        feed(&mut app, cmd);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+        assert_eq!(app.focus, want, "{cmd}: {:?}", flash_text(&app));
+    }
+}
+
+/// `3"<Esc>j` moves one line, and `d"<Esc>j` deletes nothing: `Esc` after
+/// the register prefix drops the count and operator with it.
+#[test]
+fn escape_after_a_register_prefix_drops_the_pending_command() {
+    let mut app = app_with("a\nb\nc\nd\ne\n");
+    feed(&mut app, "3\"");
+    esc(&mut app);
+    feed(&mut app, "j");
+    assert_eq!(app.buffer.cursor.line, 1, "one line, not three");
+    feed(&mut app, "d\"");
+    esc(&mut app);
+    feed(&mut app, "j");
+    assert_eq!(text(&app), "a\nb\nc\nd\ne\n", "nothing deleted");
+    assert_eq!(app.buffer.cursor.line, 2);
+}

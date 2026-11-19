@@ -2217,6 +2217,7 @@ mod tests {
     use crate::config::Config;
     use crate::render::markdown::block::BlockCache;
     use crate::render::theme::Color;
+    use crate::test_support;
     use crate::text::cursor::Cursor;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -2307,10 +2308,8 @@ mod tests {
     }
 
     fn app_with(text: &str) -> App {
-        let mut app = App::new(Config::default(), None, None).unwrap();
+        let mut app = test_support::app_with(text);
         pin_theme(&mut app);
-        app.buffer.insert_str(Cursor::new(0, 0), text);
-        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
         app
     }
 

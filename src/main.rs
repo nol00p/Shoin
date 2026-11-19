@@ -27,6 +27,8 @@ mod image;
 mod input;
 mod recover;
 mod render;
+#[cfg(test)]
+mod test_support;
 mod text;
 mod transclude;
 mod tree;
@@ -67,7 +69,8 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Open read-only: every line concealed, edits refused, `q` quits.
-    /// `i` after the refusal message, or `:view`, switches to editing.
+    /// `:view` switches to editing at any time, and so does `i` as the first
+    /// key or right after a refusal.
     #[arg(long = "read-only", short = 'R')]
     read_only: bool,
 
