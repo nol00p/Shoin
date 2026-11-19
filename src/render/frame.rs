@@ -3968,6 +3968,26 @@ mod tests {
         }
     }
 
+    /// Wrap breaks don't follow the gutter shift: a space the concealed math
+    /// has and the source lacks (after `\,`) is still a raw break point, so
+    /// the revealed first row keeps the bullet and the formula together
+    /// instead of leaving the bullet alone on it.
+    #[test]
+    fn leading_math_keeps_its_raw_wrap_break() {
+        let line = "- $abcdefghij\\,$tailtailtail";
+        for stable in [true, false] {
+            let mut app = app_with(&format!("top\n\n{line}\n"));
+            app.config.layout.measure = 16;
+            app.config.layout.stable_gutter = stable;
+            app.buffer.cursor = Cursor::new(2, 0);
+            app.active = crate::render::conceal::ActiveSet { start: 2, end: 2 };
+            let all = rows(&render_to(&app, 60, 12));
+            let first = all.iter().position(|r| r.trim() == "top").expect("the top line") + 2;
+            assert_eq!(all[first].trim(), "- $abcdefghij\\,", "stable_gutter {stable}");
+            assert_eq!(all[first + 1].trim(), "$tailtailtail", "stable_gutter {stable}");
+        }
+    }
+
     /// A warm cache must paint exactly what a cold one paints. This is the
     /// backstop for the whole incremental design: edit, scroll and reveal, then
     /// compare the frame against the same state rendered from an empty cache.

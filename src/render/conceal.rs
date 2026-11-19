@@ -380,22 +380,31 @@ impl ConcealMap {
         }
     }
 
-    /// Source indices in the LEADING RUN (as `leading_shift` reads it) where
-    /// the concealed form has a space the source does not: after a
-    /// replacement that ends in one, such as each bar of `>>text`. A row of
-    /// the concealed form may start there, so the raw wrap may too, and a
-    /// line breaks at the same place as it is revealed.
+    /// Source indices in the line's leading ops where the concealed form has
+    /// a space the source does not: after a replacement that ends in one,
+    /// such as each bar of `>>text`. A row of the concealed form may start
+    /// there, so the raw wrap may too, and a line breaks at the same place as
+    /// it is revealed.
+    ///
+    /// Unlike `leading_shift`'s LEADING RUN, inline ops count here too, up to
+    /// the first visible character: a break is about wrapping, not the gutter
+    /// shift, so leading math such as `$a\,$` keeps its break after `\,`.
     pub fn prefix_breaks(&self, source: &str) -> Vec<usize> {
         let chars: Vec<char> = source.chars().collect();
         let mut out = Vec::new();
-        for op in self.leading_run(&chars) {
+        let mut src = 0usize;
+        for op in &self.ops {
             let r = op.range();
+            if chars[src..r.start].iter().any(|c| !c.is_whitespace()) {
+                break;
+            }
             if let Conceal::Replace { text, .. } = op {
                 let spaced = r.end > 0 && chars.get(r.end - 1).is_some_and(|c| c.is_whitespace());
                 if text.ends_with(' ') && !spaced {
                     out.push(r.end);
                 }
             }
+            src = r.end;
         }
         out
     }
@@ -1613,6 +1622,8 @@ mod tests {
         assert!(breaks("> > text").is_empty());
         assert!(breaks("- item").is_empty());
         assert!(breaks("plain text").is_empty());
+        // Leading math counts here, though it doesn't shift the gutter.
+        assert_eq!(breaks("- $abcdefghij\\,$tail"), [15]);
     }
 
     /// The reveal shift the active line has to give back: `layout.stable_gutter`
