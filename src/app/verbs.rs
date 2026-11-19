@@ -224,8 +224,9 @@ impl App {
 
     /// Enter or leave read-only mode, for every open buffer: a page to read,
     /// not to edit. Every line conceals, the caret is hidden, an edit is
-    /// refused with a message, and `q` quits. Leaving it is `i` after that
-    /// message, or `:view` again.
+    /// refused with a message, and `q` quits. `:view` leaves read-only mode
+    /// at any time. `i` starts editing if pressed first or right after a
+    /// refusal, and otherwise takes two presses.
     pub fn set_view(&mut self, on: bool) {
         self.view = on;
         // Entering says "i to edit", so the very next `i` does exactly that.
