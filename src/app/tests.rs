@@ -144,6 +144,59 @@ fn a_cut_off_kitty_picture_is_sent_once_and_put_by_the_rows_that_show() {
     std::fs::remove_dir_all(&d).ok();
 }
 
+/// `![[photo.png|alt text]]` captions the picture with its alt text in place
+/// of the file's name, elided to the row; `|200` is a size and keeps the
+/// name. Under iTerm2 a box cut off by the top shows the same caption.
+#[test]
+fn a_picture_with_alt_text_is_captioned_with_it() {
+    use crate::render::conceal::ActiveSet;
+    let d = std::env::temp_dir().join(format!("shoin-alt-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let mut png = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89,
+    ];
+    png[16..20].copy_from_slice(&400u32.to_be_bytes());
+    png[20..24].copy_from_slice(&200u32.to_be_bytes());
+    std::fs::write(d.join("photo.png"), &png).unwrap();
+    let long = "A red barn ".repeat(12);
+    let body: String = format!("![[photo.png|A red barn]]\n![[photo.png|200]]\n![[photo.png|{long}]]\n")
+        .chars()
+        .chain((0..30).flat_map(|i| format!("after {i}\n").chars().collect::<Vec<_>>()))
+        .collect();
+    std::fs::write(d.join("note.md"), body).unwrap();
+    let mut app = App::new(Config::default(), Some(d.join("note.md")), None).unwrap();
+    app.embed_mode = crate::transclude::Mode::Short;
+    app.image_protocol = crate::image::Protocol::None;
+    let screen = |app: &mut App, line: usize, height: u16| -> Vec<String> {
+        app.buffer.cursor = Cursor::new(line, 0);
+        app.active = ActiveSet::none();
+        app.term_size = (80, height);
+        app.refresh_blocks();
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height)).unwrap();
+        t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+        let buf = t.backend().buffer().clone();
+        (0..height).map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    };
+    let rows = screen(&mut app, 4, 80);
+    let captions: Vec<&String> = rows.iter().filter(|r| r.contains("400\u{d7}200") || r.contains('\u{2026}')).collect();
+    assert_eq!(captions.len(), 3, "{rows:#?}");
+    assert!(captions[0].contains("A red barn \u{b7} 400\u{d7}200") && !captions[0].contains("photo"), "{captions:?}");
+    assert!(captions[1].contains("photo.png \u{b7} 400\u{d7}200"), "a size is not alt text: {captions:?}");
+    // Too long for the row: cut with an ellipsis, the size with it.
+    let elided = captions[2].split('\u{2026}').next().unwrap();
+    assert!(elided.trim_start().starts_with("A red barn A red barn"), "{captions:?}");
+    assert!(captions[2].contains('\u{2026}') && !captions[2].contains("400"), "{captions:?}");
+
+    // iTerm2, the first picture cut off by the top: its box carries the alt text.
+    app.image_protocol = crate::image::Protocol::Iterm2;
+    app.focused_pane().unwrap().scroll.set(2);
+    let rows = screen(&mut app, 4, 80);
+    assert!(rows.iter().any(|r| r.contains("\u{2502} A red barn \u{b7} 400\u{d7}200")), "{rows:#?}");
+    std::fs::remove_dir_all(&d).ok();
+}
+
 /// A whole kitty picture is put whole: no source rectangle.
 #[test]
 fn a_whole_kitty_picture_is_put_without_a_crop() {
@@ -2535,6 +2588,22 @@ fn export_command_takes_format_and_justify_in_either_order() {
     cmd(&mut app, ":export pdf justify");
     assert!(matches!(app.mode, Mode::Normal), "pandoc's template decides, not us");
 
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// `:export`'s refusals name the formats `values` lists.
+#[test]
+fn export_refusals_name_the_value_lists() {
+    let d = two_files();
+    let mut app = app_with("scratch\n");
+    app.open_file(d.join("one.md"));
+    cmd(&mut app, ":export docx");
+    let flash = app.flash.as_ref().and_then(|f| f.text.clone()).unwrap_or_default();
+    assert_eq!(flash, format!("export: \"docx\" is not {}", crate::values::or_list(crate::values::EXPORT_VALUES)));
+    assert_eq!(flash, "export: \"docx\" is not md, txt, html or pdf");
+    cmd(&mut app, ":export md justify");
+    let flash = app.flash.as_ref().and_then(|f| f.text.clone()).unwrap_or_default();
+    assert_eq!(flash, "export: justify only applies to txt or html");
     std::fs::remove_dir_all(&d).ok();
 }
 
