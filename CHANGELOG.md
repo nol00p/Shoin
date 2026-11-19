@@ -42,6 +42,9 @@
   With `layout.stable_gutter` on, its text stays in place as the cursor
   reveals the markers, so a click on a wrapped row lands on the character
   clicked. A click on a bar goes to its own `>` (#149).
+- `"` then `Esc` drops a pending count or operator, as `Esc` does after
+  `f` or `r`: `3"<Esc>j` moves one line and `d"<Esc>j` deletes nothing
+  (#158).
 
 **Lists**
 
@@ -101,6 +104,8 @@
   text, shown in its caption in place of the file name and written as
   the alt in an export. A size (`|200`, `|200x100`) is still ignored
   (#146).
+- A missing picture, embedded or linked, says `no picture called
+  "x.png"`, not `no note called` (#158).
 
 **Files**
 
@@ -151,6 +156,8 @@
   blank, the arguments of `:focus`, `:align`, `:embed`, `:number` and
   `:export` (with `justify`), and open buffers after `:b` (#138).
 - `:b <name>` prefers a buffer whose whole name matches (#138).
+- `:focus`, `:set focus` and `layout.focus` take their value in any case
+  (`Paragraph`, `SENTENCE`), as the other options do (#158).
 
 **Help**
 
@@ -163,6 +170,8 @@
   the status line, so the Visual leader hints (`b bold`, `i italic`) show
   right after `v` (#138).
 - `:help` lists every `:set` option; it listed 7 of 16 (#146).
+- `shoin --help` says when `i` leaves read-only: as the first key or
+  right after a refusal; `:view` does at any time (#158).
 
 ## 0.2.4
 
