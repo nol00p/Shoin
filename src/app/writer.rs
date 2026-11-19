@@ -304,8 +304,11 @@ impl App {
         self.touch_status();
     }
 
+    /// `o` / `O`. On a closed fold, `o` opens the line below the whole fold
+    /// and `O` the one above it, and the fold stays closed, as in vim.
     pub(super) fn open_line(&mut self, above: bool) {
         let line = self.buffer.cursor.line;
+        let line = if above { line } else { self.fold_hidden().last_of(line) };
         let at = if above {
             Cursor::new(line, 0)
         } else {

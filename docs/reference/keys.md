@@ -24,6 +24,7 @@ Motions take a count, such as `3w`.
 | `Ctrl-d` `Ctrl-u` | half a page down / up |
 | `Ctrl-f` `Ctrl-b` | a full page down / up |
 | `Ctrl-e` `Ctrl-y` | scroll the page a line down / up; the cursor stays put |
+| `zt` `zz` `zb` | scroll the cursor's line to the top / middle / bottom of the pane |
 
 ## Operators
 
@@ -163,7 +164,7 @@ first line. See [Editing](../editing.md#folding).
 | Key | Does |
 |---|---|
 | `za` | open the fold under the cursor, or fold the innermost item or section around it |
-| `zc` `zo` | fold / unfold |
+| `zc` `zo` | fold / unfold; in Visual mode, every fold in the selected lines |
 | `zM` `zR` | fold every item and section / unfold everything |
 
 ## Command line, search and prompts
@@ -379,6 +380,9 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 |---|---|---|---|
 | `scroll_view_down` | `scroll_down` | `Ctrl-e` | scroll the page a line down |
 | `scroll_view_up` | `scroll_up` | `Ctrl-y` | scroll the page a line up |
+| `scroll_cursor_top` | | `zt` | scroll the cursor's line to the top of the pane |
+| `scroll_cursor_middle` | | `zz` | scroll the cursor's line to the middle of the pane |
+| `scroll_cursor_bottom` | | `zb` | scroll the cursor's line to the bottom of the pane |
 | `cycle_focus` | `focus` | `<leader>F` | cycle focus mode |
 | `toggle_typewriter` | `typewriter` | `<leader>t` | typewriter scrolling on / off |
 | `toggle_conceal` | `conceal` | `<leader>c` | concealment on / off |

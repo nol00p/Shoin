@@ -14,6 +14,7 @@ pub mod layout;
 pub mod numbers;
 pub mod pane;
 pub mod print;
+pub mod quote;
 pub mod splash;
 pub mod markdown;
 pub mod theme;

@@ -17,6 +17,7 @@ use crate::input::mode::Mode;
 use crate::text::cursor::Cursor;
 
 use super::indent;
+use super::quote;
 use super::layout::{cell_width, display_width, text_width};
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
@@ -966,20 +967,11 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
         }
         // The `>` run becomes ONE BAR PER LEVEL, so a nested quote still reads
         // as nested instead of collapsing to a single bar.
-        BlockKind::Quote(depth) => {
-            let m = chars
-                .iter()
-                .take_while(|c| matches!(**c, ' ' | '\t' | '>'))
-                .count();
-            if m > 0 {
-                let bars = format!("{} ", glyphs.quote_bar).repeat((*depth as usize).max(1));
-                ops.push(Conceal::Replace {
-                    range: 0..m,
-                    text: bars,
-                    style: Some(Style::fg(ctx.theme.quote_bar)),
-                });
-            }
-        }
+        //
+        // The bars take the markers and the marker's space; the rest of the
+        // line is drawn as it would be outside the quote (`quote::Inner`), so
+        // a nested item keeps its indent, bullet and guides.
+        BlockKind::Quote(depth) => quote_ops(chars, *depth, ctx, ops),
         // `- ` / `* ` become a real bullet — one char for one char, so the text
         // keeps its column. An ORDINAL is content, not markup ("2." says which
         // item this is), so a numbered list keeps its number. A TASK concealsr
@@ -1071,6 +1063,63 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
         }
         _ => {}
     }
+}
+
+/// A quote line's ops: one bar per level in place of the markers and the
+/// marker's space, then the ops the rest of the line would have outside the
+/// quote, moved onto the source's columns.
+///
+/// A tab after the last marker is the marker's space plus `pad` columns of
+/// the rest. The bars then leave off their last space and the tab draws it,
+/// with the `pad` columns after it, so the tab still takes `tab_width` cells
+/// and an indent guide that falls in those columns is drawn inside it.
+fn quote_ops(chars: &[char], depth: u8, ctx: &ConcealCtx, ops: &mut Vec<Conceal>) {
+    let bars = quote::bars(&ctx.glyphs.quote_bar, depth);
+    let bar_style = Some(Style::fg(ctx.theme.quote_bar));
+    let line: String = chars.iter().collect();
+    let Some(inner) = quote::Inner::of(&line, depth, ctx.tab_width) else {
+        let m = chars.iter().take_while(|c| matches!(**c, ' ' | '\t' | '>')).count();
+        if m > 0 {
+            ops.push(Conceal::Replace { range: 0..m, text: bars, style: bar_style });
+        }
+        return;
+    };
+    let cut = &inner.cut;
+    let mut rest = Vec::new();
+    if inner.is_item() {
+        let view: Vec<char> = cut.view.chars().collect();
+        block_ops(&view, &inner.block, ctx, &mut rest);
+    }
+    let mut pad: Vec<String> = vec![" ".to_string(); cut.pad];
+    if cut.pad == 0 {
+        ops.push(Conceal::Replace { range: 0..cut.keep + cut.skip, text: bars, style: bar_style });
+    } else {
+        let text = bars.strip_suffix(' ').unwrap_or(&bars).to_string();
+        ops.push(Conceal::Replace { range: 0..cut.keep, text, style: bar_style });
+    }
+    let mut moved = Vec::with_capacity(rest.len());
+    for op in rest {
+        let r = op.range().clone();
+        if r.start < cut.pad {
+            // Only a guide on one space can sit in the tab's columns: the
+            // view has nothing else there.
+            if let Conceal::Replace { text, .. } = &op {
+                if r.len() == 1 {
+                    pad[r.start] = text.clone();
+                }
+            }
+            continue;
+        }
+        let range = cut.doc_col(r.start)..cut.doc_col(r.end);
+        moved.push(match op {
+            Conceal::Hide(_) => Conceal::Hide(range),
+            Conceal::Replace { text, style, .. } => Conceal::Replace { range, text, style },
+        });
+    }
+    if cut.pad > 0 {
+        ops.push(Conceal::plain(cut.keep..cut.keep + 1, format!(" {}", pad.concat())));
+    }
+    ops.extend(moved);
 }
 
 /// One line of a display block: its `$$` delimiters hide and what is between
