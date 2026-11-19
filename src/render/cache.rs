@@ -29,7 +29,7 @@ use crate::config::schema::{GlyphConfig, MarkdownConfig};
 use crate::render::conceal::{ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
 use crate::render::hidden::{self, Hidden};
-use crate::render::layout::{content_column, no_wrap, wrap_hanging, RowSource, VisualRow};
+use crate::render::layout::{content_column, no_wrap, text_width, wrap_hanging, RowSource, VisualRow};
 use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
 use crate::transclude::preview::Expansion;
@@ -541,6 +541,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         &app.theme,
         &cfg.markdown,
         &inline,
+        cfg.editor.tab_width,
     );
     let guides = guides_for(&source, &block, cfg.editor.tab_width);
     indent::apply(&mut styled, &guides, &app.theme, &cfg.glyphs);
@@ -561,11 +562,13 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     // SPEC §6: a wrapped list item's continuation lines up under its content.
     // Measured on each DISPLAY form separately — the marker it hangs off is a
     // different width revealed than concealed.
-    let (hang_raw, hang_concealed) = if cfg.layout.hanging_indent
-        && matches!(block, BlockKind::ListItem { .. })
-    {
+    let (hang_raw, hang_concealed) = if !cfg.layout.hanging_indent {
+        (0, 0)
+    } else if matches!(block, BlockKind::ListItem { .. }) {
         let tw = cfg.editor.tab_width as u16;
         (content_column(&source, tw, ""), content_column(&concealed, tw, &cfg.glyphs.indent_guide))
+    } else if let BlockKind::Quote(depth) = block {
+        quote_hang(&source, &concealed, depth, cfg)
     } else {
         (0, 0)
     };
@@ -623,6 +626,29 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         hang_concealed,
         embed,
     }
+}
+
+/// The hanging indent of a list item inside a quote, in each form: the
+/// width the markers take, then the item's content column as it would be
+/// outside the quote. Concealed, the markers are the bars and the rest is the
+/// item's concealed form (`conceal::quote_ops`); raw, they are the markers
+/// and the marker's space, and the rest is the view text, whose `pad` spaces
+/// take the tab's other columns.
+fn quote_hang(source: &str, concealed: &str, depth: u8, cfg: &crate::config::Config) -> (u16, u16) {
+    let tw = cfg.editor.tab_width;
+    let Some(inner) = crate::render::quote::Inner::of(source, depth, tw).filter(|i| i.is_item()) else {
+        return (0, 0);
+    };
+    let hang = |lead: u16, content: u16| if content == 0 { 0 } else { lead + content };
+    let markers: String = source.chars().take(inner.cut.keep).collect();
+    let lead_raw = text_width(&markers, tw) + inner.cut.skip as u16;
+    let raw = hang(lead_raw, content_column(&inner.cut.view, tw as u16, ""));
+    let bars = crate::render::quote::bars(&cfg.glyphs.quote_bar, depth);
+    let shown = match concealed.strip_prefix(bars.as_str()) {
+        Some(rest) => hang(text_width(&bars, tw), content_column(rest, tw as u16, &cfg.glyphs.indent_guide)),
+        None => 0,
+    };
+    (raw, shown)
 }
 
 #[cfg(test)]

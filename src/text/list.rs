@@ -934,14 +934,8 @@ impl Quoted {
         Cursor::new(line, col)
     }
 
-    /// For a cut: how many chars after the marker the view leaves out, and
-    /// how many view columns stand for them.
     fn shape(&self, c: Cut) -> (usize, usize) {
-        match c.after {
-            After::Nothing => (0, 0),
-            After::Space => (1, 0),
-            After::Tab => (1, self.tab_width - 1),
-        }
+        shape(c, self.tab_width)
     }
 
     /// The lines whose view text changed, each as its document line and the
@@ -989,13 +983,59 @@ impl Quoted {
     }
 }
 
+/// For a cut: how many chars after the marker the view leaves out, and how
+/// many view columns stand for them.
+fn shape(c: Cut, tab_width: usize) -> (usize, usize) {
+    match c.after {
+        After::Nothing => (0, 0),
+        After::Space => (1, 0),
+        After::Tab => (1, tab_width.max(1) - 1),
+    }
+}
+
 /// A quote line's text past the cut.
 fn view_text(line: &str, c: Cut, tab_width: usize) -> String {
     let rest: String = line.chars().skip(c.keep).collect();
     match c.after {
         After::Nothing => rest,
         After::Space => rest[1..].to_string(),
-        After::Tab => format!("{}{}", " ".repeat(tab_width - 1), &rest[1..]),
+        After::Tab => format!("{}{}", " ".repeat(tab_width.max(1) - 1), &rest[1..]),
+    }
+}
+
+/// One quote line read the way `Quoted` reads it: cut after its last marker,
+/// the rest as view text. The renderer draws a quote line from this, so a
+/// list inside a quote is drawn at the depth the list commands give it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuoteLine {
+    /// Chars up to and including the last marker.
+    pub keep: usize,
+    /// Chars after the marker that the view leaves out: the marker's space
+    /// or tab, or none.
+    pub skip: usize,
+    /// View columns that stand for them: `tab_width - 1` for a tab, else 0.
+    pub pad: usize,
+    /// The line past the cut, a tab after the marker written as `pad`
+    /// spaces.
+    pub view: String,
+}
+
+impl QuoteLine {
+    /// `line` cut after its `depth`-th marker; `None` when it has fewer.
+    pub fn new(line: &str, depth: u8, tab_width: usize) -> Option<QuoteLine> {
+        let c = cut(line, depth)?;
+        let (skip, pad) = shape(c, tab_width);
+        Some(QuoteLine { keep: c.keep, skip, pad, view: view_text(line, c, tab_width) })
+    }
+
+    /// The document char that view column `col` stands for. A column inside
+    /// a tab's `pad` is the tab.
+    pub fn doc_col(&self, col: usize) -> usize {
+        if col < self.pad {
+            self.keep
+        } else {
+            self.keep + self.skip + col - self.pad
+        }
     }
 }
 
@@ -1087,6 +1127,29 @@ mod tests {
         let q = quoted("x\n  > >   - a\n", 1).unwrap();
         assert_eq!(q.rewrite(1, "- a"), "  > > - a");
         assert_eq!(q.markers(1), "  > > ");
+    }
+
+    /// One quote line read on its own, as the renderer reads it, has the
+    /// view text and columns the quote's view gives it.
+    #[test]
+    fn a_quote_line_reads_as_the_quote_view_does() {
+        let text = "> - a\n>   - b\n>- c\n>\t    - d\n  > >  - e\n";
+        let q = quoted(text, 0).unwrap();
+        for (i, line) in text.lines().enumerate().take(4) {
+            let one = QuoteLine::new(line, 1, 4).unwrap();
+            assert_eq!(one.view, q.view.line_text(i + 1), "{line:?}");
+            for col in one.pad..one.view.chars().count() {
+                assert_eq!(one.doc_col(col), q.to_doc(Cursor::new(i + 1, col), line).col, "{line:?} {col}");
+            }
+        }
+        // A column inside a tab's pad is the tab.
+        let tab = QuoteLine::new(">\t- d", 1, 4).unwrap();
+        assert_eq!((tab.keep, tab.skip, tab.pad, tab.view.as_str()), (1, 1, 3, "   - d"));
+        assert_eq!(tab.doc_col(0), 1);
+        assert_eq!(tab.doc_col(3), 2);
+        let deep = QuoteLine::new("  > >  - e", 2, 4).unwrap();
+        assert_eq!((deep.keep, deep.view.as_str()), (5, " - e"));
+        assert_eq!(QuoteLine::new("> e", 2, 4), None);
     }
 
     /// A `---` on a quote's first line is a rule in the view, as it is in
