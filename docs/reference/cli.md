@@ -70,7 +70,8 @@ are in the [key reference](keys.md#read-only), and
 ## Details
 
 With `--init-config`, `--config` sets the destination. The default is
-`$XDG_CONFIG_HOME/shoin` or `~/.config/shoin`.
+`$XDG_CONFIG_HOME/shoin` or `~/.config/shoin`. See
+[Configuration defaults](config.md) for the settings it writes.
 
 Without `--out` or `--stdout`, `--export` writes `<name>.<format>` beside
 the file, or `<name>-export.<format>` when that is the file itself: Markdown

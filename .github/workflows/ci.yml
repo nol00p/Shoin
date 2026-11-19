@@ -44,6 +44,10 @@ jobs:
       # is no terminal to allocate and nothing to install.
       - run: cargo test
 
+      - name: Rustdoc
+        if: runner.os == 'Linux'
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
       # Random-session test (src/app/fuzz.rs): random keys, pastes, mouse
       # events, commands and resizes against a real App. It is #[ignore]d in
       # the normal run because it changes the working directory and HOME, so

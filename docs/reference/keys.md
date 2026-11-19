@@ -17,7 +17,7 @@ In Normal and Visual mode. Motions take a count, such as `3w`.
 | `0` `^` `$` | line start / first non-blank / line end |
 | `{` `}` | previous / next paragraph |
 | `gg` `G` | first / last line (with a count, go to that line) |
-| `f{c}` `t{c}` `F{c}` `T{c}` | find / till a character forward / backward |
+| `f` `t` `F` `T` | find / till the next character you type, forward / backward |
 | `;` `,` | repeat / reverse the last `f` or `t` |
 | `*` | search for the word under the cursor |
 | `H` `M` `L` | top / middle / bottom of the visible screen |
@@ -35,11 +35,13 @@ acts on whole lines.
 |---|---|
 | `d` `c` `y` | delete / change / yank — `dd` `cc` `yy` for the line |
 | `>` `<` | indent / outdent. Use `>>` or `<<` for whole lines |
+| `>al` `<al` | indent / outdent the item with its sub-items |
+| `>aL` `<aL` | indent / outdent every item at that level |
 | `gu` `gU` | lowercase / uppercase (`guiw`, `guu`, `gUU`) |
 | `D` `C` | delete / change to the end of the line |
 | `Y` | yank whole lines, like `yy` |
 | `x` `X` | delete the character under / before the cursor |
-| `r{c}` | replace the character under the cursor |
+| `r` | replace the character under the cursor with the next character you type |
 | `~` | toggle case |
 | `J` | join with the next line |
 | `p` `P` | paste after / before |
@@ -66,8 +68,11 @@ After an operator, or in Visual mode: `diw`, `ca(`, `vip`.
 
 ## Registers
 
+In Normal and Visual mode.
+
 | Key | Register |
 |---|---|
+| `"` | choose a register before a command |
 | `"a{cmd}` | use register `a`: `"ayy`, `"ap`, `"add` |
 | `"A{cmd}` | append to register `a` |
 | `""` | the unnamed register |
@@ -93,26 +98,33 @@ selection in Visual. Each edit is one undo step.
 
 ## Lists
 
-In Normal mode, and `Alt-j` `Alt-k` in Visual too. See
-[Editing](../editing.md#lists).
+In Normal and Visual mode. See [Editing](../editing.md#lists).
 
 | Key | Does |
 |---|---|
 | `Alt-j` `Alt-k` | move the list item past the next / previous one, with its sub-items (a count moves it past that many); in Visual, the items the selection touches |
-| `>al` `<al` | indent / outdent the item with its sub-items |
-| `>aL` `<aL` | indent / outdent every item at that level |
-| `Tab` `Shift-Tab` | in Insert mode, the same as `>al` `<al` |
 
 To rebind them, the actions are `list_item_down` and `list_item_up` (Normal
 and Visual: set them under `[keys.normal]` and `[keys.visual]`)
 and `list_indent` and `list_outdent` (Insert) — see
 [Configuration](../configuration.md#key-bindings).
 
+## Normal mode
+
+| Key | Does |
+|---|---|
+| `i` `a` | enter Insert before / after the cursor |
+| `I` `A` | enter Insert at the first non-blank / at the end of the line |
+| `o` `O` | open a new line in Insert below / above this line |
+| `v` `V` | start a charwise / linewise selection |
+| `u` `Ctrl-r` | undo / redo |
+| `.` | repeat the last change |
+| `Esc` | cancel a count, operator or most pending sequences |
+
 ## Insert mode
 
-Enter Insert from Normal with `i` before or `a` after the cursor. Use
-`I` at the first non-blank or `A` at the end of the line. Use `o` to open
-a line below or `O` to open one above.
+Enter Insert with `i`, `a`, `I`, `A`, `o` or `O` from
+[Normal mode](#normal-mode).
 
 | Key | Does |
 |---|---|
@@ -129,15 +141,15 @@ a line below or `O` to open one above.
 
 | Key | Does |
 |---|---|
-| `v` `V` | start a charwise / linewise selection at the cursor |
+| `v` `V` | start a new charwise / linewise selection at the cursor |
 | drag | select by character, from where the button went down |
 | `d` `x` / `c` `s` / `y` | delete / change / yank the selection |
 | `o` | swap ends |
 | `Esc` | leave Visual |
 | `>` `<` `u` `U` | indent / outdent / lowercase / uppercase |
-| `i{obj}` `a{obj}` | select a text object (`viw`, `vap`) |
+| `i` `a` | select a text object with the next key (`viw`, `vap`) |
 | `p` `P` | replace the selection with the register; `p` puts what it replaced in the register, `P` keeps the register |
-| `~` `r{c}` | toggle the case / replace every selected character with `c` |
+| `~` `r` | toggle the case / replace every selected character with the next character you type |
 | `J` | join the selected lines |
 | `D` `X` `Y` | delete / delete / yank the selected lines |
 | `C` `S` `R` | change the selected lines |
@@ -155,13 +167,10 @@ line. They have no key until you give them one:
 "K" = "move_lines_up"
 ```
 
-## Other
+## Normal and Visual mode
 
 | Key | Does |
 |---|---|
-| `u` `Ctrl-r` | undo / redo in Normal |
-| `.` | repeat the last change in Normal |
-| `Esc` | cancel a count, operator or most pending sequences |
 | `1`–`9` | start a count. `0` can follow another digit |
 | `Ctrl-s` | save, as `:w` does |
 | `/` `?` `n` `N` | search forward / back, repeat / reverse |
@@ -170,8 +179,8 @@ line. They have no key until you give them one:
 
 ## Folds
 
-A fold shows a list item with its sub-items, or a heading's section, as its
-first line. See [Editing](../editing.md#folding).
+In Normal and Visual mode. A fold shows only the first line of a list
+item with sub-items or of a heading's section. See [Editing](../editing.md#folding).
 
 | Key | Does |
 |---|---|
@@ -216,9 +225,10 @@ After moving or running another command, the first edit is refused with
 
 ## Leader keys
 
-These are the shipped defaults in `keys.conf`, and they're built in. Remap
-them under `[keys.normal]` and `[keys.visual]` for their respective
-modes, or set one to `"none"` to remove it.
+These are the shipped Normal-mode defaults from `keys.conf`. The
+[Visual-mode bindings](#visual-mode) have their own leader keys. Remap
+them under `[keys.normal]` or `[keys.visual]`, or set one to `"none"` to
+remove it.
 
 | Key | Does |
 |---|---|
@@ -238,6 +248,8 @@ modes, or set one to `"none"` to remove it.
 | `<leader>so` | keep only this pane |
 
 ## Panes
+
+In Normal and Visual mode.
 
 | Key | Does |
 |---|---|

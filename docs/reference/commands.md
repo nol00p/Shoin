@@ -28,15 +28,15 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 
 | Command | Does |
 |---|---|
-| `:u` `:un` `:und` `:undo` | undo, like `u` |
-| `:red` `:redo` | redo, like `Ctrl-r` |
+| `:undo` `:u` `:un` `:und` | undo, like `u` |
+| `:redo` `:red` | redo, like `Ctrl-r` |
 | `:fixlist` | re-indent the list under the cursor, or every list a Visual selection touches, so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
 
 ## Buffers and panes
 
 | Command | Does |
 |---|---|
-| `:ls` `:buffers` | list open buffers (▸ marks the current one) |
+| `:buffers` `:ls` | list open buffers (▸ marks the current one) |
 | `:buffer [name or number]` `:b` | switch by number or name fragment, preferring a whole name. Bare lists buffers |
 | `:bnext` `:bn` | switch to the next buffer |
 | `:bprevious` `:bp` `:bprev` | switch to the previous buffer |
@@ -60,7 +60,7 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 
 ## Settings
 
-`:set <key> [value]` changes a setting for this session.
+Settings changed with `:set` apply to the current session.
 
 | Option | Also | Values | Default | Does |
 |---|---|---|---|---|
@@ -90,8 +90,12 @@ numeric options show the current value. `align` and `focus` cycle.
 | Command | Does |
 |---|---|
 | `:e!` `:reload` | re-read the config |
-| `:help [topic]` | open help. Topics include `basics`, `navigation`, `editing`, `writing`, `view`, `files`, `config`. `Tab` and `Shift-Tab` switch tabs |
-| `:h` `:help <word>` | help opened at a key, command, setting or section: `:help gb`, `:help view`, `:help measure`, `:help tree`. Inside help, `/` searches every tab and `n` `N` move between matches |
+| `:set <key> [value]` | change a setting for this session |
+| `:help [topic]` `:h` | open help. Topics include `basics`, `navigation`, `editing`, `writing`, `view`, `files`, `config`. `Tab` and `Shift-Tab` switch tabs |
+
+Give `:help` a key, command, setting or section to open it directly, such as
+`:help gb`, `:help view`, `:help measure` or `:help tree`. Inside help,
+`/` searches every tab and `n` and `N` move between matches.
 
 ## Completing with Tab
 

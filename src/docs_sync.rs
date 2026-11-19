@@ -10,7 +10,7 @@
 //! The docs are read at test time rather than with `include_str!`, so the
 //! tests check the files as they are on disk.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use clap::CommandFactory;
@@ -18,6 +18,8 @@ use clap::CommandFactory;
 use crate::app::App;
 use crate::config::Config;
 use crate::help::Help;
+use crate::input::pending::{Key, KeyCode};
+use crate::values::OPTIONS;
 
 /// A file from the repository, by its path from the root.
 fn read(path: &str) -> String {
@@ -93,41 +95,144 @@ fn run(cmd: &str) -> String {
     app.flash.and_then(|f| f.text).unwrap_or_default()
 }
 
-/// `:help` and the commands reference list the same commands.
-#[test]
-fn help_and_the_commands_page_name_the_same_commands() {
-    let help = ex_commands(&help_text());
-    let docs = ex_commands(&read("docs/reference/commands.md"));
-    let only_help: Vec<_> = help.difference(&docs).collect();
-    let only_docs: Vec<_> = docs.difference(&help).collect();
+const COMMANDS_PAGE: &str = "docs/reference/commands.md";
+const CLI_PAGE: &str = "docs/reference/cli.md";
+const CONFIG_PAGE: &str = "docs/reference/config.md";
+const KEYS_PAGE: &str = "docs/reference/keys.md";
+
+fn assert_same<T: Ord + std::fmt::Debug>(
+    expected: &BTreeSet<T>, actual: &BTreeSet<T>, source: &str, destination: &str,
+) {
+    let missing: Vec<_> = expected.difference(actual).collect();
+    let extra: Vec<_> = actual.difference(expected).collect();
     assert!(
-        only_help.is_empty() && only_docs.is_empty(),
-        "only in :help: {only_help:?}\nonly in docs/reference/commands.md: {only_docs:?}"
+        missing.is_empty() && extra.is_empty(),
+        "{destination} compared with {source}\nmissing: {missing:?}\nunexpected: {extra:?}",
     );
 }
 
-/// Every `:command` the help or any doc mentions is one the editor runs.
-#[test]
-fn every_documented_command_exists() {
-    let mut named = ex_commands(&help_text());
-    for (_, text) in all_docs() {
-        named.extend(ex_commands(&text));
-    }
-    let unknown: Vec<_> = named.iter().filter(|c| run(c).starts_with("not a command")).collect();
-    assert!(unknown.is_empty(), "documented but not commands: {unknown:?}");
+type AliasGroups = BTreeSet<(String, BTreeSet<String>)>;
+
+/// COMMANDS is private to app. Read its literal tuples without widening the
+/// module's visibility. OPTIONS is available directly.
+fn command_table() -> AliasGroups {
+    let source = read("src/app/commands.rs");
+    let (_, declaration) = source.split_once("const COMMANDS:").expect("COMMANDS declaration");
+    let (_, table) = declaration.split_once("= &[").expect("COMMANDS initializer");
+    let (table, _) = table.split_once("\n];").expect("end of COMMANDS");
+    table.trim().split_terminator("),").map(|entry| {
+        let mut names = entry.split('"').skip(1).step_by(2);
+        let name = names.next().unwrap_or_else(|| panic!("unrecognized COMMANDS entry: {entry:?}"));
+        (name.to_string(), names.map(str::to_string).collect())
+    }).collect()
 }
 
-/// Every `:set` option the help or any doc mentions is one `:set` knows.
+fn option_table() -> AliasGroups {
+    OPTIONS.iter().map(|(name, aliases)| {
+        (name.to_string(), aliases.iter().map(|alias| alias.to_string()).collect())
+    }).collect()
+}
+
+fn code_spans(cell: &str) -> impl Iterator<Item = &str> {
+    cell.split('`').skip(1).step_by(2)
+}
+
+fn section<'a>(page: &'a str, heading: &str) -> &'a str {
+    let marker = format!("\n## {heading}\n");
+    let (_, rest) = page.split_once(&marker).unwrap_or_else(|| panic!("missing ## {heading}"));
+    rest.split_once("\n## ").map_or(rest, |(body, _)| body)
+}
+
+/// The command cell lists the canonical name and its aliases together.
+fn command_groups(page: &str) -> AliasGroups {
+    let mut groups = BTreeSet::new();
+    for line in page.lines() {
+        let Some(cell) = line.strip_prefix('|').and_then(|row| row.split_once(" |").map(|(cell, _)| cell)) else { continue };
+        // Force forms are checked by running the documented commands.
+        let mut names = code_spans(cell).filter_map(|span| span.strip_prefix(':'))
+            .filter_map(|span| span.split_whitespace().next())
+            .filter(|name| !name.ends_with('!'));
+        if let Some(name) = names.next() {
+            groups.insert((name.to_string(), names.map(str::to_string).collect()));
+        }
+    }
+    groups
+}
+
+fn option_groups(page: &str) -> AliasGroups {
+    section(page, "Settings").lines().filter_map(|line| {
+        let mut cells = line.strip_prefix('|')?.split('|');
+        let name = code_spans(cells.next()?).next()?;
+        let aliases = code_spans(cells.next()?).map(str::to_string).collect();
+        Some((name.to_string(), aliases))
+    }).collect()
+}
+
+#[test]
+fn the_commands_page_matches_the_code_tables() {
+    let page = read(COMMANDS_PAGE);
+    assert_same(&command_table(), &command_groups(&page), "COMMANDS", COMMANDS_PAGE);
+    assert_same(&option_table(), &option_groups(&page), "OPTIONS", COMMANDS_PAGE);
+}
+
+#[test]
+fn help_and_the_commands_page_name_the_same_commands() {
+    assert_same(&ex_commands(&help_text()), &ex_commands(&read(COMMANDS_PAGE)), ":help", COMMANDS_PAGE);
+}
+
+#[test]
+fn help_names_every_set_option_and_alias() {
+    let names = OPTIONS.iter().flat_map(|&(name, aliases)| std::iter::once(name).chain(aliases.iter().copied()))
+        .map(|name| name.to_string()).collect();
+    assert_same(&names, &set_options(&help_text()), "OPTIONS", ":help");
+}
+
+#[test]
+fn every_documented_command_exists() {
+    for (path, body) in all_docs().into_iter().chain([(":help".to_string(), help_text())]) {
+        let unknown: Vec<_> = ex_commands(&body).into_iter().filter(|name| run(name).starts_with("not a command")).collect();
+        assert!(unknown.is_empty(), "{path} names unknown commands: {unknown:?}");
+    }
+}
+
 #[test]
 fn every_documented_set_option_exists() {
-    let mut named = set_options(&help_text());
-    for (_, text) in all_docs() {
-        named.extend(set_options(&text));
+    for (path, body) in all_docs().into_iter().chain([(":help".to_string(), help_text())]) {
+        let unknown: Vec<_> = set_options(&body).into_iter()
+            .filter(|name| run(&format!("set {name}")).starts_with("unknown option"))
+            .collect();
+        assert!(unknown.is_empty(), "{path} names unknown :set options: {unknown:?}");
     }
-    assert!(!named.is_empty(), "the :set parser found nothing");
-    let unknown: Vec<_> =
-        named.iter().filter(|o| run(&format!("set {o}")).starts_with("unknown option")).collect();
-    assert!(unknown.is_empty(), "documented but not :set options: {unknown:?}");
+}
+
+fn fenced_block<'a>(page: &'a str, language: &str, path: &str) -> &'a str {
+    let fence = format!("\n```{language}\n");
+    page.split_once(&fence).and_then(|(_, tail)| tail.split_once("\n```"))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("{path}: missing fenced {language} block"))
+}
+
+#[test]
+fn the_command_line_page_matches_help_output() {
+    let output = crate::Cli::command()
+        .color(clap::ColorChoice::Never)
+        .try_get_matches_from(["shoin", "--help"])
+        .expect_err("--help exits before opening the editor");
+    assert_eq!(output.kind(), clap::error::ErrorKind::DisplayHelp);
+    let help = output.to_string();
+    let page = read(CLI_PAGE);
+    let expected = help.trim_end_matches('\n');
+    let actual = fenced_block(&page, "text", CLI_PAGE);
+    // Find the first mismatching line, including an added or deleted line.
+    let mut expected = expected.lines();
+    let mut actual = actual.lines();
+    for line in 1.. {
+        let (want, found) = (expected.next(), actual.next());
+        assert_eq!(want, found, "{CLI_PAGE}: --help block line {line} (clap vs docs)");
+        if want.is_none() {
+            break;
+        }
+    }
 }
 
 /// The long flags `shoin` accepts, from clap itself.
@@ -235,81 +340,290 @@ fn every_documented_flag_exists() {
     assert!(stale.is_empty(), "flags shoin does not have: {stale:?}");
 }
 
-/// The keys after `<leader>` in the shipped `keys.conf`, from its live
-/// (uncommented) bindings.
-fn leader_keys() -> BTreeSet<String> {
-    read("shoin/keys.conf")
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.strip_prefix("\"<leader>"))
-        .filter_map(|l| l.split_once('"').map(|(key, _)| key.to_string()))
+/// The reference's first-column keys, grouped by the modes of each section.
+fn documented_keys(page: &str) -> BTreeSet<(&str, &str)> {
+    let mut modes: &[&str] = &[];
+    let mut keys = BTreeSet::new();
+    for line in page.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            modes = match heading {
+                "Normal mode" | "Operators" | "Leader keys" => &["normal"],
+                "Insert mode" => &["insert"],
+                "Visual mode" => &["visual"],
+                "Normal and Visual mode" | "Motions" | "Writer verbs" | "Lists" | "Registers" | "Folds" | "Panes" =>
+                    &["normal", "visual"],
+                _ => &[],
+            };
+        }
+        if let Some(cell) = line.strip_prefix('|').and_then(|row| row.split('|').next()) {
+            for key in code_spans(cell) {
+                for &mode in modes {
+                    keys.insert((mode, key));
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn key_name(key: Key) -> String {
+    let mut name = String::new();
+    for (on, prefix) in [(key.ctrl, "Ctrl-"), (key.alt, "Alt-"), (key.shift, "Shift-")] {
+        if on {
+            name.push_str(prefix);
+        }
+    }
+    match key.code {
+        KeyCode::Char('\0') => name.push_str("<leader>"),
+        KeyCode::Char(' ') => name.push_str("Space"),
+        KeyCode::Char(c) => name.push(c),
+        code => name.push_str(&format!("{code:?}")),
+    }
+    name
+}
+
+fn shipped_key_name(key: &str) -> String {
+    // Preserve the leader placeholder through the real config key parser.
+    let sequence = crate::config::keys::parse_seq(key, "\0")
+        .unwrap_or_else(|err| panic!("shoin/keys.conf: {key}: {err}"));
+    let mut name = String::new();
+    let mut separate = false;
+    for key in sequence {
+        if separate {
+            name.push(' ');
+        }
+        let part = key_name(key);
+        separate = part.len() > 1 && part != "<leader>";
+        name.push_str(&part);
+    }
+    name
+}
+
+fn shipped_bindings(body: &str) -> BTreeSet<(String, String)> {
+    let tables = body.parse::<toml::Table>().expect("shoin/keys.conf parses");
+    tables["keys"].as_table().unwrap().iter().flat_map(|(mode, bindings)| {
+        bindings.as_table().unwrap().keys().map(|key| (mode.clone(), shipped_key_name(key)))
+    }).collect()
+}
+
+fn missing_bindings(
+    page: &str, expected: &BTreeSet<(String, String)>,
+) -> Vec<String> {
+    let documented = documented_keys(page);
+    expected.iter().filter(|(mode, key)| !documented.contains(&(mode.as_str(), key.as_str())))
+        .map(|(mode, key)| format!("{mode}: {key}"))
         .collect()
 }
 
-/// Every shipped leader binding is on the shortcuts page and in the keys
-/// reference.
 #[test]
-fn every_leader_binding_is_documented() {
-    let keys = leader_keys();
-    assert!(!keys.is_empty(), "no <leader> bindings found in shoin/keys.conf");
+fn the_keys_page_lists_shipped_keys_in_their_modes() {
+    let keys = shipped_bindings(&read("shoin/keys.conf"));
+    let missing = missing_bindings(&read(KEYS_PAGE), &keys);
+    assert!(missing.is_empty(), "{KEYS_PAGE} missing shoin/keys.conf bindings by mode: {missing:?}");
+
     let help = help_text();
-    let reference = read("docs/reference/keys.md");
-    let mut missing = Vec::new();
-    for key in &keys {
-        // Followed by a space or the end, so `f` is not found inside `fe`.
-        let in_help = help.match_indices(&format!("<leader>{key}")).any(|(i, m)| {
-            help[i + m.len()..].chars().next().is_none_or(char::is_whitespace)
+    for (_, key) in keys {
+        let found = help.match_indices(&key).any(|(start, word)| {
+            help[start + word.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric())
         });
-        if !in_help {
-            missing.push(format!(":help: <leader>{key}"));
-        }
-        if !reference.contains(&format!("`<leader>{key}`")) {
-            missing.push(format!("docs/reference/keys.md: <leader>{key}"));
-        }
+        assert!(found, ":help is missing shoin/keys.conf binding {key}");
     }
-    assert!(missing.is_empty(), "leader bindings not documented: {missing:?}");
 }
 
-/// The other live bindings in the shipped `keys.conf` — `<C-s>`, `<M-j>` —
-/// written the way the docs write keys: `Ctrl-s`, `Alt-j`.
-fn other_shipped_keys() -> BTreeSet<String> {
-    read("shoin/keys.conf")
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#') && !l.starts_with("\"<leader>"))
-        .filter_map(|l| l.strip_prefix('"')?.split_once('"').map(|(key, _)| key.to_string()))
-        .map(|key| {
-            let inner = key.trim_start_matches('<').trim_end_matches('>');
-            match inner.split_once('-') {
-                Some(("C", k)) => format!("Ctrl-{k}"),
-                Some(("M", k)) => format!("Alt-{k}"),
-                Some(("S", k)) => format!("Shift-{k}"),
-                _ => inner.to_string(),
+fn builtin_bindings() -> BTreeSet<(String, String)> {
+    use crate::input::action::Action;
+    use crate::input::bindings::{after_prefix, normal, visual, Verb};
+
+    let chars = (' '..='~').map(KeyCode::Char);
+    let codes: Vec<_> = chars.chain([
+        KeyCode::Esc, KeyCode::Left, KeyCode::Down, KeyCode::Up, KeyCode::Right,
+        KeyCode::Enter, KeyCode::Backspace, KeyCode::Delete, KeyCode::Tab,
+        KeyCode::Home, KeyCode::End, KeyCode::PageUp, KeyCode::PageDown,
+    ]).collect();
+    let mut out = BTreeSet::new();
+    let window_keys = window_keys();
+    for (mode, resolve) in [("normal", normal as fn(Key) -> Option<Verb>), ("visual", visual)] {
+        for code in codes.iter().copied() {
+            for (ctrl, alt) in [(false, false), (true, false), (false, true)] {
+                let key = Key { code, ctrl, alt, shift: false };
+                let Some(verb) = resolve(key) else { continue };
+                // Modified arrows/Esc and most Alt chords fall through to the
+                // unmodified binding. Only explicit chords are documented.
+                if (ctrl || alt) && !matches!(code, KeyCode::Char(_))
+                    || alt && Some(verb.clone()) == resolve(Key { alt: false, ..key })
+                {
+                    continue;
+                }
+                // The Visual table inherits these Normal actions, which
+                // app::visual_key consumes without acting on the selection.
+                if mode == "visual" && matches!(verb, Verb::Act(
+                    Action::OpenAbove | Action::OpenBelow | Action::DeleteChar | Action::Redo | Action::Repeat
+                )) {
+                    continue;
+                }
+                let first = key_name(key);
+                if let Verb::Prefix(prefix) = verb {
+                    for next in codes.iter().copied() {
+                        let key = Key { code: next, ctrl: false, alt: false, shift: false };
+                        // after_prefix passes every Ctrl-w suffix through to
+                        // window_command; only that handler assigns bindings.
+                        if after_prefix(prefix, key, mode == "visual").is_some_and(|v| {
+                            !matches!(v, Verb::Act(Action::Window(c)) if !window_keys.contains(&c))
+                        }) {
+                            let separator = if ctrl { " " } else { "" };
+                            out.insert((mode.to_string(), format!("{first}{separator}{}", key_name(key))));
+                        }
+                    }
+                } else {
+                    out.insert((mode.to_string(), first));
+                }
+            }
+        }
+    }
+    out.extend(insert_keys().into_iter().map(|key| ("insert".to_string(), key)));
+    out
+}
+
+/// Read the character patterns of the window-command dispatcher.
+fn window_keys() -> BTreeSet<char> {
+    let source = read("src/app/tree.rs");
+    let (_, handler) = source.split_once("match key {").expect("window_command dispatch");
+    let (arms, _) = handler.split_once("            _ =>").expect("window_command fallback");
+    arms.lines().filter_map(|line| line.split_once("=>")).flat_map(|(pattern, _)| {
+        pattern.trim().split(" | ").filter_map(|part| {
+            let c = part.strip_prefix('\'')?.strip_suffix('\'')?;
+            let mut chars = c.chars();
+            chars.next().filter(|_| chars.next().is_none())
+        })
+    }).collect()
+}
+
+/// Read the named keys and explicit control chords in the Insert dispatcher.
+fn insert_keys() -> BTreeSet<String> {
+    let source = read("src/app/insert.rs");
+    let (_, body) = source.split_once("fn on_key_insert(").expect("Insert handler");
+    let (_, arms) = body.split_once("match key.code {").expect("Insert key dispatch");
+    arms.lines().filter_map(|line| line.split_once("=>")).flat_map(|(pattern, _)| {
+        pattern.trim().split(" | ").filter_map(|arm| {
+            let key = arm.strip_prefix("KeyCode::")?.split_whitespace().next()?;
+            match key {
+                "BackTab" => Some("Shift-Tab".to_string()),
+                _ if key.starts_with("Char(") => {
+                    let letter = key.strip_prefix("Char('")?.strip_suffix("')")?;
+                    arm.contains("KeyModifiers::CONTROL").then(|| format!("Ctrl-{letter}"))
+                }
+                _ => Some(key.to_string()),
             }
         })
-        .collect()
+    }).collect()
 }
 
-/// Every other shipped binding is in the keys reference and in `:help` too.
-/// `Ctrl-s` shipped for a long time with neither saying so, because the
-/// check above only looks at `<leader>` keys.
 #[test]
-fn every_shipped_binding_is_documented() {
-    let keys = other_shipped_keys();
-    assert!(keys.contains("Ctrl-s"), "parsed shoin/keys.conf: {keys:?}");
-    let help = help_text();
-    let reference = read("docs/reference/keys.md");
-    let mut missing = Vec::new();
-    for key in &keys {
-        if !reference.contains(&format!("`{key}`")) {
-            missing.push(format!("docs/reference/keys.md: {key}"));
+fn the_keys_page_lists_builtin_keys_in_their_modes() {
+    let missing = missing_bindings(&read(KEYS_PAGE), &builtin_bindings());
+    assert!(missing.is_empty(), "{KEYS_PAGE} missing built-in bindings by mode: {missing:?}");
+}
+
+/// The resolved defaults expose the fixed schema fields through Debug, the
+/// same representation used by --print-config and the shipped equality test.
+fn default_config_fields() -> BTreeSet<String> {
+    let config = format!("{:#?}", Config::default());
+    let mut fields = BTreeSet::new();
+    let mut section = "";
+    for line in config.lines() {
+        if let Some(field) = debug_field(line, 4) {
+            section = field;
         }
-        if !help.contains(key.as_str()) {
-            missing.push(format!(":help: {key}"));
+        // Key bindings and theme overrides are maps with their own vocabulary.
+        if !matches!(section, "keys" | "theme") {
+            if let Some(field) = debug_field(line, 8) {
+                fields.insert(format!("{section}.{field}"));
+            }
         }
     }
-    assert!(missing.is_empty(), "shipped bindings not documented: {missing:?}");
+
+    // Theme overrides are a flat map, so its dispatchers name the fields
+    // that have defaults. theme.name is optional and has no authored value.
+    let theme = read("src/render/theme.rs");
+    for (function, section) in [("set_color", "theme"), ("set_style", "theme.styles")] {
+        let marker = format!("fn {function}(");
+        let (_, body) = theme.split_once(&marker).expect("theme dispatcher");
+        let (arms, _) = body.split_once("            _ =>").expect("theme dispatcher fallback");
+        for (pattern, _) in arms.lines().filter_map(|line| line.split_once("=>")) {
+            if let Some(field) = pattern.trim().strip_prefix('"').and_then(|part| part.strip_suffix('"')) {
+                fields.insert(format!("{section}.{field}"));
+            }
+        }
+    }
+    fields.insert("theme.indent_colors".to_string());
+    fields
+}
+
+fn debug_field(line: &str, indent: usize) -> Option<&str> {
+    if line.len() - line.trim_start().len() != indent {
+        return None;
+    }
+    line[indent..].split_once(": ").map(|(field, _)| field)
+}
+
+/// Compare authored TOML fields before serde supplies any missing values.
+fn config_entries(table: &toml::Table) -> BTreeMap<String, toml::Value> {
+    fn visit(
+        table: &toml::Table, prefix: &str, entries: &mut BTreeMap<String, toml::Value>,
+    ) {
+        for (name, value) in table {
+            let path = format!("{prefix}{name}");
+            if let Some(table) = value.as_table() {
+                visit(table, &format!("{path}."), entries);
+            } else {
+                entries.insert(path, value.clone());
+            }
+        }
+    }
+
+    let mut entries = BTreeMap::new();
+    visit(table, "", &mut entries);
+    entries
+}
+
+#[test]
+fn shipped_and_documented_config_spell_out_the_defaults() {
+    let expected = default_config_fields();
+    let mut shipped = BTreeMap::new();
+    for (name, _) in crate::config::init::SHIPPED {
+        if *name == "keys.conf" {
+            continue;
+        }
+        let body = read(&format!("shoin/{name}"));
+        let table = body.parse::<toml::Table>().unwrap_or_else(|err| panic!("shoin/{name}: {err}"));
+        shipped.extend(config_entries(&table));
+    }
+    let page = read(CONFIG_PAGE);
+    let docs = fenced_block(&page, "toml", CONFIG_PAGE)
+        .parse::<toml::Table>().unwrap_or_else(|err| panic!("{CONFIG_PAGE}: {err}"));
+    // The existing shipped-versus-default test covers the other values.
+    let config: Config = toml::Value::Table(docs.clone()).try_into().unwrap();
+    assert_eq!(
+        config.hints.enabled, Config::default().hints.enabled,
+        "{CONFIG_PAGE}: hints.enabled differs from the built-in default",
+    );
+    let docs = config_entries(&docs);
+
+    assert_same(&expected, &shipped.keys().cloned().collect(), "built-in defaults", "shoin/*.conf");
+    assert_same(&expected, &docs.keys().cloned().collect(), "built-in defaults", CONFIG_PAGE);
+    for (field, value) in shipped {
+        assert_eq!(docs[&field], value, "{CONFIG_PAGE}: {field} differs from shoin/*.conf");
+    }
+
+    // The configuration guide gives a subset of the defaults.
+    let guide_path = "docs/configuration.md";
+    let guide = read(guide_path);
+    let table = fenced_block(&guide, "toml", guide_path).parse::<toml::Table>().unwrap();
+    for (field, value) in config_entries(&table) {
+        if !field.starts_with("keys.") {
+            assert_eq!(docs.get(&field), Some(&value), "{guide_path}: {field} differs from {CONFIG_PAGE}");
+        }
+    }
 }
 
 /// Every name a `[keys.*]` binding can use, read from the three parsers'
@@ -394,9 +708,10 @@ fn every_documented_help_topic_exists() {
     let page = read("docs/reference/commands.md");
     let line = page.lines().find(|l| l.contains("`:help [topic]`")).expect("the :help row");
     let topics: Vec<&str> = line
-        .split('`')
-        .skip(3) // the command itself, then the text before the first topic
-        .step_by(2)
+        .splitn(3, '|')
+        .nth(2)
+        .into_iter()
+        .flat_map(code_spans)
         .collect();
     assert!(!topics.is_empty(), "no topics found in: {line}");
     for topic in topics {
