@@ -1,4 +1,4 @@
-//! Transclusion — `![[note]]` embedding. SPEC.md §14.
+//! Transclusion — `![[note]]` embedding.
 //!
 //! Three layers, and they are separable on purpose:
 //!   * `link` turns the text between the brackets into a path and a slice of

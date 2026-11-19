@@ -220,8 +220,6 @@ impl App {
             ("number", false) => self.set_numbers(arg),
             ("align", false) => self.set_align(arg),
             ("export", false) => self.open_export(arg),
-            // §14.3. Also re-reads every target, so it doubles as the way to
-            // refresh an expansion after editing the file it came from.
             ("embed", false) => self.set_embed_mode(arg),
             ("set", false) => self.set_option(arg),
             ("zen", false) => self.apply_action(Action::ToggleZen),
@@ -234,8 +232,7 @@ impl App {
         }
     }
 
-    /// `:embed [off|short|long|full]` — how much of an embed to expand
-    /// (SPEC.md §14.3).
+    /// `:embed [off|short|long|full]` — how much of an embed to expand.
     ///
     /// With no argument it TOGGLES, and turning it back on returns to whichever
     /// mode was last chosen: someone reading in `full` who glances at the raw
@@ -298,7 +295,7 @@ impl App {
     }
 
     /// `:align [left|center|right|justified]` — how each row of text sits
-    /// within the writing column (SPEC.md §6). Column placement itself
+    /// within the writing column. Column placement itself
     /// (`layout.align`, `center | left`) is untouched by this.
     ///
     /// With no argument it CYCLES left → center → right → justified → left,

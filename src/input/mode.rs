@@ -1,4 +1,4 @@
-//! Editor modes. SPEC.md §7.1.
+//! Editor modes.
 
 use std::path::PathBuf;
 

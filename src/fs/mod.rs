@@ -1,4 +1,4 @@
-//! File I/O. SPEC.md §10.
+//! File I/O.
 
 pub mod open;
 pub mod ops;

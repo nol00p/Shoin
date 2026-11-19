@@ -1,4 +1,4 @@
-//! Application state and the event loop. SPEC.md §9.
+//! Application state and the event loop.
 //!
 //! Build-order steps 1-3. Key handling here is direct: the operator-pending
 //! machine (`input::pending`) and the configurable keymap (`input::keymap`)
@@ -134,7 +134,7 @@ pub struct BufferState {
 
     /// Per-line block classification, parallel to the buffer. Rebuilt when the
     /// buffer revision changes; `block::invalidate_from` makes that
-    /// incremental. SPEC.md §5.2.
+    /// incremental.
     pub blocks: BlockCache,
 
     /// Per-line parse + wrap cache. Behind a `RefCell` because rendering takes
@@ -212,7 +212,7 @@ pub struct App {
     pub theme: Theme,
 
     /// Lines rendered raw this frame. Recomputed on every cursor move; a CHANGE
-    /// in it dirties the conceal cache even with no edit. SPEC.md §9.
+    /// in it dirties the conceal cache even with no edit.
     pub active: ActiveSet,
 
     pub flash: Option<Flash>,
@@ -226,7 +226,7 @@ pub struct App {
     /// the caret blue). Tracked so we only emit the escape on change.
     cursor_colored: bool,
 
-    // --- input (SPEC.md §7.2) ---
+    // --- input ---
     //
     // The whole Normal/Visual grammar — counts, operators, objects, registers,
     // multi-key sequences — lives in `input::pending`, behind the keymap. `App`
@@ -267,7 +267,7 @@ pub struct App {
     last_find: Option<(char, bool, bool)>,
 
     /// The registers, by name: `"` unnamed, `0` the yank register, `1`-`9` the
-    /// delete ring, `a`-`z` named. SPEC.md §7.2.
+    /// delete ring, `a`-`z` named.
     registers: HashMap<char, Register>,
     /// Register named by a `"x` prefix, consumed by the next store or paste.
     pending_register: Option<char>,
@@ -299,7 +299,7 @@ pub struct App {
     /// Live config-file watcher; `None` when running on built-in defaults.
     watcher: Option<ConfigWatcher>,
 
-    /// Focus mode and its cached bright region. SPEC.md §6.
+    /// Focus mode and its cached bright region.
     pub focus: FocusMode,
     pub focus_region: Option<FocusRegion>,
 
@@ -320,7 +320,7 @@ pub struct App {
     /// The last executed search; drives `n`/`N` and match highlighting.
     pub search: Option<Search>,
 
-    // --- `.` repeat (SPEC.md §7.3) ---
+    // --- `.` repeat ---
     /// Input of the last change, replayed by `.`.
     dot: Vec<Replay>,
     /// Input of the command currently in flight.
@@ -385,7 +385,7 @@ pub struct App {
     /// The `:help` overlay, when open. Intercepts input and rendering.
     pub help: Option<Help>,
 
-    /// The file-tree pane, when open (left side). SPEC.md IDEAS — Neo-tree style.
+    /// The file-tree pane, when open (left side).
     pub tree: Option<FileTree>,
 
     /// The `:diff` conflict view, when open. An overlay in the shape of `help`
@@ -404,8 +404,8 @@ pub struct App {
     /// and would otherwise forget a choice the user made at the command line.
     zen: Option<ZenState>,
 
-    /// Whether the screen is out of date. SPEC.md §9: draw only when something
-    /// changed. Every state change in this program originates from an event, so
+    /// Whether the screen is out of date. Draw only when something changed.
+    /// Every state change in this program originates from an event, so
     /// `step` raises this for whatever it handled and the loop lowers it after
     /// painting — an idle editor does no work between ticks.
     needs_redraw: bool,
@@ -1189,7 +1189,7 @@ impl App {
     }
 
     /// Recompute the focus region only when the cursor leaves it (or the buffer
-    /// changed) — not every frame. SPEC.md §6.
+    /// changed) — not every frame.
     fn refresh_focus(&mut self) {
         if self.focus == FocusMode::Off {
             self.focus_region = None;
@@ -1212,7 +1212,7 @@ impl App {
 
     /// Re-read the watched config and hot-swap it. A config that fails to parse
     /// is rejected with an error flash; the running editor is untouched, so a
-    /// typo mid-edit never costs you the buffer. SPEC.md §8.
+    /// typo mid-edit never costs you the buffer.
     fn reload_config(&mut self) {
         let candidate = match &self.watcher {
             Some(w) => w.reload(),
@@ -1540,7 +1540,7 @@ impl App {
     /// Run one resolved command: the action, with the count and register the
     /// grammar gathered for it. This is the ONLY place an action is executed —
     /// config bindings, the built-in grammar and `:` commands all land here,
-    /// which is what keeps undo grouping and dot-repeat tractable (SPEC §7.2).
+    /// which is what keeps undo grouping and dot-repeat tractable.
     fn run(&mut self, cmd: Command) {
         if self.view && cmd.action.edits() {
             // Refused once with a way out, then the way out: `i` after the

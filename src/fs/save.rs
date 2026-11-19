@@ -1,4 +1,4 @@
-//! Saving files. SPEC.md §10.
+//! Saving files.
 //!
 //! Atomic: write `.<file>.<pid>-<n>.swtmp` in the SAME directory (so `rename`
 //! stays on one filesystem), fsync, then rename over the target. A crash

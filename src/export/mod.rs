@@ -1,4 +1,4 @@
-//! `:export` — write the finished document out. SPEC.md §14.4.
+//! `:export` — write the finished document out.
 //!
 //! "Finished" means every `![[…]]` resolved and flattened, which is the same
 //! text `:embed full` shows on screen. The four formats are the four things
@@ -493,8 +493,7 @@ fn short(p: &Path) -> String {
 ///
 /// DELIBERATELY not built in. A PDF writer means a layout engine and embedded
 /// fonts inside a terminal text editor, for output worse than what the tools
-/// people already have produce. `pandoc` was named as the pipeline in SPEC
-/// §14.4 before any of this existed; this just runs it for you.
+/// people already have produce. Shoin passes the Markdown to `pandoc`.
 fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};

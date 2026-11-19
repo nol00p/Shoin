@@ -1,4 +1,4 @@
-//! Cursor and selection. SPEC.md §4.
+//! Cursor and selection.
 //!
 //! `col` is a CHAR offset within the line — not a byte offset, not a display
 //! column. Display width is a render concern, computed on demand for visible

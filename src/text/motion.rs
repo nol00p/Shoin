@@ -1,4 +1,4 @@
-//! Motions. SPEC.md §7.3.
+//! Motions.
 //!
 //! A motion resolves to a target `Cursor` plus whether it is inclusive,
 //! exclusive, or linewise — which is what operators need to compute a range.

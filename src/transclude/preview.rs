@@ -1,13 +1,10 @@
-//! Expanding an `![[…]]` line for LIVE PREVIEW. SPEC.md §14.3.
-//!
-//! One simplification is worth stating up front, because it removes most of the
-//! machinery §14.5 anticipated.
+//! Expanding an `![[…]]` line for LIVE PREVIEW.
 //!
 //! An embed occupies exactly ONE rope line — the `![[…]]` itself — however many
-//! screen rows it draws. And by SPEC §2 the active line always renders raw, so
+//! screen rows it draws. The active line always renders raw, so
 //! the cursor is on the `![[…]]` source whenever it is anywhere near the embed.
-//! The cursor therefore cannot get *inside* expanded content. Three of §14.3's
-//! requirements fall out of that for free rather than needing code:
+//! The cursor therefore cannot get *inside* expanded content. That gives
+//! preview three properties:
 //!
 //!   * embedded regions are read-only — there is nothing there to edit;
 //!   * motions traverse an embed as a single unit — it *is* a single line;
@@ -46,8 +43,7 @@ pub enum Row {
     Body(String, BlockKind),
     /// `╰───────────`.
     Bottom,
-    /// The target could not be resolved or read. Never silently empty
-    /// (SPEC §14.2).
+    /// The target could not be resolved or read. Show an error in its place.
     Error(String),
     /// The FIRST row of a picture: it carries everything the painter needs, and
     /// the rows after it are `Reserved` blanks holding the space open. Split in

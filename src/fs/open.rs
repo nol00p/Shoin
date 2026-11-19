@@ -1,4 +1,4 @@
-//! Opening files. SPEC.md §10.
+//! Opening files.
 //!
 //! UTF-8 is required. Invalid bytes are REFUSED with a clear message rather
 //! than lossily converted — the user is about to overwrite this file, and a

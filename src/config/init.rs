@@ -1,4 +1,4 @@
-//! Seeding a user config. SPEC.md §8.
+//! Seeding a user config.
 //!
 //! `cargo install` has no post-install hook, and a build script may only write
 //! to `OUT_DIR` — it also runs in sandboxes, in CI and on cross-compiles, often

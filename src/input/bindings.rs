@@ -1,4 +1,4 @@
-//! The built-in grammar, as a TABLE rather than as control flow. SPEC.md §7.2.
+//! The built-in grammar, as a TABLE rather than as control flow.
 //!
 //! Every Normal/Visual key resolves to a `Verb` here, and `Pending` is the state
 //! machine that assembles verbs into commands (`2d3w`, `"aY`, `ci(`). Splitting
@@ -159,7 +159,7 @@ pub fn visual(key: Key) -> Option<Verb> {
     })
 }
 
-/// The second key of a prefix. `g` carries the writer verbs (SPEC §7.3) and is
+/// The second key of a prefix. `g` carries the writer verbs and is
 /// shared by Normal and Visual; `<C-w>` moves between panes.
 pub fn after_prefix(prefix: char, key: Key, visual_mode: bool) -> Option<Verb> {
     // `<C-w>` takes a DIRECTION, and an arrow key is one. Folded to the vim

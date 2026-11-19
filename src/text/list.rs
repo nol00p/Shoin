@@ -1389,7 +1389,7 @@ mod tests {
         });
     }
 
-    /// The spec's example: `b` at 3 columns and `c` at 2 are both children of
+    /// In this list, `b` at 3 columns and `c` at 2 are both children of
     /// `a`, so they are siblings.
     #[test]
     fn inconsistent_child_indents_are_still_siblings() {
@@ -1770,7 +1770,7 @@ mod tests {
         assert_eq!(out, "10. a\n         - x\n\n      para\n    - w\n");
     }
 
-    /// U+2028 is not a line break (F05): `x\u{2028}y` is ONE buffer line, so
+    /// U+2028 is not a line break: `x\u{2028}y` is ONE buffer line, so
     /// the list starts on line 2 and line 3 is the blank inside it. Realign
     /// counts lines the way the buffer does, re-indents only the list, and
     /// leaves the separator where it was.

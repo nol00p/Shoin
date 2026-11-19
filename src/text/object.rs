@@ -1,5 +1,4 @@
 //! Text objects — the `iw` / `ap` / `i(` half of the operator grammar.
-//! SPEC.md §7.2.
 //!
 //! A motion answers "where does the cursor go"; an object answers "what is the
 //! thing under the cursor". Both feed the same operators, so everything here

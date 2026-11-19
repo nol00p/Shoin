@@ -1,6 +1,5 @@
 //! Primitive edits. Every mutation of the rope goes through this module so
 //! that history recording and revision bumping happen in exactly one place.
-//! SPEC.md §4.
 
 use super::buffer::Buffer;
 use super::cursor::Cursor;
@@ -159,10 +158,9 @@ impl Buffer {
         self.dirty_tail = None;
     }
 
-    /// Every mutation checks this first. Always passes today — the vec is
-    /// empty and transclusion turned out not to need it — and that one branch
-    /// is what keeps the guarantee cheap to reintroduce. See
-    /// `Buffer::readonly_ranges` and SPEC.md §14.5.
+    /// Reject edits in read-only buffers or overlapping protected ranges.
+    /// Preview leaves the range list empty because the cursor stays on source
+    /// text. The range check is here for when embeds need editable regions.
     pub(super) fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
         !self.read_only
             && !self

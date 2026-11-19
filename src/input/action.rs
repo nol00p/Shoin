@@ -1,4 +1,4 @@
-//! `Action` is the single vocabulary of the editor. SPEC.md §7.2.
+//! `Action` is the single vocabulary of the editor.
 //!
 //! Config strings map to these names. Everything that mutates the buffer is an
 //! `Action`, dispatched from one place — which is what makes undo grouping,
@@ -122,7 +122,7 @@ pub enum Action {
     Redo,
     Repeat,
 
-    // --- writer verbs (SPEC.md §7.3) ---
+    // --- writer verbs ---
     ToggleBold,
     ToggleItalic,
     ToggleHighlight,

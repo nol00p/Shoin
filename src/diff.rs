@@ -1,4 +1,4 @@
-//! Line diff for the conflict view. SPEC.md §10.
+//! Line diff for the conflict view.
 //!
 //! Produces an ALIGNMENT rather than a patch: one entry per screen row of the
 //! side-by-side view, each naming the line it shows on the left, on the right,
@@ -7,10 +7,8 @@
 //! re-paired into rows by the renderer, which is the same work done later and
 //! with less information.
 //!
-//! Hand-rolled, and not a dependency, for the reason `render/markdown/code.rs`
-//! is: SPEC §11 keeps the dependency list to things that would be worse to
-//! write than to take, and a line-level LCS is a page of code with an exact
-//! answer. See `MAX_CELLS` for the one place it gives up.
+//! The line-level LCS is small enough to implement here and gives an exact
+//! alignment without adding a dependency. See `MAX_CELLS` for the limit.
 
 use std::ops::Range;
 

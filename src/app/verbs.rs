@@ -139,7 +139,7 @@ impl App {
     // ----------------------------------------------------------------- normal
 
     /// Normal and Visual mode are one line of code each now: hand the key to
-    /// the grammar (SPEC.md §7.2) and run whatever command comes back.
+    /// the grammar and run whatever command comes back.
     pub(super) fn on_key_normal(&mut self, key: KeyEvent) {
         // `q` leaves a page you are only reading, as it leaves `less`. Only as
         // a whole command: `"q` and `fq` still get their q.
@@ -291,8 +291,8 @@ impl App {
         }
     }
 
-    /// Decide where one undo step ends inside an insert session. SPEC.md §4:
-    /// a whole `i…Esc` as one step is too coarse, so the step is split at a
+    /// Decide where one undo step ends inside an insert session. A whole
+    /// `i…Esc` as one step is too coarse, so the step is split at a
     /// word boundary, at a newline, and after `editor.undo_coalesce_ms` of
     /// thinking time — the three places a writer would expect `u` to stop.
     pub(super) fn coalesce_insert(&mut self, boundary: bool) {

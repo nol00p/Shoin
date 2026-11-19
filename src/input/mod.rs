@@ -1,4 +1,4 @@
-//! Input layer: raw keys in, `Action`s out. SPEC.md §7.
+//! Input layer: raw keys in, `Action`s out.
 
 pub mod action;
 pub mod bindings;

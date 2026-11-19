@@ -1,12 +1,9 @@
 //! Images: recognising them, measuring them, and — where the terminal allows
 //! it — drawing the actual pixels.
 //!
-//! An image reaches the editor the same way a note does, through `![[…]]`
-//! (SPEC.md §14.2). What changes is what the embed expands INTO: not the
-//! target's text, but a block of reserved rows the size the picture should
-//! occupy. Everything in this module is pure — a path in, numbers and bytes
-//! out — so the whole feature is testable without a terminal that can show a
-//! picture, which is the half no test could ever check.
+//! An image reaches the editor the same way a note does, through `![[…]]`.
+//! A picture embed reserves enough rows to fit the image. The measurements
+//! and payload can be tested without a terminal that can draw the picture.
 //!
 //! Three deliberate limits:
 //!
