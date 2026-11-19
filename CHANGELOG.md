@@ -45,6 +45,11 @@
 - `"` then `Esc` drops a pending count or operator, as `Esc` does after
   `f` or `r`: `3"<Esc>j` moves one line and `d"<Esc>j` deletes nothing
   (#158).
+- With `layout.stable_gutter`, only block markers (heading `#`s, quote
+  bars, list markers, task boxes, indent guides) shift a revealed line. A
+  line that starts with math no longer jumps left out of the text column,
+  or to the pane's edge. Leading emphasis, code spans and links don't
+  shift either, so `**Note:**` reveals at the text column (#163).
 
 **Lists**
 
