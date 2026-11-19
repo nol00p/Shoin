@@ -1,9 +1,9 @@
 # Configuration defaults
 
-Use these settings in `shoin.conf` or split them across files in your
-config directory. Shoin applies these values when you leave the settings
-unset. See [Configuration](../configuration.md) for where the editor
-looks for config, and [Keys](keys.md) for the default bindings.
+Use these settings in the project's `./shoin.conf` or split them across
+`*.conf` files in a config directory. Shoin applies these values when you leave the
+settings unset. See [Configuration](../configuration.md) for where the
+editor looks for config and [Keys](keys.md) for the default bindings.
 
 ```toml
 [layout]
@@ -160,6 +160,7 @@ dim_markers    = true
 ## Details
 
 - Leave `theme.name` unset for the built-in Tokyo Night theme. Set it to
-  load a theme from `~/.config/shoin/themes/<name>.toml`.
+  load a theme from `$XDG_CONFIG_HOME/shoin/themes/<name>.toml`. If
+  `XDG_CONFIG_HOME` is unset, Shoin uses `~/.config/shoin/themes/<name>.toml`.
 - The [shipped configuration files](../../shoin/) explain each setting
   alongside its default.

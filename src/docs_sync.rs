@@ -103,6 +103,8 @@ const KEYS_PAGE: &str = "docs/reference/keys.md";
 fn assert_same<T: Ord + std::fmt::Debug>(
     expected: &BTreeSet<T>, actual: &BTreeSet<T>, source: &str, destination: &str,
 ) {
+    assert!(!expected.is_empty(), "{source}: found no entries");
+    assert!(!actual.is_empty(), "{destination}: found no entries");
     let missing: Vec<_> = expected.difference(actual).collect();
     let extra: Vec<_> = actual.difference(expected).collect();
     assert!(
@@ -113,17 +115,9 @@ fn assert_same<T: Ord + std::fmt::Debug>(
 
 type AliasGroups = BTreeSet<(String, BTreeSet<String>)>;
 
-/// COMMANDS is private to app. Read its literal tuples without widening the
-/// module's visibility. OPTIONS is available directly.
 fn command_table() -> AliasGroups {
-    let source = read("src/app/commands.rs");
-    let (_, declaration) = source.split_once("const COMMANDS:").expect("COMMANDS declaration");
-    let (_, table) = declaration.split_once("= &[").expect("COMMANDS initializer");
-    let (table, _) = table.split_once("\n];").expect("end of COMMANDS");
-    table.trim().split_terminator("),").map(|entry| {
-        let mut names = entry.split('"').skip(1).step_by(2);
-        let name = names.next().unwrap_or_else(|| panic!("unrecognized COMMANDS entry: {entry:?}"));
-        (name.to_string(), names.map(str::to_string).collect())
+    crate::app::COMMANDS.iter().map(|(name, aliases)| {
+        (name.to_string(), aliases.iter().map(|alias| alias.to_string()).collect())
     }).collect()
 }
 
@@ -209,7 +203,8 @@ fn fenced_block<'a>(page: &'a str, language: &str, path: &str) -> &'a str {
     let fence = format!("\n```{language}\n");
     page.split_once(&fence).and_then(|(_, tail)| tail.split_once("\n```"))
         .map(|(body, _)| body)
-        .unwrap_or_else(|| panic!("{path}: missing fenced {language} block"))
+        .filter(|body| !body.trim().is_empty())
+        .unwrap_or_else(|| panic!("{path}: missing or empty fenced {language} block"))
 }
 
 #[test]
@@ -340,28 +335,45 @@ fn every_documented_flag_exists() {
     assert!(stale.is_empty(), "flags shoin does not have: {stale:?}");
 }
 
-/// The reference's first-column keys, grouped by the modes of each section.
-fn documented_keys(page: &str) -> BTreeSet<(&str, &str)> {
-    let mut modes: &[&str] = &[];
+/// The first column of each table for the three editable modes.
+fn documented_keys(page: &str) -> BTreeSet<(String, String)> {
+    const SHARED: &[&str] = &["normal", "visual"];
+    // These rows explain input grammar rather than standalone bindings.
+    const REGISTER_ARGUMENTS: &[&str] = &["\"a{cmd}", "\"A{cmd}", "\"\"", "\"0", "\"1", "\"9", "\"+", "\"*"];
+    const OPERATOR_EXAMPLES: &[&str] = &[">al", "<al", ">aL", "<aL"];
+    const COUNT_SYNTAX: &str = "`1`–`9`";
+    const MOUSE_ROWS: &[(&str, &str)] = &[("Visual mode", "drag")];
+
+    // Text objects and the overlay tables describe their own input contexts.
     let mut keys = BTreeSet::new();
-    for line in page.lines() {
-        if let Some(heading) = line.strip_prefix("## ") {
-            modes = match heading {
-                "Normal mode" | "Operators" | "Leader keys" => &["normal"],
-                "Insert mode" => &["insert"],
-                "Visual mode" => &["visual"],
-                "Normal and Visual mode" | "Motions" | "Writer verbs" | "Lists" | "Registers" | "Folds" | "Panes" =>
-                    &["normal", "visual"],
+    for (heading, modes) in [
+        ("Normal mode", &["normal"][..]), ("Operators", &["normal"]), ("Leader keys", &["normal"]),
+        ("Insert mode", &["insert"]), ("Visual mode", &["visual"]),
+        ("Normal and Visual mode", SHARED), ("Motions", SHARED), ("Writer verbs", SHARED),
+        ("Lists", SHARED), ("Registers", SHARED), ("Folds", SHARED), ("Panes", SHARED),
+    ] {
+        let mut found_binding = false;
+        for line in section(page, heading).lines() {
+            let Some((cell, _)) = line.trim().strip_prefix('|').and_then(|row| row.split_once('|')) else { continue };
+            let cell = cell.trim();
+            if matches!(cell, "Key" | "---") || MOUSE_ROWS.contains(&(heading, cell))
+                || (heading, cell) == ("Normal and Visual mode", COUNT_SYNTAX)
+            {
+                continue;
+            }
+            let spans: Vec<_> = code_spans(cell).collect();
+            assert!(!spans.is_empty(), "{KEYS_PAGE}: unrecognized key row in {heading}: {line}");
+            let examples = match heading {
+                "Registers" => REGISTER_ARGUMENTS,
+                "Operators" => OPERATOR_EXAMPLES,
                 _ => &[],
             };
-        }
-        if let Some(cell) = line.strip_prefix('|').and_then(|row| row.split('|').next()) {
-            for key in code_spans(cell) {
-                for &mode in modes {
-                    keys.insert((mode, key));
-                }
+            for key in spans.into_iter().filter(|key| !examples.contains(key)) {
+                found_binding = true;
+                keys.extend(modes.iter().map(|mode| (mode.to_string(), key.to_string())));
             }
         }
+        assert!(found_binding, "{KEYS_PAGE}: no bindings in {heading}");
     }
     keys
 }
@@ -399,30 +411,36 @@ fn shipped_key_name(key: &str) -> String {
     name
 }
 
-fn shipped_bindings(body: &str) -> BTreeSet<(String, String)> {
-    let tables = body.parse::<toml::Table>().expect("shoin/keys.conf parses");
-    tables["keys"].as_table().unwrap().iter().flat_map(|(mode, bindings)| {
-        bindings.as_table().unwrap().keys().map(|key| (mode.clone(), shipped_key_name(key)))
-    }).collect()
-}
+fn shipped_bindings() -> BTreeMap<(String, String), bool> {
+    use crate::input::{action::Action, bindings::Verb, keymap::Keymap};
 
-fn missing_bindings(
-    page: &str, expected: &BTreeSet<(String, String)>,
-) -> Vec<String> {
-    let documented = documented_keys(page);
-    expected.iter().filter(|(mode, key)| !documented.contains(&(mode.as_str(), key.as_str())))
-        .map(|(mode, key)| format!("{mode}: {key}"))
-        .collect()
+    let config = crate::config::parse("").expect("shipped keys.conf parses");
+    let (_, warnings) = Keymap::from_config(&config.keys, &config.input.leader);
+    assert!(warnings.is_empty(), "shoin/keys.conf: {warnings:?}");
+    let mut keys = BTreeMap::new();
+    for (mode, bindings) in [
+        ("normal", config.keys.normal), ("visual", config.keys.visual), ("insert", config.keys.insert),
+    ] {
+        for (key, action) in bindings {
+            let verb = Verb::from_config_name(&action).expect("validated shipped key action");
+            assert!(mode != "insert" || matches!(verb, Verb::Act(_))
+                && crate::config::keys::parse_seq(&key, &config.input.leader).unwrap().len() == 1,
+                "shoin/keys.conf: Insert binding {key} must be one key bound to an action");
+            keys.insert((mode.to_string(), shipped_key_name(&key)), verb != Verb::Act(Action::Nop));
+        }
+    }
+    assert!(keys.values().any(|enabled| *enabled), "shoin/keys.conf: no active bindings");
+    keys
 }
 
 #[test]
-fn the_keys_page_lists_shipped_keys_in_their_modes() {
-    let keys = shipped_bindings(&read("shoin/keys.conf"));
-    let missing = missing_bindings(&read(KEYS_PAGE), &keys);
-    assert!(missing.is_empty(), "{KEYS_PAGE} missing shoin/keys.conf bindings by mode: {missing:?}");
-
+fn help_lists_the_shipped_bindings() {
+    let keys = shipped_bindings();
     let help = help_text();
-    for (_, key) in keys {
+    for ((_, key), enabled) in keys {
+        if !enabled {
+            continue;
+        }
         let found = help.match_indices(&key).any(|(start, word)| {
             help[start + word.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric())
         });
@@ -484,86 +502,168 @@ fn builtin_bindings() -> BTreeSet<(String, String)> {
     out
 }
 
-/// Read the character patterns of the window-command dispatcher.
-fn window_keys() -> BTreeSet<char> {
-    let source = read("src/app/tree.rs");
-    let (_, handler) = source.split_once("match key {").expect("window_command dispatch");
-    let (arms, _) = handler.split_once("            _ =>").expect("window_command fallback");
-    arms.lines().filter_map(|line| line.split_once("=>")).flat_map(|(pattern, _)| {
-        pattern.trim().split(" | ").filter_map(|part| {
-            let c = part.strip_prefix('\'')?.strip_suffix('\'')?;
-            let mut chars = c.chars();
-            chars.next().filter(|_| chars.next().is_none())
-        })
-    }).collect()
+/// Collect literal dispatch patterns, allowing the arm and arrow to span
+/// lines. These handlers have no enumerable binding table.
+fn dispatch_patterns(path: &str, function: &str, matched: &str, starts_pattern: fn(&str) -> bool) -> Vec<String> {
+    let source = read(path);
+    let (_, body) = source.split_once(&format!("fn {function}")).expect("dispatch function");
+    let (_, body) = body.split_once(matched).expect("dispatch match");
+    let (_, arms) = body.split_once('{').expect("dispatch match body");
+    let mut patterns = Vec::new();
+    let mut pending = String::new();
+    for line in arms.lines() {
+        let line = line.split("//").next().unwrap().trim();
+        if pending.is_empty() && !starts_pattern(line) && !line.strip_prefix('_').is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '=', '\t'])) {
+            continue;
+        }
+        pending.push(' ');
+        pending.push_str(line);
+        if let Some((pattern, _)) = pending.split_once("=>") {
+            if pattern.trim() == "_" {
+                assert!(!patterns.is_empty(), "{path}: no patterns in {function}");
+                return patterns;
+            }
+            patterns.push(pattern.split_whitespace().collect::<Vec<_>>().join(" "));
+            pending.clear();
+        }
+    }
+    panic!("{path}: missing fallback arm in {function}");
 }
 
-/// Read the named keys and explicit control chords in the Insert dispatcher.
+fn window_keys() -> BTreeSet<char> {
+    dispatch_patterns("src/app/tree.rs", "window_command", "match key", |line| line.starts_with('\''))
+        .iter().flat_map(|pattern| pattern.split('|')).map(|literal| {
+            let literal = literal.trim().strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+                .unwrap_or_else(|| panic!("unrecognized window key: {literal}"));
+            let mut chars = literal.chars();
+            let key = chars.next().expect("empty window key");
+            assert!(chars.next().is_none(), "unrecognized window key: {literal}");
+            key
+        }).collect()
+}
+
 fn insert_keys() -> BTreeSet<String> {
-    let source = read("src/app/insert.rs");
-    let (_, body) = source.split_once("fn on_key_insert(").expect("Insert handler");
-    let (_, arms) = body.split_once("match key.code {").expect("Insert key dispatch");
-    arms.lines().filter_map(|line| line.split_once("=>")).flat_map(|(pattern, _)| {
-        pattern.trim().split(" | ").filter_map(|arm| {
-            let key = arm.strip_prefix("KeyCode::")?.split_whitespace().next()?;
-            match key {
-                "BackTab" => Some("Shift-Tab".to_string()),
+    let mut keys = BTreeSet::new();
+    for pattern in dispatch_patterns("src/app/insert.rs", "on_key_insert", "match key.code", |line| {
+        line.starts_with("KeyCode::")
+    }) {
+        let (alternatives, guard) = pattern.split_once(" if ").unwrap_or((&pattern, ""));
+        for pattern in alternatives.split('|').map(str::trim) {
+            let key = pattern.strip_prefix("KeyCode::")
+                .unwrap_or_else(|| panic!("unrecognized Insert key: {pattern}"));
+            let name = match key {
+                "BackTab" => "Shift-Tab".to_string(),
+                "Char(c)" | "Char(_)" => continue, // ordinary typing and ignored chords
                 _ if key.starts_with("Char(") => {
-                    let letter = key.strip_prefix("Char('")?.strip_suffix("')")?;
-                    arm.contains("KeyModifiers::CONTROL").then(|| format!("Ctrl-{letter}"))
+                    let letter = key.strip_prefix("Char('").and_then(|s| s.strip_suffix("')"))
+                        .unwrap_or_else(|| panic!("unrecognized Insert character: {pattern}"));
+                    let modifier = match guard {
+                        "key.modifiers.contains(KeyModifiers::CONTROL)" => "Ctrl",
+                        "key.modifiers.contains(KeyModifiers::ALT)" => "Alt",
+                        "" => "",
+                        _ => panic!("unrecognized Insert modifier: {guard}"),
+                    };
+                    if modifier.is_empty() { letter.to_string() } else { format!("{modifier}-{letter}") }
                 }
-                _ => Some(key.to_string()),
-            }
-        })
-    }).collect()
+                _ => key.to_string(),
+            };
+            keys.insert(name);
+        }
+    }
+    assert!(!keys.is_empty(), "Insert dispatcher: no standalone bindings");
+    let alias = Config::default().input.escape_alias;
+    if !alias.is_empty() {
+        keys.insert(alias);
+    }
+    keys
 }
 
 #[test]
-fn the_keys_page_lists_builtin_keys_in_their_modes() {
-    let missing = missing_bindings(&read(KEYS_PAGE), &builtin_bindings());
-    assert!(missing.is_empty(), "{KEYS_PAGE} missing built-in bindings by mode: {missing:?}");
+fn the_keys_page_matches_bindings_in_each_mode() {
+    let mut expected = builtin_bindings();
+    for (binding, enabled) in shipped_bindings() {
+        if enabled {
+            expected.insert(binding);
+        } else {
+            expected.remove(&binding);
+        }
+    }
+    let documented = documented_keys(&read(KEYS_PAGE));
+    for mode in ["normal", "visual", "insert"] {
+        let for_mode = |bindings: &BTreeSet<(String, String)>| {
+            bindings.iter().filter(|(name, _)| name == mode).map(|(_, key)| key.clone()).collect()
+        };
+        assert_same(&for_mode(&expected), &for_mode(&documented), mode, KEYS_PAGE);
+    }
 }
 
-/// The resolved defaults expose the fixed schema fields through Debug, the
-/// same representation used by --print-config and the shipped equality test.
-fn default_config_fields() -> BTreeSet<String> {
-    let config = format!("{:#?}", Config::default());
-    let mut fields = BTreeSet::new();
-    let mut section = "";
-    for line in config.lines() {
-        if let Some(field) = debug_field(line, 4) {
-            section = field;
+/// Inspect the field names passed by the derived Deserialize implementation.
+/// Config only derives Deserialize, so capture its schema without changing
+/// the production types or relying on their Debug representation.
+fn schema_fields<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
+    struct Fields(Option<&'static [&'static str]>);
+
+    impl<'de> serde::Deserializer<'de> for &mut Fields {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_struct<V: serde::de::Visitor<'de>>(
+            self, _name: &'static str, fields: &'static [&'static str], _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.0 = Some(fields);
+            Err(serde::de::Error::custom("schema inspection complete"))
         }
-        // Key bindings and theme overrides are maps with their own vocabulary.
-        if !matches!(section, "keys" | "theme") {
-            if let Some(field) = debug_field(line, 8) {
-                fields.insert(format!("{section}.{field}"));
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom("expected a struct schema"))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map enum
+            identifier ignored_any
+        }
+    }
+
+    let mut fields = Fields(None);
+    let _ = T::deserialize(&mut fields);
+    let fields = fields.0.expect("expected a derived Deserialize struct schema");
+    assert!(!fields.is_empty(), "empty schema for {}", std::any::type_name::<T>());
+    fields
+}
+
+fn default_config_fields() -> BTreeSet<String> {
+    use crate::config::schema::*;
+
+    let mut fields: BTreeSet<_> = schema_fields::<Config>().iter().map(|field| field.to_string()).collect();
+    for (section, members) in [
+        ("layout", schema_fields::<LayoutConfig>()), ("status", schema_fields::<StatusConfig>()),
+        ("cursor", schema_fields::<CursorConfig>()), ("editor", schema_fields::<EditorConfig>()),
+        ("input", schema_fields::<InputConfig>()), ("markdown", schema_fields::<MarkdownConfig>()),
+        ("glyphs", schema_fields::<GlyphConfig>()), ("splash", schema_fields::<SplashConfig>()),
+        ("tree", schema_fields::<TreeConfig>()), ("transclude", schema_fields::<TranscludeConfig>()),
+        ("hints", schema_fields::<HintsConfig>()),
+    ] {
+        assert!(fields.remove(section), "missing config section {section}");
+        for member in members {
+            // The schema includes the legacy alias of transclude.embed.
+            if (section, *member) != ("transclude", "preview") {
+                fields.insert(format!("{section}.{member}"));
             }
         }
     }
 
-    // Theme overrides are a flat map, so its dispatchers name the fields
-    // that have defaults. theme.name is optional and has no authored value.
-    let theme = read("src/render/theme.rs");
+    // The variable keymap and the theme override maps have their own schema.
+    assert!(fields.remove("keys"));
+    assert!(fields.remove("theme"));
     for (function, section) in [("set_color", "theme"), ("set_style", "theme.styles")] {
-        let marker = format!("fn {function}(");
-        let (_, body) = theme.split_once(&marker).expect("theme dispatcher");
-        let (arms, _) = body.split_once("            _ =>").expect("theme dispatcher fallback");
-        for (pattern, _) in arms.lines().filter_map(|line| line.split_once("=>")) {
-            if let Some(field) = pattern.trim().strip_prefix('"').and_then(|part| part.strip_suffix('"')) {
-                fields.insert(format!("{section}.{field}"));
-            }
+        for pattern in dispatch_patterns("src/render/theme.rs", function, "match key", |line| line.starts_with('"')) {
+            let field = pattern.strip_prefix('"').and_then(|part| part.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("unrecognized theme key: {pattern}"));
+            fields.insert(format!("{section}.{field}"));
         }
     }
     fields.insert("theme.indent_colors".to_string());
     fields
-}
-
-fn debug_field(line: &str, indent: usize) -> Option<&str> {
-    if line.len() - line.trim_start().len() != indent {
-        return None;
-    }
-    line[indent..].split_once(": ").map(|(field, _)| field)
 }
 
 /// Compare authored TOML fields before serde supplies any missing values.
@@ -619,7 +719,9 @@ fn shipped_and_documented_config_spell_out_the_defaults() {
     let guide_path = "docs/configuration.md";
     let guide = read(guide_path);
     let table = fenced_block(&guide, "toml", guide_path).parse::<toml::Table>().unwrap();
-    for (field, value) in config_entries(&table) {
+    let guide_entries = config_entries(&table);
+    assert!(!guide_entries.is_empty(), "{guide_path}: no config entries");
+    for (field, value) in guide_entries {
         if !field.starts_with("keys.") {
             assert_eq!(docs.get(&field), Some(&value), "{guide_path}: {field} differs from {CONFIG_PAGE}");
         }
@@ -684,6 +786,7 @@ fn documented_action_names() -> (String, BTreeSet<String>) {
 #[test]
 fn every_action_name_is_documented() {
     let (section, documented) = documented_action_names();
+    assert!(!documented.is_empty(), "{KEYS_PAGE}: no documented action names");
     let names = action_names();
     assert!(names.contains("save") && names.contains("operator_delete") && names.contains("move_down"));
 
