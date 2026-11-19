@@ -281,9 +281,23 @@ fn categories() -> Vec<Category> {
         .iter()
         .map(|(name, _, page)| Category {
             name,
-            rows: if page.is_empty() { config_rows() } else { parse(page) },
+            rows: if page.is_empty() { config_rows() } else { parse(&fill(page)) },
         })
         .collect()
+}
+
+/// A page with its value lists filled in from `values`, so help names what
+/// the parsers take: `{focus}`, `{number}` (the modes besides off), `{align}`,
+/// `{export}` and `{options}`, every `:set` option.
+fn fill(page: &str) -> String {
+    use crate::values::{dot_list, ALIGN_VALUES, EXPORT_VALUES, FOCUS_VALUES, NUMBER_VALUES, OPTIONS};
+    let numbers: Vec<&str> = NUMBER_VALUES.iter().copied().filter(|v| *v != "off").collect();
+    let options: Vec<&str> = OPTIONS.iter().map(|(name, _)| *name).collect();
+    page.replace("{focus}", &dot_list(FOCUS_VALUES))
+        .replace("{number}", &dot_list(&numbers))
+        .replace("{align}", &dot_list(ALIGN_VALUES))
+        .replace("{export}", &EXPORT_VALUES.join("|"))
+        .replace("{options}", &dot_list(&options))
 }
 
 // ------------------------------------------------------------------ layout
@@ -694,25 +708,25 @@ gp :: start the next paragraph, in Insert
 > An embed on the cursor's line shows its raw source, like **bold** does. Embedded text belongs to another file, so it can't be edited here.
 
 ## Images — ![[photo.png]]: png, jpg, gif, webp, bmp
-> An image embed reserves a box the shape of the picture, captioned with its name and size. Terminals that draw pixels (kitty, Ghostty, WezTerm, iTerm2, VS Code) show the picture in it; elsewhere the box and caption stand in for it. kitty's protocol (kitty, Ghostty) draws only PNG; a JPEG or GIF keeps the box and caption. :export html carries it inside the page. SHOIN_IMAGE_PROTOCOL=kitty|iterm|none overrides the detection.
+> An image embed reserves a box the shape of the picture, captioned with its name and size, or its alt text and size for ![[photo.png|A red barn]] (a size such as |200 is ignored). Terminals that draw pixels (kitty, Ghostty, WezTerm, iTerm2, VS Code) show the picture in it; elsewhere the box and caption stand in for it. kitty's protocol (kitty, Ghostty) draws only PNG; a JPEG or GIF keeps the box and caption. :export html carries it inside the page. SHOIN_IMAGE_PROTOCOL=kitty|iterm|none overrides the detection.
 ";
 
 const VIEW: &str = "
 ## Toggles
 <leader>c :: concealment on · off — :set conceal
-<leader>F :: cycle focus: off · paragraph · sentence
+<leader>F :: cycle focus: {focus}
 :focus [mode] :: pick one; bare cycles
 <leader>t :: typewriter scrolling — :typewriter, :tw
 <leader>z :: zen: hide all chrome — :zen
 <leader>n :: line numbers on · off
-:number [mode] :: relative · absolute; bare toggles off and back to your last mode
+:number [mode] :: {number}; bare toggles off and back to your last mode
 <leader>a :: cycle how lines sit in the column
-:align [mode] :: left · center · right · justified; bare cycles. Where the column itself sits is layout.align
+:align [mode] :: {align}; bare cycles. Where the column itself sits is layout.align
 :typewriter :tw :: typewriter scrolling
 :zen :: hide all chrome
 
 ## Settings, live
-:set <key> [on|off] :: conceal · typewriter · mouse · focus · numbers · code_syntax · hints
+:set <key> [value] :: {options}. A toggle takes on or off; bare flips it
 :set measure=72 :: the text width in columns; :set measure reads it
 :set line_spacing=1 :: blank rows between lines, 0 to 4
 :set tab_width=4 :: cells a tab counts and is drawn as, 1 to 16 (:set ts)
@@ -746,7 +760,7 @@ const FILES: &str = "
 :set autoreload [on|off] :: take outside changes back automatically. On by default, and only ever on a buffer with nothing unsaved
 
 ## Export
-:export [md|txt|html|pdf] [justify] :: write the finished document out, through a dialog with a name you can change. html is one self-contained page; pdf needs pandoc and a layout engine (typst is the smallest). justify stretches html and txt to fill the measure
+:export [{export}] [justify] :: write the finished document out, through a dialog with a name you can change. html is one self-contained page; pdf needs pandoc and a layout engine (typst is the smallest). justify stretches html and txt to fill the measure
 
 ## File tree — beside the page
 <leader>fe <leader>fE :: open it in this file's folder · over $HOME; again to close. tree.root = \"cwd\" opens <leader>fe and <leader>ff where Shoin was launched instead; file_tree_cwd and find_file_cwd always do
@@ -796,6 +810,38 @@ Ctrl-w = :: equal sizes again
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `:set` line names every option, and the value lines name what
+    /// the parsers take, all read from `values`.
+    #[test]
+    fn value_lines_read_the_value_lists() {
+        use crate::values::{dot_list, ALIGN_VALUES, EXPORT_VALUES, FOCUS_VALUES, OPTIONS};
+        let rows: Vec<Row> = categories().into_iter().flat_map(|c| c.rows).collect();
+        let desc = |keys: &str| {
+            let at = rows.iter().rposition(|r| matches!(r, Row::Entry { keys: k, .. } if k == keys)).expect(keys);
+            // The last one: Basics names some keys too. A wrapped description
+            // goes on in rows with empty keys.
+            let mut text = String::new();
+            for r in &rows[at..] {
+                match r {
+                    Row::Entry { keys: k, desc, .. } if k == keys || (k.is_empty() && !text.is_empty()) => {
+                        text = format!("{text} {desc}").trim().to_string()
+                    }
+                    _ => break,
+                }
+            }
+            text
+        };
+        let options: Vec<&str> = OPTIONS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(desc(":set <key> [value]"), format!("{}. A toggle takes on or off; bare flips it", dot_list(&options)));
+        assert_eq!(desc("<leader>F"), format!("cycle focus: {}", dot_list(FOCUS_VALUES)));
+        assert!(desc(":align [mode]").starts_with(&format!("{};", dot_list(ALIGN_VALUES))));
+        assert!(desc(":number [mode]").starts_with("relative · absolute;"));
+        assert!(rows.iter().any(|r| matches!(r, Row::Entry { keys, .. } if *keys == format!(":export [{}] [justify]", EXPORT_VALUES.join("|")))));
+        for slot in ["{focus}", "{number}", "{align}", "{export}", "{options}"] {
+            assert!(!rows.iter().any(|r| r.plain().contains(slot)), "{slot} left unfilled");
+        }
+    }
 
     /// The words a category answers to, old topic names included.
     #[test]

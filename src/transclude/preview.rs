@@ -94,7 +94,7 @@ pub fn expand(
     let root = super::compile::search_root(from, cfg);
     if let Ok(target) = super::link::resolve(link, from, &root) {
         if crate::image::looks_like_image(&target) {
-            return picture(&target, label, cfg, measure);
+            return picture(&target, label, link.alt(), cfg, measure);
         }
     }
 
@@ -150,7 +150,10 @@ const MAX_PICTURE_ROWS: u16 = 20;
 ///
 /// The bytes are read once, here, rather than at paint time: this runs when the
 /// line's cache entry is rebuilt, and painting runs every frame.
-fn picture(path: &Path, label: String, cfg: &TranscludeConfig, measure: u16) -> Expansion {
+///
+/// The caption is `alt · W×H` when the embed has alt text (`![[p.png|A barn]]`),
+/// and the file's name in its place otherwise.
+fn picture(path: &Path, label: String, alt: Option<&str>, cfg: &TranscludeConfig, measure: u16) -> Expansion {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => return one_error(label, e.to_string(), measure),
@@ -160,10 +163,10 @@ fn picture(path: &Path, label: String, cfg: &TranscludeConfig, measure: u16) -> 
     };
     let inner = measure.saturating_sub(if cfg.border { 4 } else { 0 }).max(8);
     let (cols, rows) = crate::image::fit(info, inner, MAX_PICTURE_ROWS);
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| label.clone());
+    let name = match alt {
+        Some(alt) => alt.to_string(),
+        None => path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| label.clone()),
+    };
 
     let mut out = vec![Row::Image(Picture {
         cols,
@@ -461,6 +464,31 @@ mod tests {
             !e.rows.iter().any(|r| matches!(r, Row::Body(..))),
             "no bytes were pasted in as prose"
         );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `|text` captions a picture with its alt text; `|200`, `|200x100` and
+    /// an empty `|` keep the file's name.
+    #[test]
+    fn alt_text_takes_the_names_place_in_the_caption() {
+        let d = vault("alt");
+        let mut png = PNG.to_vec();
+        png[16..20].copy_from_slice(&400u32.to_be_bytes());
+        png[20..24].copy_from_slice(&200u32.to_be_bytes());
+        std::fs::write(d.join("photo.png"), &png).unwrap();
+        let from = d.join("comp.md");
+        let cfg = TranscludeConfig::default();
+        let caption = |body: &str| match expand(&Link::parse(body).unwrap(), &from, &cfg, 60, Mode::Short, true, 4)
+            .rows
+            .last()
+        {
+            Some(Row::Caption(c)) => c.clone(),
+            _ => panic!("{body}: no caption"),
+        };
+        assert_eq!(caption("photo.png|A red barn"), "A red barn \u{b7} 400\u{d7}200");
+        for body in ["photo.png", "photo.png|200", "photo.png|200x100", "photo.png|"] {
+            assert_eq!(caption(body), "photo.png \u{b7} 400\u{d7}200", "{body}");
+        }
         std::fs::remove_dir_all(&d).ok();
     }
 
