@@ -1,9 +1,11 @@
 # Configuration defaults
 
 Use these settings in the project's `./shoin.conf` or split them across
-`*.conf` files in a config directory. Shoin applies these values when you leave the
-settings unset. See [Configuration](../configuration.md) for where the
-editor looks for config and [Keys](keys.md) for the default bindings.
+`*.conf` files in a config directory. Shoin applies these defaults to unset
+settings. If you set `glyphs.nerd_fonts = false`, unset glyphs use their ASCII
+fallbacks in place of the listed Nerd Font defaults. Explicitly set glyphs
+keep their configured values. See [Configuration](../configuration.md) for
+where the editor looks for config and [Keys](keys.md) for the default bindings.
 
 ```toml
 [layout]

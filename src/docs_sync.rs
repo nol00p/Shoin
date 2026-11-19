@@ -502,36 +502,89 @@ fn builtin_bindings() -> BTreeSet<(String, String)> {
     out
 }
 
-/// Collect literal dispatch patterns, allowing the arm and arrow to span
-/// lines. These handlers have no enumerable binding table.
-fn dispatch_patterns(path: &str, function: &str, matched: &str, starts_pattern: fn(&str) -> bool) -> Vec<String> {
+/// Collect dispatch patterns, allowing the pattern and arrow to span lines.
+/// The handlers use a single expression or a braced block for each arm body.
+fn dispatch_patterns(path: &str, function: &str, matched: &str) -> Vec<String> {
     let source = read(path);
     let (_, body) = source.split_once(&format!("fn {function}")).expect("dispatch function");
     let (_, body) = body.split_once(matched).expect("dispatch match");
     let (_, arms) = body.split_once('{').expect("dispatch match body");
     let mut patterns = Vec::new();
     let mut pending = String::new();
+    let mut block_depth = 0;
+    let mut fallback = false;
     for line in arms.lines() {
         let line = line.split("//").next().unwrap().trim();
-        if pending.is_empty() && !starts_pattern(line) && !line.strip_prefix('_').is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '=', '\t'])) {
+        if line.is_empty() {
             continue;
         }
-        pending.push(' ');
-        pending.push_str(line);
-        if let Some((pattern, _)) = pending.split_once("=>") {
-            if pattern.trim() == "_" {
+        let body = if block_depth > 0 {
+            line
+        } else {
+            if line == "}" && pending.is_empty() {
+                assert!(fallback, "{path}: missing fallback arm in {function}");
                 assert!(!patterns.is_empty(), "{path}: no patterns in {function}");
                 return patterns;
             }
-            patterns.push(pattern.split_whitespace().collect::<Vec<_>>().join(" "));
+            assert!(!fallback, "{path}: unexpected arm after fallback in {function}: {line}");
+            let Some((pattern, body)) = line.split_once("=>") else {
+                pending.push_str(line);
+                pending.push(' ');
+                continue;
+            };
+            pending.push_str(pattern);
+            let pattern = pending.split_whitespace().collect::<Vec<_>>().join(" ");
             pending.clear();
+            fallback = pattern == "_";
+            if !fallback {
+                patterns.push(pattern);
+            }
+            let body = body.trim();
+            if !body.starts_with('{') {
+                assert!(
+                    body.ends_with(',') && !body.contains("=>"),
+                    "{path}: unrecognized arm body in {function}: {line}",
+                );
+                continue;
+            }
+            body
+        };
+        let mut literal = None;
+        let mut escaped = false;
+        for (index, ch) in body.char_indices() {
+            if let Some(quote) = literal {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote {
+                    literal = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' => literal = Some(ch),
+                '{' => block_depth += 1,
+                '}' => {
+                    block_depth -= 1;
+                    if block_depth == 0 {
+                        assert!(
+                            matches!(body[index + 1..].trim(), "" | ","),
+                            "{path}: unexpected text after arm body in {function}: {line}",
+                        );
+                        break;
+                    }
+                }
+                _ => {}
+            }
         }
+        assert!(literal.is_none(), "{path}: unrecognized literal in {function}: {line}");
     }
-    panic!("{path}: missing fallback arm in {function}");
+    panic!("{path}: unterminated dispatch match in {function}");
 }
 
 fn window_keys() -> BTreeSet<char> {
-    dispatch_patterns("src/app/tree.rs", "window_command", "match key", |line| line.starts_with('\''))
+    dispatch_patterns("src/app/tree.rs", "window_command", "match key")
         .iter().flat_map(|pattern| pattern.split('|')).map(|literal| {
             let literal = literal.trim().strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
                 .unwrap_or_else(|| panic!("unrecognized window key: {literal}"));
@@ -544,18 +597,25 @@ fn window_keys() -> BTreeSet<char> {
 
 fn insert_keys() -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
-    for pattern in dispatch_patterns("src/app/insert.rs", "on_key_insert", "match key.code", |line| {
-        line.starts_with("KeyCode::")
-    }) {
+    for pattern in dispatch_patterns("src/app/insert.rs", "on_key_insert", "match key.code") {
         let (alternatives, guard) = pattern.split_once(" if ").unwrap_or((&pattern, ""));
         for pattern in alternatives.split('|').map(str::trim) {
-            let key = pattern.strip_prefix("KeyCode::")
+            let (path, key) = pattern.rsplit_once("KeyCode::")
+                .filter(|(path, _)| path.is_empty() || path.ends_with("::"))
                 .unwrap_or_else(|| panic!("unrecognized Insert key: {pattern}"));
+            assert!(
+                path.strip_prefix("::").unwrap_or(path).split_terminator("::").all(|part| {
+                    !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                }),
+                "unrecognized Insert key: {pattern}",
+            );
             let name = match key {
-                "BackTab" => "Shift-Tab".to_string(),
-                "Char(c)" | "Char(_)" => continue, // ordinary typing and ignored chords
+                "BackTab" if guard.is_empty() || guard == "self.list_tab_applies()" => "Shift-Tab".to_string(),
+                "Char(c)" if guard.is_empty() => continue, // ordinary typing
+                "Char(_)" if guard == "key.modifiers.contains(KeyModifiers::CONTROL)" => continue, // ignored chords
                 _ if key.starts_with("Char(") => {
                     let letter = key.strip_prefix("Char('").and_then(|s| s.strip_suffix("')"))
+                        .filter(|s| s.chars().count() == 1)
                         .unwrap_or_else(|| panic!("unrecognized Insert character: {pattern}"));
                     let modifier = match guard {
                         "key.modifiers.contains(KeyModifiers::CONTROL)" => "Ctrl",
@@ -565,7 +625,9 @@ fn insert_keys() -> BTreeSet<String> {
                     };
                     if modifier.is_empty() { letter.to_string() } else { format!("{modifier}-{letter}") }
                 }
-                _ => key.to_string(),
+                _ if (guard.is_empty() || (key, guard) == ("Tab", "self.list_tab_applies()"))
+                    && !key.is_empty() && key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') => key.to_string(),
+                _ => panic!("unrecognized Insert key: {pattern} (guard: {guard:?})"),
             };
             keys.insert(name);
         }
@@ -656,7 +718,7 @@ fn default_config_fields() -> BTreeSet<String> {
     assert!(fields.remove("keys"));
     assert!(fields.remove("theme"));
     for (function, section) in [("set_color", "theme"), ("set_style", "theme.styles")] {
-        for pattern in dispatch_patterns("src/render/theme.rs", function, "match key", |line| line.starts_with('"')) {
+        for pattern in dispatch_patterns("src/render/theme.rs", function, "match key") {
             let field = pattern.strip_prefix('"').and_then(|part| part.strip_suffix('"'))
                 .unwrap_or_else(|| panic!("unrecognized theme key: {pattern}"));
             fields.insert(format!("{section}.{field}"));
@@ -719,12 +781,11 @@ fn shipped_and_documented_config_spell_out_the_defaults() {
     let guide_path = "docs/configuration.md";
     let guide = read(guide_path);
     let table = fenced_block(&guide, "toml", guide_path).parse::<toml::Table>().unwrap();
-    let guide_entries = config_entries(&table);
-    assert!(!guide_entries.is_empty(), "{guide_path}: no config entries");
+    let mut guide_entries = config_entries(&table);
+    guide_entries.retain(|field, _| !field.starts_with("keys."));
+    assert!(!guide_entries.is_empty(), "{guide_path}: no config entries outside keys.*");
     for (field, value) in guide_entries {
-        if !field.starts_with("keys.") {
-            assert_eq!(docs.get(&field), Some(&value), "{guide_path}: {field} differs from {CONFIG_PAGE}");
-        }
+        assert_eq!(docs.get(&field), Some(&value), "{guide_path}: {field} differs from {CONFIG_PAGE}");
     }
 }
 
