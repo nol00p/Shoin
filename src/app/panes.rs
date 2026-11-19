@@ -48,6 +48,7 @@ impl App {
         let id = self.next_pane_id;
         self.next_pane_id += 1;
         if self.layout.split(self.focus_pane, vertical, Pane { id, doc, scroll: std::cell::Cell::new(scroll), weight: crate::render::pane::EVEN, cursor }) {
+            self.copy_folds(self.focus_pane, id);
             self.focus_pane = id;
             self.touch_status();
         }
@@ -69,6 +70,7 @@ impl App {
             .or_else(|| self.layout.neighbor(area, gone, Dir::Right))
             .or_else(|| self.layout.neighbor(area, gone, Dir::Down));
         self.layout.close(gone);
+        self.drop_folds_of_closed_panes();
         self.focus_pane = next.unwrap_or_else(|| self.layout.ids()[0]);
         self.sync_after_input();
         self.touch_status();
@@ -81,6 +83,7 @@ impl App {
             return;
         };
         self.layout = Node::Leaf(pane);
+        self.drop_folds_of_closed_panes();
         self.touch_status();
     }
 

@@ -281,7 +281,7 @@ fn render_pane(
     lay.number_gutter = number_gutter_width(numbers, doc.buffer.line_count(), lay.margin_left);
 
     let mut cache = doc.cache.borrow_mut();
-    cache.sync_doc(app, doc, lay.measure);
+    cache.sync_doc(app, doc, pane.id, lay.measure);
 
     // The focused pane follows the document's live cursor; every other pane
     // anchors on its OWN, clamped — an edit in another pane can have moved the
@@ -322,8 +322,9 @@ fn render_pane(
     // Its chars are collected once too: each row is a window into them, and a
     // long line wraps to many rows.
     let mut current: Option<(usize, DisplayLine, Vec<char>)> = None;
-    // The lines closed folds hide, to say how many after each fold's line.
-    let folded = crate::render::hidden::of(&doc.folds);
+    // The lines this pane's closed folds hide, to say how many after each
+    // fold's line.
+    let folded = cache.hidden().clone();
     // The cursor line's chars, kept when the loop moves past it, for placing
     // the caret below without collecting the line a second time.
     let mut cursor_chars: Option<Vec<char>> = None;
@@ -1381,6 +1382,38 @@ pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Curs
     let first = cache.locate(line, 0).0 == row;
     let col = if first { cursor.col } else { target.start_col };
     Some((new_top, Cursor::new(line, col.min(len))))
+}
+
+/// `zt` `zz` `zb`: the focused pane's top row that puts the cursor's line at
+/// the top, middle or bottom of it. The top and bottom keep `scroll_off`
+/// rows between the line and the edge, as vim's do; near the start of the
+/// document the top cannot go above the first row. A wrapped line is placed
+/// whole where it fits.
+pub fn cursor_line_at(app: &App, area: Rect, to: crate::input::action::ScrollTo) -> Option<usize> {
+    use crate::input::action::ScrollTo;
+    let cfg = &app.config;
+    let rect = focused_rect(app, area)?;
+    let lay = Layout::compute(&cfg.layout, rect.width, rect.height, 0);
+
+    let mut cache = app.cache.borrow_mut();
+    cache.sync(app, lay.measure);
+    if cache.total_rows() == 0 {
+        return None;
+    }
+    let height = (lay.height as usize).max(1);
+    let pad = (cfg.editor.scroll_off as usize).min(height.saturating_sub(1) / 2);
+    let (first, last) = cache.line_rows(app.buffer.cursor.line);
+    let (cursor_row, _) = cache.locate(app.buffer.cursor.line, app.buffer.cursor.col);
+    let top = match to {
+        ScrollTo::Top => first.saturating_sub(pad),
+        ScrollTo::Middle => ((first + last) / 2).saturating_sub(height.saturating_sub(1) / 2),
+        ScrollTo::Bottom => (last + pad + 1).saturating_sub(height),
+    };
+    // A line taller than the pane: the cursor's own row has to stay on it,
+    // which is the line `scroll_offset` would otherwise pull the view back to.
+    let lo = (cursor_row + pad + 1).saturating_sub(height);
+    let hi = cursor_row.saturating_sub(pad);
+    Some(top.clamp(lo, hi.max(lo)))
 }
 
 /// The rect the focused pane occupies.
