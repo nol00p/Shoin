@@ -108,6 +108,11 @@ pub enum Unresolved {
 impl std::fmt::Display for Unresolved {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // A picture is not a note, and calling it one sends the reader
+            // looking for the wrong file.
+            Unresolved::Missing(t) if crate::image::looks_like_image(Path::new(t)) => {
+                write!(f, "no picture called {t:?}")
+            }
             Unresolved::Missing(t) => write!(f, "no note called {t:?}"),
             Unresolved::Ambiguous(t, found) => {
                 let names: Vec<String> = found
@@ -872,5 +877,16 @@ echo done ^notanid
         assert_eq!(strip_front_matter("---\r\nnope\r\n"), "---\r\nnope\r\n");
         assert_eq!(strip_front_matter("----\nx\n---\nbody\n"), "----\nx\n---\nbody\n");
         assert_eq!(strip_front_matter("---"), "---");
+    }
+
+    /// A missing picture is named as one; anything else is a note.
+    #[test]
+    fn a_missing_picture_is_not_called_a_note() {
+        let msg = |t: &str| Unresolved::Missing(t.to_string()).to_string();
+        assert_eq!(msg("x.png"), "no picture called \"x.png\"");
+        assert_eq!(msg("pics/Shot.JPEG"), "no picture called \"pics/Shot.JPEG\"");
+        assert_eq!(msg("x"), "no note called \"x\"");
+        assert_eq!(msg("paper.pdf"), "no note called \"paper.pdf\"");
+        assert_eq!(msg("notes.md"), "no note called \"notes.md\"");
     }
 }
