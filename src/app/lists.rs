@@ -390,7 +390,7 @@ impl App {
                     }
                     None => {
                         let start = self.buffer.rope.line_to_char(line);
-                        let ws = leading_ws_cols(&self.buffer.line_text(line));
+                        let ws = leading_ws_chars(&self.buffer.line_text(line));
                         self.buffer.delete_chars(start, start + ws);
                         self.buffer.insert_str(Cursor::new(line, 0), &" ".repeat(cols));
                     }

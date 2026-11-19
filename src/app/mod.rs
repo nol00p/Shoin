@@ -38,7 +38,7 @@ use crate::render::focus::{FocusMode, FocusRegion};
 use crate::render::numbers::NumberMode;
 use crate::render::pane::{Dir, Node, Pane, PaneId};
 use crate::render::frame;
-use crate::render::markdown::block::{leading_ws_cols, BlockCache, BlockKind, Marker};
+use crate::render::markdown::block::{leading_ws_chars, BlockCache, BlockKind, Marker};
 use crate::render::markdown::inline::{self, Inline};
 use crate::render::theme::Theme;
 use crate::fs::ops;
