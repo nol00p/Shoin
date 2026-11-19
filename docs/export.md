@@ -42,9 +42,9 @@ instead: it prints the page as the editor shows it, styled, with pictures.
 
 ## Details
 
-- Plain text keeps list indentation inside quotes. Long items wrap under
-  their text. Each wrapped line repeats its quote markers before the list
-  indent, including with `justify`.
+- Plain text keeps list indentation inside quotes: a nested item is
+  indented after the quote's `>` markers as it is outside a quote. A list
+  item is never wrapped, with or without `justify`.
 - `justify` stretches every wrapped line but a paragraph's last to fill the
   measure. It applies to `html` and `txt` only: `md` and `pdf` have no layout
   of their own to stretch, so they refuse it.

@@ -22,9 +22,9 @@ use crate::text::{buffer::Buffer, list::Quoted};
 /// terminal to render into. Left `false` (the default), a paragraph is
 /// written exactly as it always was: one output line per source line,
 /// unwrapped — Shoin stores a paragraph as one logical line and only wraps it
-/// for display, so that is already the full text. List items wrap with a
-/// hanging indent and stay ragged in either mode. A heading, quote, or table
-/// row keeps its layout.
+/// for display, so that is already the full text. A heading, quote, list
+/// item, or table row is never justified; stretching a quote's `> ` prefix or
+/// a table's `|` columns would break what they are.
 pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut carry = Carry::default();
@@ -163,7 +163,7 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
                         }));
                         let body = without_break(&body, joins);
                         if let BlockKind::ListItem { marker, checked, depth } = inner {
-                            push_item(&mut out, &prefix, body, (marker, checked, depth), measure, md);
+                            push_item(&mut out, &prefix, body, (marker, checked, depth), md);
                         } else {
                             push_paragraph(&mut out, &prefix, &strip_inline(body, md), measure, justify);
                         }
@@ -176,7 +176,7 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
                 }
             }
             BlockKind::ListItem { marker, checked, depth } => {
-                push_item(&mut out, "", line, (*marker, *checked, *depth), measure, md);
+                push_item(&mut out, "", line, (*marker, *checked, *depth), md);
             }
             BlockKind::Paragraph => {
                 push_paragraph(&mut out, "", &strip_inline(line, md), measure, justify);
@@ -210,14 +210,14 @@ fn without_break(line: &str, continues: bool) -> &str {
     }
 }
 
-/// The quote prefix sits outside the list's measure, so every row after
-/// that prefix matches the same item outside a quote.
+/// A list item as one line: its indent, a plain bullet, its text. Inside a
+/// quote `prefix` is the quote's markers, so the item matches the same item
+/// outside a quote after them.
 fn push_item(
     out: &mut Vec<String>,
     prefix: &str,
     line: &str,
     (marker, checked, depth): (Marker, Option<bool>, u8),
-    measure: u16,
     md: &MarkdownConfig,
 ) {
     let indent = " ".repeat(usize::from(depth));
@@ -227,21 +227,9 @@ fn push_item(
         (Marker::Ordered, None) => format!("{} ", ordinal(line)),
         (_, None) => "- ".to_string(),
     };
-    let hanging = usize::from(depth) + bullet.len();
-    let available = measure.saturating_sub(hanging as u16);
-    let chars: Vec<char> = strip_inline(super::item_body(line), md).chars().collect();
-    for (i, (start, end)) in crate::render::layout::wrap_chars(&chars, available, COMMONMARK_TAB)
-        .into_iter().enumerate()
-    {
-        let row = crate::render::layout::char_window(&chars, start, end);
-        let row = row.trim_end();
-        if i == 0 {
-            out.push(format!("{prefix}{indent}{bullet}{row}"));
-        } else if !row.is_empty() {
-            let row = row.trim_start();
-            out.push(format!("{prefix}{:hanging$}{row}", ""));
-        }
-    }
+    // One line, as the author wrote it: a list item is never wrapped,
+    // with or without `justify`, inside a quote or not.
+    out.push(format!("{prefix}{indent}{bullet}{}", strip_inline(super::item_body(line), md)));
 }
 
 /// `12.` from `  12. text`.
@@ -449,11 +437,12 @@ mod tests {
         );
     }
 
+    /// A long item stays one line, quoted or not, with or without `justify`.
     #[test]
-    fn quoted_lists_repeat_the_prefix_on_hanging_rows() {
+    fn a_long_item_is_never_wrapped() {
         let md = MarkdownConfig::default();
         let input = "- a\n  12. abc def ghi\n\n> - a\n>   12. abc def ghi\n";
-        let expected = "- a\n  12. abc def\n      ghi\n\n> - a\n>   12. abc def\n>       ghi\n";
+        let expected = "- a\n  12. abc def ghi\n\n> - a\n>   12. abc def ghi\n";
         assert_eq!(render(input, 14, false, &md), expected);
         assert_eq!(render(input, 14, true, &md), expected);
     }
@@ -555,10 +544,11 @@ mod tests {
     }
 
     #[test]
-    fn justify_leaves_headings_quote_prose_and_tables_alone() {
+    fn justify_leaves_headings_quotes_lists_and_tables_alone() {
         let got = render(
             "# A heading much longer than the measure itself\n\n\
              > a quoted line that is also much longer than the measure\n\n\
+             - a list item that likewise runs well past the measure\n\n\
              | a | b |\n|---|---|\n| longer than the measure | cell |\n",
             10,
             true,
@@ -566,6 +556,7 @@ mod tests {
         );
         assert!(got.contains("A heading much longer than the measure itself"));
         assert!(got.contains("> a quoted line that is also much longer than the measure"));
+        assert!(got.contains("- a list item that likewise runs well past the measure"));
         assert!(got.contains("| longer than the measure | cell |"));
     }
 }
