@@ -330,6 +330,31 @@ impl ConcealMap {
         }
     }
 
+    /// Source indices in the LEADING RUN (as `leading_shift` reads it) where
+    /// the concealed form has a space the source does not: after a
+    /// replacement that ends in one, such as each bar of `>>text`. A row of
+    /// the concealed form may start there, so the raw wrap may too, and a
+    /// line breaks at the same place as it is revealed.
+    pub fn prefix_breaks(&self, source: &str) -> Vec<usize> {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = Vec::new();
+        let mut src = 0usize;
+        for op in &self.ops {
+            let r = op.range();
+            if chars[src..r.start].iter().any(|c| !c.is_whitespace()) {
+                break;
+            }
+            if let Conceal::Replace { text, .. } = op {
+                let spaced = r.end > 0 && chars.get(r.end - 1).is_some_and(|c| c.is_whitespace());
+                if text.ends_with(' ') && !spaced {
+                    out.push(r.end);
+                }
+            }
+            src = r.end;
+        }
+        out
+    }
+
     /// The concealed display string alone, without re-styling. The render
     /// cache needs it to wrap a line; the spans come later, once the frame's
     /// overlays are known.
@@ -1532,6 +1557,17 @@ mod tests {
         assert_eq!(shown("* [ ] starred"), "☐ starred");
         // An ordered task keeps its number in front of the box.
         assert_eq!(shown("1. [ ] first"), "1. ☐ first");
+    }
+
+    /// The concealed bars' spaces are break points the compact source lacks.
+    #[test]
+    fn prefix_breaks_are_the_spaces_only_the_concealed_form_has() {
+        let breaks = |line: &str| map(line).prefix_breaks(line);
+        assert_eq!(breaks(">>text"), [1, 2]);
+        assert_eq!(breaks("> >text"), [3]);
+        assert!(breaks("> > text").is_empty());
+        assert!(breaks("- item").is_empty());
+        assert!(breaks("plain text").is_empty());
     }
 
     /// The reveal shift the active line has to give back: `layout.stable_gutter`

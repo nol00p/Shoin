@@ -29,7 +29,9 @@ use crate::config::schema::{GlyphConfig, MarkdownConfig};
 use crate::render::conceal::{ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
 use crate::render::hidden::{self, Hidden};
-use crate::render::layout::{content_column, no_wrap, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow};
+use crate::render::layout::{
+    content_column, no_wrap, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow, MIN_WRAP_WIDTH,
+};
 use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
 use crate::transclude::preview::Expansion;
@@ -55,6 +57,10 @@ pub struct LineEntry {
     /// Hanging indent for continuation rows, in each form. Zero unless this is
     /// a list item and `layout.hanging_indent` is on — and the two differ,
     /// because a concealed `- [ ] ` is narrower than the revealed one.
+    /// Capped as the wrapper caps it, and measured from where the first row
+    /// starts: a raw row the stable gutter starts inside the measure has its
+    /// inset added here, and one it starts in the margin is offset by
+    /// `frame::hang_x`.
     hang_raw: u16,
     hang_concealed: u16,
     /// What this line draws instead of itself when it is a whole-line `![[…]]`
@@ -613,7 +619,15 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     } else {
         0
     };
-    let wrap_hang = if hang_raw == 0 { 0 } else { hang_raw.saturating_add(inset) };
+    // Each form's hang, measured from the text column and capped the way the
+    // wrapper caps it, so drawing reserves exactly what wrapping left. The
+    // raw first row starts `inset` cells in, so its content does too.
+    let cap = measure.saturating_sub(MIN_WRAP_WIDTH);
+    let hang_raw = if hang_raw == 0 { 0 } else { hang_raw.saturating_add(inset).min(cap) };
+    let hang_concealed = hang_concealed.min(cap);
+    // The concealed prefix may break after a bar the source writes with no
+    // space after it (`>>text`); the raw wrap may break there too.
+    let breaks = cmap.prefix_breaks(&source);
 
     // A table row's `|` columns are laid out by its author, in the source; word
     // wrap would break that layout onto several ragged rows instead of leaving
@@ -623,7 +637,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         (no_wrap(&source), no_wrap(&concealed))
     } else {
         (
-            wrap_with_inset(&source, measure, wrap_hang, cfg.editor.tab_width, inset),
+            wrap_with_inset(&source, measure, hang_raw, cfg.editor.tab_width, inset, &breaks),
             wrap_hanging(&concealed, measure, hang_concealed, cfg.editor.tab_width),
         )
     };

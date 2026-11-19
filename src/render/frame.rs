@@ -747,21 +747,17 @@ fn elide(s: &str, cells: usize) -> String {
 
 /// A continuation row's hanging indent, measured from the TEXT COLUMN.
 ///
-/// `VisualRow::hanging` is the item's content column measured from the LINE's
-/// own left edge. Translate it to the text column using the first row's
-/// offset so continuations line up under the item's text.
+/// `VisualRow::hanging` is what the wrapper reserved, measured from where the
+/// line's first row starts. A revealed row the stable gutter moves into the
+/// margin starts left of the text column, so its content does too; the
+/// continuation gives back the same cells. It never hangs further than the
+/// wrapper reserved, so a continuation row always fits its text.
 fn hang_x(app: &App, cache: &RenderCache, lay: &Layout, row: &VisualRow) -> u16 {
     if row.hanging == 0 {
         return 0;
     }
     let left = line_left(app, cache, lay, row.line(), 0);
-    let max_hang = if left > lay.margin_left {
-        lay.measure.saturating_sub(super::layout::MIN_WRAP_WIDTH)
-    } else {
-        lay.measure
-    };
-    (i32::from(left) + i32::from(row.hanging) - i32::from(lay.margin_left))
-        .clamp(0, i32::from(max_hang)) as u16
+    row.hanging.saturating_sub(lay.margin_left.saturating_sub(left))
 }
 
 /// Whether this line belongs to a fenced code block — its delimiters included,
@@ -3236,8 +3232,9 @@ mod tests {
         app.config.layout.measure = 16;
         let all = rows(&render_to(&app, 60, 12));
         let y = all.iter().position(|r| r.contains(">>")).unwrap();
-        assert_eq!(all[y].chars().skip(margin).collect::<String>(), "  >>abcdefghijkl");
-        assert_eq!(all[y + 1].chars().skip(margin).collect::<String>(), "mn");
+        // It breaks after the bars, as the concealed `▎ ▎ ` does.
+        assert_eq!(all[y].chars().skip(margin).collect::<String>(), "  >>");
+        assert_eq!(all[y + 1].chars().skip(margin).collect::<String>(), "abcdefghijklmn");
     }
 
     /// Prose must NOT hang — there is no content column to line up under.
@@ -4211,6 +4208,102 @@ mod tests {
     }
 
     /// The column of the first cell on row `y` that shows `sym`.
+    /// `doc` as line 2 under `top`, at `measure` and a tab of 4, with the
+    /// cursor at `cursor` (line 0 leaves line 2 concealed). Returns the
+    /// buffer, the text column and the screen row of line 2's first row.
+    fn shown_at(doc: &str, measure: u16, cursor: Cursor) -> (App, ratatui::buffer::Buffer, u16, u16) {
+        let mut app = app_with(&format!("top\n\n{doc}\n"));
+        app.config.layout.measure = measure;
+        app.config.editor.tab_width = 4;
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, 4);
+        app.buffer.cursor = cursor;
+        app.active = crate::render::conceal::ActiveSet::compute(&app.mode, &cursor, None);
+        let buf = render_to(&app, 60, 16);
+        let lay = Layout::compute(&app.config.layout, 60, 16 - STATUS_ROWS, 0);
+        (app, buf, lay.margin_left, lay.top + 2)
+    }
+
+    /// The rows of line 2 from `shown_at`, from the text column on.
+    fn line_rows(buf: &ratatui::buffer::Buffer, margin: u16, y: u16) -> Vec<String> {
+        (y..buf.area.height)
+            .map(|y| row_text(buf, y).chars().skip(margin as usize).collect::<String>())
+            .take_while(|r| !r.trim().is_empty() && !r.contains("i write"))
+            .collect()
+    }
+
+    /// A hanging indent deeper than the wrapper allows is capped at
+    /// `MIN_WRAP_WIDTH` short of the measure, and drawing, the caret and
+    /// clicks use the same cap, so no continuation is pushed off the
+    /// measure. Concealed and raw, in a quote and outside one.
+    #[test]
+    fn an_over_deep_hang_is_capped_the_same_for_wrap_and_draw() {
+        for (doc, marker) in [
+            (">             - abcdefghijklmnop", 16),
+            ("             - abcdefghijklmnop", 15),
+        ] {
+            for cursor in [Cursor::new(0, 0), Cursor::new(2, 0)] {
+                let (mut app, buf, margin, y) = shown_at(doc, 16, cursor);
+                let rows = line_rows(&buf, margin, y);
+                assert_eq!(rows[1..], ["        abcdefgh", "        ijklmnop"], "{doc:?} {cursor:?}: {rows:?}");
+                // The `j`: the `i` before it ends a hard break, where the
+                // caret is drawn at the end of the row above.
+                let i = locate_click(&app, Rect::new(0, 0, 60, 16), margin + 9, y + 2).unwrap();
+                assert_eq!(i, Cursor::new(2, marker + 9), "{doc:?} {cursor:?}");
+                app.buffer.cursor = i;
+                app.active = crate::render::conceal::ActiveSet::compute(&app.mode, &i, None);
+                let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+                terminal.draw(|f| render(f, &app)).unwrap();
+                assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(margin + 9, y + 2), "{doc:?}");
+            }
+        }
+    }
+
+    /// Revealing a compact quote keeps the break the bars' trailing space
+    /// gives the concealed line, so a click on a concealed continuation
+    /// puts the caret on the same cell once the line is raw.
+    #[test]
+    fn revealing_a_compact_quote_keeps_its_wrap_break() {
+        for (doc, body) in [(">>abcdefghijklmn", 2), ("> > abcdefghijklmn", 4), ("> >abcdefghijklmn", 3)] {
+            let (app, buf, margin, y) = shown_at(doc, 16, Cursor::new(0, 0));
+            let concealed = line_rows(&buf, margin, y);
+            assert_eq!(concealed, ["▎ ▎", "abcdefghijklmn"], "{doc:?}");
+            let c = locate_click(&app, Rect::new(0, 0, 60, 16), margin + 2, y + 1).unwrap();
+            assert_eq!(c, Cursor::new(2, body + 2), "{doc:?}");
+
+            let (app, buf, margin, y) = shown_at(doc, 16, c);
+            let raw = line_rows(&buf, margin, y);
+            assert_eq!(raw[1], "abcdefghijklmn", "{doc:?}: {raw:?}");
+            assert_eq!(raw.len(), 2, "{doc:?}: {raw:?}");
+            let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+            terminal.draw(|f| render(f, &app)).unwrap();
+            assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(margin + 2, y + 1), "{doc:?}");
+        }
+    }
+
+    /// A tab between a list marker and its text is part of the hanging
+    /// indent, drawn and measured as `tab_width` cells, in a quote and
+    /// outside one, concealed and raw.
+    #[test]
+    fn a_tab_after_the_marker_counts_in_the_hanging_indent() {
+        for doc in ["> -\tword word word word word word", "-\tword word word word word word"] {
+            for cursor in [Cursor::new(0, 0), Cursor::new(2, 0)] {
+                let (app, buf, margin, y) = shown_at(doc, 16, cursor);
+                let rows = line_rows(&buf, margin, y);
+                let col = |r: &String| r.chars().position(|c| c == 'w');
+                let body = col(&rows[0]).unwrap();
+                assert!(rows.len() > 2, "{doc:?}: {rows:?}");
+                for r in &rows[1..] {
+                    assert_eq!(col(r), Some(body), "{doc:?} {cursor:?}: {rows:?}");
+                }
+                // A click on the second row's first letter lands on it.
+                let start = doc.find('w').unwrap();
+                let second = start + rows[0].chars().count() - body + 1;
+                let x = margin + body as u16;
+                assert_eq!(locate_click(&app, Rect::new(0, 0, 60, 16), x, y + 1), Some(Cursor::new(2, second)));
+            }
+        }
+    }
+
     fn cell_of(buf: &ratatui::buffer::Buffer, y: u16, sym: &str) -> u16 {
         (0..buf.area.width)
             .find(|&x| buf[(x, y)].symbol() == sym)
