@@ -2,7 +2,9 @@
 //!
 //! Normal-mode input accumulates as:
 //!
-//!     register? · count₁? · (operator · count₂? · motion|object) | action
+//! ```text
+//! register? · count₁? · (operator · count₂? · motion|object) | action
+//! ```
 //!
 //! Every keypress either EXTENDS the pending state, RESOLVES it into a
 //! `Command`, or INVALIDATES it. `partial` additionally handles multi-key

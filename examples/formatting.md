@@ -1,9 +1,9 @@
 # Shoin
 
-A no-clutter terminal Markdown editor. This file exercises the block styling —
-headings, lists, quotes, tables and fenced code. Open it to see concealment at
-work: the line your cursor is on shows its raw Markdown, every other line shows
-the finished text.
+A no-clutter terminal Markdown editor. This file exercises the block
+styling — headings, lists, quotes, tables and fenced code. Open it
+to see concealment at work: the line your cursor is on shows its raw
+Markdown, every other line shows the finished text.
 
 ## Headings cascade through six colors
 
@@ -47,6 +47,14 @@ $$
 > The active line is always rendered 1:1 with its source.
 > Every other line may conceal markup.
 
+## Tables
+
+| Key | Does   |
+|-----|--------|
+| `i` | edit   |
+| `v` | select |
+| `/` | search |
+
 ## Code
 
 ```rust
@@ -62,5 +70,5 @@ A language shoin does not know keeps the flat slab, and so does
 
 ---
 
-Ordinary prose flows in a centered measure with wide margins, and that's the
-whole interface.
+Ordinary prose flows in a centered measure with wide margins, and
+that's the whole interface.

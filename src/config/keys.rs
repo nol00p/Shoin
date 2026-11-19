@@ -9,7 +9,7 @@
 //!              | "Home" | "End" | "PageUp" | "PageDown"
 //!              | "leader" | CHAR
 //!
-//! Examples: "gg" → [g, g] · "<C-s>" → [ctrl+s] · "<leader>w" → [leader, w]
+//! Examples: `"gg"` → `[g, g]` · `"<C-s>"` → `[ctrl+s]` · `"<leader>w"` → `[leader, w]`
 
 use anyhow::{bail, Result};
 

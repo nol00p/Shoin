@@ -266,7 +266,7 @@ fn merge_tables(base: &mut toml::Table, over: toml::Table) {
 /// Watches the resolved config location with `notify`. Watching a directory
 /// catches any `.conf` file being edited, added, or removed.
 ///
-/// On change the caller re-runs [`reload`], which re-discovers and merges; a
+/// On change the caller re-runs [`reload`](Self::reload), which re-discovers and merges; a
 /// candidate is swapped in only if it parses. A broken config never takes down a
 /// running editor holding unsaved text.
 pub struct ConfigWatcher {

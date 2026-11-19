@@ -18,7 +18,7 @@
 
 use crate::config::schema::MarkdownConfig;
 use crate::render::markdown::block::{
-    classify, has_cell_separator, indent_cols, leading_ws_cols, BlockKind, Carry, Marker, Open, COMMONMARK_TAB,
+    classify, has_cell_separator, indent_cols, leading_ws_chars, BlockKind, Carry, Marker, Open, COMMONMARK_TAB,
 };
 use crate::render::markdown::code::{self, Class, Cont, Lang};
 use crate::render::markdown::inline::{self, Inline};
@@ -225,7 +225,7 @@ impl<'a> Body<'a> {
 
             BlockKind::FenceOpen(info) => {
                 self.open_block(indent_cols(line, COMMONMARK_TAB));
-                self.open_fence(info, leading_ws_cols(line));
+                self.open_fence(info, leading_ws_chars(line));
             }
             BlockKind::FenceBody { .. } => self.fence_line(line),
             BlockKind::FenceClose => self.close_fence(),
@@ -269,7 +269,7 @@ impl<'a> Body<'a> {
                         self.flush_math_block();
                         self.close_lists();
                         self.open_quote(q.depth);
-                        self.open_fence(info, leading_ws_cols(&q.body));
+                        self.open_fence(info, leading_ws_chars(&q.body));
                     }
                     BlockKind::FenceBody { .. } => self.fence_line(&q.body),
                     BlockKind::FenceClose => self.close_fence(),
@@ -635,7 +635,7 @@ impl<'a> Body<'a> {
         // As in CommonMark, a fence indented N columns takes up to N
         // columns of indent off each of its lines: code nested in an
         // item lines up with the item, not the page.
-        let strip = leading_ws_cols(line).min(indent);
+        let strip = leading_ws_chars(line).min(indent);
         let line: String = line.chars().skip(strip).collect();
         let (html, next) = highlight(&line, lang, cont);
         self.out.push_str(&html);

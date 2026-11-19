@@ -607,9 +607,9 @@ pub fn indent_cols(line: &str, tab_width: usize) -> usize {
         .sum()
 }
 
-/// The number of leading space and tab CHARS: what to remove to take a
+/// The number of leading space and tab chars: what to remove to take a
 /// line's indent off. Not a column count; `indent_cols` is that.
-pub(crate) fn leading_ws_cols(line: &str) -> usize {
+pub(crate) fn leading_ws_chars(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 

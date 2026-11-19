@@ -28,7 +28,7 @@ use ropey::Rope;
 
 use super::buffer::Buffer;
 use super::cursor::Cursor;
-use crate::render::markdown::block::{item_text_col, leading_ws_cols, BlockCache, BlockKind, Marker};
+use crate::render::markdown::block::{item_text_col, leading_ws_chars, BlockCache, BlockKind, Marker};
 pub use crate::render::markdown::block::indent_cols;
 
 /// One ordinal to rewrite: the digits at `cols` (chars) on `line` become
@@ -44,7 +44,7 @@ pub struct Renumber {
 /// a `Realign` line is applied.
 pub fn reindent(rope: &mut Rope, line: usize, cols: usize) {
     let start = rope.line_to_char(line);
-    let ws = leading_ws_cols(&rope.line(line).to_string());
+    let ws = leading_ws_chars(&rope.line(line).to_string());
     rope.remove(start..start + ws);
     rope.insert(start, &" ".repeat(cols));
 }
