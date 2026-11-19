@@ -708,7 +708,7 @@ gp :: start the next paragraph, in Insert
 > An embed on the cursor's line shows its raw source, like **bold** does. Embedded text belongs to another file, so it can't be edited here.
 
 ## Images — ![[photo.png]]: png, jpg, gif, webp, bmp
-> An image embed reserves a box the shape of the picture, captioned with its name and size. Terminals that draw pixels (kitty, Ghostty, WezTerm, iTerm2, VS Code) show the picture in it; elsewhere the box and caption stand in for it. kitty's protocol (kitty, Ghostty) draws only PNG; a JPEG or GIF keeps the box and caption. :export html carries it inside the page. SHOIN_IMAGE_PROTOCOL=kitty|iterm|none overrides the detection.
+> An image embed reserves a box the shape of the picture, captioned with its name and size, or its alt text and size for ![[photo.png|A red barn]] (a size such as |200 is ignored). Terminals that draw pixels (kitty, Ghostty, WezTerm, iTerm2, VS Code) show the picture in it; elsewhere the box and caption stand in for it. kitty's protocol (kitty, Ghostty) draws only PNG; a JPEG or GIF keeps the box and caption. :export html carries it inside the page. SHOIN_IMAGE_PROTOCOL=kitty|iterm|none overrides the detection.
 ";
 
 const VIEW: &str = "

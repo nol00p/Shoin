@@ -67,6 +67,9 @@ terminal that can draw pixels — kitty, Ghostty, WezTerm, iTerm2 — the pictur
 itself is drawn there.** Everywhere else, including inside tmux, the box and
 caption stand in for it.
 
+Text after a `|` is the picture's alt text: `![[barn.png|A red barn]]` is
+captioned `A red barn · 640×480` instead of with the file's name.
+
 <p align="center">
   <img src="media/images.gif" alt="A note with a bar chart drawn in it. Moving the cursor onto the embed line shows the raw ![[words.png]] link in place of the picture; scrolling brings a second picture into view; a line typed above the chart pushes it down a row and it stays drawn" width="800">
 </p>
@@ -107,7 +110,12 @@ See [Reading](reading.md#print-a-note).
   an outline and its caption until the whole picture is on screen again.
 - A cycle of embeds is a hard error naming the loop, and an unresolved link
   leaves a visible placeholder rather than a silent hole in your export.
-- In an export, an embedded picture becomes `![name](path)`, with the path
+- After the `|`, a size (`![[barn.png|200]]` or `|200x100`) is ignored, not
+  alt text: the picture fills its box as usual and the caption keeps the
+  name. On a note, `![[note|Title]]` shows the note as `![[note]]` does.
+- A caption too long for the box ends in `…`.
+- In an export, an embedded picture becomes `![name](path)`, or
+  `![alt text](path)` when it has some, with the path
   relative to the exported note's folder when the picture is inside it and
   absolute otherwise. A path with a space or a parenthesis is written in
   `<…>`.

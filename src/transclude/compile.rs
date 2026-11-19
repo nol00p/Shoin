@@ -255,8 +255,17 @@ pub(super) fn shape(
     // An image is not text to slice into sections: it becomes a Markdown
     // image, which every export format already knows — `<img>` in HTML, and
     // the link itself in Markdown and plain text.
+    // Its alt text is the embed's (`![[p.png|A barn]]`), or the link as
+    // written; brackets and backslashes are escaped so the image syntax holds.
     if crate::image::looks_like_image(target) {
-        return Ok(format!("![{}]({})\n", link.label(), picture_dest(target, base)));
+        let mut alt = String::new();
+        for c in link.alt().map_or_else(|| link.label(), str::to_string).chars() {
+            if matches!(c, '[' | ']' | '\\') {
+                alt.push('\\');
+            }
+            alt.push(c);
+        }
+        return Ok(format!("![{alt}]({})\n", picture_dest(target, base)));
     }
     let text = read(target)?;
     let text = if cfg.strip_frontmatter {
@@ -552,7 +561,10 @@ mod tests {
         let main = write(
             &d,
             "notes/a.md",
-            &format!("![[img/p.png]]\n\n![[my pic (1).png]]\n\n![[{}]]\n", far.display()),
+            &format!(
+                "![[img/p.png]]\n\n![[my pic (1).png]]\n\n![[{}]]\n\n![[img/p.png|A red barn]]\n\n![[img/p.png|200]]\n\n![[img/p.png|a [b] c]]\n",
+                far.display()
+            ),
         );
         // Given as a path with `..` and `.` in it, as a relative path from
         // the command line would be after joining.
@@ -560,6 +572,9 @@ mod tests {
         let out = compile(&given, &cfg()).unwrap();
         assert!(out.contains("![img/p.png](img/p.png)"), "{out}");
         assert!(out.contains("![my pic (1).png](<my pic (1).png>)"), "{out}");
+        // Alt text is the picture's; a size is not, so `|200` keeps the link.
+        assert!(out.contains("![A red barn](img/p.png)\n\n![img/p.png](img/p.png)\n\n![a"), "{out}");
+        assert!(out.contains("![a \\[b\\] c](img/p.png)"), "brackets escaped: {out}");
         let far = std::fs::canonicalize(&far).unwrap();
         assert!(out.contains(&format!("]({})", far.display())), "{out}");
         assert_eq!(compile(&main, &cfg()).unwrap(), out);
