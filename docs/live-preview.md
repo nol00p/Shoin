@@ -46,6 +46,13 @@ that off.
   belongs to the marker. A tab there is the marker's space plus
   `tab_width` − 1 columns of indent, as the list commands count it (see
   [Editing](editing.md)), and still takes `tab_width` cells.
+- Styles nest. Emphasis, code spans and highlights inside a link's text are
+  styled in the link's colour, and a link inside emphasis
+  (`**see [docs](u)**`) is drawn as a link in the outer style, its address
+  hidden.
+- A compact quote such as `>>- a` or `>>text` draws like a spaced one. With
+  `layout.stable_gutter` on (the default), its text stays in place when the
+  cursor reveals the markers.
 - `layout.conceal = false`, `:set conceal off` or `<leader>c` turns concealment
   off entirely.
 - To see every line concealed, the cursor's too, open the page read-only:
