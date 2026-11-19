@@ -134,28 +134,38 @@ impl Layout {
 /// `hang` is clamped so a continuation row always keeps some width — a deeply
 /// indented item in a narrow pane must still wrap rather than loop forever.
 pub fn wrap_hanging(text: &str, measure: u16, hang: u16, tab: usize) -> Vec<(usize, usize)> {
-    if hang == 0 {
-        return wrap_line(text, measure, tab);
-    }
+    wrap_with_inset(text, measure, hang, tab, 0, &[])
+}
+
+/// Wrap a line whose first row starts `inset` cells inside the measure.
+/// `breaks` are char indices a row may also start at, as if a space came
+/// before them.
+pub(super) fn wrap_with_inset(
+    text: &str,
+    measure: u16,
+    hang: u16,
+    tab: usize,
+    inset: u16,
+    breaks: &[usize],
+) -> Vec<(usize, usize)> {
     let hang = hang.min(measure.saturating_sub(MIN_WRAP_WIDTH));
-    let first = wrap_line(text, measure, tab);
-    if first.len() < 2 || hang == 0 {
+    let chars: Vec<char> = text.chars().collect();
+    let first = wrap_chars_at(&chars, measure.saturating_sub(inset), tab, breaks);
+    if first.len() < 2 || (hang == 0 && inset == 0) {
         return first;
     }
-    // The first row is whatever the full measure took; the rest are re-wrapped
-    // at the narrower width, so the break points shift as they must.
+    // Keep the first break. Wrap the remaining text at the continuation width.
     let (start, end) = first[0];
     let mut out = vec![(start, end)];
-    let chars: Vec<char> = text.chars().collect();
-    let rest: String = chars[end..].iter().collect();
-    for (a, b) in wrap_line(&rest, measure - hang, tab) {
+    let rest_breaks: Vec<usize> = breaks.iter().filter_map(|&b| b.checked_sub(end)).collect();
+    for (a, b) in wrap_chars_at(&chars[end..], measure - hang, tab, &rest_breaks) {
         out.push((end + a, end + b));
     }
     out
 }
 
 /// The narrowest a hanging continuation row may become.
-const MIN_WRAP_WIDTH: u16 = 8;
+pub(super) const MIN_WRAP_WIDTH: u16 = 8;
 
 /// The display column an item's content starts at — the width of its leading
 /// marker run, which is what a wrapped continuation lines up under.
@@ -213,10 +223,15 @@ pub fn content_column(text: &str, tab_width: u16, guide: &str) -> u16 {
         marker += 4;
     }
     // And the space(s) between marker and content.
+    // A tab there is drawn `tab_width` cells wide, so it counts as that many.
     let mut gap = 0u16;
-    while chars.peek() == Some(&' ') {
+    loop {
+        match chars.peek() {
+            Some(' ') => gap += 1,
+            Some('\t') => gap += tab_width.max(1),
+            _ => break,
+        }
         chars.next();
-        gap += 1;
     }
     // A marker with no content after it is not a hanging indent, it is a line.
     if chars.peek().is_none() {
@@ -238,6 +253,11 @@ pub fn wrap_line(text: &str, measure: u16, tab: usize) -> Vec<(usize, usize)> {
 /// `wrap_line` for a line whose chars the caller already has, so a long line
 /// is not collected twice when its rows are then cut with `char_window`.
 pub fn wrap_chars(chars: &[char], measure: u16, tab: usize) -> Vec<(usize, usize)> {
+    wrap_chars_at(chars, measure, tab, &[])
+}
+
+/// `wrap_chars` that may also start a row at any index in `breaks`.
+fn wrap_chars_at(chars: &[char], measure: u16, tab: usize, breaks: &[usize]) -> Vec<(usize, usize)> {
     if chars.is_empty() {
         return vec![(0, 0)];
     }
@@ -246,27 +266,32 @@ pub fn wrap_chars(chars: &[char], measure: u16, tab: usize) -> Vec<(usize, usize
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut width = 0usize;
-    let mut last_space: Option<usize> = None;
+    // The latest index after `start` a row may start at: past a space, or
+    // one of `breaks`.
+    let mut last_break: Option<usize> = None;
     let mut i = 0usize;
 
     while i < chars.len() {
         let w = cell_width(chars[i], tab);
         if width + w > max && i > start {
-            // Break at the last space if there was one inside this row,
-            // otherwise hard-break at the current character.
-            let brk = match last_space {
-                Some(s) if s > start => s + 1,
+            // Break at the last break point inside this row, otherwise
+            // hard-break at the current character.
+            let brk = match last_break {
+                Some(b) if b > start => b,
                 _ => i,
             };
             out.push((start, brk));
             start = brk;
             width = 0;
-            last_space = None;
+            last_break = None;
             i = brk;
             continue;
         }
-        if matches!(chars[i], ' ' | '\t') {
-            last_space = Some(i);
+        if i > start && breaks.contains(&i) {
+            last_break = Some(i);
+        }
+        if i > start && matches!(chars[i], ' ' | '\t') {
+            last_break = Some(i + 1);
         }
         width += w;
         i += 1;
@@ -423,6 +448,23 @@ pub fn scroll_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tab between the marker and the text counts its drawn width.
+    #[test]
+    fn a_tab_after_the_marker_counts_as_its_width() {
+        assert_eq!(content_column("-\tword", 4, ""), 5);
+        assert_eq!(content_column("1.\tword", 4, ""), 6);
+        assert_eq!(content_column("- \tword", 2, ""), 4);
+    }
+
+    /// `breaks` let a row start where no space precedes, and a row that
+    /// starts with a space still does not break right after it.
+    #[test]
+    fn extra_breaks_are_break_points() {
+        assert_eq!(wrap_with_inset(">>abcdefghijklmn", 16, 0, 4, 2, &[1, 2]), [(0, 2), (2, 16)]);
+        assert_eq!(wrap_with_inset(">>abcdefghijklmn", 16, 0, 4, 2, &[]), [(0, 14), (14, 16)]);
+        assert_eq!(wrap_chars(&" abcdefghij".chars().collect::<Vec<_>>(), 8, 4), [(0, 8), (8, 11)]);
+    }
 
     /// The column a wrapped continuation hangs at, read off the DISPLAY form.
     #[test]

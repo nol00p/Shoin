@@ -30,7 +30,9 @@ use crate::config::schema::{GlyphConfig, MarkdownConfig};
 use crate::render::conceal::{ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
 use crate::render::hidden::{self, Hidden};
-use crate::render::layout::{content_column, no_wrap, text_width, wrap_hanging, RowSource, VisualRow};
+use crate::render::layout::{
+    content_column, no_wrap, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow, MIN_WRAP_WIDTH,
+};
 use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
 use crate::transclude::preview::Expansion;
@@ -51,9 +53,15 @@ pub struct LineEntry {
     wrap_raw: Vec<(usize, usize)>,
     /// Wrap ranges of `concealed` at the cached measure.
     wrap_concealed: Vec<(usize, usize)>,
+    /// Source prefix width minus concealed prefix width.
+    pub leading_shift: i32,
     /// Hanging indent for continuation rows, in each form. Zero unless this is
     /// a list item and `layout.hanging_indent` is on — and the two differ,
     /// because a concealed `- [ ] ` is narrower than the revealed one.
+    /// Capped as the wrapper caps it, and measured from where the first row
+    /// starts: a raw row the stable gutter starts inside the measure has its
+    /// inset added here, and one it starts in the margin is offset by
+    /// `frame::hang_x`.
     hang_raw: u16,
     hang_concealed: u16,
     /// What this line draws instead of itself when it is a whole-line `![[…]]`
@@ -121,6 +129,7 @@ struct StyleKey {
     /// the source text and the block kind, and neither of them moves when a
     /// layout setting does.
     hanging_indent: bool,
+    stable_gutter: bool,
     /// Reaches an embed's expansion: the search root, the depth cap, the
     /// heading offset and the border are all read while the line is parsed.
     transclude: crate::config::schema::TranscludeConfig,
@@ -137,6 +146,7 @@ impl StyleKey {
             && self.syntax == doc.buffer.syntax
             && self.embed_mode == app.embed_mode
             && self.hanging_indent == app.config.layout.hanging_indent
+            && self.stable_gutter == (app.config.layout.stable_gutter && app.config.layout.conceal)
             && self.transclude == app.config.transclude
     }
 
@@ -149,6 +159,7 @@ impl StyleKey {
             syntax: doc.buffer.syntax,
             embed_mode: app.embed_mode,
             hanging_indent: app.config.layout.hanging_indent,
+            stable_gutter: app.config.layout.stable_gutter && app.config.layout.conceal,
             transclude: app.config.transclude.clone(),
         }
     }
@@ -623,6 +634,22 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         None
     };
 
+    let leading_shift = cmap.leading_shift(&source, cfg.editor.tab_width);
+    let inset = if cfg.layout.stable_gutter && cfg.layout.conceal && doc.buffer.syntax == Syntax::Markdown {
+        (-leading_shift).clamp(0, i32::from(measure.saturating_sub(1))) as u16
+    } else {
+        0
+    };
+    // Each form's hang, measured from the text column and capped the way the
+    // wrapper caps it, so drawing reserves exactly what wrapping left. The
+    // raw first row starts `inset` cells in, so its content does too.
+    let cap = measure.saturating_sub(MIN_WRAP_WIDTH);
+    let hang_raw = if hang_raw == 0 { 0 } else { hang_raw.saturating_add(inset).min(cap) };
+    let hang_concealed = hang_concealed.min(cap);
+    // The concealed prefix may break after a bar the source writes with no
+    // space after it (`>>text`); the raw wrap may break there too.
+    let breaks = cmap.prefix_breaks(&source);
+
     // A table row's `|` columns are laid out by its author, in the source; word
     // wrap would break that layout onto several ragged rows instead of leaving
     // it aligned. Overflow past the measure is clipped at the pane edge, same
@@ -631,7 +658,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         (no_wrap(&source), no_wrap(&concealed))
     } else {
         (
-            wrap_hanging(&source, measure, hang_raw, cfg.editor.tab_width),
+            wrap_with_inset(&source, measure, hang_raw, cfg.editor.tab_width, inset, &breaks),
             wrap_hanging(&concealed, measure, hang_concealed, cfg.editor.tab_width),
         )
     };
@@ -639,6 +666,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     LineEntry {
         wrap_raw,
         wrap_concealed,
+        leading_shift,
         source,
         block,
         styled,
