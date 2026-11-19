@@ -62,7 +62,7 @@ root = "file"             # where <leader>fe / ff open: "file" (the edited
 | `[layout]` | measure, alignment, focus, numbers, typewriter, conceal, line spacing |
 | `[theme]` | every color, from the background to syntax highlighting and diff |
 | `[input]` | leader, mouse, the Insert-mode escape alias |
-| `[editor]` | indenting, pairs, list numbering and Tab, saving, autosave, autoreload, clipboard |
+| `[editor]` | indenting, pairs, list numbering and `Tab`, saving, autosave, autoreload, clipboard |
 | `[tree]` | file-tree options |
 | `[transclude]` | how embeds resolve and display |
 | `[markdown]` | which syntax is styled: tags, wiki links, highlight, tables, code, math; whether export follows those |
@@ -113,10 +113,10 @@ The first of these that exists wins:
 - Bindings match exactly, so one that is also the start of a longer binding
   shadows it. Shoin warns about that at load time. To bind a prefix key such
   as `<leader>f` on its own, set the bindings under it to `"none"`.
-- `[keys.insert]` takes single keys only. `"<S-Tab>"` names Shift-Tab.
+- `[keys.insert]` takes single keys only. `"<S-Tab>"` names `Shift-Tab`.
 - `list_renumber = false` leaves the numbers of a `1.` `2.` `3.` list as you
   wrote them when `>al`, `<al`, `Alt-j` or `Alt-k` moves an item. `list_tab =
-  false` makes Tab type a tab on a list item too — see
+  false` makes `Tab` type a tab on a list item too — see
   [Editing](editing.md#lists).
 - `table_align = "manual"` stops Shoin rewriting a table when you leave
   Insert; `ga` still aligns it on demand. See [Writing](writing.md#writer-verbs).

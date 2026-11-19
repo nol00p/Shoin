@@ -70,6 +70,9 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   backslash breaks the line (`<br>`); in `txt` the line just ends there, and
   the spaces or backslash go. Consecutive `>` lines are one quoted
   paragraph; a bare `>` starts the next.
+- A fenced code block inside a quote exports as code, nested quotes and
+  `~~~` fences included. A tab after `>` counts as the marker's space, as in
+  CommonMark.
 - Setext headings (`Title` over `=====`), footnotes, indented code blocks
   and raw HTML are not part of Shoin's Markdown. They export as the text
   they are.
