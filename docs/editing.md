@@ -14,7 +14,9 @@ know Shoin; the full list is in the [key reference](reference/keys.md).
 - **Insert** — type text. Enter it with `i` `a` `I` `A` `o` `O`; leave with
   `Esc`, `Ctrl-c` or `jk`.
 - **Visual** — select text: `v` by character, `V` by line, or drag the mouse.
-- **Command** — the `:` line. **Search** — `/` forward, `?` backward.
+- **Command** — the `:` line, with `Tab` completion (see
+  [The command line](#the-command-line)). **Search** — `/` forward, `?`
+  backward.
 
 ## Getting around
 
@@ -69,11 +71,11 @@ step. In Visual mode it re-indents every list the selection touches, still
 as one undo step. To put it on a key, bind `fix_list` under `[keys.normal]`.
 
 A list inside a blockquote (`> - a`) works the same way: every command
-above, Tab, and Enter, which continues `> - a` with `> - `. The `>`
+above, `Tab`, and `Enter`, which continues `> - a` with `> - `. The `>`
 markers stay as written.
 
-In Insert mode, Tab and Shift-Tab do the same as `>al` and `<al` on an item's
-line, so Enter, Tab, and typing starts a sub-item.
+In Insert mode, `Tab` and `Shift-Tab` do the same as `>al` and `<al` on an
+item's line, so `Enter`, `Tab`, and typing starts a sub-item.
 
 An indent that would break the list is refused with a message and changes
 nothing (see Details). Each command is one undo step and `.` repeats it.
@@ -85,13 +87,23 @@ nothing (see Details). Each command is one undo step and `.` repeats it.
 the delete ring, newest first. `"+` is the system clipboard — see
 [Clipboard](clipboard.md).
 
+## The command line
+
+`:` opens the command line. `Tab` completes the word you are typing: a
+command's name, a path after `:e`, `:w`, `:saveas` and `:wq`, an option or
+its value after `:set`, a topic after `:help`, an open buffer after `:b`, and
+the values `:focus`, `:align`, `:embed`, `:number` and `:export` take. `Tab`
+again puts in the next match and `Shift-Tab` the one before; past either end,
+the line goes back to what you typed. The hint bar lists the matches. Every
+command is in the [command reference](reference/commands.md).
+
 ## Insert mode
 
-Enter continues a list marker or a quote prefix, and ends the list when the
-item is empty. On a list item's line, Tab nests the item under the one above
-and Shift-Tab brings it back out, sub-items included, the same as `>al` and
-`<al`; anywhere else Tab types a tab. `list_tab = false` in `[editor]` makes
-Tab a tab on list items too. A terminal paste goes in exactly as copied: no
+`Enter` continues a list marker or a quote prefix, and ends the list when the
+item is empty. On a list item's line, `Tab` nests the item under the one above
+and `Shift-Tab` brings it back out, sub-items included, the same as `>al` and
+`<al`; anywhere else `Tab` types a tab. `list_tab = false` in `[editor]` makes
+`Tab` a tab on list items too. A terminal paste goes in exactly as copied: no
 auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 
 ## Folding
@@ -106,7 +118,8 @@ line ends with ` … 5 lines`, the number of lines it hides.
   zc  zo    fold · unfold             zM   fold every item and section
 ```
 
-`j` and `k` step over a fold as one line, and so do `Ctrl-d` and `Ctrl-u`.
+`j` and `k` step over a fold as one line, and so do `Ctrl-d`, `Ctrl-u`,
+`Ctrl-f` and `Ctrl-b`.
 A search, `G`, `gg` or `:42` that lands inside a fold opens it. Each pane
 folds on its own, so two panes on one file can show it folded differently.
 Folds last until you quit. They are not saved and don't change the file or
@@ -145,8 +158,9 @@ middle or the bottom of the pane. The cursor stays where it is.
 - A new pane (`:split`, `Ctrl-w v`) starts with the folds of the pane it was
   split from. Lines added or removed in one pane move the folds of every
   pane on that file.
-- Typing on a folded line keeps the fold; Insert mode opens it. Lines added
-  or removed above a fold move it along. A fold whose first line stops being
+- A Normal-mode edit on a folded line, such as `~` or `r`, keeps the fold;
+  Insert mode on it opens it. Lines added or removed above a fold move it
+  along. A fold whose first line stops being
   a list item or a heading goes away; changing a heading's level changes how
   far its section reaches.
 - `zt` and `zb` keep `scroll_off` lines between the cursor's line and the
@@ -181,7 +195,7 @@ middle or the bottom of the pane. The cursor stays where it is.
   default was 500 ms before tmux 3.5): `set -sg escape-time 10` fixes it, and
   it is the usual advice for Vim in tmux. On macOS, Terminal.app needs "Use
   Option as Meta key" and iTerm2 needs Option set to "Esc+". Or rebind
-  `list_item_down` and `list_item_up` in `keys.conf`. Tab and Shift-Tab are
+  `list_item_down` and `list_item_up` in `keys.conf`. `Tab` and `Shift-Tab` are
   `list_indent` and `list_outdent` under `[keys.insert]`.
 - Moving swaps the item and the items it passes as two blocks of text; the
   blank lines between them stay where they were.
@@ -260,7 +274,7 @@ middle or the bottom of the pane. The cursor stays where it is.
   `>` counts as the marker's space plus `tab_width` − 1 columns of indent.
   A line whose indent changes keeps that tab while the columns after it
   stay the same; otherwise the tab becomes a space. In Visual, `Alt-j` and
-  `Alt-k` refuse a selection that leaves the quote. Enter on an empty item
+  `Alt-k` refuse a selection that leaves the quote. `Enter` on an empty item
   in a quote ends the list and keeps the quote: the line becomes `>` and
   the next one starts with `> `. A quote inside a list item that holds no
   list of its own still belongs to the item.
@@ -291,8 +305,8 @@ middle or the bottom of the pane. The cursor stays where it is.
   the same way, in Normal mode.
 - `:u`, `:undo`, `:red` and `:redo` work as well as `u` and `Ctrl-r`.
 - `.` repeats the last change in the document you are in now, wherever it
-  was made. Keys that switch documents or panes (`:bn`, `:e`, `gf`, `<C-^>`,
-  `:bd`, the `<C-w>` keys) are never the change, even when they are refused,
+  was made. Keys that switch documents or panes (`:bn`, `:e`, `gf`, `Ctrl-^`,
+  `:bd`, the `Ctrl-w` keys) are never the change, even when they are refused,
   and in Visual mode they end the selection, as in Vim. `3.` repeats the
   change with a count of 3, and so does every `.` after it. `.` in Visual
   mode does nothing. A change made on a dragged selection repeats over as

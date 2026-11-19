@@ -55,8 +55,9 @@ to a PDF is reported, not invented.
 
 ## No pictures in tmux
 
-Inside tmux, an image embed shows its box and caption rather than the picture,
-because a half-drawn image is worse than none.
+Inside tmux or screen, an image embed shows its box and caption rather than
+the picture. A multiplexer doesn't pass the picture's escapes through
+reliably, and a half-drawn image in a pane is worse than none.
 
 ## Markdown and text only
 

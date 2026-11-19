@@ -92,9 +92,11 @@ switches to that read-only view and back. See [Reading](reading.md).
 While you learn, the bottom row shows the keys that matter right now: in
 each mode, in the file tree, and after a key like `<leader>` or `g` that waits
 for another. A key that waits for another takes the row from the status line,
-in Visual too, until the next key. The most used keys come first, so on a narrow terminal the
-rarely used ones are the ones cut off. `:set hints off` hides it for the session, and
-`enabled = false` under `[hints]` for good.
+in Visual too, until the next key. The most used keys come first, so on a
+narrow terminal the rarely used ones are cut off. On the `:` line, `Tab`
+completes commands, paths and options, and the row lists the matches.
+`:set hints off` hides the row for the session, and `enabled = false` under
+`[hints]` for good.
 
 `<leader>n` turns on line numbers. For Vim's relative numbers, which make counts
 like `5j` easy to read off, set `numbers = "relative"` under `[layout]` or try

@@ -107,7 +107,10 @@ version and then the file's, in the order shown on screen.
 ## Details
 
 - Saving through a symlink writes the file it points to rather than replacing
-  the link.
+  the link. A link to a missing file creates that file and keeps the link, as
+  Vim does; a loop of links, or a link into a missing folder, is an error.
+  `:w other.md` onto a broken link says so, and `:w!` creates the file it
+  names.
 - A file opens in one buffer however it is named: `n.md`, `./n.md`,
   `sub/../n.md`, the tree's path and a symlink to it all switch to the same
   buffer. Renaming or moving it in the tree takes the buffer along.
@@ -161,6 +164,9 @@ version and then the file's, in the order shown on screen.
   `$XDG_STATE_HOME/shoin/recover-<pid>-<n>.md` (`~/.local/state/shoin/` when
   `XDG_STATE_HOME` is unset), skipping any `<n>` already taken. Recovery files
   are readable by you only.
+- A file name too long to take the recovery endings gets a shortened
+  recovery name beside it: the start of the name, `~` and a short hash.
+  Recovery files 0.2.4 wrote under the full name are still found.
 - A new recovery file takes `notes.md.shoin-recover` when that name is free,
   and otherwise the number after the highest one there, even when a lower
   name is free. Opening a file looks for the others only when
