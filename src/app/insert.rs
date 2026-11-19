@@ -137,7 +137,7 @@ impl App {
         true
     }
 
-    /// `input.escape_alias` (default `jk`) — SPEC.md §7.2.
+    /// `input.escape_alias` (default `jk`).
     ///
     /// Deliberately NOT a keymap entry: the first character must land in the
     /// buffer immediately, or typing "jam" would stutter while the editor waited

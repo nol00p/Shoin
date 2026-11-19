@@ -10,8 +10,8 @@
 // was finished it had accumulated a duplicate copy of the input grammar, six
 // unreachable `Action` variants, and — worst — an `Action::ReplaceChar` the
 // grammar emitted and nothing handled, so `r{c}` compiled and did nothing.
-// The one field that genuinely leads its use (`VisualRow::editable`, the SPEC
-// §14.5 transclusion seam) carries its own targeted allow.
+// `VisualRow::editable` has a targeted allow because it is reserved for
+// editable transclusions.
 
 mod app;
 mod clipboard;
@@ -208,8 +208,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Exporting is a batch job: no terminal is acquired, so errors go to stderr
-    // as an exit code rather than a status-line flash (SPEC.md §14.4).
+    // Batch export skips terminal setup, so errors go to stderr and the
+    // command exits with a failure status.
     if let Some(src) = &cli.export {
         let format = export_format(&cli.format, cli.justify)?;
         let page = export::html::Page {

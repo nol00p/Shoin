@@ -1,4 +1,4 @@
-//! Markdown to one self-contained HTML page. SPEC.md §14.4.
+//! Markdown to one self-contained HTML page.
 //!
 //! Unlike PDF, this is NOT shelled out. `pandoc` exists because typesetting a
 //! page is a hard problem shoin has no business solving; turning the block
@@ -939,12 +939,6 @@ fn escape(s: &str) -> String {
 fn escape_chars(chars: &[char]) -> String {
     escape(&chars.iter().collect::<String>())
 }
-/// A local image, turned into a `data:` URI so the page really is one file.
-///
-/// SPEC §14.4 calls HTML export "self-contained", and a page that reaches back
-/// to `~/notes/photo.png` is not — it breaks the moment it is sent to anyone.
-/// A URL, or a file that cannot be read, is left exactly as written: those are
-/// the cases where the author meant a reference.
 /// The file a local picture address names: against the document's folder
 /// `base` first, then the working directory (see `inline_src` for why both).
 /// `None` for an address, a `data:` URI, or a file that is not there.
@@ -961,6 +955,8 @@ pub(crate) fn local_file(url: &str, base: &std::path::Path) -> Option<std::path:
     candidates.into_iter().find(|p| p.is_file())
 }
 
+/// Embed supported local images as `data:` URIs so they stay visible when
+/// the page is moved or shared. Keep the original source if inlining fails.
 fn inline_src(url: &str, base: &std::path::Path) -> String {
     if url.is_empty() || url.contains("://") || url.starts_with("data:") {
         return url.to_string();

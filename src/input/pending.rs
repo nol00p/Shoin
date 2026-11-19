@@ -1,4 +1,4 @@
-//! The operator-pending state machine. SPEC.md §7.2.
+//! The operator-pending state machine.
 //!
 //! Normal-mode input accumulates as:
 //!

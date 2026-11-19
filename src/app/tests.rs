@@ -995,7 +995,7 @@ fn zen_survives_a_config_reload() {
 }
 
 /// One `u` takes back a word, not the whole insert session: the step is
-/// split at each word boundary. SPEC.md §4.
+/// split at each word boundary.
 #[test]
 fn undo_splits_an_insert_session_at_word_boundaries() {
     let mut app = app_with("");
@@ -1034,7 +1034,7 @@ fn undoing_back_to_the_saved_state_clears_modified() {
     let _ = std::fs::remove_file(path);
 }
 
-/// SPEC §10: a write refuses to clobber a file something else changed
+/// A write refuses to clobber a file something else changed
 /// underneath us, and `:w!` is the way past it. Without this the recorded
 /// `disk_mtime` was bookkeeping nobody read.
 #[test]
@@ -1182,7 +1182,7 @@ fn diff_on_a_matching_file_opens_nothing() {
 
 /// `:w` with `trim_on_save` trims the buffer as it trims the file, so
 /// `:diff` straight after finds nothing; and `.` still repeats the edit
-/// made before the save, not the `:w`. F21.
+/// made before the save, not the `:w`.
 #[test]
 fn a_trimming_save_leaves_the_buffer_matching_and_dot_alone() {
     let (mut app, path) = app_on_disk("trim", "one two\nx \nthree four\n");
@@ -1491,7 +1491,7 @@ fn a_clean_buffer_takes_the_file_changes() {
     let _ = std::fs::remove_file(path);
 }
 
-/// F22: a file that changes into something that cannot be loaded is
+/// A file that changes into something that cannot be loaded is
 /// reported once, not every poll. The text stays, the poll keeps trying,
 /// and a readable version reloads as usual. `:w` still refuses to write
 /// over the file; `:w!` does.
@@ -1768,7 +1768,7 @@ fn autosave_leaves_a_conflicted_buffer_to_the_reader() {
 
 // ------------------------------------------------------------- autosave
 
-/// F18: `:w <other>` on a buffer with its own file writes a copy and
+/// `:w <other>` on a buffer with its own file writes a copy and
 /// keeps editing the original; the next `:w` goes to the original.
 #[test]
 fn w_to_another_name_writes_a_copy() {
@@ -1802,7 +1802,7 @@ fn w_to_another_name_writes_a_copy() {
     let _ = std::fs::remove_file(copy);
 }
 
-/// F18: `:saveas` switches the buffer to the new file and restyles it by
+/// `:saveas` switches the buffer to the new file and restyles it by
 /// the new extension; an unnamed buffer's `:w <name>` does the same.
 #[test]
 fn saveas_switches_the_buffer_and_its_syntax() {
@@ -1825,7 +1825,7 @@ fn saveas_switches_the_buffer_and_its_syntax() {
     }
 }
 
-/// F18: `:saveas` will not take over a file another buffer has open, and
+/// `:saveas` will not take over a file another buffer has open, and
 /// `:wq <path>` saves the buffer as that file (not a copy) before quitting.
 #[test]
 fn saveas_refuses_an_open_file_and_wq_path_saves_as() {
@@ -1854,7 +1854,7 @@ fn saveas_refuses_an_open_file_and_wq_path_saves_as() {
     }
 }
 
-/// F18: `~` and `~/…` at the start of a typed path are `$HOME`.
+/// `~` and `~/…` at the start of a typed path are `$HOME`.
 #[test]
 fn a_typed_tilde_is_home() {
     let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else { return };
@@ -2136,7 +2136,7 @@ fn wq_bang_with_a_failed_write_does_not_quit() {
     assert!(!app.quit, "no file name: the write failed");
 }
 
-/// SPEC §7.2: `jk` in Insert removes both characters and leaves the mode.
+/// `jk` in Insert removes both characters and leaves the mode.
 /// The `j` must appear first — the editor may not stall a keystroke waiting
 /// to see what follows.
 #[test]
@@ -3242,7 +3242,7 @@ fn moving_the_last_item_of_a_file_with_no_final_newline() {
     assert_eq!(text(&app), "- a\n- b");
 }
 
-/// F15: Normal-mode edit keys act on the Visual selection and end Visual,
+/// Normal-mode edit keys act on the Visual selection and end Visual,
 /// instead of editing at the cursor with the selection still up.
 #[test]
 fn visual_edit_keys_act_on_the_selection() {
@@ -4389,7 +4389,7 @@ fn gi_italic_and_gk_code() {
     assert_eq!(text(&app), "`word`\n");
 }
 
-/// `_word_` and `__word__` are emphasis too (F14), and `_` is a word
+/// `_word_` and `__word__` are emphasis too, and `_` is a word
 /// character, so the word under the cursor INCLUDES the underscores. The
 /// toggles act on the span the renderer styles, so they strip those
 /// underscores rather than wrapping them in stars.
@@ -5029,7 +5029,7 @@ fn delete_before_join_and_toggle_case() {
     assert_eq!(text(&app), "AbC\n");
 }
 
-/// F27: a count on `i`, `a`, `A` and `o`/`O` repeats what was typed, in
+/// A count on `i`, `a`, `A` and `o`/`O` repeats what was typed, in
 /// one undo step; `Ctrl-C` leaves without the copies.
 #[test]
 fn insert_counts_repeat_the_typed_text() {
@@ -5078,7 +5078,7 @@ fn insert_counts_repeat_the_typed_text() {
     assert_eq!(text(&app), "xxxx\n");
 }
 
-/// F27: `3.` replays the change with 3 in place of its own count, and a
+/// `3.` replays the change with 3 in place of its own count, and a
 /// later `.` keeps the 3.
 #[test]
 fn a_count_on_dot_replaces_the_changes_count() {
@@ -5116,7 +5116,7 @@ fn a_count_on_dot_replaces_the_changes_count() {
     assert_eq!(app.registers.get(&'q').map(|r| r.text.as_str()), Some("b c "));
 }
 
-/// F27: a count on the word objects takes that many words.
+/// A count on the word objects takes that many words.
 #[test]
 fn counted_word_objects() {
     for (keys, want) in [
@@ -5133,7 +5133,7 @@ fn counted_word_objects() {
     }
 }
 
-/// F27: `cc` keeps the indent with `auto_indent`, and `yy` leaves the
+/// `cc` keeps the indent with `auto_indent`, and `yy` leaves the
 /// cursor where it was; `yk` and `yip` take it up to where they start.
 #[test]
 fn cc_keeps_the_indent_and_yy_keeps_the_cursor() {
@@ -5166,7 +5166,7 @@ fn cc_keeps_the_indent_and_yy_keeps_the_cursor() {
     assert_eq!(app.buffer.cursor.line, 0, "yip goes to the paragraph's first line");
 }
 
-/// F16: `F` and `T` are exclusive under an operator, so the character
+/// `F` and `T` are exclusive under an operator, so the character
 /// under the cursor stays; a forward `t` to the very next character
 /// still gives the operator that one character; `;` and `,` take an
 /// operator too.
@@ -5203,7 +5203,7 @@ fn find_motions_under_an_operator() {
     assert_eq!(app.buffer.cursor.col, 3, "y leaves the cursor at the start");
 }
 
-/// F16: as plain motions the finds land where they always did.
+/// As plain motions the finds land where they always did.
 #[test]
 fn find_motions_alone_are_unchanged() {
     for (keys, col) in [("$Fx", 3), ("$Tx", 4), ("tx", 2), ("ltx", 2), ("lltx", 2), ("fx", 3)] {
@@ -5948,7 +5948,7 @@ fn tree_operations_refuse_to_clobber() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// F17: `Ctrl-W` deletes like vim's command line: the trailing spaces,
+/// `Ctrl-W` deletes like vim's command line: the trailing spaces,
 /// then one run of word characters or one run of symbols.
 #[test]
 fn ctrl_w_deletes_the_last_word() {
@@ -5968,7 +5968,7 @@ fn ctrl_w_deletes_the_last_word() {
     }
 }
 
-/// F17: in the `:` and `/` `?` lines a control chord is never typed as
+/// In the `:` and `/` `?` lines a control chord is never typed as
 /// its letter. `Ctrl-C` cancels, `Ctrl-U` clears, `Ctrl-W` deletes a
 /// word, `Ctrl-H` is a backspace, and anything else is ignored.
 #[test]
@@ -6014,7 +6014,7 @@ fn control_keys_in_the_command_and_search_lines() {
     assert!(app.search.is_none());
 }
 
-/// F17: the finder's query takes the same editing keys, but an empty
+/// The finder's query takes the same editing keys, but an empty
 /// query stays open on Backspace.
 #[test]
 fn control_keys_in_the_finder() {
@@ -6035,7 +6035,7 @@ fn control_keys_in_the_finder() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// F17: the tree's prompts take the same keys. `Ctrl-y` is not a yes.
+/// The tree's prompts take the same keys. `Ctrl-y` is not a yes.
 #[test]
 fn control_keys_in_a_tree_prompt() {
     let dir = two_files();

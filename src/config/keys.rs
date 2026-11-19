@@ -1,4 +1,4 @@
-//! Key string parser. SPEC.md §8.
+//! Key string parser.
 //!
 //! Grammar:
 //!   sequence  := key+

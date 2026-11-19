@@ -1,4 +1,4 @@
-//! Flattening a composition into one document. SPEC.md §14.4.
+//! Flattening a composition into one document.
 //!
 //! Walks `![[…]]` links recursively and returns one flat document — the
 //! machinery under `:export`, and under `:embed rec`/`full`. Two rules shape it:
@@ -61,8 +61,8 @@ fn close_at(chars: &[char], from: usize) -> Option<usize> {
     None
 }
 
-/// A line that is nothing but one embed — the composition form from §14.1,
-/// and the only shape that expands to a block rather than inline.
+/// Recognize a single embed on its own line so expansion can replace the
+/// whole line without disturbing surrounding prose.
 pub fn whole_line_embed(line: &str) -> Option<Link> {
     let t = line.trim();
     let found = embeds_in(t);
@@ -99,8 +99,8 @@ fn walk(text: &str, path: &Path, cfg: &TranscludeConfig) -> Result<(String, Vec<
     let mut w = Walk::new(path, cfg);
     w.stack.push(canonical(path));
     let mut out = String::new();
-    // The composition file keeps its own front matter (§14.4); only embedded
-    // files are stripped.
+    // The composition keeps its front matter as the document metadata.
+    // Strip embedded notes' front matter so it does not appear in the body.
     w.expand(text, path, 0, &mut out)?;
     // Block ids go from the WHOLE document, not just from embedded text. They
     // are addresses rather than prose, and the composition's own are as much
@@ -319,8 +319,8 @@ pub fn flatten_link(
     Ok(link::strip_block_ids(&out))
 }
 
-/// What an unresolved embed leaves in the output. Loud on purpose: SPEC §14.2
-/// forbids a silent gap, and this is what stops a hole reaching a publisher.
+/// Mark unresolved embeds in the output so missing content is visible
+/// before publication.
 fn placeholder(link: &Link, why: &str) -> String {
     format!("> **Missing embed** `![[{}]]` — {why}", link.label())
 }
@@ -331,8 +331,8 @@ fn name_of(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-/// Demote every heading by `by` levels so the flattened outline stays coherent
-/// (§14.4). Headings already at level 6 stay there — Markdown has no `#######`,
+/// Demote every heading by `by` levels so the flattened outline stays coherent.
+/// Headings already at level 6 stay there — Markdown has no `#######`,
 /// and dropping the heading entirely would lose the text.
 ///
 /// Fenced code is skipped: a `#` at the start of a line inside a shell snippet
@@ -532,7 +532,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// F08: an embedded note saved with Windows line endings loses its front
+    /// An embedded note saved with Windows line endings loses its front
     /// matter like any other.
     #[test]
     fn front_matter_of_a_crlf_embed_goes() {
@@ -546,7 +546,7 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// F10: an embedded picture's path is relative to the composition's
+    /// An embedded picture's path is relative to the composition's
     /// folder when it is inside it, wherever the compile was started from,
     /// and absolute otherwise. A space or a parenthesis puts the destination
     /// in `<…>` so the image syntax holds.
@@ -687,9 +687,8 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// F06 and F07 through the whole walk: a heading embed keeps its code
-    /// block closed, a dated name resolves, and folders and extensions in a
-    /// link are not dropped.
+    /// A heading embed keeps its code block closed. Dated names resolve,
+    /// and folders and extensions in a link are preserved.
     #[test]
     fn embeds_keep_fences_and_resolve_by_full_name() {
         let d = vault("f06f07");

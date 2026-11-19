@@ -1,4 +1,4 @@
-//! Config discovery, parsing, and hot reload. SPEC.md §8.
+//! Config discovery, parsing, and hot reload.
 //!
 //! A config location is either a single `.conf` file or a DIRECTORY of `.conf`
 //! files (conf.d style) — the standard `~/.config/<app>/*.conf` layout. When a

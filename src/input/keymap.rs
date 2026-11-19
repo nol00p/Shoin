@@ -1,5 +1,4 @@
 //! Key sequence -> Action lookup, built from defaults + config overrides.
-//! SPEC.md §7.4.
 //!
 //! RESOLUTION RULE: an exact match wins the moment it is complete — `lookup`
 //! answers `Found` before it answers `Prefix`. So there is no ambiguity to
@@ -106,7 +105,7 @@ impl Keymap {
     /// Insert mode looks up SINGLE keys only: a multi-key sequence would have
     /// to hold characters back from the buffer while it waited, and the one
     /// sequence Insert mode does have — `input.escape_alias` — is deliberately
-    /// not a keymap entry for exactly that reason (SPEC.md §7.2).
+    /// not a keymap entry for exactly that reason.
     pub fn insert_key(&self, key: Key) -> Option<&Verb> {
         self.insert.get(std::slice::from_ref(&key))
     }

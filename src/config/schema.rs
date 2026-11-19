@@ -1,4 +1,4 @@
-//! Serde types mirroring `shoin.conf`. SPEC.md §8.
+//! Serde types mirroring `shoin.conf`.
 //!
 //! Every field has a default, so any subset of the file is valid.
 //! `deny_unknown_fields` is deliberately NOT set — unknown keys warn instead,
@@ -38,7 +38,7 @@ pub struct LayoutConfig {
     pub padding_bottom: u16,
     pub hanging_indent: bool,
     /// Blank rows drawn after each source line — the terminal's answer to line
-    /// height. Rows that belong to no line; SPEC.md §6.
+    /// height. These rows belong to no document line.
     pub line_spacing: u16,
     pub scroll_hint: bool,
     pub typewriter: bool,
@@ -49,7 +49,7 @@ pub struct LayoutConfig {
     /// Live preview. `false` renders every line raw with dimmed markers.
     pub conceal: bool,
     /// Reserve reveal width for the active line, trading horizontal slack for
-    /// zero jitter while typing. SPEC.md §6.
+    /// zero jitter while typing.
     pub stable_gutter: bool,
 }
 
@@ -262,7 +262,7 @@ pub struct MarkdownConfig {
     pub highlight: bool,
     pub tables: bool,
     /// Syntax-highlight the body of a fenced block whose info string names a
-    /// language shoin knows. SPEC.md §5.3.
+    /// language shoin knows.
     pub code_syntax: bool,
     pub plain_text_extensions: Vec<String>,
     /// Recognize inline `$…$` and display `$$…$$` LaTeX math.
@@ -317,7 +317,7 @@ pub struct ThemeConfig {
 /// Every glyph here is DRAWN by something. Fields for glyphs nothing renders
 /// are worse than no config at all — they read as settings that silently do
 /// nothing (`link_icon`, `image_icon` and friends were exactly that, removed
-/// 2026-08-14), except where a doc comment names the SPEC section still owed.
+/// 2026-08-14).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct GlyphConfig {
@@ -329,10 +329,10 @@ pub struct GlyphConfig {
     pub task_todo: String,
     pub task_done: String,
     pub quote_bar: String,
-    /// SPEC §5.4, drawn on concealed lines by `conceal::indent_guide_ops` and
+    /// Drawn on concealed lines by `conceal::indent_guide_ops` and
     /// depth-colored by `indent::apply`. Empty turns the guides off.
     pub indent_guide: String,
-    /// SPEC §5.3, hung in the left margin beside every row of a fenced
+    /// Hung in the left margin beside every row of a fenced
     /// block by `frame::render_fence_bar`. Empty turns the bar off.
     pub fence_bar: String,
     /// File-tree directory icons. The per-file-type icons are not configurable
@@ -343,7 +343,7 @@ pub struct GlyphConfig {
     /// Drawn beside the filename by `frame::status_text` when the file changed
     /// on disk under a modified buffer. Empty turns the marker off.
     pub conflict: String,
-    /// SPEC §6, drawn by `frame::render_scroll_hint` at the pane's right
+    /// Drawn by `frame::render_scroll_hint` at the pane's right
     /// edge, and only while the document overflows the screen.
     pub scroll_hint: String,
     pub rule: String,
@@ -429,9 +429,7 @@ impl GlyphConfig {
     }
 }
 
-/// SPEC.md §14.6. Every field here is live — this comment used to say the
-/// section was "accepted and validated but ignored until the feature lands",
-/// which stopped being true the day transclusion shipped.
+/// Settings for expanding and compiling embeds.
 ///
 /// `Clone + PartialEq` because `render::cache::StyleKey` holds a copy: these
 /// settings reach an embed's EXPANSION, so changing one has to re-parse the

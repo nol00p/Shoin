@@ -9,8 +9,8 @@ impl App {
         let span = inline::span_at(&line, self.buffer.cursor.col, &self.config.markdown)?;
         let target = inline::target_of(&span, &line)?;
         Some(match span.kind {
-            // A wiki target is a NAME, even when it looks like a path: §14.2
-            // resolution tries it relative to this file first anyway.
+            // Wiki targets use vault lookup even when they look like paths.
+            // Resolution tries the current file's directory first.
             Inline::WikiLink => Dest::Note(link::Link::parse(&target)?),
             Inline::Autolink => Dest::Url(target),
             _ if is_url(&target) => Dest::Url(target),

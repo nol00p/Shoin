@@ -1,4 +1,4 @@
-//! Text layer. Knows nothing about rendering, input, or config. SPEC.md §4.
+//! Text layer. Knows nothing about rendering, input, or config.
 //! The exceptions are `list` and `table`, which read the block cache's line kinds
 //! rather than parse list markers and table rows a second time.
 

@@ -1,4 +1,4 @@
-//! Undo/redo. SPEC.md §4.
+//! Undo/redo.
 //!
 //! A single undo STEP is a group of primitive `Change`s. Grouping is driven by
 //! the caller (`app`): each Normal/Visual command opens a group and each Insert

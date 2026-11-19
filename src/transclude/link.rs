@@ -1,4 +1,4 @@
-//! Parsing and resolving `![[…]]` embeds. SPEC.md §14.2.
+//! Parsing and resolving `![[…]]` embeds.
 //!
 //! This module knows nothing about rendering or compiling — it turns the text
 //! between the brackets into a path on disk and the slice of that file the
@@ -36,10 +36,8 @@ impl Link {
     /// Parse the text BETWEEN the brackets — `note`, `note#heading`,
     /// `note#^blockid`, optionally with an Obsidian `|alias` suffix.
     ///
-    /// The alias is kept aside rather than rejected. SPEC §14.2 asks for
-    /// Obsidian syntax so vaults stay portable, and a vault full of
-    /// `![[note|Title]]` should not turn into a document full of error
-    /// placeholders. A note ignores it; a picture reads it as `alt`.
+    /// Keeping the alias lets Obsidian embeds like `![[note|Title]]` resolve
+    /// unchanged. A note ignores it, and a picture reads it as `alt`.
     pub fn parse(body: &str) -> Option<Link> {
         let (body, alias) = match body.split_once('|') {
             Some((body, alias)) => (body.trim(), Some(alias.trim()).filter(|a| !a.is_empty())),
@@ -97,9 +95,8 @@ fn is_size(s: &str) -> bool {
 
 /// Why a link could not be turned into a file.
 ///
-/// Named cases rather than one string because §14.2 requires an error
-/// PLACEHOLDER in the document — never a silent empty — and the placeholder
-/// reads better when it can say which kind of wrong this is.
+/// The error placeholder tells the reader whether the target is missing
+/// or several files match it.
 #[derive(Debug)]
 pub enum Unresolved {
     Missing(String),
@@ -143,7 +140,7 @@ fn linkable() -> Vec<String> {
 
 /// Turn a link's target into a path on disk.
 ///
-/// Order per SPEC §14.2: relative to the composition file first, then by unique
+/// Resolve relative to the composition file first, then by unique
 /// filename anywhere under `root`. The relative try comes first so a vault can
 /// have several `index.md` and each folder's own one still wins locally.
 pub fn resolve(link: &Link, from: &Path, root: &Path) -> Result<PathBuf, Unresolved> {
@@ -578,7 +575,7 @@ third para
         assert!(extract(doc, &Section::Block("nope".into())).is_err());
     }
 
-    /// F06: a `#` comment inside a fenced block is code, not a heading. Read
+    /// A `#` comment inside a fenced block is code, not a heading. Read
     /// as one, it ended the section mid-fence and the export kept an opening
     /// fence with no close.
     #[test]
@@ -643,7 +640,7 @@ more
         std::fs::write(p, body).unwrap();
     }
 
-    /// SPEC §14.2: relative to the composition file FIRST, then by unique name.
+    /// Relative to the composition file FIRST, then by unique name.
     /// The order is what lets a vault have several `index.md` and each folder's
     /// own one still win locally.
     #[test]
@@ -717,7 +714,7 @@ more
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// F07: a dot in a note's name is part of the name, not an extension.
+    /// A dot in a note's name is part of the name, not an extension.
     /// Dated names are common in Obsidian vaults.
     #[test]
     fn a_dotted_name_finds_its_note() {
@@ -738,7 +735,7 @@ more
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// F07: an extension the link names is kept. `![[diagram.png]]` with no
+    /// An extension the link names is kept. `![[diagram.png]]` with no
     /// such picture is missing, not `diagram.md`.
     #[test]
     fn a_named_extension_is_not_dropped() {
@@ -762,7 +759,7 @@ more
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// F07: folders in a link narrow the vault search to paths that end in
+    /// Folders in a link narrow the vault search to paths that end in
     /// them; they are not dropped.
     #[test]
     fn folders_in_a_link_must_match() {
@@ -784,7 +781,7 @@ more
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// What F07 must not break: a bare name still finds a picture, matches
+    /// A bare name still finds a picture, matches
     /// case-insensitively, and two notes of one name still need a choice.
     #[test]
     fn the_vault_search_keeps_its_old_answers() {
@@ -864,7 +861,7 @@ echo done ^notanid
         assert_eq!(strip_front_matter("---\nnope\n"), "---\nnope\n");
     }
 
-    /// F08: the opening line is tested the way the editor's classifier tests
+    /// The opening line is tested the way the editor's classifier tests
     /// it, `trim_end() == "---"`, so Windows line endings and trailing spaces
     /// are front matter too.
     #[test]

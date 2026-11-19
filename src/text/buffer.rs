@@ -1,4 +1,4 @@
-//! The document. SPEC.md §4.
+//! The document.
 //!
 //! Rope-backed, char-indexed. Line endings are detected on load, normalized to
 //! `\n` in the rope, and reapplied on save — the file round-trips byte for byte
@@ -119,7 +119,7 @@ pub struct Buffer {
     /// It was built for transclusion, which then did not need it: an embed
     /// occupies exactly one rope line and the active line always renders raw,
     /// so the cursor can never be inside expanded content and there is nothing
-    /// to protect (SPEC.md §14.5, `transclude/preview.rs`). It stays because it
+    /// to protect (`transclude/preview.rs`). It stays because it
     /// costs one branch in `edit.rs` and is the escape hatch if embeds ever
     /// become editable — auditing every mutation site later would not be.
     pub readonly_ranges: Vec<std::ops::Range<usize>>,
@@ -170,7 +170,7 @@ impl Buffer {
     }
 
     /// UTF-8 only. Invalid bytes are refused rather than lossily converted —
-    /// we are about to let the user overwrite this file. SPEC.md §10.
+    /// we are about to let the user overwrite this file.
     ///
     /// A path that does not exist is not an error: it opens an empty buffer
     /// that will create the file on first `:w`.
@@ -223,7 +223,7 @@ impl Buffer {
         Ok(b)
     }
 
-    /// Atomic: temp file in the same directory, fsync, rename. SPEC.md §10.
+    /// Atomic: temp file in the same directory, fsync, rename.
     ///
     /// `force` is `:w!` — write even though the file changed underneath us.
     pub fn save(&mut self, policy: SavePolicy, force: bool) -> Result<()> {
@@ -244,7 +244,7 @@ impl Buffer {
         // Refuse to clobber a file something else has written since we read it.
         // Only meaningful when this IS the file we read: `:w other.md` records
         // an mtime for a different path, and comparing the two would refuse a
-        // perfectly ordinary write. SPEC.md §10.
+        // perfectly ordinary write.
         let same_file = self.path.as_deref().is_some_and(|ours| same_path(ours, path));
         if !force && same_file && save::changed_externally(path, self.disk_mtime) {
             anyhow::bail!("{} changed on disk — :w! to overwrite", name_of(path));
@@ -1013,7 +1013,7 @@ mod tests {
 
     /// Read-only mode is where a file is watched, so a reload there must
     /// take the new text. It used to keep the old text, record the new
-    /// mtime and report success. F02.
+    /// mtime and report success.
     #[test]
     fn a_read_only_buffer_reloads_the_new_text() {
         let d = dir("ro-reload");
@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     /// Characters other text tools treat as line breaks. Shoin breaks lines
-    /// on `\n` only, so each of these sits inside its line. F05.
+    /// on `\n` only, so each of these sits inside its line.
     const NOT_BREAKS: [&str; 6] = ["\u{2028}", "\u{2029}", "\u{85}", "\x0b", "\x0c", "\r"];
 
     /// One line holding the character is one line: the line count, its
@@ -1496,7 +1496,7 @@ mod tests {
 
 /// How the screen shows the characters that no longer break a line. Here
 /// rather than in `render/` because it guards what changing the rope's line
-/// metric (F05) let through to the renderer; it only reads the drawn frame.
+/// metric let through to the renderer; it only reads the drawn frame.
 #[cfg(test)]
 mod drawn {
     use crate::app::App;
