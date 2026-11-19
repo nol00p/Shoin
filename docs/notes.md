@@ -88,6 +88,7 @@ See [Reading](reading.md#print-a-note).
 - An embed on the cursor's line shows its raw source, as `**bold**` does.
   Embedded text belongs to another file, so it can't be edited from here.
 - An embed shows its note as last saved, including a note `gf` just created.
+- `gf` follows a link inside emphasis (`**see [docs](u)**`) too.
 - Only notes are created by `gf`. A dead `[chart](out/chart.pdf)` or
   `[[report.pdf]]` is reported, not invented.
 - A bare `![[diagram]]` finds `diagram.png`, but prefers `diagram.md` if both
@@ -104,7 +105,8 @@ See [Reading](reading.md#print-a-note).
 - `SHOIN_IMAGE_PROTOCOL=kitty|iterm|none` overrides the terminal detection.
 - With the kitty graphics protocol (kitty, Ghostty) only PNG pictures are
   drawn; a JPEG or GIF keeps its box and caption. The iTerm2 protocol
-  (iTerm2, WezTerm, VS Code) draws all three.
+  (iTerm2, WezTerm, VS Code) draws PNG, JPEG and GIF. A WEBP or BMP picture
+  gets its box and caption in every terminal, never its pixels.
 - A picture cut off by the top or bottom of the screen shows the part that is
   on screen with the kitty protocol. With the iTerm2 protocol, its box shows
   an outline and its caption until the whole picture is on screen again.

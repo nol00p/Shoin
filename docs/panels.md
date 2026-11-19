@@ -47,6 +47,9 @@ panes.
 
 ## Details
 
+- `:b <name>` goes to the buffer whose whole name matches, ignoring case,
+  and otherwise to the first whose name contains it. `Tab` after `:b`
+  completes the open buffers' names.
 - Deleting asks first, and says how much a folder holds.
 - Renaming or moving a file you have open carries the buffer with it.
 - In a tree prompt, `Ctrl-u` clears it, `Ctrl-w` deletes a word, `Ctrl-h` is a
