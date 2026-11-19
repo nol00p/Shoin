@@ -29,7 +29,9 @@ off. Inline math `$…$` and math blocks `$$…$$` conceal common LaTeX commands
 into Unicode symbols (such as `\rightarrow` → `→`, `\alpha` → `α`, `x^2` → `x²`),
 one line at a time; `math = false` under `[markdown]` in `input.conf` turns
 that off.
-[`examples/formatting.md`](../examples/formatting.md) exercises all of it.
+[`examples/formatting.md`](../examples/formatting.md) exercises all of it;
+[`math.md`](../examples/math.md), [`quoted-list.md`](../examples/quoted-list.md)
+and [`tab-list.md`](../examples/tab-list.md) beside it show one thing each.
 
 ## Details
 

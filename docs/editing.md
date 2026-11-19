@@ -126,7 +126,8 @@ Folds last until you quit. They are not saved and don't change the file or
 its export.
 
 In Visual mode, `zc` folds every item and section in the selected lines and
-`zo` unfolds every fold there.
+`zo` unfolds every fold there. [`examples/folding.md`](../examples/folding.md)
+has sections and lists to try it on.
 
 `zt`, `zz` and `zb` scroll the page so the cursor's line is at the top, the
 middle or the bottom of the pane. The cursor stays where it is.
