@@ -32,6 +32,12 @@
   insert (#139).
 - `j` and `k` keep the screen column across tabs and wide characters, as
   in vim (#140).
+- `zt`, `zz` and `zb` scroll the cursor's line to the top, middle or
+  bottom of the pane (#148).
+- A compact quote such as `>>- a` or `>>text` draws like a spaced one.
+  With `layout.stable_gutter` on, its text stays in place as the cursor
+  reveals the markers, so a click on a wrapped row lands on the character
+  clicked. A click on a bar goes to its own `>` (#149).
 
 **Lists**
 
@@ -59,6 +65,14 @@
   one undo step (#144).
 - `iL` selects the list item under the cursor through the last item at
   its level (#144).
+- A nested list inside a quote draws as it does outside one, after the
+  bars: the same bullet per depth, indent guides and hanging indent. A
+  tab after `>` counts as the marker's space plus `tab_width` − 1 columns,
+  as the list commands count it (#147).
+- A wrapped list item indented deeper than the measure allows keeps its
+  continuation rows on screen, in a quote or out of one (#149).
+- A list item with a tab after its marker wraps under its text, not under
+  the tab (#149).
 
 **Folding**
 
@@ -67,6 +81,15 @@
   `j` and `k` step over a fold; a search or jump into one opens it; `dd`
   takes it whole. Folds last for the session and never change the file
   (#143).
+- Folds are per pane: two panes on one file fold apart, and a new pane
+  starts with the folds of the one it was split from (#148).
+- On a folded line, `o` and `O` open a line below or above the whole fold,
+  and `J` keeps the fold closed, as in vim; Visual `J` joins a closed fold
+  whole. Visual `zc` and `zo` fold and unfold every fold in the selected
+  lines (#148).
+- `Ctrl-d`, `Ctrl-u`, `Ctrl-f` and `Ctrl-b` count a fold as one line. A
+  `}` or `{` that lands inside a fold leaves the cursor on the folded
+  line, and `}` on a folded line starts after it (#148).
 
 **Pictures**
 
@@ -74,6 +97,10 @@
   in kitty and Ghostty, sending the file once and only the crop after.
   In iTerm2 and WezTerm its box shows an outline and its caption until
   it is all on screen (#142).
+- `![[pic.png|A red barn]]`: the text after `|` is the picture's alt
+  text, shown in its caption in place of the file name and written as
+  the alt in an export. A size (`|200`, `|200x100`) is still ignored
+  (#146).
 
 **Files**
 
@@ -111,6 +138,8 @@
   marker's space, as in CommonMark (#125).
 - HTML and plain-text export count a tab in a list's indent as 4
   columns, as CommonMark does; it was 1 (#135).
+- Nested list items inside a quote keep their indent in plain-text
+  export and piped `shoin -p`; they were flush with their parent (#150).
 
 **Command line**
 
@@ -133,6 +162,7 @@
 - After the leader, `g`, `Ctrl-w` or an operator, the hint bar shows over
   the status line, so the Visual leader hints (`b bold`, `i italic`) show
   right after `v` (#138).
+- `:help` lists every `:set` option; it listed 7 of 16 (#146).
 
 ## 0.2.4
 
