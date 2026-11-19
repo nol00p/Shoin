@@ -1,4 +1,4 @@
-//! The per-line render cache. SPEC.md §9 ("draw only what changed").
+//! The per-line render cache: draw only what changed.
 //!
 //! Rendering a line is expensive: an inline scan, a styled-span cover, a
 //! conceal map, and a soft wrap. None of it depends on the frame — only on the
@@ -383,8 +383,8 @@ impl RenderCache {
                 // Zero rows: the lines a closed fold stands for.
                 continue;
             }
-            // An embed expands only when it is NOT the active line — SPEC §2's
-            // rule, applied to embeds exactly as it applies to `**bold**`.
+            // An embed expands only when it is NOT the active line — the
+            // active-line rule, applied to embeds exactly as to `**bold**`.
             // That is also what keeps the cursor from ever being inside one.
             rows += content_rows(self.entries[line].as_deref(), concealed);
             // Spacing goes between a line and the next one SHOWN, so before
@@ -518,7 +518,7 @@ fn content_rows(entry: Option<&LineEntry>, concealed: bool) -> usize {
 }
 
 /// Blank rows to leave after `line` — `layout.line_spacing`, minus the places
-/// where air reads as damage rather than as breathing room. SPEC.md §6.
+/// where air reads as damage rather than as breathing room.
 fn spacer_rows(spacing: usize, doc: &BufferState, line: usize, n: usize) -> usize {
     // Nothing trails the last line: spacing is what separates two lines, and
     // below the last one there is no second line to separate from.
@@ -591,7 +591,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
     );
     let concealed = cmap.display_text(&source);
 
-    // SPEC §6: a wrapped list item's continuation lines up under its content.
+    // A wrapped list item's continuation lines up under its content.
     // Measured on each DISPLAY form separately — the marker it hangs off is a
     // different width revealed than concealed.
     let (hang_raw, hang_concealed) = if !cfg.layout.hanging_indent {

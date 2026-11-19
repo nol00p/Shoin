@@ -1,4 +1,4 @@
-//! Concealment — the Obsidian live-preview model. SPEC.md §2, §5.5.
+//! Concealment — the Obsidian live-preview model.
 //!
 //! THE INVARIANT: the active line is rendered 1:1 with its source; every other
 //! line may conceal markup.
@@ -6,7 +6,7 @@
 //! Because the cursor only ever sits on a 1:1 line, this mapping is needed for
 //! non-active lines only, and only for read-only concerns. The one direction
 //! anything asks for today is SCREEN -> SOURCE (`source_col`), for mouse
-//! click-to-position — the case SPEC §5.5 anticipated. Frame overlays (search
+//! click-to-position. Frame overlays (search
 //! matches, the selection, focus dim) are applied in SOURCE coordinates before
 //! `render` remaps them, so they need no mapping of their own.
 
@@ -68,7 +68,7 @@ pub struct ConcealCtx<'a> {
     /// The text measure in cells — a fence delimiter conceals to a rule this
     /// wide, so an entry built with it is only valid at that measure.
     pub measure: u16,
-    /// Columns per indent level, for the §5.4 guides.
+    /// Columns per indent level, for the indent guides.
     pub tab_width: usize,
 }
 
@@ -80,7 +80,7 @@ pub struct ConcealMap {
     pub ops: Vec<Conceal>,
 }
 
-/// The set of lines rendered raw this frame. SPEC.md §2, "The active set".
+/// The set of lines rendered raw this frame.
 ///
 /// Normal/Insert/Command/Search -> the cursor's line.
 /// Visual/VisualLine            -> every line the selection touches, so you
@@ -123,7 +123,7 @@ impl ConcealMap {
     ///
     /// `outer - inner` of each inline span IS the conceal set — the scanner
     /// already computed it, so there is no second parsing pass. Block-level
-    /// markers (`## `, `> `, `- `) contribute `Hide` or `Replace` per §5.2.
+    /// markers (`## `, `> `, `- `) contribute `Hide` or `Replace` ops of their own.
     pub fn build(line: &str, block: &BlockKind, spans: &[InlineSpan], ctx: &ConcealCtx) -> Self {
         let chars: Vec<char> = line.chars().collect();
         let mut ops: Vec<Conceal> = Vec::new();
@@ -167,8 +167,8 @@ impl ConcealMap {
         ConcealMap { ops: clean }
     }
 
-    /// Which SOURCE column a display column maps to — mouse click-to-position,
-    /// the case SPEC §5.5 anticipated. A click inside a hidden or replaced
+    /// Which SOURCE column a display column maps to, for mouse
+    /// click-to-position. A click inside a hidden or replaced
     /// region lands on that region's source start.
     ///
     /// Takes the source line so visible characters are measured at their true
@@ -294,7 +294,7 @@ impl ConcealMap {
     ///
     /// `layout.stable_gutter` reserves exactly this much for the active line so
     /// its text stays in the same column as it is revealed. The shift is
-    /// negative when the concealed markers are wider. SPEC.md §6.
+    /// negative when the concealed markers are wider.
     /// Every op in the LEADING RUN counts, not just the first: a line's markers
     /// can conceal in several pieces — an indent guide, then a bullet, then a
     /// task's checkbox — and missing the later ones let the body text jump as
@@ -947,7 +947,7 @@ fn bullet_for(depth: u8, ctx: &ConcealCtx) -> String {
     }
 }
 
-/// Depth-colored indent guides (SPEC §5.4): each completed indent level trades
+/// Depth-colored indent guides: each completed indent level trades
 /// its first space for the guide glyph. One char for one char, so the conceal
 /// map costs nothing in width and every column downstream stays put. A level
 /// that starts on a tab trades the tab for the glyph padded with spaces to the
@@ -1011,7 +1011,7 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
         // item this is), so a numbered list keeps its number. A TASK concealsr
         // its whole `- [ ] ` prefix to one checkbox, which then stands in the
         // bullet column like any other marker. The leading whitespace picks up
-        // its indent guides on the way past (SPEC §5.4).
+        // its indent guides on the way past.
         BlockKind::ListItem { marker, checked, depth } => {
             let indent = chars.iter().take_while(|c| **c == ' ' || **c == '\t').count();
             indent_guide_ops(chars, block, ctx, ops);
@@ -1078,7 +1078,7 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
             }
         }
         // ``` and ~~~ conceal to a rule across the measure: the code block gets
-        // a visible top and bottom without its delimiters shouting. SPEC §5.2.
+        // a visible top and bottom without its delimiters shouting.
         // A thematic break (`---`) is the same idea and gets the same drawing.
         BlockKind::FenceOpen(_) | BlockKind::FenceClose | BlockKind::Rule if len > 0 => {
             let color = if matches!(block, BlockKind::Rule) {
@@ -1422,7 +1422,7 @@ mod tests {
     }
 
     /// Fence delimiters conceal to a rule the width of the measure, so a code
-    /// block reads as a block without its backticks shouting. SPEC §5.2.
+    /// block reads as a block without its backticks shouting.
     #[test]
     fn fence_delimiters_become_a_rule() {
         let open = shown("```rust");
@@ -1519,14 +1519,15 @@ mod tests {
         assert_eq!(map.display_text("- item"), "  item");
     }
 
-    /// SPEC §5.4: each completed indent level trades its first space for the
+    /// Each completed indent level trades its first space for the
     /// guide glyph, one char for one char (the helper's tab_width is 2).
     #[test]
     fn indent_guides_replace_a_space_per_level() {
         assert_eq!(shown("    - nested"), "│ │ • nested");
         assert_eq!(shown("  - one level"), "│ ◦ one level");
         assert_eq!(shown("- flush"), "• flush", "no indent, no guides");
-        // Width is preserved exactly, which is what keeps SPEC §2 true.
+        // Width is preserved exactly, so the text does not move when the
+        // line turns active.
         for line in ["    - nested", "  - one level"] {
             assert_eq!(shown(line).chars().count(), line.chars().count());
         }
@@ -1648,4 +1649,4 @@ mod tests {
 // in `render::cache::RenderCache`, which keeps ONE cache instead of several
 // keyed the same way. The active set does not invalidate those entries: a
 // concealed and a raw line are two views of one parse, so cursor movement only
-// re-picks the view (SPEC.md §9 — a caveat the earlier design missed).
+// re-picks the view.

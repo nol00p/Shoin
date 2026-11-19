@@ -1,4 +1,4 @@
-//! Timing for one very long line (F25, part 1).
+//! Timing for one very long line.
 //!
 //! Ignored by default: it builds 200 KB lines and only means something in a
 //! release build. Run it with

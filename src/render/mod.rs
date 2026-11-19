@@ -1,6 +1,5 @@
 //! Render layer. Pure: takes `&Buffer` + `&Theme`, returns frame content.
 //! Holds no mutable state except caches keyed by `Buffer::revision`.
-//! SPEC.md §3, §9.
 
 pub mod align;
 pub mod cache;

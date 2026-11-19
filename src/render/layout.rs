@@ -1,4 +1,4 @@
-//! Measure, margins, soft wrap, typewriter scroll. SPEC.md §6.
+//! Measure, margins, soft wrap, typewriter scroll.
 //!
 //! This is the only module permitted to introduce display-only indentation
 //! (hanging indent on wrapped list lines), and it does so inside the wrap map
@@ -32,7 +32,7 @@ pub struct Layout {
 
 /// Where a visual row's content comes from.
 ///
-/// SPEC.md §14.5 — the seam that was opened before anything needed it, when the
+/// A seam opened before anything needed it, when the
 /// mapping to rope lines was still the identity. It PAID: `Embedded` (a row of
 /// transcluded text, which has no line in this rope) and `Spacer` (line
 /// spacing, which has no text at all) were each one variant and its arithmetic,
@@ -47,7 +47,7 @@ pub enum RowSource {
     Buffer(usize),
     /// A row of content transcluded into `line` by an `![[…]]` there — text
     /// that exists in another file and has NO line in this rope. This is the
-    /// variant §14.5 said would be expensive to retrofit, and the reason
+    /// variant that would have been expensive to retrofit, and the reason
     /// nothing outside this module indexes the rope for rendering.
     Embedded { line: usize, index: usize },
     /// A blank row drawn AFTER `line` for `layout.line_spacing` — line height,
@@ -129,7 +129,7 @@ impl Layout {
 
 /// Word-boundary wrap with a HANGING INDENT: every row after the first is
 /// narrowed by `hang` cells, because the renderer will push it right by that
-/// much so it lines up under the item's content (SPEC.md §6).
+/// much so it lines up under the item's content.
 ///
 /// `hang` is clamped so a continuation row always keeps some width — a deeply
 /// indented item in a narrow pane must still wrap rather than loop forever.
@@ -310,7 +310,7 @@ pub fn char_window(chars: &[char], start: usize, end: usize) -> String {
 /// What a char that must not reach the terminal raw is drawn as instead.
 ///
 /// U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR sit inside a line,
-/// since lines break on `\n` only (F05). Sent raw, terminals disagree on
+/// since lines break on `\n` only. Sent raw, terminals disagree on
 /// them: some break the row, some draw nothing, and the screen drifts from
 /// the layout. So each is drawn as a dim `↵` — not East Asian Ambiguous, so a
 /// CJK terminal draws it one cell wide too — and the reader can see, and put
@@ -402,7 +402,7 @@ pub fn char_at_cell(chars: &[char], cell: usize, tab: usize) -> usize {
 /// `scroll_off` and — when typewriter mode is on — pinning the cursor row to
 /// `typewriter_anchor` of the text height.
 ///
-/// ORDER MATTERS (SPEC.md §6, "Reveal shift"): this is computed AFTER the wrap
+/// ORDER MATTERS: this is computed AFTER the wrap
 /// map is built with the active line already revealed. Deriving scroll from
 /// post-reveal geometry is what stops the cursor being pushed off-screen by its
 /// own line growing when the markers reappear.

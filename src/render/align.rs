@@ -1,5 +1,5 @@
 //! Text alignment WITHIN the writing column — a different axis from
-//! `layout.align`, which places the column itself on screen (SPEC.md §6) and
+//! `layout.align`, which places the column itself on screen, and
 //! is never touched by this. The column stays put; this decides how each row
 //! sits inside it.
 //!

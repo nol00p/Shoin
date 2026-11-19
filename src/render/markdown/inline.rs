@@ -1,12 +1,14 @@
 //! Pass B — inline scan, left to right: links and what binds tighter, then
-//! emphasis around them (see `scan`). SPEC.md §5.2.
+//! emphasis around them (see `scan`).
 //!
 //! Delimiter matching is deliberately naive-but-safe: an opener is honored only
 //! if a matching closer exists later on the SAME line. Unbalanced markers render
 //! as plain text — which is exactly right while the user is mid-word typing
 //! `**` before the closing pair exists.
 //!
-//! Markers are DIMMED, never concealed. Concealment would break SPEC.md §2.
+//! Markers are DIMMED, never concealed: this pass styles the active line
+//! too, which must show its source 1:1. Hiding them on other lines is the
+//! conceal map's job.
 
 use std::ops::Range;
 
@@ -1133,7 +1135,7 @@ mod tests {
         assert_eq!(only("==hi==").kind, Inline::Highlight);
     }
 
-    /// F14: a delimiter run opens only when no space follows it and closes only
+    /// A delimiter run opens only when no space follows it and closes only
     /// when no space precedes it, so arithmetic stays plain.
     #[test]
     fn spaced_markers_do_not_emphasise() {
@@ -1169,7 +1171,7 @@ mod tests {
         assert!(scan("* item * more", &md()).is_empty());
     }
 
-    /// F14: `_` and `__` emphasise like `*` and `**`, but never inside a word.
+    /// `_` and `__` emphasise like `*` and `**`, but never inside a word.
     #[test]
     fn underscore_emphasis() {
         let line = "an _italic_ and __bold__ word";
@@ -1733,7 +1735,7 @@ mod tests {
         assert_eq!(target_of(&span, "[label]()"), None);
     }
 
-    /// F13: an address may hold balanced parentheses, a title, or `<…>`.
+    /// An address may hold balanced parentheses, a title, or `<…>`.
     #[test]
     fn link_destinations_balance_parens_and_split_titles() {
         let wiki = "[Rust](https://en.wikipedia.org/wiki/Rust_(programming_language))";

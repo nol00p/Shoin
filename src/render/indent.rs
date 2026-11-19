@@ -1,8 +1,9 @@
-//! Depth-colored indent guides. SPEC.md §5.4.
+//! Depth-colored indent guides.
 //!
 //! Leading whitespace on list items is replaced by a guide glyph colored by
 //! nesting depth, cycling through `theme.indent_colors`. The glyph occupies
-//! exactly the column the whitespace occupied, so SPEC.md §2 holds.
+//! exactly the column the whitespace occupied, so the text does not move
+//! when the line turns active and its spaces come back.
 //!
 //! The feature is split in two: this module marks and colors the columns, and
 //! the conceal map swaps the glyph in (concealed lines only, like every other
