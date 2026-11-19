@@ -287,15 +287,15 @@ fn categories() -> Vec<Category> {
 }
 
 /// A page with its value lists filled in from `values`, so help names what
-/// the parsers take: `{focus}`, `{number}` (the modes besides off), `{align}`,
+/// `{focus}`, `{number}`, `{align}`, `{embed}`,
 /// `{export}` and `{options}`, every `:set` option.
 fn fill(page: &str) -> String {
-    use crate::values::{dot_list, ALIGN_VALUES, EXPORT_VALUES, FOCUS_VALUES, NUMBER_VALUES, OPTIONS};
-    let numbers: Vec<&str> = NUMBER_VALUES.iter().copied().filter(|v| *v != "off").collect();
+    use crate::values::{dot_list, ALIGN_VALUES, EMBED_VALUES, EXPORT_VALUES, FOCUS_VALUES, NUMBER_VALUES, OPTIONS};
     let options: Vec<&str> = OPTIONS.iter().map(|(name, _)| *name).collect();
     page.replace("{focus}", &dot_list(FOCUS_VALUES))
-        .replace("{number}", &dot_list(&numbers))
+        .replace("{number}", &dot_list(NUMBER_VALUES))
         .replace("{align}", &dot_list(ALIGN_VALUES))
+        .replace("{embed}", &dot_list(EMBED_VALUES))
         .replace("{export}", &EXPORT_VALUES.join("|"))
         .replace("{options}", &dot_list(&options))
 }
@@ -526,18 +526,18 @@ const BASICS: &str = "
 > The line the cursor is on shows its raw Markdown; every other line shows the result, markers hidden. Editing is modal, with Vim's keys.
 
 ## Modes
-Normal :: move around and run operators. Esc always comes back here
-Insert :: type: i a I A o O to start, Esc or jk to stop
+Normal :: move around and run operators
+Insert :: type: i a I A o O to start, Esc, Ctrl-c or jk to stop
 Visual :: select: v by character, V by line, or drag with the mouse. A drag while typing selects too; an operator or Esc goes back to typing
-Command :: : then a command, Enter to run it. Tab completes the last word: a command, a path, an option, a help topic
+Command :: : then a command, Enter to run it. Tab and Shift-Tab cycle completions for commands, paths, options and values, help topics, and buffer names. Enter runs the current line
 
 ## First keys
 i :: start typing
 Esc :: stop typing
 :w :: save — Ctrl-s and <leader>w too
 :q :: close this buffer; the last one quits
-u Ctrl-r :: undo · redo
-. :: repeat the last change
+u Ctrl-r :: undo · redo in Normal
+. :: repeat the last change in Normal
 
 ## Leader keys — <leader> is Space unless you remap it: [input] leader
 <leader>hl :: this help
@@ -566,23 +566,29 @@ cat notes.md | shoin :: piped text, in an unnamed buffer: :w name.md saves it, :
 cat notes.md | shoin -p :: print piped text
 
 ## This help
-hint bar :: the bottom row shows the keys for right now, and after <leader>, g, z or Ctrl-w what can follow. :set hints off hides it; [hints] enabled = false for good
-Tab Shift-Tab :: next · previous category; 1 to 7 jump to one
-j k :: scroll; d u half a page, g G top · bottom
-/ :: search every category; n N next · previous match
+hint bar :: the bottom row shows current keys and continuations over the status line after a prefix or operator. Leader hints put the most used keys first. :set hints off hides it; [hints] enabled = false for good
+Tab Right l :: next category
+Shift-Tab Left h :: previous category
+1 to 7 :: jump to a category
+j Down / k Up :: scroll one line down · up
+d PageDown / u PageUp :: scroll ten lines down · up
+g Home / G End :: top · bottom
+/ :: search every category. Enter submits, Ctrl-u clears, Backspace deletes, Esc cancels
+n N :: next · previous search match
 :help <word> :: open at a key, command, setting or section: :help gb, :help view, :help measure, :help tree
-:help [topic] :: open a category: basics, navigation, editing, writing, view, files, config
+:help [topic] :h :: open a category: basics, navigation, editing, writing, view, files, config
 q Esc :: close
 ";
 
 const NAVIGATION: &str = "
 ## Motions — take a count: 3w, 5j
-h j k l :: left · down · up · right; the arrows too
+h j k l :: left · down · up · right. Left Down Up Right do the same
 w b e :: next word · previous · end of word
-W B E :: the same, with words split by spaces only
+W B E :: the same, with whitespace-delimited words
 0 ^ $ :: line start · first non-blank · line end
 { } :: previous · next paragraph
-gg G :: first · last line; with a count, that line
+gg G :: first · last line. With a count, go to that line
+1 to 9 :: start a count; 0 can follow another digit
 H M L :: top · middle · bottom of the screen
 
 ## Folds — a list item with its sub-items, or a heading's section
@@ -599,6 +605,7 @@ F{c} T{c} :: the same, backward
 ## Scrolling
 Ctrl-d Ctrl-u :: half a page down · up
 Ctrl-f Ctrl-b :: a page down · up
+zt zz zb :: put the cursor line at the pane top · middle · bottom
 Ctrl-e Ctrl-y :: scroll the page a line; the cursor stays put until it would leave the screen
 mouse wheel :: scrolls the page, three lines a notch
 
@@ -606,7 +613,15 @@ mouse wheel :: scrolls the page, three lines a notch
 / ? :: search forward · backward
 n N :: next · previous match
 * :: search the word under the cursor
-> In the : / ? lines, the finder and the tree's rename, move and new prompts, Ctrl-u clears, Ctrl-w deletes a word, Ctrl-h is a backspace, and Esc or Ctrl-c cancels.
+
+## Command line, search and prompts
+: :: open the command line from Normal or Visual
+Enter :: run, search, or answer
+Esc Ctrl-c Ctrl-[ :: cancel
+Ctrl-u :: clear the line
+Ctrl-w Alt-Backspace Ctrl-Backspace :: delete the last word
+Backspace Ctrl-h :: delete the last character. Cancel on an empty line except in the finder
+Tab Shift-Tab :: next · previous completion in the command line. Before Tab, Shift-Tab starts with the last match
 
 ## Links
 gf :: follow the link under the cursor: [[note]], ![[note]], or the path in [text](note.md). A #Heading or #^block lands on it. A note that doesn't exist yet is created empty, so a link can come before its note; a name several notes answer to opens the finder
@@ -617,44 +632,52 @@ Ctrl-^ Ctrl-6 :: back to the previous buffer — the way back out of a gf
 const EDITING: &str = "
 ## Insert mode
 i a :: type before · after the cursor
-I A :: at the line's start · end
+I A :: at the first non-blank · end of line
 o O :: on a new line below · above
 Esc Ctrl-c jk :: back to Normal. jk is input.escape_alias; \"\" turns it off
-Ctrl-s :: save and keep typing; in Normal it saves, as :w
+Ctrl-s :: save and keep typing. In Normal and Visual it saves, as :w
 Enter :: continues a list marker or quote; on an empty item it ends the list (editor.auto_indent)
-Tab Shift-Tab :: on a list item's line, indent · outdent it (editor.list_tab)
+Tab Shift-Tab :: on a list item's line, indent · outdent it (editor.list_tab). Elsewhere Tab inserts spaces or a tab (editor.expand_tab)
+Backspace Delete :: delete before · under the cursor
+Left Right Up Down :: move the cursor
+Home End :: start · end of line
+PageUp PageDown :: move half a page up · down
 
 ## Operators — then a motion or object, or doubled for the whole line
 d c y :: delete · change · yank
 dd cc yy :: the whole line
-> < :: indent · outdent: >> <<, >ip
-gu gU :: lowercase · uppercase: guiw, gUU
+> < :: indent · outdent. >> and << take whole lines
+gu gU :: lowercase · uppercase. guu and gUU take whole lines
 2d3w :: counts multiply — this deletes six words
 
 ## Quick edits
 x X :: delete the character under · before the cursor
-D C Y :: delete · change · yank to the end of the line
+D C :: delete · change to the end of the line
+Y :: yank whole lines, like yy
 r{c} :: replace the character under the cursor
 ~ J :: toggle case · join the next line on
 p P :: paste after · before
-u Ctrl-r :: undo · redo
+u Ctrl-r :: undo · redo in Normal
 :u :un :und :undo :: undo, the : spelling of u
 :red :redo :: redo, the : spelling of Ctrl-r
-. :: repeat the last change
+. :: repeat the last change in Normal
 
 ## Text objects — after an operator, or in Visual: diw, ca(, vip
-iw aw :: inner · around word; iW aW split on spaces only
+iw aw :: inner · around word
+iW aW :: inner · around whitespace-delimited word
 is as :: sentence
 ip ap :: paragraph, by lines
-i\" a\" :: inside · with the quotes; ' and ` too
-i( a( :: inside · with the brackets: ( [ { <, b for () and B for {}. Brackets may span lines
+i\" i' i` / a\" a' a` :: inside · with the quotes
+i( i) i[ i] i{ i} i< i> ib iB :: inside brackets. b means () and B means {}
+a( a) a[ a] a{ a} a< a> ab aB :: with the brackets. Brackets can span lines
 il al :: a list item without · with its sub-items
 aL :: every item at that level, with sub-items
 iL :: the item and the items after it at its level
 
 ## Visual
-v V :: select by character · by line
-d c y x :: operate on the selection
+v V :: select by character · by line. In Visual, start a new selection at the cursor
+Esc :: leave Visual or clear a pending command
+d x / c s / y :: delete · change · yank the selection
 o :: swap the ends
 > < u U :: indent · outdent · lowercase · uppercase
 i{obj} a{obj} :: select a text object: viw, vap
@@ -677,6 +700,7 @@ Tab Shift-Tab :: the same as >al <al, in Insert on the item's line
 ## Registers
 \"a{cmd} :: use register a: \"ayy \"ap \"add
 \"A{cmd} :: an uppercase name appends to it
+\"\" :: the unnamed register
 \"0 :: the last yank — a delete never overwrites it
 \"1 to \"9 :: the delete ring, newest first
 \"+ \"* :: the system clipboard: \"+yy \"+p
@@ -693,7 +717,7 @@ gl :: wrap as a [link](url), the cursor in the URL
 <leader>b <leader>i :: bold · italic, on a Visual selection
 
 ## Blocks
-g1 to g6 :: set the line's heading level
+g1 g2 g3 g4 g5 g6 :: set the line's heading level
 g0 :: strip the heading
 gt :: toggle a task checkbox, - [ ] and - [x]; on a plain list item, adds one
 ga :: align the table under the cursor: pad every cell. editor.table_align = \"auto\" does it on leaving Insert
@@ -719,17 +743,32 @@ const VIEW: &str = "
 <leader>t :: typewriter scrolling — :typewriter, :tw
 <leader>z :: zen: hide all chrome — :zen
 <leader>n :: line numbers on · off
-:number [mode] :: {number}; bare toggles off and back to your last mode
+:number [mode] :nu :: {number}. Bare toggles off and back to your last mode
 <leader>a :: cycle how lines sit in the column
-:align [mode] :: {align}; bare cycles. Where the column itself sits is layout.align
+:align [mode] :: {align}. Bare cycles. Where the column itself sits is layout.align
 :typewriter :tw :: typewriter scrolling
 :zen :: hide all chrome
 
 ## Settings, live
-:set <key> [value] :: {options}. A toggle takes on or off; bare flips it
-:set measure=72 :: the text width in columns; :set measure reads it
-:set line_spacing=1 :: blank rows between lines, 0 to 4
-:set tab_width=4 :: cells a tab counts and is drawn as, 1 to 16 (:set ts)
+:set <key> [value] :: {options}. A boolean option takes on or off. With no value it toggles
+:set align :: {align}. Default left. Bare cycles. Align the text inside the column
+:set autoreload :: on / off. Default on. Take outside changes when nothing is unsaved
+:set autosave :: on / off. Default off. Write modified named buffers on a timer
+:set autosave_interval :set autosave_min :: 1–5. Default 3. Minutes between autosaves
+:set clipboard :set cb :: on / off. Default off. Use the system clipboard for plain y, d and p
+:set code_syntax :set syntax :: on / off. Default on. Highlight recognized fenced code
+:set conceal :: on / off. Default on. Hide Markdown markers away from the cursor
+:set embed :: {embed}. Default none. Bare toggles off and back
+:set focus :: {focus}. Default off. Bare cycles. Dim text outside the focus
+:set hints :: on / off. Default on. Show the key-hint bar
+:set line_spacing :set spacing :: 0–4. Default 0. Blank rows between lines. Higher values clamp to 4
+:set measure :set width :: 8–65535. Default 72. Text width in columns
+:set mouse :: on / off. Default on. Capture mouse clicks, drags and scrolling
+:set numbers :set number :set nu :: {number}. Default off. Bare toggles off and back
+:set tab_width :set ts :: 1–16. Default 4. Cells per tab for display and indentation. Changes reclassify open documents
+:set typewriter :set tw :: on / off. Default off. Keep the cursor line at a fixed height
+
+> Use a space or = before a value. With no value, a numeric option reports its current value.
 
 ## Read-only — shoin -R, :view or <leader>v
 :view :: read-only on · off: every line concealed, no caret
@@ -738,8 +777,8 @@ j k :: scroll a line
 Ctrl-d Ctrl-u :: half a page
 gg G :: top · bottom
 / ? n N :: search
-q :: quit
-i :: switch to editing
+q :: close the buffer. Quit if it is the last one
+i :: switch to editing after an edit is refused
 > An edit is refused with a message. Yanking, panels, gf and :w still work.
 ";
 
@@ -748,63 +787,81 @@ const FILES: &str = "
 :w :write [path] :: save; with a path, write a copy there and keep editing this file. An unnamed buffer takes the name
 :saveas :sav <path> :: save to a path and edit that file from now on
 :w! :: save over a file that changed on disk, or over one :w <path> won't touch
-:wq :x :: save and quit; :wq! even if the file changed
+:wq [path] :x :: save and quit. A path saves under that name. Add ! to force the write
 :q :q! :: close this buffer — the last one quits · the same, discarding changes
-:Q :qa :: quit every buffer at once; :Q! :qa! discard changes
-:set autosave [on|off] :: write modified named buffers on a timer. Off by default, and it keeps the guard of :w
-:set autosave_interval=3 :: minutes between autosaves, 1 to 5
+:qall :qa :Q :: quit every buffer
+:w! :write! :saveas! :sav! :: force a write
+:wq! :x! :: force the write and quit if it succeeds
+:qall! :qa! :Q! :: discard changes and quit every buffer
 
 ## When the file changes on disk
-:diff :: merge against the file on disk: n p move between differences, Tab cycles this one (live · file · both), l f b set them all, w commits, q aborts. Nothing is written until w, and then it is one undo
+:diff :diffsplit :: merge against the file on disk
+n p :: next · previous difference
+Tab Shift-Tab :: cycle live · file · both for this difference
+l f b :: choose live · file · both for every difference
+w W :: commit and write. W leaves read-only first
+q Esc :: abort
+j Down / k Up :: scroll a line down · up
+Ctrl-d Ctrl-u :: scroll half a page down · up
+g Home / G End :: top · bottom
 :revert :revert! :: re-read the file from disk; ! discards unsaved changes
-:set autoreload [on|off] :: take outside changes back automatically. On by default, and only ever on a buffer with nothing unsaved
 
 ## Export
 :export [{export}] [justify] :: write the finished document out, through a dialog with a name you can change. html is one self-contained page; pdf needs pandoc and a layout engine (typst is the smallest). justify stretches html and txt to fill the measure
 
 ## File tree — beside the page
 <leader>fe <leader>fE :: open it in this file's folder · over $HOME; again to close. tree.root = \"cwd\" opens <leader>fe and <leader>ff where Shoin was launched instead; file_tree_cwd and find_file_cwd always do
-j k :: move
-l Enter o :: open a file · expand a folder
-h :: collapse
-g G R :: top · bottom · refresh
+j Down / k Up :: move down · up
+l Enter o Right :: open a file or expand a folder
+h Left :: collapse or go to the parent
+g Home / G End :: top · bottom
+R :: refresh
 - = :: move the root up a level · into the selected folder
 H :: show · hide dotfiles; remembered, tree.show_hidden to start with
 a :: new file in this folder; end the name with / for a folder
 r m d :: rename · move · delete. Delete asks first, and says how much a folder holds
-Ctrl-w h l :: between the tree and the editor
+Ctrl-w l / w / j / k :: return to the editor. Right, Down and Up work in place of letters
 <leader>hl :: these keys, here in help — the leader keys work from the tree too
-q :: close the tree
+q Esc :: close the tree
+y Y :: confirm a delete prompt. Any other key cancels
 > A prompt takes Ctrl-u to clear it, Ctrl-w to delete a word, and Esc or Ctrl-c to abandon it. Renaming or moving a file you have open carries the buffer with it.
 
 ## Fuzzy finder
 <leader>ff <leader>fF :: find a file in this file's folder · over $HOME
 type :: narrow the list
-Ctrl-n Ctrl-p :: next · previous match; the arrows too
-Ctrl-u Ctrl-w Ctrl-h :: clear the query · delete its last word · backspace
-Enter Esc :: open · close
+Ctrl-n Ctrl-j Down Tab :: next match
+Ctrl-p Ctrl-k Up Shift-Tab :: previous match
+Ctrl-u :: clear the query
+Ctrl-w Alt-Backspace Ctrl-Backspace :: delete its last word
+Backspace Ctrl-h :: delete its last character
+Enter / Esc Ctrl-c Ctrl-[ :: open · close
 
 ## Buffers — several files open at once
-:e <path> :: open a file in a new buffer
+:edit <path> :e :: open a file in a new buffer
 <leader>fb :: switch buffer, in the finder
 :ls :buffers :: list open buffers; ▸ marks this one
-:b <name> :b <n> :: switch by name fragment or number
-:bn :bp :: next · previous buffer, round the list
+:buffer [name or number] :b :: switch by number or name fragment. A whole name wins. Bare lists buffers
+:bnext :bn :: next buffer
+:bprevious :bp :bprev :: previous buffer
 Ctrl-^ Ctrl-6 :: back to the previous buffer; twice lands where you started
-:bd :bd! :: close this buffer; ! discards changes
-:set clipboard [on|off] :: plain y d p use the system clipboard too, as Vim's unnamedplus. \"+ and \"* reach it either way. :set cb
+:bdelete :bd :: close this buffer. The last stays open
+:bdelete! :bd! :: close and discard changes
 
 ## Panes
 <leader>sv <leader>ss :: split beside · below — again to close it
 <leader>so :: keep only this pane
-:sp :vs :: split horizontally · vertically
-:close :: close the focused pane
-:only :: close every pane but this one
+:split :sp :: split below
+:vsplit :vs :vsp :: split beside
+:close :clo :: close the focused pane
+:only :on :: keep only the focused pane
 Ctrl-w v s :: split beside · below
-Ctrl-w h j k l :: move between panes; the arrows too
-Ctrl-w q o w :: close · keep only this · cycle
+Ctrl-w h j k l :: move between panes. Left, Down, Up and Right work in place of letters
+Ctrl-w q c / o / w :: close · keep only this · cycle
 Ctrl-w > < + - :: wider · narrower · taller · shorter; takes a count
 Ctrl-w = :: equal sizes again
+
+## Reloading config
+:reload :e! :: re-read the config
 ";
 
 #[cfg(test)]
@@ -833,12 +890,12 @@ mod tests {
             text
         };
         let options: Vec<&str> = OPTIONS.iter().map(|(name, _)| *name).collect();
-        assert_eq!(desc(":set <key> [value]"), format!("{}. A toggle takes on or off; bare flips it", dot_list(&options)));
+        assert_eq!(desc(":set <key> [value]"), format!("{}. A boolean option takes on or off. With no value it toggles", dot_list(&options)));
         assert_eq!(desc("<leader>F"), format!("cycle focus: {}", dot_list(FOCUS_VALUES)));
-        assert!(desc(":align [mode]").starts_with(&format!("{};", dot_list(ALIGN_VALUES))));
-        assert!(desc(":number [mode]").starts_with("relative · absolute;"));
+        assert!(desc(":align [mode]").starts_with(&format!("{}.", dot_list(ALIGN_VALUES))));
+        assert!(desc(":number [mode] :nu").starts_with("off · relative · absolute."));
         assert!(rows.iter().any(|r| matches!(r, Row::Entry { keys, .. } if *keys == format!(":export [{}] [justify]", EXPORT_VALUES.join("|")))));
-        for slot in ["{focus}", "{number}", "{align}", "{export}", "{options}"] {
+        for slot in ["{focus}", "{number}", "{align}", "{embed}", "{export}", "{options}"] {
             assert!(!rows.iter().any(|r| r.plain().contains(slot)), "{slot} left unfilled");
         }
     }
@@ -878,7 +935,7 @@ mod tests {
             ("registers", "Editing", "Registers"),
             ("gb", "Writing", "gb"),
             (":view", "View", ":view"),
-            ("measure", "Config", "measure = 72"),
+            ("measure", "View", ":set measure"),
             ("layout.measure", "Config", "measure = 72"),
             ("n", "Navigation", "n N"),
             ("<leader>fe", "Files", "<leader>fe"),
