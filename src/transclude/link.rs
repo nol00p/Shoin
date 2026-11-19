@@ -21,22 +21,30 @@ pub enum Section {
     Block(String),
 }
 
-/// A parsed `![[target#section]]`.
+/// A parsed `![[target#section|alias]]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     pub target: String,
     pub section: Section,
+    /// The text after the first `|`, trimmed; `None` when there is none or
+    /// it is empty. Only a picture reads it (`alt`); a note embed or link
+    /// ignores it.
+    pub alias: Option<String>,
 }
 
 impl Link {
     /// Parse the text BETWEEN the brackets — `note`, `note#heading`,
     /// `note#^blockid`, optionally with an Obsidian `|alias` suffix.
     ///
-    /// The alias is dropped rather than rejected. SPEC §14.2 asks for Obsidian
-    /// syntax so vaults stay portable, and a vault full of `![[note|Title]]`
-    /// should not turn into a document full of error placeholders.
+    /// The alias is kept aside rather than rejected. SPEC §14.2 asks for
+    /// Obsidian syntax so vaults stay portable, and a vault full of
+    /// `![[note|Title]]` should not turn into a document full of error
+    /// placeholders. A note ignores it; a picture reads it as `alt`.
     pub fn parse(body: &str) -> Option<Link> {
-        let body = body.split('|').next().unwrap_or(body).trim();
+        let (body, alias) = match body.split_once('|') {
+            Some((body, alias)) => (body.trim(), Some(alias.trim()).filter(|a| !a.is_empty())),
+            None => (body.trim(), None),
+        };
         if body.is_empty() {
             return None;
         }
@@ -57,7 +65,14 @@ impl Link {
         if target.is_empty() {
             return None;
         }
-        Some(Link { target: target.to_string(), section })
+        Some(Link { target: target.to_string(), section, alias: alias.map(str::to_string) })
+    }
+
+    /// A picture's alt text, as Obsidian reads `![[pic.png|…]]`: the alias,
+    /// unless it is a size (`100` or `100x200`), which says how big to draw
+    /// it and is not text.
+    pub fn alt(&self) -> Option<&str> {
+        self.alias.as_deref().filter(|a| !is_size(a))
     }
 
     /// The name to show in an embed's border, and in error messages.
@@ -67,6 +82,16 @@ impl Link {
             Section::Heading(h) => format!("{}#{h}", self.target),
             Section::Block(b) => format!("{}#^{b}", self.target),
         }
+    }
+}
+
+/// `100` or `100x200`: a picture's width, or width and height, in an
+/// Obsidian embed.
+fn is_size(s: &str) -> bool {
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    match s.split_once('x') {
+        Some((w, h)) => digits(w) && digits(h),
+        None => digits(s),
     }
 }
 
@@ -454,14 +479,14 @@ mod tests {
 
     #[test]
     fn parses_every_form_in_the_spec() {
-        assert_eq!(link("note"), Link { target: "note".into(), section: Section::All });
+        assert_eq!(link("note"), Link { target: "note".into(), section: Section::All, alias: None });
         assert_eq!(
             link("note#Heading"),
-            Link { target: "note".into(), section: Section::Heading("Heading".into()) }
+            Link { target: "note".into(), section: Section::Heading("Heading".into()), alias: None }
         );
         assert_eq!(
             link("note#^abc123"),
-            Link { target: "note".into(), section: Section::Block("abc123".into()) }
+            Link { target: "note".into(), section: Section::Block("abc123".into()), alias: None }
         );
         // Paths, spaces, and an Obsidian alias that we drop rather than choke on.
         assert_eq!(link("fragments/one two").target, "fragments/one two");
@@ -473,6 +498,32 @@ mod tests {
         assert_eq!(Link::parse("#heading"), None, "a section with no file is not a link");
         // A trailing `#` is a whole-file embed, not an empty heading.
         assert_eq!(link("note#").section, Section::All);
+    }
+
+    /// After `|`: a size stays ignored, anything else is a picture's alt
+    /// text. A note's link is the same with or without its alias.
+    #[test]
+    fn a_pipe_gives_alt_text_unless_it_is_a_size() {
+        let barn = link("pic.png| A red barn ");
+        assert_eq!(barn.target, "pic.png");
+        assert_eq!(barn.alt(), Some("A red barn"));
+        assert_eq!(link("pic.png|100").alt(), None);
+        assert_eq!(link("pic.png|100x200").alt(), None);
+        assert_eq!(link("pic.png|100x200").alias.as_deref(), Some("100x200"));
+        assert_eq!(link("pic.png|").alt(), None);
+        assert_eq!(link("pic.png|").alias, None);
+        assert_eq!(link("pic.png|  ").alt(), None);
+        assert_eq!(link("pic.png").alt(), None);
+        // Not a size: text that only looks like part of one.
+        assert_eq!(link("pic.png|x200").alt(), Some("x200"));
+        assert_eq!(link("pic.png|100x").alt(), Some("100x"));
+        assert_eq!(link("pic.png|100 px").alt(), Some("100 px"));
+        assert_eq!(link("pic.png|a|b").alt(), Some("a|b"), "everything after the first |");
+
+        let note = link("note#Head|Nice Title");
+        assert_eq!((note.target.as_str(), &note.section), ("note", &Section::Heading("Head".into())));
+        assert_eq!(note.label(), "note#Head", "the alias is not in the border");
+        assert_eq!(Link::parse("|alias"), None, "an alias with no file is not a link");
     }
 
     #[test]

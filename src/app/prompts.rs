@@ -186,13 +186,18 @@ impl App {
             Some(f) => match Format::parse(f) {
                 Some(f) => f,
                 None => {
-                    return self
-                        .notify(format!("export: {f:?} is not md, txt, html or pdf"), FlashKind::Error)
+                    return self.notify(
+                        format!("export: {f:?} is not {}", crate::values::or_list(super::commands::EXPORT_VALUES)),
+                        FlashKind::Error,
+                    )
                 }
             },
         };
         if justify && !super::commands::export_justifies(format) {
-            return self.notify("export: justify only applies to html or txt", FlashKind::Error);
+            return self.notify(
+                format!("export: justify only applies to {}", crate::values::or_list(&crate::values::justify_formats())),
+                FlashKind::Error,
+            );
         }
         let Some(src) = self.buffer.path.clone() else {
             return self.notify("export: save this file first", FlashKind::Error);

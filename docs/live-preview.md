@@ -40,6 +40,12 @@ that off.
 - Table rows never wrap. A row wider than the pane stays on one line and is
   clipped at the edge. Shoin lines the columns up in the file when you
   leave Insert, or on `ga`. See [Writing](writing.md#writer-verbs).
+- A list inside a blockquote draws as the same list outside it, after one
+  bar per `>`: the same bullet at each depth, the same indent guides, and
+  the same hanging indent when an item wraps. The space after the last `>`
+  belongs to the marker. A tab there is the marker's space plus
+  `tab_width` − 1 columns of indent, as the list commands count it (see
+  [Editing](editing.md)), and still takes `tab_width` cells.
 - `layout.conceal = false`, `:set conceal off` or `<leader>c` turns concealment
   off entirely.
 - To see every line concealed, the cursor's too, open the page read-only:

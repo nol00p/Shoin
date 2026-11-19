@@ -684,6 +684,7 @@ fn render_embed_row(
                 theme,
                 md,
                 &inline,
+                app.config.editor.tab_width,
             );
             let ctx = crate::render::conceal::ConcealCtx {
                 glyphs: &app.config.glyphs,
@@ -3084,6 +3085,116 @@ mod tests {
             rows[first + 1].trim_start().starts_with("word"),
             "…and it is the item's own text"
         );
+    }
+
+    /// The rows of `doc` drawn at width `w`, from the row of its first line
+    /// (`top`, where the cursor is) on, without the left margin.
+    fn drawn(doc: &str, w: u16, measure: u16, tab_width: usize) -> Vec<String> {
+        let mut app = app_with("");
+        app.config.editor.tab_width = tab_width;
+        app.config.layout.measure = measure;
+        app.buffer.insert_str(Cursor::new(0, 0), &format!("top\n\n{doc}"));
+        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, tab_width);
+        app.buffer.cursor = Cursor::new(0, 0);
+        let all = rows(&render_to(&app, w, 24));
+        let first = all.iter().position(|r| r.trim() == "top").expect("the top line");
+        let margin = all[first].find("top").unwrap();
+        all[first + 2..]
+            .iter()
+            .take_while(|r| !r.trim().is_empty())
+            .map(|r| r.chars().skip(margin).collect())
+            .collect()
+    }
+
+    /// A list inside a quote draws as the same list outside it, after the
+    /// bar: the bullet each depth wears, the indent and the guides.
+    #[test]
+    fn a_nested_list_in_a_quote_keeps_its_indent() {
+        let list = "- a\n  - b\n    - c\n";
+        let quoted = "> - a\n>   - b\n>     - c\n";
+        assert_eq!(drawn(list, 60, 50, 4), ["• a", "  • b", "│   ◦ c"]);
+        assert_eq!(drawn(quoted, 60, 50, 4), ["▎ • a", "▎   • b", "▎ │   ◦ c"]);
+        // At tab width 2 the same lines are three levels.
+        assert_eq!(drawn(quoted, 60, 50, 2), ["▎ • a", "▎ │ ◦ b", "▎ │ │ • c"]);
+    }
+
+    #[test]
+    fn a_nested_quote_keeps_the_list_indent_too() {
+        assert_eq!(drawn("> > - c\n> >   - d\n> >     - e\n", 60, 50, 4), ["▎ ▎ • c", "▎ ▎   • d", "▎ ▎ │   ◦ e"]);
+    }
+
+    #[test]
+    fn an_ordered_list_in_a_quote_keeps_its_indent() {
+        assert_eq!(drawn("1. one\n   1. two\n", 60, 50, 4), ["1. one", "   1. two"]);
+        assert_eq!(drawn("> 1. one\n>    1. two\n", 60, 50, 4), ["▎ 1. one", "▎    1. two"]);
+    }
+
+    /// A tab after `>` is the marker's space and `tab_width - 1` columns of
+    /// indent, as the list commands read it: the item draws as it would with
+    /// those columns as spaces, and the tab still takes `tab_width` cells.
+    #[test]
+    fn a_tab_after_the_marker_is_its_space_and_the_indent() {
+        assert_eq!(drawn("   - a\n       - b\n", 60, 50, 4), ["   • a", "│      ◦ b"]);
+        assert_eq!(drawn(">\t- a\n>\t    - b\n", 60, 50, 4), ["▎    • a", "▎ │      ◦ b"]);
+        assert_eq!(drawn(">\t- a\n>\t  - b\n", 60, 50, 2), ["▎  • a", "▎ │  ◦ b"]);
+    }
+
+    /// A wrapped nested item hangs under its own text, as it does outside
+    /// the quote.
+    #[test]
+    fn a_wrapped_item_in_a_quote_hangs_under_its_text() {
+        let words = "word ".repeat(10);
+        assert_eq!(
+            drawn(&format!("> - a\n>   - {words}\n"), 60, 30, 4),
+            ["▎ • a", "▎   • word word word word", "      word word word word", "      word word"]
+        );
+        assert_eq!(
+            drawn(&format!("- a\n  - {words}\n"), 60, 30, 4),
+            ["• a", "  • word word word word word", "    word word word word word"]
+        );
+    }
+
+    /// The line under the cursor shows its source, markers and spaces, in
+    /// the column it is drawn at, and the caret sits on the char it is on.
+    #[test]
+    fn the_quoted_item_under_the_cursor_is_raw() {
+        let mut app = app_with("> - a\n>   - beta\n>     - c\n");
+        app.buffer.cursor = Cursor::new(1, 6);
+        app.active = crate::render::conceal::ActiveSet::compute(&app.mode, &app.buffer.cursor, None);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let all = rows(&buf);
+        let a = all.iter().position(|r| r.contains("▎ • a")).unwrap_or_else(|| panic!("{all:#?}"));
+        let margin = all[a].find('▎').unwrap();
+        let cells = |y: usize| all[y].chars().skip(margin).collect::<String>();
+        assert_eq!(cells(a + 1), ">   - beta");
+        assert_eq!(cells(a + 2), "▎ │   ◦ c");
+        let at = terminal.get_cursor_position().unwrap();
+        assert_eq!(buf[(at.x, at.y)].symbol(), "b");
+        assert_eq!(at.y as usize, a + 1);
+    }
+
+    /// A click on a nested item lands on the char drawn there: the bar is
+    /// the line's start, the bullet its `-`, a letter that letter.
+    #[test]
+    fn a_click_on_a_quoted_item_lands_on_its_char() {
+        for (doc, tw) in [("> - a\n>   - beta\n", 4), ("> - a\n>\t  - beta\n", 4)] {
+            let mut app = app_with(&format!("top\n\n{doc}"));
+            app.config.editor.tab_width = tw;
+            app.buffer.cursor = Cursor::new(0, 0);
+            let area = Rect { x: 0, y: 0, width: 60, height: 12 };
+            let all = rows(&render_to(&app, 60, 12));
+            let y = all.iter().position(|r| r.contains("beta")).unwrap();
+            let x = |s: &str| all[y].find(s).map(|b| all[y][..b].chars().count()).unwrap() as u16;
+            let line = app.buffer.line_text(3);
+            let src = |c: char| line.chars().position(|x| x == c).unwrap();
+            let at = |col| locate_click(&app, area, col, y as u16).unwrap();
+            assert_eq!(at(x("▎")), Cursor::new(3, 0), "{doc:?}");
+            let bullet = if all[y].contains('•') { "•" } else { "◦" };
+            assert_eq!(at(x(bullet)), Cursor::new(3, src('-')), "{doc:?}");
+            assert_eq!(at(x("beta") + 2), Cursor::new(3, src('t')), "{doc:?}");
+        }
     }
 
     /// Prose must NOT hang — there is no content column to line up under.

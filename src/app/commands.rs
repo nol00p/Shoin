@@ -1,4 +1,8 @@
 use super::*;
+pub(crate) use crate::values::{
+    export_justifies, ALIGN_VALUES, EMBED_VALUES, EXPORT_VALUES, FOCUS_VALUES, JUSTIFY_WORDS, NUMBER_VALUES, ON_WORDS,
+    OPTIONS, TOGGLE_VALUES,
+};
 use crate::config::schema::MAX_TAB_WIDTH;
 
 /// Every `:` command: its name, and the other (mostly shorter) names it
@@ -45,60 +49,6 @@ pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
 
 /// The commands whose argument is a path, by their name in `COMMANDS`.
 pub(crate) const PATH_COMMANDS: &[&str] = &["edit", "saveas", "wq", "write"];
-
-/// Every `:set` option: its name, and the other names it answers to.
-/// `set_option` reads keys through this table and Tab completes the first
-/// column.
-pub(crate) const OPTIONS: &[(&str, &[&str])] = &[
-    ("align", &[]),
-    ("autoreload", &[]),
-    ("autosave", &[]),
-    ("autosave_interval", &["autosave_min"]),
-    ("clipboard", &["cb"]),
-    ("code_syntax", &["syntax"]),
-    ("conceal", &[]),
-    ("embed", &[]),
-    ("focus", &[]),
-    ("hints", &[]),
-    ("line_spacing", &["spacing"]),
-    ("measure", &["width"]),
-    ("mouse", &[]),
-    ("numbers", &["number", "nu"]),
-    ("tab_width", &["ts"]),
-    ("typewriter", &["tw"]),
-];
-
-/// The words that turn a toggle option on; any other value turns it off.
-const ON_WORDS: &[&str] = &["on", "true", "1", "yes"];
-
-/// What `:set` offers for a toggle option.
-pub(crate) const TOGGLE_VALUES: &[&str] = &["off", "on"];
-
-/// The values `:focus` and `:set focus` take, as `FocusMode::parse` reads
-/// them and its labels name them.
-pub(crate) const FOCUS_VALUES: &[&str] = &["off", "paragraph", "sentence"];
-
-/// The values `:align` and `:set align` take (`TextAlign::parse`).
-pub(crate) const ALIGN_VALUES: &[&str] = &["left", "center", "right", "justified"];
-
-/// The values `:embed` and `:set embed` take (`transclude::Mode::parse`).
-pub(crate) const EMBED_VALUES: &[&str] = &["none", "short", "rec", "full"];
-
-/// The values `:number` and `:set numbers` take (`NumberMode::parse`).
-pub(crate) const NUMBER_VALUES: &[&str] = &["off", "relative", "absolute"];
-
-/// The formats `:export` takes (`export::Format::parse`).
-pub(crate) const EXPORT_VALUES: &[&str] = &["md", "txt", "html", "pdf"];
-
-/// The words that ask `:export` to justify, in either place beside the
-/// format. The first is the one Tab offers.
-pub(crate) const JUSTIFY_WORDS: &[&str] = &["justify", "justified"];
-
-/// Whether `:export` can justify `format`: plain text and HTML only.
-pub(crate) fn export_justifies(format: crate::export::Format) -> bool {
-    use crate::export::Format;
-    matches!(format, Format::Html | Format::Text)
-}
 
 /// The values a `:set` option takes, by its name in `OPTIONS`: on and off
 /// for a toggle, the named choices for the rest. A number has none to list.
