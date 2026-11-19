@@ -647,7 +647,7 @@ fn embed_rows(app: &mut App, line: usize) -> Vec<String> {
 fn embed_rows_of(app: &App, doc: usize, line: usize) -> Vec<String> {
     use crate::transclude::preview::Row;
     let mut cache = app.docs[doc].cache.borrow_mut();
-    cache.sync_doc(app, &app.docs[doc], 60);
+    cache.sync_doc(app, &app.docs[doc], app.focus_pane, 60);
     let Some(x) = cache.entry(line).and_then(|e| e.embed.as_ref()) else {
         return Vec::new();
     };

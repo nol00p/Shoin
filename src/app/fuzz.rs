@@ -84,8 +84,9 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
     trace.push(format!("<size {w}x{h}>"));
     // No space here: Space is the leader in Normal mode, and the leader opens
     // the file tree and other things that reach outside the temp folder.
-    // `z` is there to fold: `za` `zc` `zo` `zM` `zR` come up as pairs too.
-    let normal = "zazczMzRzohjklwbeWBE0$^GggxXdDcCyYpPuoOiIaAvVJ~.;,nN{}()[]<>\"'`-+*#=|123456789fFtTrzgZ%&_/?hjklhjkldduu";
+    // `z` is there to fold and scroll: `za` `zc` `zo` `zM` `zR` `zt` `zz`
+    // `zb` come up as pairs too.
+    let normal = "zazczMzRzoztzzzbhjklwbeWBE0$^GggxXdDcCyYpPuoOiIaAvVJ~.;,nN{}()[]<>\"'`-+*#=|123456789fFtTrzgZ%&_/?hjklhjkldduu";
     let typed = "abc xyz\t-*#`[]()|$>1.!=~_\\\"jk日🙂";
     let ex = [
         "sp", "vs", "close", "only", "focus", "focus sentence", "typewriter", "number", "number relative", "align",
@@ -208,16 +209,24 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         if c.line >= app.buffer.line_count().max(1) || c.col > app.buffer.line_len(c.line) {
             return Err(format!("step {step}: cursor {c:?} out of bounds\ntext: {:?}", text(&app)));
         }
-        // A closed fold never hides the cursor, and every fold is inside the
-        // text and still measures as an item or a section.
+        // Folds are per pane. In every pane, every fold is inside the text
+        // and still measures as an item or a section; the focused pane's
+        // never hide the cursor; and no fold outlives its pane.
         app.sync_folds();
         let n = app.buffer.line_count();
-        for f in app.folds.closed() {
-            if f.end >= n || f.start >= f.end {
-                return Err(format!("step {step}: fold {f:?} outside {n} lines\ntext: {:?}", text(&app)));
+        let panes = app.layout.ids();
+        for (pane, folds) in &app.docs[app.current()].folds {
+            if !panes.contains(pane) {
+                return Err(format!("step {step}: folds kept for closed pane {pane}"));
             }
-            if f.hides(c.line) && !insertish && app.blocks.revision == app.buffer.revision {
-                return Err(format!("step {step}: cursor {c:?} inside fold {f:?}\ntext: {:?}", text(&app)));
+            for f in folds.closed() {
+                if f.end >= n || f.start >= f.end {
+                    return Err(format!("step {step}: pane {pane} fold {f:?} outside {n} lines\ntext: {:?}", text(&app)));
+                }
+                let synced = app.blocks.revision == app.buffer.revision;
+                if *pane == app.focus_pane && f.hides(c.line) && !insertish && synced {
+                    return Err(format!("step {step}: cursor {c:?} inside fold {f:?}\ntext: {:?}", text(&app)));
+                }
             }
         }
         term.draw(|f| crate::render::frame::render(f, &app)).unwrap();

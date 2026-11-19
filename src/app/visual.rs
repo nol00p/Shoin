@@ -92,7 +92,10 @@ impl App {
                 self.visual_map_chars(move |_, out| out.push(r));
             }
             Action::JoinLines => {
+                // A closed fold in the selection joins whole, as in vim.
                 let (a, b) = self.visual_lines();
+                let (a, b) = self.fold_hidden().widen(a, b);
+                let b = b.min(self.buffer.last_line());
                 self.end_visual();
                 self.buffer.cursor = Cursor::new(a, 0);
                 // At least two lines, as vim: `vJ` on one line joins the next.

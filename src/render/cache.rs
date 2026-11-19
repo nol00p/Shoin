@@ -25,6 +25,7 @@
 //! what keeps the expensive work O(viewport) while the row index stays O(lines).
 
 use crate::app::{App, BufferState};
+use crate::render::pane::PaneId;
 use crate::config::schema::{GlyphConfig, MarkdownConfig};
 use crate::render::conceal::{ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
@@ -172,7 +173,7 @@ pub struct RenderCache {
     /// `entries.len() + 1` long after a sync.
     row_starts: Vec<usize>,
     /// The lines that take no rows in the current row index
-    /// (`render::hidden`): closed folds today.
+    /// (`render::hidden`): the closed folds of the pane it was built for.
     hidden: Hidden,
     /// The buffer revision at which every entry was last verified against its
     /// line. `None` means the entries and the document may have diverged, which
@@ -194,19 +195,24 @@ pub struct RenderCache {
 impl RenderCache {
     /// Bring the cache in line with the buffer and rebuild the row index.
     /// Everything else on this type reads what this leaves behind.
-    /// Sync against the CURRENT document. Panes showing another one call
-    /// `sync_doc` directly.
+    /// Sync against the CURRENT document, as the focused pane shows it. Panes
+    /// showing another one call `sync_doc` directly.
     pub fn sync(&mut self, app: &App, measure: u16) {
         let doc = &app.docs[app.current()];
-        self.sync_doc(app, doc, measure);
+        self.sync_doc(app, doc, app.focus_pane, measure);
     }
 
-    /// Bring the cache in step with `doc` at `measure`.
+    /// Bring the cache in step with `doc` at `measure`, with the row index as
+    /// `pane` shows it: its folds are its own (vim's are per window).
     ///
     /// `doc` is passed rather than read off `app` because a pane may be showing
     /// a document that is not the current one — and then nothing in it is
     /// "active", so every line conceals.
-    pub fn sync_doc(&mut self, app: &App, doc: &BufferState, measure: u16) {
+    ///
+    /// The parse is shared by every pane on the document; only the row index
+    /// is per pane, and it is rebuilt on every sync anyway (integer work), so
+    /// a second pane folding differently costs nothing extra.
+    pub fn sync_doc(&mut self, app: &App, doc: &BufferState, pane: PaneId, measure: u16) {
         let n = doc.buffer.line_count();
 
         if !self.key.as_ref().is_some_and(|k| k.matches(app, doc)) {
@@ -295,7 +301,7 @@ impl RenderCache {
             self.seen = Some(doc.buffer.rope.clone());
         }
 
-        self.index(app, doc, n);
+        self.index(app, doc, pane, n);
     }
 
     /// Find the lines an edit touched by comparing the buffer with the text
@@ -335,7 +341,7 @@ impl RenderCache {
     /// Rebuild the line → first-row index for this frame's active set. Integer
     /// work only, so a cursor move that re-reveals a line costs O(lines) adds
     /// rather than a re-parse.
-    fn index(&mut self, app: &App, doc: &BufferState, n: usize) {
+    fn index(&mut self, app: &App, doc: &BufferState, pane: PaneId, n: usize) {
         let conceal_on = app.config.layout.conceal && doc.buffer.syntax == Syntax::Markdown;
         let spacing = app.config.layout.line_spacing.min(crate::render::layout::MAX_LINE_SPACING) as usize;
         // Only the document under the cursor has an active (raw) line. A pane
@@ -348,7 +354,7 @@ impl RenderCache {
         self.row_starts.clear();
         self.row_starts.reserve(n + 1);
 
-        self.hidden = hidden::of(&doc.folds);
+        self.hidden = hidden::of(doc.folds_in(pane));
         let ranges = self.hidden.ranges();
         // The next run of hidden lines at or below `line`, walked alongside
         // rather than searched per line.
@@ -379,6 +385,11 @@ impl RenderCache {
             rows += spacer_rows(spacing, doc, last, n);
         }
         self.row_starts.push(rows);
+    }
+
+    /// The lines that take no rows in the current row index.
+    pub fn hidden(&self) -> &Hidden {
+        &self.hidden
     }
 
     /// Total visual rows in the document, as currently revealed.
@@ -447,6 +458,16 @@ impl RenderCache {
             hanging: if within == 0 { 0 } else { entry.hang(concealed) },
             editable: true,
         })
+    }
+
+    /// The first and last rows of `line`'s own text, line spacing left out:
+    /// what `zt` puts at the top and `zb` at the bottom. A hidden line answers
+    /// for the line shown in its place.
+    pub fn line_rows(&self, line: usize) -> (usize, usize) {
+        let line = self.hidden.shown(line);
+        let Some(&first) = self.row_starts.get(line) else { return (0, 0) };
+        let rows = content_rows(self.entry(line), self.is_concealed(line));
+        (first, first + rows.saturating_sub(1))
     }
 
     /// Which visual row holds a source position, and the column offset within

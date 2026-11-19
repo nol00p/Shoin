@@ -170,10 +170,11 @@ fn prefix_hints(prefix: char, visual: bool) -> Vec<Hint> {
             ("w", "cycle"),
             ("> < + - =", "size"),
         ]),
-        'z' if !visual => list(&[
+        'z' => list(&[
             ("a", "toggle fold"),
             ("c o", "close · open"),
             ("M R", "close all · open all"),
+            ("t z b", "line to top · middle · bottom"),
         ]),
         _ => list(&[("Esc", "cancel")]),
     }
@@ -303,6 +304,9 @@ fn label(action: &str) -> String {
         "fold_close" => "close fold",
         "fold_open_all" => "open all folds",
         "fold_close_all" => "close all folds",
+        "scroll_cursor_top" => "line to top",
+        "scroll_cursor_middle" => "line to middle",
+        "scroll_cursor_bottom" => "line to bottom",
         "toggle_numbers" | "numbers" | "number" => "numbers",
         "cycle_align" | "align" => "align",
         "toggle_view" | "view" | "read_only" => "read-only",
