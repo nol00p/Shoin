@@ -102,9 +102,10 @@ impl FocusMode {
     }
 
     /// `None` for a word this does not know, so a typo in `layout.focus` is
-    /// reported rather than silently read as `off`.
+    /// reported rather than silently read as `off`. Case is ignored, as for
+    /// the other enum options.
     pub fn parse(s: &str) -> Option<FocusMode> {
-        Some(match s.trim() {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
             "off" | "none" => FocusMode::Off,
             "paragraph" | "para" => FocusMode::Paragraph,
             "sentence" | "sent" => FocusMode::Sentence,
@@ -173,5 +174,16 @@ mod tests {
         let r = FocusRegion::compute(&b, FocusMode::Sentence).unwrap();
         assert_eq!(r.start.col, 0);
         assert_eq!(r.end.col, 12); // through the first '.'
+    }
+
+    /// `:focus Paragraph` and `layout.focus = "SENTENCE"` read as their
+    /// lowercase words, as the other enum options do.
+    #[test]
+    fn parse_ignores_case_and_rejects_the_rest() {
+        assert_eq!(FocusMode::parse("Paragraph"), Some(FocusMode::Paragraph));
+        assert_eq!(FocusMode::parse("SENTENCE"), Some(FocusMode::Sentence));
+        assert_eq!(FocusMode::parse(" Para "), Some(FocusMode::Paragraph));
+        assert_eq!(FocusMode::parse("OFF"), Some(FocusMode::Off));
+        assert_eq!(FocusMode::parse("banana"), None);
     }
 }

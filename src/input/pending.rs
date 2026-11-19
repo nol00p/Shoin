@@ -413,15 +413,21 @@ impl Pending {
             },
             // A register prefix qualifies the command still to come, so unlike
             // every other prefix it leaves the pending count and operator
-            // alone: `"a2dd` is one command.
-            Awaiting::Register => {
-                if let Some(name) = key.as_char() {
+            // alone: `"a2dd` is one command. A key that is no character
+            // (`Esc` above all) abandons the whole command, as it does after
+            // `f` or `r`, so `3"<Esc>j` moves one line.
+            Awaiting::Register => match key.as_char() {
+                Some(name) => {
                     if name.is_ascii_alphanumeric() || matches!(name, '"' | '+' | '*') {
                         self.register = Some(name);
                     }
+                    Resolution::Pending
                 }
-                Resolution::Pending
-            }
+                None => {
+                    self.reset();
+                    Resolution::Invalid
+                }
+            },
             Awaiting::Prefix(p) => match bindings::after_prefix(p, key, table.is_visual()) {
                 Some(verb) => self.apply_verb(verb, table),
                 // An unknown second key drops the sequence, as vim does — but
@@ -691,5 +697,25 @@ mod tests {
             _ => panic!("Esc resolves to NormalMode"),
         }
         assert!(p.is_clean());
+    }
+
+    /// `"` then `Esc` abandons the whole half-typed command, as `Esc` does
+    /// after `f` or `t`: `3"<Esc>j` moves one line and `d"<Esc>j` deletes
+    /// nothing.
+    #[test]
+    fn escape_after_a_register_prefix_clears_the_count_and_operator() {
+        let km = keymap();
+        let esc = Key { code: KeyCode::Esc, ctrl: false, alt: false, shift: false };
+        for before in ["3\"", "d\"", "2d\""] {
+            let mut p = Pending::default();
+            run(&mut p, before, Table::Normal);
+            p.feed(esc, &km, Table::Normal);
+            assert!(p.is_clean(), "{before:?} then Esc leaves nothing pending");
+            let cmds = run(&mut p, "j", Table::Normal);
+            assert_eq!(cmds.len(), 1, "{before:?}<Esc>j: {cmds:?}");
+            assert_eq!(cmds[0].action, Action::Move(Motion::Down), "{before:?}<Esc>j");
+            assert_eq!(cmds[0].count, 1, "{before:?}<Esc>j");
+            assert_eq!(cmds[0].register, None, "{before:?}<Esc>j");
+        }
     }
 }

@@ -7653,3 +7653,55 @@ fn a_document_switch_mid_insert_seals_the_session() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+
+/// An embed of a picture that is not there says so as a picture, and an
+/// embed of a missing note keeps calling it a note.
+#[test]
+fn an_embed_of_a_missing_picture_is_called_a_picture() {
+    let (_d, mut app) = vault("intro\n![[pics/shot.png]]\n![[fragments/next]]\n", &[]);
+    app.embed_mode = crate::transclude::Mode::Full;
+    assert_eq!(embed_rows(&mut app, 1), ["![[pics/shot.png]] — no picture called \"pics/shot.png\""]);
+    assert_eq!(embed_rows(&mut app, 2), ["![[fragments/next]] — no note called \"fragments/next\""]);
+}
+
+/// `gx` on a wiki link to a missing picture reports it as a picture.
+#[test]
+fn gx_on_a_missing_picture_names_it_a_picture() {
+    let (_d, mut app) = vault("see [[shot.webp]]\n", &[]);
+    cursor_on(&mut app, 0, "shot.webp");
+    feed(&mut app, "gx");
+    assert_eq!(flash_text(&app), "no picture called \"shot.webp\"");
+}
+
+/// The `:focus` and `:set focus` words are read whatever their case.
+#[test]
+fn focus_takes_its_word_in_any_case() {
+    let mut app = app_with("one\n");
+    for (cmd, want) in [
+        (":focus Paragraph", FocusMode::Paragraph),
+        (":focus SENTENCE", FocusMode::Sentence),
+        (":set focus=Off", FocusMode::Off),
+        (":set focus=PARA", FocusMode::Paragraph),
+    ] {
+        feed(&mut app, cmd);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.sync_after_input();
+        assert_eq!(app.focus, want, "{cmd}: {:?}", flash_text(&app));
+    }
+}
+
+/// `3"<Esc>j` moves one line, and `d"<Esc>j` deletes nothing: `Esc` after
+/// the register prefix drops the count and operator with it.
+#[test]
+fn escape_after_a_register_prefix_drops_the_pending_command() {
+    let mut app = app_with("a\nb\nc\nd\ne\n");
+    feed(&mut app, "3\"");
+    esc(&mut app);
+    feed(&mut app, "j");
+    assert_eq!(app.buffer.cursor.line, 1, "one line, not three");
+    feed(&mut app, "d\"");
+    esc(&mut app);
+    feed(&mut app, "j");
+    assert_eq!(text(&app), "a\nb\nc\nd\ne\n", "nothing deleted");
+    assert_eq!(app.buffer.cursor.line, 2);
+}
