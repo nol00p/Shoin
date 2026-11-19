@@ -40,7 +40,8 @@ desk built into a bay by the window, and nothing else in the room.
 - **Vim grammar, plus writer verbs.** Operators, motions, text objects, counts,
   registers and `.` — and `gb` for bold, `gt` to tick a task, `g1`–`g6` for
   headings, `>al` and `Alt-j` to nest and move a list item with everything
-  under it. → [Editing](docs/editing.md) · [Writing](docs/writing.md)
+  under it. `zc` folds a section or a list item into one line.
+  → [Editing](docs/editing.md) · [Writing](docs/writing.md)
 - **Notes that compose.** `[[links]]` you walk with `gf`, `![[embeds]]` that
   pull one note into another, and export to Markdown, text, HTML or PDF.
   → [Notes](docs/notes.md) · [Export](docs/export.md)
@@ -61,7 +62,7 @@ highlighted in seventeen languages.
 ## See it work
 
 **Formatting** — the finished page with the cursor's line raw, `gb`, `gi` and
-`g2` in place, and a table that lines itself up on Esc.
+`g2` in place, and a table that lines itself up on `Esc`.
 
 <p align="center">
   <img src="docs/media/formatting.gif" alt="A note with headings, bold, italic, a quote, tasks, a table and code; the cursor's line shows its Markdown, and a new table row lines the columns up on Esc" width="800">
@@ -166,7 +167,8 @@ Files, and Config, which explains every option.
 
 - [Getting started](docs/getting-started.md) — install, requirements, first run
 - [Live preview](docs/live-preview.md) — how concealment works
-- [Editing](docs/editing.md) — motions, operators, text objects, lists, registers
+- [Editing](docs/editing.md) — motions, operators, text objects, lists, registers,
+  [folding](docs/editing.md#folding), [the `:` command line](docs/editing.md#the-command-line)
 - [Clipboard](docs/clipboard.md) — system clipboard, SSH, pasting
 - [Writing](docs/writing.md) — writer verbs, focus, typewriter and zen modes
 - [Panels](docs/panels.md) — file tree, finder, buffers, splits
