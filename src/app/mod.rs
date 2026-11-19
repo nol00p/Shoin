@@ -936,6 +936,7 @@ mod insert;
 mod prompts;
 mod search;
 mod commands;
+#[cfg(test)] pub(crate) use commands::COMMANDS;
 mod complete;
 
 impl App {
