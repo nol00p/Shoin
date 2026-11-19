@@ -11,6 +11,7 @@
 use crate::config::schema::MarkdownConfig;
 use crate::render::markdown::block::{classify, BlockKind, Carry, Marker, COMMONMARK_TAB};
 use crate::render::markdown::inline;
+use crate::text::{buffer::Buffer, list::Quoted};
 
 /// Convert a Markdown document to plain text.
 ///
@@ -21,9 +22,9 @@ use crate::render::markdown::inline;
 /// terminal to render into. Left `false` (the default), a paragraph is
 /// written exactly as it always was: one output line per source line,
 /// unwrapped — Shoin stores a paragraph as one logical line and only wraps it
-/// for display, so that is already the full text. A heading, quote, list item,
-/// or table row is never justified; stretching a quote's `> ` prefix or a
-/// table's `|` columns would break what they are.
+/// for display, so that is already the full text. A heading, quote, list
+/// item, or table row is never justified; stretching a quote's `> ` prefix or
+/// a table's `|` columns would break what they are.
 pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut carry = Carry::default();
@@ -32,13 +33,13 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
     // Classified up front: whether a line ends in a hard break depends on
     // whether the next line carries its paragraph on, and a table's header
     // row is only known by the delimiter row after it — two lines ahead.
-    let lines: Vec<(&str, BlockKind)> = text
+    let kinds: Vec<BlockKind> = text
         .lines()
         .enumerate()
         .map(|(i, line)| {
             let (kind, next) = classify(line, &carry, i == 0, md.math, COMMONMARK_TAB);
             carry = next;
-            (line, kind)
+            kind
         })
         .collect();
     // With `tables = false` a table is prose to the paragraph rule, as it is
@@ -49,10 +50,37 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
     };
     let mut held = super::Held::default();
 
-    for (i, (line, kind)) in lines.iter().enumerate() {
+    let mut buffer = None;
+    let mut quote = None::<Quoted>;
+    let mut quote_carry = Carry::default();
+    let mut lines = text.lines().zip(&kinds).enumerate().peekable();
+
+    while let Some((i, (line, kind))) = lines.next() {
         let before = std::mem::take(&mut held);
         let (next, quoted) = before.step(line, &as_prose(kind), md.math);
         held = next;
+        // Use the editor's quote view for list indentation. Keep its carry
+        // within a run of markers at the same depth, as list commands do.
+        let quote_block = if matches!(kind, BlockKind::Quote(_)) {
+            if !quote.as_ref().is_some_and(|q| q.contains(i)) {
+                let buffer = buffer.get_or_insert_with(|| {
+                    let mut buffer = Buffer::empty();
+                    buffer.rope = ropey::Rope::from_str(text);
+                    buffer
+                });
+                quote = Quoted::around(buffer, &kinds, i, COMMONMARK_TAB);
+                quote_carry = Carry::default();
+            }
+            quote.as_ref().map(|q| {
+                let body = q.view.line_text(q.view_line(i));
+                let (kind, next) = classify(&body, &quote_carry, false, md.math, COMMONMARK_TAB);
+                quote_carry = next;
+                (body, kind, quote_carry.in_list())
+            })
+        } else {
+            quote = None;
+            None
+        };
         // A fence in a quote is code in it: its delimiters go and its code is
         // indented inside the quote's marks, as a fence is outside one.
         if let Some(q) = quoted.filter(|_| held.code) {
@@ -93,11 +121,11 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
             continue;
         }
         // Code is never touched, so this comes after the fence check.
+        let joins = lines.peek().is_some_and(|(_, (next, k))| {
+            held.joins(next, &as_prose(k), kinds.get(i + 2), md)
+        });
         let line = match as_prose(kind) {
-            BlockKind::Paragraph | BlockKind::Quote(_) | BlockKind::ListItem { .. } => {
-                let joins = lines.get(i + 1).is_some_and(|(next, k)| {
-                    held.joins(next, &as_prose(k), lines.get(i + 2).map(|(_, k)| k), md)
-                });
+            BlockKind::Paragraph | BlockKind::ListItem { .. } => {
                 without_break(line, joins)
             }
             _ => line,
@@ -122,25 +150,36 @@ pub fn render(text: &str, measure: u16, justify: bool, md: &MarkdownConfig) -> S
             BlockKind::Rule => out.push("-".repeat(40)),
             BlockKind::Quote(depth) => {
                 let depth = (*depth).max(1);
-                let body = super::quote_strip(line, depth);
                 let prefix = "> ".repeat(depth as usize);
-                out.push(format!("{prefix}{}", strip_inline(body.trim_start(), md)));
+                match quote_block {
+                    Some((body, inner @ (BlockKind::ListItem { .. } | BlockKind::Paragraph), true)) => {
+                        let joins = joins || (body.ends_with('\\') && quote.as_ref().is_some_and(|q| {
+                            if !q.contains(i + 1) {
+                                return false;
+                            }
+                            let next = q.view.line_text(q.view_line(i + 1));
+                            let (kind, _) = classify(&next, &quote_carry, false, md.math, COMMONMARK_TAB);
+                            kind == BlockKind::Paragraph
+                        }));
+                        let body = without_break(&body, joins);
+                        if let BlockKind::ListItem { marker, checked, depth } = inner {
+                            push_item(&mut out, &prefix, body, (marker, checked, depth), md);
+                        } else {
+                            push_paragraph(&mut out, &prefix, &strip_inline(body, md), measure, justify);
+                        }
+                    }
+                    Some((body, _, _)) => {
+                        let body = without_break(&body, joins);
+                        out.push(format!("{prefix}{}", strip_inline(body.trim_start(), md)));
+                    }
+                    None => out.push(strip_inline(line, md)),
+                }
             }
             BlockKind::ListItem { marker, checked, depth } => {
-                let indent = " ".repeat(*depth as usize);
-                let body = super::item_body(line);
-                let bullet = match (marker, checked) {
-                    // A checkbox has to survive: unticked and ticked are the
-                    // whole point of the line.
-                    (_, Some(true)) => "[x] ".to_string(),
-                    (_, Some(false)) => "[ ] ".to_string(),
-                    (Marker::Ordered, None) => format!("{} ", ordinal(line)),
-                    (_, None) => "- ".to_string(),
-                };
-                out.push(format!("{indent}{bullet}{}", strip_inline(body, md)));
+                push_item(&mut out, "", line, (*marker, *checked, *depth), md);
             }
-            BlockKind::Paragraph if justify => {
-                push_justified(&mut out, &strip_inline(line, md), measure)
+            BlockKind::Paragraph => {
+                push_paragraph(&mut out, "", &strip_inline(line, md), measure, justify);
             }
             _ => out.push(strip_inline(line, md)),
         }
@@ -171,6 +210,28 @@ fn without_break(line: &str, continues: bool) -> &str {
     }
 }
 
+/// A list item as one line: its indent, a plain bullet, its text. Inside a
+/// quote `prefix` is the quote's markers, so the item matches the same item
+/// outside a quote after them.
+fn push_item(
+    out: &mut Vec<String>,
+    prefix: &str,
+    line: &str,
+    (marker, checked, depth): (Marker, Option<bool>, u8),
+    md: &MarkdownConfig,
+) {
+    let indent = " ".repeat(usize::from(depth));
+    let bullet = match (marker, checked) {
+        (_, Some(true)) => "[x] ".to_string(),
+        (_, Some(false)) => "[ ] ".to_string(),
+        (Marker::Ordered, None) => format!("{} ", ordinal(line)),
+        (_, None) => "- ".to_string(),
+    };
+    // One line, as the author wrote it: a list item is never wrapped,
+    // with or without `justify`, inside a quote or not.
+    out.push(format!("{prefix}{indent}{bullet}{}", strip_inline(super::item_body(line), md)));
+}
+
 /// `12.` from `  12. text`.
 fn ordinal(line: &str) -> String {
     let t = line.trim_start();
@@ -179,9 +240,13 @@ fn ordinal(line: &str) -> String {
     format!("{digits}{delim}")
 }
 
-/// Word-wrap `body` to `measure` and stretch every row but the last to fill it
-/// exactly, pushing each as its own output line.
-fn push_justified(out: &mut Vec<String>, body: &str, measure: u16) {
+/// With justification, word-wrap to the measure and stretch every row but
+/// the last. A quote prefix sits outside the measure.
+fn push_paragraph(out: &mut Vec<String>, prefix: &str, body: &str, measure: u16, justify: bool) {
+    if !justify {
+        out.push(format!("{prefix}{body}"));
+        return;
+    }
     let chars: Vec<char> = body.chars().collect();
     // A tab counts CommonMark's 4, the width export classifies with.
     let ranges = crate::render::layout::wrap_line(body, measure, crate::render::markdown::block::COMMONMARK_TAB);
@@ -189,10 +254,10 @@ fn push_justified(out: &mut Vec<String>, body: &str, measure: u16) {
     for (i, (start, end)) in ranges.into_iter().enumerate() {
         let row: String = chars[start..end].iter().collect();
         if i == last {
-            out.push(row.trim_end().to_string());
+            out.push(format!("{prefix}{}", row.trim_end()));
         } else {
             let gaps = crate::render::align::justify_gaps(&row, measure, crate::render::markdown::block::COMMONMARK_TAB);
-            out.push(stretch(&row, &gaps));
+            out.push(format!("{prefix}{}", stretch(&row, &gaps)));
         }
     }
 }
@@ -359,6 +424,47 @@ mod tests {
         assert!(got.contains("[x] done"));
     }
 
+    #[test]
+    fn quoted_lists_use_the_same_indent_as_unquoted_lists() {
+        let md = MarkdownConfig::default();
+        assert_eq!(
+            render("- a\n  * b\n    + c\n\n> - a\n>   * b\n>     + c\n", 72, false, &md),
+            "- a\n  - b\n    - c\n\n> - a\n>   - b\n>     - c\n",
+        );
+        assert_eq!(
+            render("> 10) **first**\n>     2. second\n> > * c\n", 72, false, &md),
+            "> 10) first\n>     2. second\n> > - c\n",
+        );
+    }
+
+    /// A long item stays one line, quoted or not, with or without `justify`.
+    #[test]
+    fn a_long_item_is_never_wrapped() {
+        let md = MarkdownConfig::default();
+        let input = "- a\n  12. abc def ghi\n\n> - a\n>   12. abc def ghi\n";
+        let expected = "- a\n  12. abc def ghi\n\n> - a\n>   12. abc def ghi\n";
+        assert_eq!(render(input, 14, false, &md), expected);
+        assert_eq!(render(input, 14, true, &md), expected);
+    }
+
+    #[test]
+    fn a_tab_after_a_quote_marker_leaves_three_columns_of_indent() {
+        let md = MarkdownConfig::default();
+        assert_eq!(
+            render("> - a\n>\t+ b\n> >\t* c\n", 72, false, &md),
+            "> - a\n>    - b\n> >    - c\n",
+        );
+    }
+
+    #[test]
+    fn quoted_list_continuations_keep_their_indent() {
+        let md = MarkdownConfig::default();
+        let input = "- a\n  - b\\\n    c\n\n> - a\n>   - b\\\n>     c\n";
+        let expected = "- a\n  - b\n    c\n\n> - a\n>   - b\n>     c\n";
+        assert_eq!(render(input, 72, false, &md), expected);
+        assert_eq!(render(input, 72, true, &md), expected);
+    }
+
     /// A tab after the marker is whitespace like a space; the first word
     /// after it is text, not part of the marker.
     #[test]
@@ -437,9 +543,6 @@ mod tests {
         assert_eq!(got.trim_end(), "aaa bbb");
     }
 
-    /// `justify` never touches a heading, quote, list item or table row: a
-    /// quote's `> ` prefix and a table's `|` columns are the author's own
-    /// layout, and wrapping them the way a paragraph wraps would break it.
     #[test]
     fn justify_leaves_headings_quotes_lists_and_tables_alone() {
         let got = render(

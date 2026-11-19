@@ -2,7 +2,8 @@
 //! first line.
 //!
 //! What can fold is read off the text each time (`candidates`, `all`); what
-//! IS folded is a `Folds`, one per document, holding the closed ones. They live
+//! IS folded is a `Folds`, one per pane and document (vim's are per window),
+//! holding the closed ones. They live
 //! for the session only and never touch the text: a fold is a pair of line
 //! numbers, END INCLUSIVE like every range in `list`.
 //!
@@ -157,8 +158,8 @@ pub fn all(buffer: &Buffer, kinds: &[BlockKind], tab_width: usize) -> Vec<Fold> 
     out
 }
 
-/// The closed folds of one document.
-#[derive(Default)]
+/// The closed folds of one document in one pane.
+#[derive(Clone, Debug, Default)]
 pub struct Folds {
     /// Sorted by start, then by end. Nested folds stay here while the fold
     /// around them is closed, so opening that one shows them still closed.
@@ -168,7 +169,17 @@ pub struct Folds {
     seen: Option<(Rope, u64)>,
 }
 
+/// The fold of `kind` that starts on `start` as the text is now, if it still
+/// hides a line: what a fold an edit went through is measured again with.
+pub fn remeasure(buffer: &Buffer, kinds: &[BlockKind], tab_width: usize, kind: FoldKind, start: usize) -> Option<Fold> {
+    let lists = Lists::new(buffer, kinds, tab_width);
+    measure(buffer, kinds, &lists, kind, start)
+}
+
 impl Folds {
+    /// No fold closed: what a pane that never folded this document has.
+    pub const NONE: Folds = Folds { closed: Vec::new(), seen: None };
+
     pub fn is_empty(&self) -> bool {
         self.closed.is_empty()
     }
@@ -273,19 +284,18 @@ impl Folds {
         let (head, tail) = shared_ends(old, new);
         // The touched lines are `first..old_end` in the old text and
         // `first..new_end` in the new one. A shared end that starts at the
-        // start of a line holds that whole line; one that starts mid-line
-        // holds only the line's end, which is still touched.
-        let end_line = |r: &Rope, at: usize| {
-            let line = r.byte_to_line(at);
-            if at == 0 || r.byte(at - 1) == b'\n' {
-                line
-            } else {
-                line + 1
-            }
-        };
+        // start of a line in BOTH texts holds that whole line; otherwise the
+        // line holding its first byte is touched, in both. Deciding it for
+        // each text apart would count lines differently on the two sides:
+        // `-` typed on an empty line above a fold starts the shared end at a
+        // line start in the old text and just after the `-` in the new one,
+        // and the fold would move down a line nobody added.
+        let line_start = |r: &Rope, at: usize| at == 0 || r.byte(at - 1) == b'\n';
+        let (old_at, new_at) = (old.len_bytes() - tail, new.len_bytes() - tail);
+        let whole = usize::from(!(line_start(old, old_at) && line_start(new, new_at)));
         let first = new.byte_to_line(head);
-        let old_end = end_line(old, old.len_bytes() - tail);
-        let new_end = end_line(new, new.len_bytes() - tail);
+        let old_end = old.byte_to_line(old_at) + whole;
+        let new_end = new.byte_to_line(new_at) + whole;
         if old_end == new_end {
             return;
         }
@@ -347,6 +357,26 @@ text\n\
         // A lone `- x` and the empty section D fold nothing of their own.
         assert_eq!(starts(11), [(10, 11, Section), (0, 11, Section)]);
         assert_eq!(starts(12), []);
+    }
+
+    /// Folds of `text` after `edit` turned it into `edited`, by first line.
+    fn shifted(text: &str, edited: &str, at: usize) -> Vec<usize> {
+        let (b, _) = buf(text);
+        let mut folds = Folds::default();
+        folds.close(Fold { start: at, end: at + 1, kind: FoldKind::Item }, &b);
+        let (mut b2, c2) = buf(edited);
+        b2.revision = b.revision + 1;
+        folds.sync(&b2, &c2.kinds, b2.revision, 4);
+        folds.closed().iter().map(|f| f.start).collect()
+    }
+
+    #[test]
+    fn edits_above_a_fold_move_it_by_the_lines_they_add() {
+        let doc = "intro\n\n- one\n  - a\n";
+        assert_eq!(shifted(doc, "intro\n-\n- one\n  - a\n", 2), [2], "typed on the empty line above: no line added");
+        assert_eq!(shifted(doc, "intro\n\n\n- one\n  - a\n", 2), [3], "a line opened above");
+        assert_eq!(shifted(doc, "intro\n- one\n  - a\n", 2), [1], "a line deleted above");
+        assert_eq!(shifted(doc, "intro\n\n- one\n  - a\nmore\n", 2), [2], "a line added below");
     }
 
     #[test]

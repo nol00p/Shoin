@@ -587,9 +587,9 @@ H M L :: top · middle · bottom of the screen
 
 ## Folds — a list item with its sub-items, or a heading's section
 za :: fold or unfold here
-zc zo :: fold · unfold; zc again folds the next one out
+zc zo :: fold · unfold; zc again folds the next one out. In Visual, every fold in the selected lines
 zM zR :: fold every item and section · unfold everything
-> A folded line ends with … N lines. j k step over it; a search or G that lands inside opens it. dd takes the whole fold. Folds last until you quit and never change the file.
+> A folded line ends with … N lines. j k Ctrl-d Ctrl-u step over it; a search or G that lands inside opens it. dd takes the whole fold; o opens a line below it. Each pane folds on its own. Folds last until you quit and never change the file.
 
 ## Along the line
 f{c} t{c} :: to the next c · to just before it

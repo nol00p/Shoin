@@ -13,8 +13,10 @@
 //! one, belonging to whichever pane has focus, and every other pane holds the
 //! position it will return to.
 //!
-//! Concealment is the one thing that stays shared: the row index lives in the
-//! document's render cache, so the active (raw) line is the FOCUSED pane's, in
+//! Folds are per pane, as vim's are per window: the parse lives in the
+//! document's render cache, and the row index built from it is rebuilt for
+//! each pane as it is drawn, from that pane's folds. Concealment is the one
+//! thing that stays shared: the active (raw) line is the FOCUSED pane's, in
 //! every pane showing that document. A pane showing a document that is not the
 //! current one has no cursor in it at all and conceals throughout.
 //!

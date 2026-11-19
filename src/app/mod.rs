@@ -146,9 +146,10 @@ pub struct BufferState {
     /// one you just left.
     pub cache: RefCell<RenderCache>,
 
-    /// The closed folds (`za`, `zM`). Per document, not per pane, because the
-    /// row index they shape is per document. Session only: never saved.
-    pub folds: crate::text::fold::Folds,
+    /// The closed folds (`za`, `zM`), by the pane they were made in: two
+    /// panes on one file fold apart, as vim's windows do. A pane with no entry
+    /// has nothing folded here. Session only: never saved.
+    pub folds: HashMap<PaneId, crate::text::fold::Folds>,
 }
 
 impl BufferState {
@@ -162,6 +163,12 @@ impl BufferState {
             cache: RefCell::new(RenderCache::default()),
             folds: Default::default(),
         }
+    }
+
+    /// What `pane` has folded in this document.
+    pub fn folds_in(&self, pane: PaneId) -> &crate::text::fold::Folds {
+        static NONE: crate::text::fold::Folds = crate::text::fold::Folds::NONE;
+        self.folds.get(&pane).unwrap_or(&NONE)
     }
 
     /// The name shown in the buffer list and the switcher.
@@ -1097,6 +1104,8 @@ impl App {
             // writes its escape here, never in the middle of a draw.
             self.clipboard.poll();
             self.refresh_blocks();
+            // A reload from disk moves the folds of the panes on that file.
+            self.sync_folds();
             self.refresh_focus();
             let Some(frame) = crate::recover::frame() else { return Ok(crate::recover::Ended::Stopped) };
             self.sync_cursor_shape();
@@ -1462,6 +1471,9 @@ impl App {
     }
 
     fn move_by(&mut self, m: Motion, count: usize) {
+        if self.fold_move(m, count) {
+            return;
+        }
         let Some(count) = self.fold_count(m, count) else { return };
         let page = self.viewport_height();
         if let Some(res) = motion::resolve(&self.buffer, m, count, page, false, self.config.editor.tab_width) {
@@ -1488,6 +1500,22 @@ impl App {
             pane.scroll.set(top);
         }
         self.buffer.cursor = cursor;
+    }
+
+    /// `zt` `zz` `zb`: scroll the focused pane so the cursor's line is at
+    /// its top, middle or bottom, as vim's do, `scroll_off` lines in from
+    /// the edge for the top and bottom. The cursor stays where it is.
+    /// Typewriter and read-only mode tie the view to the cursor, so there
+    /// they do nothing.
+    fn scroll_cursor(&mut self, to: crate::input::action::ScrollTo) {
+        if self.view || self.config.layout.typewriter {
+            return;
+        }
+        let area = Rect { x: 0, y: 0, width: self.term_size.0, height: self.term_size.1 };
+        let Some(top) = frame::cursor_line_at(self, area, to) else { return };
+        if let Some(pane) = self.focused_pane() {
+            pane.scroll.set(top);
+        }
     }
 
     /// The current text-area height in rows, for paging motions.
@@ -1575,7 +1603,12 @@ impl App {
             // `3rx` replaces three characters, so this needs the count and
             // belongs here rather than in `apply_action`.
             Action::ReplaceChar(c) => self.replace_chars(c, count),
-            Action::JoinLines => self.join_lines(count),
+            // On a closed fold, as vim: the fold's first two lines join and
+            // the fold stays closed.
+            Action::JoinLines => {
+                let line = self.buffer.cursor.line;
+                self.keeping_folds_at(line, |app| app.join_lines(count));
+            }
             Action::ToggleCase => self.toggle_case(count),
             Action::ListItemMove { down } => self.move_list_item(down, count),
             Action::MoveLines { down } => self.move_lines(down, count),
@@ -1794,6 +1827,7 @@ impl App {
             Action::ToggleZen => self.set_zen(self.zen.is_none()),
             Action::ToggleView => self.set_view(!self.view),
             Action::Fold(cmd) => self.fold(cmd),
+            Action::ScrollCursor(to) => self.scroll_cursor(to),
             // Recognized, deliberately nothing — `"" = "nop"` unbinds a key.
             Action::Nop => {}
             // Handled in `run`, where the count they take is still in hand.

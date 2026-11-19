@@ -106,9 +106,17 @@ line ends with ` … 5 lines`, the number of lines it hides.
   zc  zo    fold · unfold             zM   fold every item and section
 ```
 
-`j` and `k` step over a fold as one line. A search, `G`, `gg` or `:42` that
-lands inside a fold opens it. Folds last until you quit. They are not saved
-and don't change the file or its export.
+`j` and `k` step over a fold as one line, and so do `Ctrl-d` and `Ctrl-u`.
+A search, `G`, `gg` or `:42` that lands inside a fold opens it. Each pane
+folds on its own, so two panes on one file can show it folded differently.
+Folds last until you quit. They are not saved and don't change the file or
+its export.
+
+In Visual mode, `zc` folds every item and section in the selected lines and
+`zo` unfolds every fold there.
+
+`zt`, `zz` and `zb` scroll the page so the cursor's line is at the top, the
+middle or the bottom of the pane. The cursor stays where it is.
 
 ## Details
 
@@ -121,12 +129,29 @@ and don't change the file or its export.
   so they stay on screen between the folded sections.
 - `dd`, `yy`, `cc`, `>>` and `V` take a closed fold whole, and `3dd` counts
   it as one line. `p` on a folded line pastes below the whole fold.
+- On a folded line, `o` opens a line below the whole fold and `O` one above
+  it; the fold stays closed. `J` joins the folded line with the next line,
+  the first one the fold hides, and the fold stays closed, as in vim. `J` in
+  Visual mode joins a closed fold in the selection whole.
+- `}` on a folded line starts after the fold, so the blank lines it hides
+  don't stop it. A `}` or `{` that lands on a blank line inside a closed fold
+  leaves the cursor on the folded line, and the fold stays closed.
+- In Visual mode, `zc` works line by line from the top, as vim's does: it
+  folds the innermost open item or section around a line, then goes on
+  after it. On a line that is already folded it folds the next one out.
+  `zo` opens each fold one level. Both end Visual mode and put the cursor at
+  the start of the selection. `za` in Visual mode acts at the cursor only
+  and keeps the selection.
+- A new pane (`:split`, `Ctrl-w v`) starts with the folds of the pane it was
+  split from. Lines added or removed in one pane move the folds of every
+  pane on that file.
 - Typing on a folded line keeps the fold; Insert mode opens it. Lines added
   or removed above a fold move it along. A fold whose first line stops being
   a list item or a heading goes away; changing a heading's level changes how
   far its section reaches.
-- Folds belong to the document, so every pane showing it shows the same
-  folds.
+- `zt` and `zb` keep `scroll_off` lines between the cursor's line and the
+  edge, as vim's do. A wrapped line is placed whole. In typewriter and
+  read-only mode the cursor sets the view, so they do nothing.
 - A folded line that fills the text width has its ` … N lines` cut off at
   the edge of the page.
 - A command repeats at most 99,999 times, however many digits you type. A

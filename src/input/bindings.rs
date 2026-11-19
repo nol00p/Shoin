@@ -10,7 +10,7 @@
 //! `L` resolve against the visible range) stays a `Motion` for `app` to finish,
 //! and Insert mode is not a grammar at all — it is text entry with a few keys.
 
-use super::action::{Action, FoldCmd, Operator};
+use super::action::{Action, FoldCmd, Operator, ScrollTo};
 use super::pending::{Key, KeyCode};
 use crate::text::motion::Motion;
 
@@ -190,12 +190,17 @@ pub fn after_prefix(prefix: char, key: Key, visual_mode: bool) -> Option<Verb> {
         ('g', 'x') => Verb::Act(Action::OpenExternal),
         ('g', 'p') => Verb::Act(Action::AppendParagraph),
         ('g', c @ '0'..='6') => Verb::Act(Action::SetHeading(c as u8 - b'0')),
-        // Folds, as vim's. Normal mode only: a fold is not a selection.
-        ('z', 'a') if !visual_mode => Verb::Act(Action::Fold(FoldCmd::Toggle)),
-        ('z', 'o') if !visual_mode => Verb::Act(Action::Fold(FoldCmd::Open)),
-        ('z', 'c') if !visual_mode => Verb::Act(Action::Fold(FoldCmd::Close)),
-        ('z', 'R') if !visual_mode => Verb::Act(Action::Fold(FoldCmd::OpenAll)),
-        ('z', 'M') if !visual_mode => Verb::Act(Action::Fold(FoldCmd::CloseAll)),
+        // Folds, as vim's. In Visual `zc` and `zo` take every fold in the
+        // selected lines (`App::fold`).
+        ('z', 'a') => Verb::Act(Action::Fold(FoldCmd::Toggle)),
+        ('z', 'o') => Verb::Act(Action::Fold(FoldCmd::Open)),
+        ('z', 'c') => Verb::Act(Action::Fold(FoldCmd::Close)),
+        ('z', 'R') => Verb::Act(Action::Fold(FoldCmd::OpenAll)),
+        ('z', 'M') => Verb::Act(Action::Fold(FoldCmd::CloseAll)),
+        // The cursor's line to the top, middle or bottom of the pane.
+        ('z', 't') => Verb::Act(Action::ScrollCursor(ScrollTo::Top)),
+        ('z', 'z') => Verb::Act(Action::ScrollCursor(ScrollTo::Middle)),
+        ('z', 'b') => Verb::Act(Action::ScrollCursor(ScrollTo::Bottom)),
         // `<C-w>` hands its second key straight to the window commands, so a
         // pane verb can be added without touching the grammar.
         ('w', c) => Verb::Act(Action::Window(c)),

@@ -183,8 +183,20 @@ pub enum Action {
     /// its first line, or open it again. Never an edit: the text is untouched.
     Fold(FoldCmd),
 
+    /// `zt` `zz` `zb` — scroll the focused pane so the cursor's line is at
+    /// the top, middle or bottom of it. The cursor stays where it is.
+    ScrollCursor(ScrollTo),
+
     /// Recognized key, deliberately does nothing.
     Nop,
+}
+
+/// Where `zt` `zz` `zb` put the cursor's line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollTo {
+    Top,
+    Middle,
+    Bottom,
 }
 
 /// What a `z` fold key does.
@@ -329,6 +341,9 @@ impl Action {
             "fold_close" => Action::Fold(FoldCmd::Close),
             "fold_open_all" => Action::Fold(FoldCmd::OpenAll),
             "fold_close_all" => Action::Fold(FoldCmd::CloseAll),
+            "scroll_cursor_top" => Action::ScrollCursor(ScrollTo::Top),
+            "scroll_cursor_middle" => Action::ScrollCursor(ScrollTo::Middle),
+            "scroll_cursor_bottom" => Action::ScrollCursor(ScrollTo::Bottom),
             _ => {
                 if let Some(n) = name.strip_prefix("heading_") {
                     return n.parse::<u8>().ok().filter(|n| (1..=6).contains(n)).map(Action::SetHeading);
