@@ -148,6 +148,7 @@ fn from_table(table: toml::Table) -> Result<Config> {
 /// by nothing at all — the kind of rot that is only ever found by asking every
 /// setting, in one place, whether anyone understood it.
 pub fn validate(cfg: &Config) -> Vec<String> {
+    use crate::values::{dot_list, ALIGN_VALUES, EMBED_VALUES, FOCUS_VALUES, NUMBER_VALUES};
     let mut out = Vec::new();
     let mut check = |name: &str, value: &str, ok: bool, legal: &str| {
         if !ok {
@@ -188,13 +189,13 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         "layout.focus",
         &cfg.layout.focus,
         crate::render::focus::FocusMode::parse(&cfg.layout.focus).is_some(),
-        "off · paragraph · sentence",
+        &dot_list(FOCUS_VALUES),
     );
     check(
         "layout.numbers",
         &cfg.layout.numbers,
         crate::render::numbers::NumberMode::parse(&cfg.layout.numbers).is_some(),
-        "off · relative · absolute",
+        &dot_list(NUMBER_VALUES),
     );
     check(
         "layout.align",
@@ -206,7 +207,7 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         "layout.text_align",
         &cfg.layout.text_align,
         crate::render::align::TextAlign::parse(&cfg.layout.text_align).is_some(),
-        "left · center · right · justified",
+        &dot_list(ALIGN_VALUES),
     );
     check(
         "tree.root",
@@ -218,7 +219,7 @@ pub fn validate(cfg: &Config) -> Vec<String> {
         "transclude.embed",
         &cfg.transclude.embed,
         crate::transclude::Mode::parse(&cfg.transclude.embed).is_some(),
-        "none · short · rec · full",
+        &dot_list(EMBED_VALUES),
     );
     for (name, value) in [
         ("cursor.normal", &cfg.cursor.normal),
@@ -581,6 +582,28 @@ mod tests {
         assert!(w.iter().any(|s| s.starts_with("cursor.normal")), "{w:?}");
         assert!(w.iter().any(|s| s.starts_with("layout.focus")), "{w:?}");
         assert!(w[0].contains("preserve"), "the message lists the legal words: {w:?}");
+    }
+
+    /// A bad value's message names the values `values` lists, as `:set`
+    /// and Tab completion do.
+    #[test]
+    fn a_bad_value_names_the_value_list() {
+        use crate::values::{dot_list, ALIGN_VALUES, EMBED_VALUES, FOCUS_VALUES, NUMBER_VALUES};
+        let cfg = parse(
+            "[layout]\nfocus = \"x\"\nnumbers = \"x\"\ntext_align = \"x\"\n\n[transclude]\nembed = \"x\"\n",
+        )
+        .unwrap();
+        let w = validate(&cfg);
+        for (name, values) in [
+            ("layout.focus", FOCUS_VALUES),
+            ("layout.numbers", NUMBER_VALUES),
+            ("layout.text_align", ALIGN_VALUES),
+            ("transclude.embed", EMBED_VALUES),
+        ] {
+            let want = format!("{name}: {}, not \"x\"", dot_list(values));
+            assert!(w.contains(&want), "{want} in {w:?}");
+        }
+        assert!(w.contains(&"layout.focus: off · paragraph · sentence, not \"x\"".to_string()), "{w:?}");
     }
 
     /// Only `keys.conf` is built in; the other shipped files are meant to

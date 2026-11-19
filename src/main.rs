@@ -30,11 +30,30 @@ mod render;
 mod text;
 mod transclude;
 mod tree;
+mod values;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
+
+/// The `--format` line of `--help`: "What `--export` writes: `md`, `txt`,
+/// `html` or `pdf`.", from `values::EXPORT_VALUES`.
+fn format_help() -> String {
+    let formats: Vec<String> = values::EXPORT_VALUES.iter().map(|f| format!("`{f}`")).collect();
+    format!("What `--export` writes: {}.", values::or_list(&formats))
+}
+
+/// `--format` read, and `--justify` checked against it.
+fn export_format(name: &str, justify: bool) -> anyhow::Result<export::Format> {
+    let format = export::Format::parse(name)
+        .ok_or_else(|| anyhow::anyhow!("{name:?} is not {}", values::or_list(values::EXPORT_VALUES)))?;
+    if justify && !values::export_justifies(format) {
+        let formats: Vec<String> = values::justify_formats().iter().map(|f| format!("--format {f}")).collect();
+        anyhow::bail!("--justify only applies to {}", values::or_list(&formats));
+    }
+    Ok(format)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "shoin", version, about = "A no-clutter terminal Markdown editor")]
@@ -74,8 +93,8 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     export: Option<PathBuf>,
 
-    /// What `--export` writes: `md`, `txt`, `html` or `pdf`.
-    #[arg(long, value_name = "FORMAT", default_value = "md")]
+    /// What `--export` writes (`format_help`).
+    #[arg(long, value_name = "FORMAT", default_value = "md", help = format_help())]
     format: String,
 
     /// Stretch every wrapped line but a paragraph's last to fill the measure.
@@ -192,11 +211,7 @@ fn main() -> Result<()> {
     // Exporting is a batch job: no terminal is acquired, so errors go to stderr
     // as an exit code rather than a status-line flash (SPEC.md §14.4).
     if let Some(src) = &cli.export {
-        let format = export::Format::parse(&cli.format)
-            .ok_or_else(|| anyhow::anyhow!("{:?} is not md, txt, html or pdf", cli.format))?;
-        if cli.justify && !matches!(format, export::Format::Html | export::Format::Text) {
-            anyhow::bail!("--justify only applies to --format html or --format txt");
-        }
+        let format = export_format(&cli.format, cli.justify)?;
         let page = export::html::Page {
             theme: render::theme::Theme::authored(&config.theme).unwrap_or_default(),
             measure: config.layout.measure,
@@ -396,5 +411,22 @@ fn print_out(text: &str) -> Result<()> {
     match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         other => Ok(other?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--help`, `--format` and `--justify` name the formats `values` lists.
+    #[test]
+    fn format_messages_read_the_value_list() {
+        assert_eq!(format_help(), "What `--export` writes: `md`, `txt`, `html` or `pdf`.");
+        let err = export_format("docx", false).unwrap_err().to_string();
+        assert_eq!(err, format!("\"docx\" is not {}", values::or_list(values::EXPORT_VALUES)));
+        assert_eq!(err, "\"docx\" is not md, txt, html or pdf");
+        let err = export_format("md", true).unwrap_err().to_string();
+        assert_eq!(err, "--justify only applies to --format txt or --format html");
+        assert!(export_format("html", true).is_ok());
     }
 }

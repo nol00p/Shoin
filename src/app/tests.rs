@@ -2538,6 +2538,22 @@ fn export_command_takes_format_and_justify_in_either_order() {
     std::fs::remove_dir_all(&d).ok();
 }
 
+/// `:export`'s refusals name the formats `values` lists.
+#[test]
+fn export_refusals_name_the_value_lists() {
+    let d = two_files();
+    let mut app = app_with("scratch\n");
+    app.open_file(d.join("one.md"));
+    cmd(&mut app, ":export docx");
+    let flash = app.flash.as_ref().and_then(|f| f.text.clone()).unwrap_or_default();
+    assert_eq!(flash, format!("export: \"docx\" is not {}", crate::values::or_list(crate::values::EXPORT_VALUES)));
+    assert_eq!(flash, "export: \"docx\" is not md, txt, html or pdf");
+    cmd(&mut app, ":export md justify");
+    let flash = app.flash.as_ref().and_then(|f| f.text.clone()).unwrap_or_default();
+    assert_eq!(flash, "export: justify only applies to txt or html");
+    std::fs::remove_dir_all(&d).ok();
+}
+
 /// The bare no-argument toggle is also reachable as a leader binding, the
 /// way `toggle_conceal`/`toggle_zen` are.
 #[test]
