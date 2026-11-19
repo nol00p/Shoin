@@ -3906,6 +3906,68 @@ mod tests {
         assert_ne!(column_of(&concealed), column_of(&unstable));
     }
 
+    /// Where the first line of `doc` is drawn, revealed (the cursor on it) and
+    /// concealed (the cursor two lines down): the cell column `needle` starts
+    /// at in each, and the pane's text column.
+    fn reveal_columns(doc: &str, needle: (&str, &str), stable: bool) -> (Option<u16>, Option<u16>, u16) {
+        let mut app = app_with(&format!("{doc}\n\nother\n"));
+        app.config.layout.stable_gutter = stable;
+        let (w, h) = (120, 12);
+        let lay = Layout::compute(&app.config.layout, w, h - STATUS_ROWS, 0);
+        let column = |buf: &ratatui::buffer::Buffer, needle: &str| -> Option<u16> {
+            let cells: Vec<String> = (0..w).map(|x| buf[(x, lay.top)].symbol().to_string()).collect();
+            let want: Vec<String> = needle.chars().map(String::from).collect();
+            (0..cells.len()).find(|&i| cells[i..].starts_with(&want)).map(|i| i as u16)
+        };
+        let mut at = |line: usize| {
+            app.buffer.cursor = Cursor::new(line, 0);
+            app.active = crate::render::conceal::ActiveSet { start: line, end: line };
+            render_to(&app, w, h)
+        };
+        let revealed = at(0);
+        let concealed = at(2);
+        (column(&revealed, needle.0), column(&concealed, needle.1), lay.margin_left)
+    }
+
+    /// `layout.stable_gutter` moves a revealed line by its BLOCK markers
+    /// only. A line that opens with math, emphasis or a link reveals at the
+    /// text column like any other text: a display formula used to jump left
+    /// by the width its TeX gains, out of the column, or to the pane's edge.
+    #[test]
+    fn a_stable_gutter_shifts_by_block_markers_only() {
+        // (line, its start revealed, its start concealed, cells the revealed
+        // start sits left of the text column)
+        let long = "$$\\alpha\\beta\\gamma\\delta\\theta\\lambda\\mu\\pi\\sigma\\omega$$";
+        let cases: [(&str, (&str, &str), u16); 6] = [
+            ("$$E = mc^2$$", ("$$E", "E = mc"), 0),
+            (long, ("$$\\alpha", "\u{3b1}\u{3b2}"), 0),
+            ("$\\alpha$ decay", ("$\\alpha", "\u{3b1} decay"), 0),
+            ("## $\\alpha$ decay", ("## $", "\u{3b1} decay"), 3),
+            ("**Note:** read this", ("**Note", "Note"), 0),
+            ("> - $x$", (">", "\u{258e}"), 0),
+        ];
+        for (line, needle, back) in cases {
+            let (revealed, concealed, margin) = reveal_columns(line, needle, true);
+            assert_eq!(concealed, Some(margin), "{line:?} concealed starts at the text column");
+            assert_eq!(revealed, Some(margin - back), "{line:?} revealed");
+        }
+        // The visible text of a line that opens with block markers stays put.
+        let (revealed, concealed, _) = reveal_columns("## $\\alpha$ decay", (" decay", " decay"), true);
+        assert_eq!(revealed.unwrap() - concealed.unwrap(), "$\\alpha$".len() as u16 - 1);
+        let (revealed, concealed, _) = reveal_columns("> - $x$ y", ("$x", "x"), true);
+        assert_eq!(revealed, concealed, "the bar and bullet swap one for one");
+        // Leading bold: `Note` moves right by the returning `**`.
+        let (revealed, concealed, _) = reveal_columns("**Note:** read this", ("Note", "Note"), true);
+        assert_eq!(revealed.unwrap(), concealed.unwrap() + 2);
+
+        // Off, every revealed line starts at the text column.
+        for line in ["$$E = mc^2$$", "## $\\alpha$ decay", "**Note:** read this"] {
+            let first: String = line.chars().take(2).collect();
+            let (revealed, _, margin) = reveal_columns(line, (&first, "zzz"), false);
+            assert_eq!(revealed, Some(margin), "{line:?} with stable_gutter off");
+        }
+    }
+
     /// A warm cache must paint exactly what a cold one paints. This is the
     /// backstop for the whole incremental design: edit, scroll and reveal, then
     /// compare the frame against the same state rendered from an empty cache.

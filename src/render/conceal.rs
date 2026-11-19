@@ -60,6 +60,22 @@ impl Conceal {
     }
 }
 
+/// Where a conceal op comes from, which decides whether it can move the
+/// line's text when the cursor reveals it (`ConcealMap::leading_shift`).
+///
+/// No `Default`: every op is tagged where it is built, so a new kind of op
+/// has to say which it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// Line structure, at the start of the line: heading `#`s, quote bars,
+    /// list markers, task boxes, indent guides, and a fence or rule drawn
+    /// across the whole line. Only these shift a revealed line.
+    Block,
+    /// Styling inside the text: emphasis, code span and link markers, math
+    /// (inline or a display block's line), escapes. These never shift it.
+    Inline,
+}
+
 /// What concealment needs to know beyond the line itself: the glyphs to
 /// substitute, the colors they wear, and the width a full-line rule spans.
 pub struct ConcealCtx<'a> {
@@ -78,6 +94,8 @@ pub struct ConcealCtx<'a> {
 pub struct ConcealMap {
     /// Sorted by start, non-overlapping. Enforced by `build`, asserted in tests.
     pub ops: Vec<Conceal>,
+    /// The [`Origin`] of each op in `ops`, index for index.
+    origins: Vec<Origin>,
 }
 
 /// The set of lines rendered raw this frame.
@@ -126,24 +144,30 @@ impl ConcealMap {
     /// markers (`## `, `> `, `- `) contribute `Hide` or `Replace` ops of their own.
     pub fn build(line: &str, block: &BlockKind, spans: &[InlineSpan], ctx: &ConcealCtx) -> Self {
         let chars: Vec<char> = line.chars().collect();
-        let mut ops: Vec<Conceal> = Vec::new();
+        let mut marks: Vec<Conceal> = Vec::new();
+        let mut inline: Vec<Conceal> = Vec::new();
 
-        block_ops(&chars, block, ctx, &mut ops);
+        // A display block's line is all math: inline styling, not structure.
+        if *block == BlockKind::MathBlock {
+            math_block_ops(&chars, &mut inline);
+        } else {
+            block_ops(&chars, block, ctx, &mut marks);
+        }
 
         // Inline: the markers are exactly `outer - inner`, already computed by
         // the scanner — no second parse.
         for sp in spans {
             if sp.inner.start > sp.outer.start {
-                ops.push(Conceal::Hide(sp.outer.start..sp.inner.start));
+                inline.push(Conceal::Hide(sp.outer.start..sp.inner.start));
             }
             if sp.outer.end > sp.inner.end {
-                ops.push(Conceal::Hide(sp.inner.end..sp.outer.end));
+                inline.push(Conceal::Hide(sp.inner.end..sp.outer.end));
             }
             if sp.kind == crate::render::markdown::inline::Inline::Latex {
                 let inner: String = chars[sp.inner.clone()].iter().collect();
                 let text = render_latex(&inner);
                 if text != inner {
-                    ops.push(Conceal::Replace {
+                    inline.push(Conceal::Replace {
                         range: sp.inner.clone(),
                         text,
                         style: None,
@@ -153,18 +177,43 @@ impl ConcealMap {
         }
 
         // Sort and drop any overlap (block vs inline never overlap in practice,
-        // but the invariant must hold regardless).
-        ops.sort_by_key(|o| o.range().start);
-        let mut clean: Vec<Conceal> = Vec::with_capacity(ops.len());
+        // but the invariant must hold regardless). The sort is stable, so a
+        // block op wins a tie.
+        let mut ops: Vec<(Origin, Conceal)> = marks
+            .into_iter()
+            .map(|op| (Origin::Block, op))
+            .chain(inline.into_iter().map(|op| (Origin::Inline, op)))
+            .collect();
+        ops.sort_by_key(|(_, o)| o.range().start);
+        let mut map = ConcealMap::default();
         let mut last_end = 0usize;
-        for op in ops {
+        for (origin, op) in ops {
             if op.range().start >= last_end {
                 last_end = op.range().end;
-                clean.push(op);
+                map.ops.push(op);
+                map.origins.push(origin);
             }
         }
+        map
+    }
 
-        ConcealMap { ops: clean }
+    /// The LEADING RUN: the block-marker ops the line opens with. It ends at
+    /// the first inline op or at visible text, whichever comes first: past
+    /// either, the line's body has begun.
+    fn leading_run<'a>(&'a self, chars: &'a [char]) -> impl Iterator<Item = &'a Conceal> + 'a {
+        let mut src = 0usize;
+        self.ops
+            .iter()
+            .zip(&self.origins)
+            .take_while(move |(op, origin)| {
+                let r = op.range();
+                let open = **origin == Origin::Block && chars[src..r.start].iter().all(|c| c.is_whitespace());
+                if open {
+                    src = r.end;
+                }
+                open
+            })
+            .map(|(op, _)| op)
     }
 
     /// Which SOURCE column a display column maps to, for mouse
@@ -295,11 +344,15 @@ impl ConcealMap {
     /// `layout.stable_gutter` reserves exactly this much for the active line so
     /// its text stays in the same column as it is revealed. The shift is
     /// negative when the concealed markers are wider.
+    ///
     /// Every op in the LEADING RUN counts, not just the first: a line's markers
     /// can conceal in several pieces — an indent guide, then a bullet, then a
     /// task's checkbox — and missing the later ones let the body text jump as
-    /// the cursor arrived. The run ends at the first gap holding a non-blank
-    /// character, which is where the body text begins.
+    /// the cursor arrived. Only block markers ([`Origin::Block`]) make up the
+    /// run: it ends at the first inline op or the first visible character.
+    /// Math, emphasis or a link at the start of a line conceals as part of
+    /// the text, so revealing it moves nothing: a display formula used to
+    /// shift by the whole width its TeX gains, out of the text column.
     pub fn leading_shift(&self, source: &str, tab: usize) -> i32 {
         if self.ops.is_empty() {
             return 0;
@@ -309,11 +362,8 @@ impl ConcealMap {
 
         let mut shift = 0;
         let mut src = 0usize;
-        for op in &self.ops {
+        for op in self.leading_run(&chars) {
             let r = op.range();
-            if chars[src..r.start].iter().any(|c| !c.is_whitespace()) {
-                break; // body text — everything past here is not a marker
-            }
             let hidden: usize = chars[r.clone()].iter().map(width_of).sum();
             let shown = match op {
                 Conceal::Hide(_) => 0,
@@ -338,19 +388,14 @@ impl ConcealMap {
     pub fn prefix_breaks(&self, source: &str) -> Vec<usize> {
         let chars: Vec<char> = source.chars().collect();
         let mut out = Vec::new();
-        let mut src = 0usize;
-        for op in &self.ops {
+        for op in self.leading_run(&chars) {
             let r = op.range();
-            if chars[src..r.start].iter().any(|c| !c.is_whitespace()) {
-                break;
-            }
             if let Conceal::Replace { text, .. } = op {
                 let spaced = r.end > 0 && chars.get(r.end - 1).is_some_and(|c| c.is_whitespace());
                 if text.ends_with(' ') && !spaced {
                     out.push(r.end);
                 }
             }
-            src = r.end;
         }
         out
     }
@@ -1092,9 +1137,8 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
                 style: Some(Style::fg(color)),
             });
         }
-        BlockKind::MathBlock => {
-            math_block_ops(chars, ops);
-        }
+        // `ConcealMap::build` gives a display block's lines their ops itself:
+        // they are math, not markers.
         _ => {}
     }
 }
@@ -1589,7 +1633,42 @@ mod tests {
         assert_eq!(shift("  - [ ] nested"), 4);
         // The run stops at the body: an inline marker further along the line
         // does not pull the text sideways.
-        assert_eq!(shift("**bold** and more"), 2);
+        assert_eq!(shift("a **bold** word"), 0);
+        // A rule is replaced whole and has no body to align.
+        assert_eq!(shift("---"), 0);
+    }
+
+    /// Only BLOCK markers shift a revealed line. An inline op ends the run
+    /// wherever it sits, even first on the line, so math, emphasis, a code
+    /// span or a link conceal as part of the text and move nothing.
+    #[test]
+    fn leading_shift_stops_at_the_first_inline_op() {
+        let shift = |line: &str| map(line).leading_shift(line, 2);
+        // Display math: `$$E = mc^2$$` used to shift by its 5-cell TeX gain.
+        assert_eq!(shown("$$E = mc^2$$"), "E = mc²");
+        assert_eq!(shift("$$E = mc^2$$"), 0);
+        assert_eq!(shift("$$\\frac{a}{b} + \\sum_{i=0}^{n} x_i^2 + \\int_0^1 f(x)\\,dx$$"), 0);
+        // Inline math first on the line.
+        assert_eq!(shift("$\\alpha$ decay"), 0);
+        // Block markers in front of the math still count, the math does not.
+        assert_eq!(shift("## $\\alpha$ decay"), 3, "the `## ` only");
+        assert_eq!(shift("- $x^2$ grows"), 0, "the bullet, one for one");
+        assert_eq!(shift("> $x$"), 0, "the bar, one for one");
+        assert_eq!(shift("> - $x$"), 0);
+        assert_eq!(shift("- [ ] $x$ todo"), 4, "the task prefix only");
+        // Leading inline markup: the text moves right as its markers return.
+        assert_eq!(shift("**Note:** read this"), 0);
+        assert_eq!(shift("*em* then"), 0);
+        assert_eq!(shift("`code` first"), 0);
+        assert_eq!(shift("[link](url) first"), 0);
+        assert_eq!(shift("## **Bold** title"), 3);
+        assert_eq!(shift("- **a** b"), 0);
+        assert_eq!(shift("- [ ] **a** b"), 4);
+        // A display block's own lines, delimiters included.
+        let math = Carry { open: Open::InMath, ..Default::default() };
+        let inside = |line: &str| map_in(line, &math).leading_shift(line, 2);
+        assert_eq!(inside("\\alpha + \\beta"), 0);
+        assert_eq!(inside("$$"), 0);
     }
 
     #[test]

@@ -52,9 +52,15 @@ and [`tab-list.md`](../examples/tab-list.md) beside it show one thing each.
   styled in the link's colour, and a link inside emphasis
   (`**see [docs](u)**`) is drawn as a link in the outer style, its address
   hidden.
-- A compact quote such as `>>- a` or `>>text` draws like a spaced one. With
-  `layout.stable_gutter` on (the default), its text stays in place when the
-  cursor reveals the markers.
+- With `layout.stable_gutter` on (the default), a line's text stays in
+  place when the cursor reveals its block markers: heading `#`s, quote `>`s,
+  list markers, task boxes and indent guides come back to the left of the
+  text, into the margin if need be. Inline markup moves nothing, even at the
+  start of a line: `**Note:**` reveals at the text column, so `Note` moves
+  two cells right, and a line that starts with math shows its LaTeX from the
+  text column. Off, every revealed line starts at the text column.
+- A compact quote such as `>>- a` or `>>text` draws like a spaced one, and
+  with `layout.stable_gutter` on its text stays in place too.
 - `layout.conceal = false`, `:set conceal off` or `<leader>c` turns concealment
   off entirely.
 - To see every line concealed, the cursor's too, open the page read-only:

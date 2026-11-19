@@ -48,8 +48,11 @@ pub struct LayoutConfig {
     pub numbers: String,
     /// Live preview. `false` renders every line raw with dimmed markers.
     pub conceal: bool,
-    /// Reserve reveal width for the active line, trading horizontal slack for
-    /// zero jitter while typing.
+    /// Keep the active line's text in place as its block markers (heading
+    /// `#`s, quote `>`s, list markers, task boxes, indent guides) are
+    /// revealed, by moving the raw line left by their extra width. Inline
+    /// markup (emphasis, code spans, links, math) moves nothing, even at the
+    /// start of the line. See `ConcealMap::leading_shift`.
     pub stable_gutter: bool,
 }
 
