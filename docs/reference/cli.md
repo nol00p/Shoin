@@ -61,9 +61,9 @@ and embeds resolve from the working directory, as on a blank page.
 `shoin -R notes.md` opens a page to read rather than to edit. Every line is
 concealed, the cursor's too, and there's no caret: `j`/`k`, `Ctrl-d`/`Ctrl-u`,
 `G`/`gg` and search scroll the page, as in `less`. `q` quits. Yanking,
-panels, `gf` and `:w` still work; anything that would change the text is
-refused with "read-only — press i to edit", and `i` then switches to
-editing. `:view` turns the mode on and off from inside the editor. The keys
+panels, `gf` and `:w` still work. Press `i` as your first command to start
+editing. After moving or running another command, press `i` after the
+"read-only — press i to edit" message. `:view` toggles read-only. The keys
 are in the [key reference](keys.md#read-only), and
 [Reading](../reading.md#read-only) walks through it.
 

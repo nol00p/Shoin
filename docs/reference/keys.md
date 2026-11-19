@@ -208,11 +208,11 @@ See [Reading](../reading.md#read-only).
 | `gg` `G` | top / bottom |
 | `/` `?` `n` `N` | search |
 | `q` | close the buffer. Quit if it is the last one |
-| `i` | switch to editing after an edit is refused |
+| `i` | switch to editing on entry to read-only or after a refused edit |
 | `<leader>v` | switch to editing (it also turns read-only on) |
 
-An edit is refused with "read-only — press i to edit". Yanking, panels, `gf`
-and `:w` still work.
+After moving or running another command, the first edit is refused with
+"read-only — press i to edit". Yanking, panels, `gf` and `:w` still work.
 
 ## Leader keys
 

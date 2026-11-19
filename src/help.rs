@@ -778,7 +778,7 @@ Ctrl-d Ctrl-u :: half a page
 gg G :: top · bottom
 / ? n N :: search
 q :: close the buffer. Quit if it is the last one
-i :: switch to editing after an edit is refused
+i :: switch to editing on entry to read-only or after a refused edit
 > An edit is refused with a message. Yanking, panels, gf and :w still work.
 ";
 
