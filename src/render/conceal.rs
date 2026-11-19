@@ -293,17 +293,21 @@ impl ConcealMap {
     /// the cursor lands on this line.
     ///
     /// `layout.stable_gutter` reserves exactly this much for the active line so
-    /// its text stays in the same column as it is revealed. SPEC.md §6.
+    /// its text stays in the same column as it is revealed. The shift is
+    /// negative when the concealed markers are wider. SPEC.md §6.
     /// Every op in the LEADING RUN counts, not just the first: a line's markers
     /// can conceal in several pieces — an indent guide, then a bullet, then a
     /// task's checkbox — and missing the later ones let the body text jump as
     /// the cursor arrived. The run ends at the first gap holding a non-blank
     /// character, which is where the body text begins.
-    pub fn leading_shift(&self, source: &str, tab: usize) -> u16 {
+    pub fn leading_shift(&self, source: &str, tab: usize) -> i32 {
+        if self.ops.is_empty() {
+            return 0;
+        }
         let chars: Vec<char> = source.chars().collect();
         let width_of = |c: &char| cell_width(*c, tab);
 
-        let mut shift = 0usize;
+        let mut shift = 0;
         let mut src = 0usize;
         for op in &self.ops {
             let r = op.range();
@@ -315,10 +319,15 @@ impl ConcealMap {
                 Conceal::Hide(_) => 0,
                 Conceal::Replace { text, .. } => text_width(text, tab) as usize,
             };
-            shift += hidden.saturating_sub(shown);
+            shift += hidden as i32 - shown as i32;
             src = r.end;
         }
-        shift as u16
+        // A full-line replacement (such as a rule) has no body to align.
+        if chars[src..].iter().all(|c| c.is_whitespace()) {
+            shift.max(0)
+        } else {
+            shift
+        }
     }
 
     /// The concealed display string alone, without re-styling. The render
@@ -1091,11 +1100,19 @@ fn quote_ops(chars: &[char], depth: u8, ctx: &ConcealCtx, ops: &mut Vec<Conceal>
         block_ops(&view, &inner.block, ctx, &mut rest);
     }
     let mut pad: Vec<String> = vec![" ".to_string(); cut.pad];
-    if cut.pad == 0 {
-        ops.push(Conceal::Replace { range: 0..cut.keep + cut.skip, text: bars, style: bar_style });
-    } else {
-        let text = bars.strip_suffix(' ').unwrap_or(&bars).to_string();
-        ops.push(Conceal::Replace { range: 0..cut.keep, text, style: bar_style });
+    // Give each bar its own source range so a click can distinguish the
+    // markers with or without intervening spaces.
+    let end = if cut.pad == 0 { cut.keep + cut.skip } else { cut.keep };
+    let mut start = 0;
+    let markers = chars[..cut.keep].iter().enumerate().filter_map(|(i, &c)| (c == '>').then_some(i));
+    for next in markers.skip(1).chain(std::iter::once(end)) {
+        let text = if next == end && cut.pad > 0 {
+            ctx.glyphs.quote_bar.clone()
+        } else {
+            quote::bars(&ctx.glyphs.quote_bar, 1)
+        };
+        ops.push(Conceal::Replace { range: start..next, text, style: bar_style });
+        start = next;
     }
     let mut moved = Vec::with_capacity(rest.len());
     for op in rest {
@@ -1518,14 +1535,17 @@ mod tests {
     }
 
     /// The reveal shift the active line has to give back: `layout.stable_gutter`
-    /// draws that line this many columns left, so the body text never moves as
-    /// the cursor arrives. Every leading op counts toward it.
+    /// uses the signed width difference to keep the body text in place.
+    /// Every leading op counts toward it.
     #[test]
     fn leading_shift_covers_the_whole_marker_run() {
         let shift = |line: &str| map(line).leading_shift(line, 2);
         assert_eq!(shift("## Title"), 3, "`## ` is hidden outright");
         assert_eq!(shift("- item"), 0, "a bullet swaps one char for one");
         assert_eq!(shift("> quoted"), 0, "`> ` becomes a bar of the same width");
+        assert_eq!(shift(">>- item"), -2);
+        assert_eq!(shift("> >- item"), -1);
+        assert_eq!(shift(">>- [ ] todo"), 2, "the wider bars offset the narrower checkbox");
         // `- [ ] ` (5 cells) down to one box.
         assert_eq!(shift("- [ ] todo"), 4);
         // Indent guides come first and cost nothing; the task prefix still counts.

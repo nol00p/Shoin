@@ -134,16 +134,17 @@ impl Layout {
 /// `hang` is clamped so a continuation row always keeps some width — a deeply
 /// indented item in a narrow pane must still wrap rather than loop forever.
 pub fn wrap_hanging(text: &str, measure: u16, hang: u16, tab: usize) -> Vec<(usize, usize)> {
-    if hang == 0 {
-        return wrap_line(text, measure, tab);
-    }
+    wrap_with_inset(text, measure, hang, tab, 0)
+}
+
+/// Wrap a line whose first row starts inside the measure.
+pub(super) fn wrap_with_inset(text: &str, measure: u16, hang: u16, tab: usize, inset: u16) -> Vec<(usize, usize)> {
     let hang = hang.min(measure.saturating_sub(MIN_WRAP_WIDTH));
-    let first = wrap_line(text, measure, tab);
-    if first.len() < 2 || hang == 0 {
+    let first = wrap_line(text, measure.saturating_sub(inset), tab);
+    if first.len() < 2 || (hang == 0 && inset == 0) {
         return first;
     }
-    // The first row is whatever the full measure took; the rest are re-wrapped
-    // at the narrower width, so the break points shift as they must.
+    // Keep the first break. Wrap the remaining text at the continuation width.
     let (start, end) = first[0];
     let mut out = vec![(start, end)];
     let chars: Vec<char> = text.chars().collect();
@@ -155,7 +156,7 @@ pub fn wrap_hanging(text: &str, measure: u16, hang: u16, tab: usize) -> Vec<(usi
 }
 
 /// The narrowest a hanging continuation row may become.
-const MIN_WRAP_WIDTH: u16 = 8;
+pub(super) const MIN_WRAP_WIDTH: u16 = 8;
 
 /// The display column an item's content starts at — the width of its leading
 /// marker run, which is what a wrapped continuation lines up under.

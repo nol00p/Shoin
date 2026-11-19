@@ -373,14 +373,14 @@ fn render_pane(
         }
         let (_, d, chars) = current.as_ref().unwrap();
         let mut spans = window_spans(chars, &d.spans, row.start_col, row.end_col);
-        let shift = gutter_shift(app, &cache, &lay, row.line(), row.start_col);
+        let left = line_left(app, &cache, &lay, row.line(), row.start_col);
         // A wrapped list continuation is pushed right to sit under the item's
         // content; the cache already wrapped it at the narrower width (SPEC §6).
         let hang = hang_x(app, &cache, &lay, &row);
         let r = Rect {
-            x: text_area.x - shift + hang,
+            x: rect.x + left + hang,
             y: text_area.y + i as u16,
-            width: lay.measure + shift - hang,
+            width: lay.margin_left + lay.measure - left - hang,
             height: 1,
         };
         // A fenced row's slab is painted by the ROW, not by its spans: the
@@ -426,16 +426,11 @@ fn render_pane(
         if fenced {
             render_fence_bar(frame, app, r);
         }
-        // Shifted left by the SAME `shift` as the row's own text: on the
-        // active line, revealed markers hang into the columns immediately
-        // left of where the row now starts, so the number has to give up
-        // that band and sit one further band left of it — never the same
-        // columns, whatever `shift` turns out to be. When even that does not
-        // fit the margin, the number is skipped for this one row rather than
-        // drawn off the pane or over the markers.
-        if lay.number_gutter > 0 && is_first_row && shift + lay.number_gutter <= lay.margin_left {
+        // Put the number immediately before the first row's adjusted left
+        // edge, if the whole number fits before it.
+        if lay.number_gutter > 0 && is_first_row && lay.number_gutter <= left {
             let gutter = Rect {
-                x: text_area.x - shift - lay.number_gutter,
+                x: rect.x + left - lay.number_gutter,
                 y: text_area.y + i as u16,
                 width: lay.number_gutter - 1,
                 height: 1,
@@ -465,7 +460,7 @@ fn render_pane(
     let line_text =
         cursor_chars.unwrap_or_else(|| doc.buffer.line_text(cursor.line).chars().collect());
     let prefix = char_window(&line_text, row_start, row_start + cursor_offset);
-    let shift = gutter_shift(app, &cache, &lay, cursor.line, row_start);
+    let left = line_left(app, &cache, &lay, cursor.line, row_start);
 
     // The same alignment the render loop drew this row with, so the caret
     // lands where the text actually is under `Center`/`Right`/`Justified`.
@@ -475,7 +470,7 @@ fn render_pane(
     let fenced = in_fence(&cache, cursor.line);
     let is_last_row = row_end >= line_text.len();
     let align = row_align(app.text_align, fenced || table, is_last_row);
-    let row_width = lay.measure + shift - hang;
+    let row_width = lay.margin_left + lay.measure - left - hang;
     let extra = match align {
         TextAlign::Left => 0,
         TextAlign::Center | TextAlign::Right => {
@@ -489,8 +484,7 @@ fn render_pane(
         }
     };
     // On a tab, the caret is on its first cell.
-    let x = (text_area.x + text_width(&prefix, cfg.editor.tab_width) + hang + extra)
-        .saturating_sub(shift)
+    let x = (rect.x + left + text_width(&prefix, cfg.editor.tab_width) + hang + extra)
         .min(rect.right().saturating_sub(1));
     Some(Position::new(x, text_area.y + screen_row as u16))
 }
@@ -754,15 +748,20 @@ fn elide(s: &str, cells: usize) -> String {
 /// A continuation row's hanging indent, measured from the TEXT COLUMN.
 ///
 /// `VisualRow::hanging` is the item's content column measured from the LINE's
-/// own left edge — and a revealed line's left edge is `gutter_shift` columns to
-/// the left of the text column. Subtracting that shift is what makes a wrapped
-/// task line up under its own text instead of four columns right of it.
+/// own left edge. Translate it to the text column using the first row's
+/// offset so continuations line up under the item's text.
 fn hang_x(app: &App, cache: &RenderCache, lay: &Layout, row: &VisualRow) -> u16 {
     if row.hanging == 0 {
         return 0;
     }
-    let line_shift = gutter_shift(app, cache, lay, row.line(), 0);
-    row.hanging.saturating_sub(line_shift).min(lay.measure)
+    let left = line_left(app, cache, lay, row.line(), 0);
+    let max_hang = if left > lay.margin_left {
+        lay.measure.saturating_sub(super::layout::MIN_WRAP_WIDTH)
+    } else {
+        lay.measure
+    };
+    (i32::from(left) + i32::from(row.hanging) - i32::from(lay.margin_left))
+        .clamp(0, i32::from(max_hang)) as u16
 }
 
 /// Whether this line belongs to a fenced code block — its delimiters included,
@@ -890,28 +889,24 @@ fn render_scroll_hint(
     );
 }
 
-/// Columns to hang a revealed line's markers into, left of the text column.
-///
-/// `layout.stable_gutter`: the active line renders raw, so `## ` reappears and
-/// would push its own text three columns right. Drawing that line shifted left
-/// by exactly the width the markers took back keeps the BODY text in the same
-/// column whether the line is active or not — zero horizontal jitter as the
-/// cursor moves through a document (SPEC.md §6, "Reveal shift").
-///
-/// Only the first row of a line shifts: a wrapped continuation carries no
-/// markers, so it already sits where it belongs.
-fn gutter_shift(app: &App, cache: &RenderCache, lay: &Layout, line: usize, start_col: usize) -> u16 {
+/// A row's left edge within its pane. With `layout.stable_gutter`, the raw
+/// first row moves by the net difference in marker widths so its text stays
+/// in place. A heading can move into the margin, and a compact quote can
+/// move into the measure. Wrapped rows use their hanging indent separately.
+fn line_left(app: &App, cache: &RenderCache, lay: &Layout, line: usize, start_col: usize) -> u16 {
     if !app.config.layout.stable_gutter
         || !cache.conceal_on()
         || cache.is_concealed(line)
         || start_col != 0
     {
-        return 0;
+        return lay.margin_left;
     }
     let Some(entry) = cache.entry(line) else {
-        return 0;
+        return lay.margin_left;
     };
-    entry.cmap.leading_shift(&entry.source, app.config.editor.tab_width).min(lay.margin_left)
+    let shift = entry.leading_shift;
+    let last_cell = lay.margin_left + lay.measure.saturating_sub(1);
+    (i32::from(lay.margin_left) - shift).clamp(0, i32::from(last_cell)) as u16
 }
 
 /// The tree pane width for this frame (0 when closed), capped to half the width.
@@ -1486,13 +1481,12 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
         return Some(Cursor::new(line, 0));
     }
 
-    // The active line may hang its markers into the gutter, so it starts that
-    // many columns to the left of the text column.
+    // Use the same row origin as the renderer.
     let entry = cache.entry(line)?;
     let concealed = cache.is_concealed(line);
-    let shift = gutter_shift(app, &cache, &lay, line, vr.start_col);
+    let left = line_left(app, &cache, &lay, line, vr.start_col);
     let hang = hang_x(app, &cache, &lay, &vr);
-    let raw_click_x = (col + shift).saturating_sub(ex + lay.margin_left + hang);
+    let raw_click_x = col.saturating_sub(ex + left + hang);
 
     // Undo whatever offset `text_align` drew this row with, so the click
     // still lands on the character under the pointer rather than wherever
@@ -1503,7 +1497,7 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
     let display_text: Vec<char> = display_text.chars().collect();
     let is_last_row = vr.end_col >= display_text.len();
     let align = row_align(app.text_align, fenced || table, is_last_row);
-    let row_width = lay.measure + shift - hang;
+    let row_width = lay.margin_left + lay.measure - left - hang;
     let tab = cfg.editor.tab_width;
     let row_chars = &display_text[vr.start_col.min(display_text.len())..vr.end_col.min(display_text.len())];
     // The click's cell within the row, before any `text_align` offset.
@@ -3164,6 +3158,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn compact_quotes_draw_the_same_rows_as_spaced_quotes() {
+        for (compact, spaced, expected) in [
+            (">>- a", "> > - a", "▎ ▎ • a"),
+            ("> >- a", "> > - a", "▎ ▎ • a"),
+            (">>text", "> > text", "▎ ▎ text"),
+            (">>  - b", "> >  - b", "▎ ▎  • b"),
+            (">>   - b", "> >   - b", "▎ ▎ │ ◦ b"),
+        ] {
+            assert_eq!(drawn(compact, 60, 50, 2), [expected]);
+            assert_eq!(drawn(spaced, 60, 50, 2), [expected]);
+        }
+
+        let expected = ["▎ ▎ • word word word", "      word word word"];
+        for markers in [">>", "> >", "> > "] {
+            assert_eq!(
+                drawn(&format!("{markers}- word word word word word word"), 60, 22, 4),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn compact_quote_clicks_and_selection_follow_the_source() {
+        let area = Rect::new(0, 0, 60, 12);
+        for source in [">>- beta", "> >- beta", ">>  - beta", ">>text", "> > - beta"] {
+            let mut app = app_with(&format!("top\n\n{source}\n"));
+            let lay = Layout::compute(&app.config.layout, 60, 12 - STATUS_ROWS, 0);
+            let y = lay.top + 2;
+            let buf = render_to(&app, 60, 12);
+            let first_bar = cell_of(&buf, y, "▎");
+            let body = if source.ends_with("beta") { "beta" } else { "text" };
+            let body_x = cell_of(&buf, y, &body[..1]);
+            let body_col = source.find(body).unwrap();
+            let click = |x| locate_click(&app, area, x, y).unwrap();
+            assert_eq!(click(first_bar), Cursor::new(2, 0));
+            assert_eq!(click(first_bar + 2), Cursor::new(2, source.rfind('>').unwrap()));
+            if let Some(bullet) = source.find('-') {
+                assert_eq!(click(cell_of(&buf, y, "•")), Cursor::new(2, bullet));
+            }
+            let letter = click(body_x + 1);
+            assert_eq!(letter, Cursor::new(2, body_col + 1));
+
+            app.buffer.cursor = letter;
+            app.mode = Mode::Visual;
+            app.anchor = Some(Cursor::new(2, body_col));
+            app.active = crate::render::conceal::ActiveSet::compute(&app.mode, &letter, app.anchor);
+            let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+            terminal.draw(|f| render(f, &app)).unwrap();
+            assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(body_x + 1, y));
+            let buf = terminal.backend().buffer();
+            assert_eq!(row_text(buf, y).trim(), source);
+            assert_eq!(locate_click(&app, area, body_x + 1, y), Some(letter));
+            let sel = app.theme.selection.to_ratatui();
+            assert_eq!(buf[(body_x, y)].bg, sel);
+            assert_eq!(buf[(body_x + 1, y)].bg, sel);
+            assert_ne!(buf[(body_x + 2, y)].bg, sel);
+        }
+    }
+
+    #[test]
+    fn a_raw_compact_quote_wraps_before_the_shifted_edge() {
+        let mut app = app_with(">>- abcdefghijklmnopqrstuvwxyz");
+        app.config.layout.measure = 16;
+        let buf = render_to(&app, 60, 12);
+        let all = rows(&buf);
+        let y = all.iter().position(|r| r.contains(">>-")).unwrap();
+        let margin = (60 - 16) / 2;
+        let text = |row: usize| all[row].chars().skip(margin).collect::<String>();
+        assert_eq!(text(y), "  >>-");
+        assert_eq!(text(y + 1), "      abcdefghij");
+        assert_eq!(text(y + 2), "      klmnopqrst");
+        assert_eq!(text(y + 3), "      uvwxyz");
+
+        let mut app = app_with(">>abcdefghijklmn");
+        app.config.layout.measure = 16;
+        let all = rows(&render_to(&app, 60, 12));
+        let y = all.iter().position(|r| r.contains(">>")).unwrap();
+        assert_eq!(all[y].chars().skip(margin).collect::<String>(), "  >>abcdefghijkl");
+        assert_eq!(all[y + 1].chars().skip(margin).collect::<String>(), "mn");
+    }
+
     /// Prose must NOT hang — there is no content column to line up under.
     #[test]
     fn a_wrapped_paragraph_does_not_hang() {
@@ -3414,7 +3490,7 @@ mod tests {
     }
 
     /// The active line renders its heading markers raw, which normally hangs
-    /// them left into the margin (`gutter_shift`). With numbers on, the
+    /// them left into the margin (`line_left`). With numbers on, the
     /// number has to give up that same band — it shifts one band further
     /// left, in lockstep with the row, so the two sit side by side rather
     /// than fighting for the same columns (regression: they used to overlap,
