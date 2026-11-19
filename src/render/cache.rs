@@ -703,17 +703,14 @@ fn quote_hang(source: &str, concealed: &str, depth: u8, cfg: &crate::config::Con
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::render::markdown::block::BlockCache;
+    use crate::test_support;
     use crate::text::cursor::Cursor;
 
     const MEASURE: u16 = 40;
 
     fn app_with(text: &str) -> App {
-        let mut app = App::new(Config::default(), None, None).unwrap();
-        app.buffer.insert_str(Cursor::new(0, 0), text);
-        app.buffer.cursor = Cursor::new(0, 0);
-        app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
+        let mut app = test_support::app_with(text);
         app.buffer.clear_dirty();
         app
     }

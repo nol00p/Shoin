@@ -2,17 +2,14 @@
 //! around a closed fold.
 
 use super::*;
-use crate::render::markdown::block::BlockCache;
+use crate::test_support;
 use ratatui::{backend::TestBackend, Terminal};
 
 const W: u16 = 60;
 const H: u16 = 16;
 
 fn app_with(text: &str) -> App {
-    let mut app = App::new(Config::default(), None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
-    app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
+    let mut app = test_support::app_with(text);
     app.term_size = (W, H);
     app
 }

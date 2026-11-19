@@ -27,6 +27,8 @@ mod image;
 mod input;
 mod recover;
 mod render;
+#[cfg(test)]
+mod test_support;
 mod text;
 mod transclude;
 mod tree;

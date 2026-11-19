@@ -1,15 +1,8 @@
 use super::*;
 use crate::fs::save::SavePolicy;
 use crate::render::markdown::block::BlockCache;
+use crate::test_support::{app_with, app_with_config};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-fn app_with(text: &str) -> App {
-    let mut app = App::new(Config::default(), None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
-    app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-    app
-}
 
 fn text(app: &App) -> String {
     app.buffer.rope.to_string()
@@ -4843,11 +4836,7 @@ fn app_with_keys(text: &str, bindings: &[(&str, &str)]) -> App {
     for (k, a) in bindings {
         cfg.keys.normal.insert(k.to_string(), a.to_string());
     }
-    let mut app = App::new(cfg, None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
-    app.buffer.cursor = Cursor::new(0, 0);
-    app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-    app
+    app_with_config(text, cfg)
 }
 
 /// `move_lines_down` / `move_lines_up` bound in Visual, as people bind
