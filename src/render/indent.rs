@@ -26,8 +26,23 @@ pub struct Guides {
 /// (`block::indent_cols`: a tab is `tab_width` columns). Each mark is the
 /// CHAR offset where its level starts, and the char there may be a tab; a
 /// level that starts inside a tab gets no mark, as the tab already covers it.
+///
+/// A quote line gets the guides of the list item past its markers, as that
+/// item would have them outside the quote, each at the source char its
+/// column stands for (`QuoteLine::doc_col`): a guide in the columns of a tab
+/// after the last `>` is on that tab.
 pub fn guides_for(line: &str, block: &BlockKind, tab_width: usize) -> Guides {
     let mut marks = Vec::new();
+    if let BlockKind::Quote(depth) = block {
+        if let Some(inner) = super::quote::Inner::of(line, *depth, tab_width).filter(|i| i.is_item()) {
+            marks = guides_for(&inner.cut.view, &inner.block, tab_width)
+                .marks
+                .into_iter()
+                .map(|(col, depth)| (inner.cut.doc_col(col), depth))
+                .collect();
+        }
+        return Guides { marks };
+    }
     if !matches!(block, BlockKind::ListItem { .. }) {
         return Guides { marks };
     }
@@ -132,7 +147,23 @@ mod tests {
     #[test]
     fn only_lists_are_guided() {
         assert!(guides_for("  > quote", &BlockKind::Quote(1), 2).marks.is_empty());
+        assert!(guides_for(">     quote", &BlockKind::Quote(1), 2).marks.is_empty());
         assert!(guides_for("no indent", &BlockKind::Paragraph, 2).marks.is_empty());
+    }
+
+    /// A list item in a quote has the guides it has outside, on the chars
+    /// past the markers; a tab after `>` holds the guide its columns get.
+    #[test]
+    fn a_quoted_item_has_its_guides_past_the_markers() {
+        let q = |line: &str, depth| guides_for(line, &BlockKind::Quote(depth), 2).marks;
+        assert_eq!(q(">   - x", 1), vec![(2, 0)]);
+        assert_eq!(q("> >     - x", 2), vec![(4, 0), (6, 1)]);
+        assert_eq!(q("> - x", 1), vec![]);
+        // `>` then a tab at width 4 is the marker's space and 3 columns.
+        let t = |line: &str| guides_for(line, &BlockKind::Quote(1), 4).marks;
+        assert_eq!(t(">\t- x"), vec![]);
+        assert_eq!(t(">\t  - x"), vec![(1, 0)]);
+        assert_eq!(t(">\t      - x"), vec![(1, 0), (3, 1)]);
     }
 
     #[test]

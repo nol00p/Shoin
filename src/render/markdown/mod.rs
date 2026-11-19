@@ -32,6 +32,7 @@ pub fn style_line_with(
     theme: &Theme,
     cfg: &MarkdownConfig,
     spans: &[InlineSpan],
+    tab_width: usize,
 ) -> Vec<StyledSpan> {
     let len = line.chars().count();
     let base = Style {
@@ -97,7 +98,10 @@ pub fn style_line_with(
         _ => {}
     }
 
-    let (marker_end, body, ordinal) = block_body(line, &block, theme, base);
+    let (marker_end, body, ordinal) = match &block {
+        BlockKind::Quote(depth) => quote_body(line, *depth, theme, tab_width),
+        _ => block_body(line, &block, theme, base),
+    };
 
     let mut out = Vec::new();
     if marker_end > 0 {
@@ -158,17 +162,32 @@ fn block_body(line: &str, block: &BlockKind, theme: &Theme, base: Style) -> Bloc
             };
             (m, body, None)
         }
-        BlockKind::Quote(_) => {
-            let m = line
-                .chars()
-                .take_while(|c| matches!(*c, ' ' | '\t' | '>'))
-                .count();
-            (m, Style::fg(theme.quote), None)
-        }
+        // Quotes are `quote_body`'s.
         BlockKind::ListItem { marker, checked, .. } => list_body(line, *marker, *checked, theme),
         // Paragraph, Blank — no marker, plain body.
         _ => (0, base, None),
     }
+}
+
+/// A quote line's marker prefix and body style. When the rest of the line is
+/// a list item (`> - a`), the prefix runs through the item's marker, the
+/// ordinal is styled as content as it is outside the quote, and the body
+/// keeps the quote's color unless the item is a ticked task.
+fn quote_body(line: &str, depth: u8, theme: &Theme, tab_width: usize) -> BlockBody {
+    let plain = || {
+        let m = line.chars().take_while(|c| matches!(*c, ' ' | '\t' | '>')).count();
+        (m, Style::fg(theme.quote), None)
+    };
+    let Some(inner) = super::quote::Inner::of(line, depth, tab_width) else {
+        return plain();
+    };
+    let BlockKind::ListItem { marker, checked, .. } = inner.block else {
+        return plain();
+    };
+    let (m, body, ordinal) = list_body(&inner.cut.view, marker, checked, theme);
+    let body = if checked == Some(true) { body } else { Style::fg(theme.quote) };
+    let at = |col: usize| inner.cut.doc_col(col);
+    (at(m), body, ordinal.map(|(a, b)| (at(a), at(b))))
 }
 
 /// A highlighted fence body: the lexer's tokens as styled spans, with the code
