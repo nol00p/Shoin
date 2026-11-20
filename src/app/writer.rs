@@ -547,6 +547,7 @@ impl App {
         // or shift puts the cursor back on it, as Neovim's 'nostartofline'.
         let tw = self.config.editor.tab_width;
         let cells = motion::goal_cells(&self.buffer, self.buffer.cursor, tw);
+        let revision = self.buffer.revision;
         // A closed fold at either end is taken whole: `dd` on one deletes
         // every line it stands for, as in vim.
         let (a, b) = self.fold_hidden().widen(l1.min(l2), l1.max(l2));
@@ -580,6 +581,7 @@ impl App {
                 // `j` stays on `ab`'s column.
                 let line = a.min(self.buffer.last_line());
                 self.buffer.cursor = Cursor::new(line, motion::col_at_cells(&self.buffer, line, cells, tw));
+                self.land_for_redo(revision);
             }
             Operator::Change => {
                 // With `auto_indent`, the line to type into keeps the first
@@ -610,7 +612,20 @@ impl App {
                 // Neovim's `>>`: the text moves under the cursor.
                 self.shift_lines(a, b, op == Operator::Outdent);
                 self.buffer.cursor = Cursor::new(a, motion::col_at_cells(&self.buffer, a, cells, tw));
+                self.land_for_redo(revision);
             }
+        }
+    }
+
+    /// Redo of the edit just made puts the cursor where it is now, as
+    /// Neovim's does, rather than where the edit's last change ended (the
+    /// start of a deleted range, the end of an added indent). Only when the
+    /// text changed since `revision`: otherwise the latest change belongs to
+    /// an earlier command.
+    fn land_for_redo(&mut self, revision: u64) {
+        if self.buffer.revision != revision {
+            let cursor = self.buffer.cursor;
+            self.buffer.history.set_redo_cursor(cursor);
         }
     }
 

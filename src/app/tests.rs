@@ -8792,7 +8792,8 @@ fn sticky_long() -> String {
 }
 
 /// A fresh app on `text` with a 30-row window, after `keys`, where the
-/// control characters stand for `Ctrl-d` `Ctrl-u` `Ctrl-f` `Ctrl-b`.
+/// control characters stand for `Ctrl-d` `Ctrl-u` `Ctrl-f` `Ctrl-b` and
+/// `Ctrl-r`.
 fn sticky_keys(text: &str, keys: &str) -> App {
     let mut app = app_with(text);
     app.term_size = (80, 30);
@@ -8802,6 +8803,7 @@ fn sticky_keys(text: &str, keys: &str) -> App {
             '\u{15}' => ctrl(&mut app, 'u'),
             '\u{6}' => ctrl(&mut app, 'f'),
             '\u{2}' => ctrl(&mut app, 'b'),
+            '\u{12}' => ctrl(&mut app, 'r'),
             c => feed(&mut app, &c.to_string()),
         }
     }
@@ -8976,4 +8978,135 @@ fn read_only_colon_number_puts_its_line_on_top() {
     feed(&mut other, "G");
     screen_of(&mut other, READ_W, READ_H);
     assert_eq!(app.buffer.cursor, other.buffer.cursor, "parked where `G` parks it");
+}
+
+/// Read-only: `NG` and `:N` show their line from its first wrapped row,
+/// as before #176. The sticky column is edit mode's: carried here, the
+/// column the view parked the cursor on in the line it left would put a
+/// later row of the target line on top.
+#[test]
+fn read_only_line_jumps_start_at_the_first_wrapped_row() {
+    let words = |p: &str| (0..60).map(|i| format!("{p}{i:02}")).collect::<Vec<_>>().join(" ");
+    let rest: String = (0..30).map(|i| format!("after {i}\n")).collect();
+    let text = format!("{}\n{}\n{rest}", words("a"), words("b"));
+    for keys in ["2G", ":2"] {
+        let mut app = app_with(&text);
+        reader(&mut app);
+        feed(&mut app, "jjj");
+        screen_of(&mut app, READ_W, READ_H);
+        assert!(app.buffer.cursor.col > 0, "{keys}: parked inside the first line");
+        if let Some(c) = keys.strip_prefix(':') {
+            cmd(&mut app, &format!(":{c}"));
+        } else {
+            feed(&mut app, keys);
+        }
+        let screen = screen_of(&mut app, READ_W, READ_H);
+        assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, 0), "{keys}");
+        let top = app.cache.borrow().locate(1, 0).0;
+        assert_eq!(app.scroll_hint(), top, "{keys}\n{screen:#?}");
+        assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains("b00"), "{keys}\n{screen:#?}");
+    }
+}
+
+/// Redo puts the cursor back where the linewise edit left it, not at the
+/// start of the range it removed or the end of the indent it added, and
+/// undo where the command began: Neovim's answers, each key string run
+/// with `u` and then `Ctrl-r` after it.
+#[test]
+fn undo_and_redo_of_linewise_edits_land_as_neovim() {
+    let text = "abcdefghijklmnop\n".repeat(4);
+    let mut cases = Vec::new();
+    for (keys, undo, redo) in [
+        ("08ldd", (0, 8), (0, 8)),
+        ("08l2>>", (0, 8), (0, 8)),
+        ("08l>>", (0, 8), (0, 8)),
+        ("08ldj", (0, 8), (0, 8)),
+        ("08ljVkd", (1, 8), (0, 8)),
+        ("08ljdG", (1, 8), (0, 8)),
+    ] {
+        // Undo of `Vkd` is where the command began, line 2: Neovim goes to
+        // the top line of the change, 1:8, and that predates the kept column.
+        cases.push((format!("{keys}u"), undo));
+        cases.push((format!("{keys}u\u{12}"), redo));
+    }
+    // The goal comes back with the redo: `j` keeps column 8.
+    cases.push(("08lddu\u{12}j".to_string(), (1, 8)));
+    let cases: Vec<_> = cases.iter().map(|(k, w)| (k.as_str(), "", *w)).collect();
+    let misses = sticky_misses(&text, &cases);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A goal set with the cursor on a tab is the tab's LAST cell, where
+/// Neovim draws the Normal-mode cursor: after `dd` lands on one, after `0`
+/// or `h` moves onto one. (`l0`, because a `0` already at column 0 moves
+/// nothing in Shoin and keeps the old goal.) Every case is Neovim's answer but the mid-line
+/// tab's: Shoin draws a tab as a fixed four cells, so `ab\tx`'s tab ends at
+/// cell 5 here and at cell 3 in Neovim (the round-2 difference).
+#[test]
+fn a_goal_set_on_a_tab_is_its_last_cell_as_neovim() {
+    let leading = "abcdefghijk\n\tx\nabcdefghijk\n";
+    let mid = "abcdefghijk\nab\tx\nabcdefghijk\n";
+    let two = "abcdefghijk\n\t\tx\nabcdefghijk\n";
+    let mut misses = Vec::new();
+    for (text, cases) in [
+        (
+            leading,
+            &[
+                ("02lddj", (1, 3)),
+                ("jl0j", (2, 3)),
+                ("jl0k", (0, 3)),
+                ("jl0dd", (1, 3)),
+                ("jfxhj", (2, 3)),
+                ("jfxhG", (2, 3)),
+                ("jfxhgg", (0, 3)),
+                ("jl0vj", (2, 3)),
+                ("jfxhjk", (1, 0)),
+            ][..],
+        ),
+        (
+            mid,
+            &[
+                ("02lddj", (1, 5)), // Neovim (1, 3)
+                ("02lddk", (0, 2)),
+                ("jfxhj", (2, 5)), // Neovim (2, 3)
+                ("jfxhgg", (0, 5)), // Neovim (0, 3)
+                ("jfxhjk", (1, 2)),
+                ("j0j", (2, 0)),
+            ][..],
+        ),
+        (two, &[("jl0j", (2, 3)), ("j0lj", (2, 7)), ("05lddj", (1, 7))][..]),
+    ] {
+        let cases: Vec<_> = cases.iter().map(|&(k, w)| (k, "", w)).collect();
+        misses.extend(sticky_misses(text, &cases));
+    }
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    // Insert mode's cursor stands before the tab, and so does its goal:
+    // Neovim's `i<Down>` from in front of `\tx` keeps column 0.
+    let mut app = sticky_keys(leading, "j0i");
+    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.sync_after_input();
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (2, 0));
+}
+
+/// A line jump, `j`/`k` or a linewise delete clamped to a line that ends in
+/// a combining mark lands on its base character, as Neovim's do: the mark
+/// is drawn in the base's cell. One mark, two, an enclosing one and a
+/// zero-width joiner, each after `ab`.
+#[test]
+fn clamping_never_lands_on_a_combining_mark() {
+    let mut misses = Vec::new();
+    for mark in ["\u{301}", "\u{301}\u{302}", "\u{20dd}", "\u{200d}"] {
+        let text = format!("abcdefghijk\nab{mark}\nabcdefghijk\n");
+        let cases = [
+            ("09ldd", "", (0, 1)),
+            ("09lj", "", (1, 1)),
+            ("09ljk", "", (0, 9)),
+            ("G09lk", "", (1, 1)),
+            ("09lddj", "", (1, 1)),
+            ("09l2G", "", (1, 1)),
+            ("09l", ":2", (1, 1)),
+        ];
+        misses.extend(sticky_misses(&text, &cases).into_iter().map(|m| format!("{mark:?} {m}")));
+    }
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
