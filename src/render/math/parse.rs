@@ -39,6 +39,7 @@ enum Kind {
     Space,
     Relation,
     Binary,
+    StackedOperator,
 }
 
 impl Kind {
@@ -154,6 +155,7 @@ impl<'a> Parser<'a> {
         let mut parts = Vec::new();
         let mut used = 0;
         let mut previous: Option<Kind> = None;
+        let mut previous_visible = None;
         let mut previous_named = false;
         let mut previous_alphanumeric = false;
         loop {
@@ -185,9 +187,17 @@ impl<'a> Parser<'a> {
                 || (previous_named && (had_space && first_alphanumeric
                     || matches!(next, Token::Char(c) if c.is_alphanumeric())
                     || matches!(next, Token::Command(name) if name != "left" && name.starts_with(char::is_alphabetic))));
-            if separated || (operator_space && atom.kind != Kind::Space && previous != Some(Kind::Space)) {
+            // A stacked limit can fill its column even when the baseline glyph is narrow.
+            let limit_space = atom.box_.width > 0 && previous_visible.is_some_and(|kind| {
+                kind != Kind::Space && atom.kind != Kind::Space
+                    && (kind == Kind::StackedOperator || atom.kind == Kind::StackedOperator)
+            });
+            if separated || limit_space || (operator_space && atom.kind != Kind::Space && previous != Some(Kind::Space)) {
                 parts.push(MathBox::text(" "));
                 used += 1;
+            }
+            if atom.box_.width > 0 {
+                previous_visible = Some(atom.kind);
             }
             previous = Some(atom.kind);
             previous_named = atom.named;
@@ -218,6 +228,11 @@ impl<'a> Parser<'a> {
                 }
                 _ => break,
             }
+        }
+        if (lower.is_some() && matches!(atom.limits, Limits::Below | Limits::Both))
+            || (upper.is_some() && matches!(atom.limits, Limits::Both))
+        {
+            atom.kind = Kind::StackedOperator;
         }
         atom.box_ = match atom.limits {
             Limits::Side => atom.box_.side_scripts(upper, lower, self.width)?,

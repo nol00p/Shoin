@@ -30,6 +30,23 @@ fn scripts_and_limits() {
         ("bigoplus", "⨁"), ("bigotimes", "⨂"),
     ] {
         check(&format!(r"\{command}_i^n"), &["n", glyph, "i"]);
+        check(&format!(r"a\{command}_i^nb"), &["  n  ", &format!("a {glyph} b"), "  i  "]);
+    }
+}
+
+#[test]
+fn stacked_limits_leave_room_for_adjacent_boxes() {
+    check(r"\sum_{k=0}^{\infty} \frac{x^k}{k!}",
+        &["     k", " ∞  x ", " ∑  ──", "k=0 k!"]);
+    check(r"\lim_{x\to0}\frac{\sin x}{x}",
+        &["    sin x", "lim ─────", "x→0   x  "]);
+    check(r"a + \sum_{i=1}^{n}i", &["     n   ", "a +  ∑  i", "    i=1  "]);
+    check(r"a\sum_i\!b", &["a ∑ b", "  i  "]);
+    check(r"a\,\sum_i\,b", &["a ∑ b", "  i  "]);
+    check(r"a\sum b", &["a∑b"]);
+    check(r"x^{a\sum_i b}", &[" a ∑ b", "   i  ", "x     "]);
+    for command in ["lim", "max", "min", "sup", "inf"] {
+        check(&format!(r"(\{command}_i)"), &[&format!("( {command} )"), "   i   "]);
     }
 }
 
@@ -165,7 +182,7 @@ fn malformed_and_empty_input() {
 #[test]
 fn issue_example() {
     check(r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}",
-        &[" n     n(n + 1)", " ∑ i = ────────", "i=1       2    "]);
+        &[" n      n(n + 1)", " ∑  i = ────────", "i=1        2    "]);
 }
 
 #[test]
@@ -203,6 +220,9 @@ fn fuzz_display_math() {
 #[ignore = "print representative display formulas for terminal inspection"]
 fn display_math_examples() {
     for tex in [
+        r"\sum_{k=0}^{\infty} \frac{x^k}{k!}",
+        r"\lim_{x\to0}\frac{\sin x}{x}",
+        r"a + \sum_{i=1}^{n}i",
         r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}",
         r"\begin{pmatrix}a&b\\c&d\end{pmatrix}",
         r"\begin{cases}x^2 & \text{if } x>0 \\ 0 & \text{otherwise}\end{cases}",
