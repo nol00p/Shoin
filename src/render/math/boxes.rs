@@ -93,42 +93,17 @@ impl MathBox {
         self.rows[0].chars().map(map).collect::<Option<String>>().map(Self::text)
     }
 
-    fn shift_script(mut self, upper: bool) -> Self {
-        if upper {
-            self.baseline += 1;
-            if self.baseline == self.rows.len() {
-                self.rows.push(" ".repeat(self.width));
-            }
-        } else if self.baseline == 0 {
-            self.rows.insert(0, " ".repeat(self.width));
-        } else {
-            self.baseline -= 1;
-        }
-        self
-    }
-
     pub fn side_scripts(self, upper: Option<Self>, lower: Option<Self>, limit: usize) -> Option<Self> {
         let scripts = match (upper, lower) {
             (None, None) => return Some(self),
             (Some(up), None) => up.unicode_script(true)
-                .unwrap_or_else(|| up.shift_script(true)),
+                .unwrap_or_else(|| Self::stack(Some(up), Self::text(""), None)),
             (None, Some(down)) => down.unicode_script(false)
-                .unwrap_or_else(|| down.shift_script(false)),
+                .unwrap_or_else(|| Self::stack(None, Self::text(""), Some(down))),
             (Some(up), Some(down)) => {
                 let up = up.unicode_script(true).unwrap_or(up);
                 let down = down.unicode_script(false).unwrap_or(down);
-                let inner_rows = up.descent() + down.baseline;
-                match inner_rows {
-                    0 => Self::stack(Some(up), Self::text(""), Some(down)),
-                    1 => {
-                        let baseline = up.baseline + 1;
-                        let mut pair = Self::stack(None, up, Some(down));
-                        pair.baseline = baseline;
-                        pair
-                    }
-                    // Give overlapping rows separate columns so both scripts stay visible.
-                    _ => return Self::join(vec![self, up.shift_script(true), down.shift_script(false)], limit),
-                }
+                Self::stack(Some(up), Self::text(""), Some(down))
             }
         };
         Self::join(vec![self, scripts], limit)

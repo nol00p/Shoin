@@ -34,20 +34,24 @@ fn scripts_and_limits() {
 }
 
 #[test]
-fn superscript_uses_its_baseline() {
-    check(r"x^{\frac{1}{2}}", &[" 1", " ─", "x2"]);
-    check(r"x^{\frac{1}{2}}_z", &[" 1", " ─", "x2", " z"]);
-    check(r"x^{\frac{1}{2}}_{\frac{a}{b}}", &[" 1 ", " ─ ", "x2a", "  ─", "  b"]);
+fn superscript_sits_above_base_baseline() {
+    check(r"x^{\frac{1}{2}}", &[" 1", " ─", " 2", "x "]);
 }
 
 #[test]
-fn subscript_uses_its_baseline() {
-    check(r"x_{\frac{1}{2}}", &["x1", " ─", " 2"]);
+fn subscript_sits_below_base_baseline() {
+    check(r"x_{\frac{1}{2}}", &["x ", " 1", " ─", " 2"]);
+}
+
+#[test]
+fn paired_scripts_share_a_column() {
+    check(r"x^{\frac{1}{2}}_z", &[" 1", " ─", " 2", "x ", " z"]);
+    check(r"x_{\frac{a}{b}}^{\frac{c}{d}}", &[" c", " ─", " d", "x ", " a", " ─", " b"]);
 }
 
 #[test]
 fn script_with_empty_first_row() {
-    check(r"x^{\begin{gather}\\̂\end{gather}}", &[" ", "x̂"]);
+    check(r"x^{\begin{gather}\\̂\end{gather}}", &[" ", " ̂", "x"]);
 }
 
 #[test]
@@ -206,6 +210,7 @@ fn display_math_examples() {
         r"\sqrt{\frac{\frac{1}{2}}{x+1}}",
         r"x^{\frac{1}{2}}",
         r"x_{\frac{1}{2}}",
+        r"x_{\frac{a}{b}}^{\frac{c}{d}}",
         r"x^{\begin{gather}\\̂\end{gather}}",
         r"\hat{\sum_{i=1}}",
         r"\sin\!x",
