@@ -21,6 +21,7 @@ use super::quote;
 use super::layout::{cell_width, display_width, text_width};
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
+use super::math::symbols::{accent_command, env_delims, math_escape, subscript_char, superscript_char, symbol, text_of, OPERATORS};
 use super::theme::{Attrs, Color, Style, Theme};
 use super::StyledSpan;
 
@@ -443,7 +444,7 @@ impl ConcealMap {
 
 }
 
-fn render_latex(input: &str) -> String {
+pub(super) fn render_latex(input: &str) -> String {
     let mut out = String::new();
     let chars: Vec<char> = input.trim().chars().collect();
     let mut i = 0;
@@ -451,43 +452,18 @@ fn render_latex(input: &str) -> String {
         let ch = chars[i];
         i += 1;
         if ch == '\\' {
-            if i < chars.len() {
-                match chars[i] {
-                    '\\' => {
-                        let is_trailing = chars[i + 1..].iter().all(|c| c.is_whitespace());
-                        if !is_trailing {
-                            out.push_str(" │ ");
-                        }
-                        i += 1;
-                        continue;
-                    }
-                    ',' | ' ' => {
-                        out.push(' ');
-                        i += 1;
-                        continue;
-                    }
-                    ';' => {
-                        out.push_str("  ");
-                        i += 1;
-                        continue;
-                    }
-                    '!' => {
-                        i += 1;
-                        continue;
-                    }
-                    // An escaped special is that character, as written.
-                    c if SPECIALS.contains(c) => {
-                        out.push(c);
-                        i += 1;
-                        continue;
-                    }
-                    '|' => {
-                        out.push('‖');
-                        i += 1;
-                        continue;
-                    }
-                    _ => {}
+            if chars.get(i) == Some(&'\\') {
+                let is_trailing = chars[i + 1..].iter().all(|c| c.is_whitespace());
+                if !is_trailing {
+                    out.push_str(" │ ");
                 }
+                i += 1;
+                continue;
+            }
+            if let Some(escaped) = chars.get(i).copied().and_then(math_escape) {
+                out.push_str(&escaped);
+                i += 1;
+                continue;
             }
             let end = name_end(&chars, i);
             let name: String = chars[i..end].iter().collect();
@@ -532,19 +508,14 @@ fn render_latex(input: &str) -> String {
             }
             if matches!(name.as_str(), "vec" | "mathbf" | "bm" | "boldsymbol") {
                 if let Some((value, end)) = argument(&chars, i) {
-                    out.push_str(&if name == "vec" { accent(&value, '\u{20D7}') } else { value });
+                    out.push_str(&if name == "vec" { accent_command("vec", &value) } else { value });
                     i = end;
                     continue;
                 }
             }
             if name == "hat" {
                 if let Some((value, end)) = argument(&chars, i) {
-                    out.push_str(&match value.as_str() {
-                        // Precomposed, so the dot of i and j does not sit under the hat.
-                        "i" => "î".to_string(),
-                        "j" => "ĵ".to_string(),
-                        _ => accent(&value, '\u{0302}'),
-                    });
+                    out.push_str(&accent_command("hat", &value));
                     i = end;
                     continue;
                 }
@@ -597,108 +568,7 @@ fn render_latex(input: &str) -> String {
                 push_operator(&mut out, &name, &chars, i);
                 continue;
             }
-            let replacement = match name.as_str() {
-                "nabla" => "∇",
-                "partial" => "∂",
-                "oint" => "∮",
-                "oiint" => "∯",
-                "iint" => "∬",
-                "iiint" => "∭",
-                "int" => "∫",
-                "sum" => "∑",
-                "prod" => "∏",
-                "coprod" => "∐",
-                "rightarrow" | "to" => "→",
-                "leftarrow" | "gets" => "←",
-                "leftrightarrow" => "↔",
-                "Rightarrow" | "implies" => "⇒",
-                "Leftarrow" => "⇐",
-                "Leftrightarrow" | "iff" => "⇔",
-                "downarrow" => "↓",
-                "uparrow" => "↑",
-                "times" => "×",
-                "cdot" => "·",
-                "div" => "÷",
-                "pm" => "±",
-                "mp" => "∓",
-                "neq" | "ne" => "≠",
-                "leq" | "le" => "≤",
-                "geq" | "ge" => "≥",
-                "approx" => "≈",
-                "equiv" => "≡",
-                "sim" => "∼",
-                "propto" => "∝",
-                "infty" => "∞",
-                "hbar" => "ℏ",
-                "forall" => "∀",
-                "exists" => "∃",
-                "nexists" => "∄",
-                "in" => "∈",
-                "notin" => "∉",
-                "subset" => "⊂",
-                "supset" => "⊃",
-                "subseteq" => "⊆",
-                "supseteq" => "⊇",
-                "cap" => "∩",
-                "cup" => "∪",
-                "land" | "wedge" => "∧",
-                "lor" | "vee" => "∨",
-                "neg" | "lnot" => "¬",
-                "circ" => "∘",
-                "bullet" => "•",
-                "star" => "⋆",
-                "perp" => "⊥",
-                "parallel" => "∥",
-                "dots" | "ldots" => "…",
-                "cdots" => "⋯",
-                "vdots" => "⋮",
-                "ddots" => "⋱",
-                "quad" => "  ",
-                "qquad" => "    ",
-                // Greek lowercase
-                "alpha" => "α",
-                "beta" => "β",
-                "gamma" => "γ",
-                "delta" => "δ",
-                "epsilon" => "ϵ",
-                "varepsilon" => "ε",
-                "zeta" => "ζ",
-                "eta" => "η",
-                "theta" => "θ",
-                "vartheta" => "ϑ",
-                "iota" => "ι",
-                "kappa" => "κ",
-                "lambda" => "λ",
-                "mu" => "μ",
-                "nu" => "ν",
-                "xi" => "ξ",
-                "pi" => "π",
-                "varpi" => "ϖ",
-                "rho" => "ρ",
-                "varrho" => "ϱ",
-                "sigma" => "σ",
-                "varsigma" => "ς",
-                "tau" => "τ",
-                "upsilon" => "υ",
-                "phi" => "ϕ",
-                "varphi" => "φ",
-                "chi" => "χ",
-                "psi" => "ψ",
-                "omega" => "ω",
-                // Greek uppercase
-                "Gamma" => "Γ",
-                "Delta" => "Δ",
-                "Theta" => "Θ",
-                "Lambda" => "Λ",
-                "Xi" => "Ξ",
-                "Pi" => "Π",
-                "Sigma" => "Σ",
-                "Upsilon" => "Υ",
-                "Phi" => "Φ",
-                "Psi" => "Ψ",
-                "Omega" => "Ω",
-                _ => "",
-            };
+            let replacement = symbol(&name);
             if replacement.is_empty() {
                 out.push('\\');
                 out.push_str(&name);
@@ -753,37 +623,6 @@ fn render_latex(input: &str) -> String {
     }
     out
 }
-
-/// Operator names, written upright as themselves (`\sin` → `sin`).
-const OPERATORS: &[&str] = &[
-    "sin", "cos", "tan", "cot", "sec", "csc", "arcsin", "arccos", "arctan", "sinh", "cosh",
-    "tanh", "coth", "log", "ln", "lg", "exp", "lim", "liminf", "limsup", "max", "min", "sup",
-    "inf", "det", "dim", "ker", "deg", "gcd", "arg", "hom", "Pr", "mod", "bmod",
-];
-
-/// `value` with a combining `mark` on its first character.
-fn accent(value: &str, mark: char) -> String {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) => format!("{first}{mark}{}", chars.as_str()),
-        None => String::new(),
-    }
-}
-
-/// The delimiters a matrix environment is drawn between.
-fn env_delims(env: &str) -> (&'static str, &'static str) {
-    match env {
-        "vmatrix" => ("|", "|"),
-        "Vmatrix" => ("‖", "‖"),
-        "pmatrix" => ("(", ")"),
-        "bmatrix" => ("[", "]"),
-        "Bmatrix" => ("{", "}"),
-        _ => ("", ""),
-    }
-}
-
-/// The characters that `\` escapes into themselves, in math and in text.
-const SPECIALS: &str = "{}&%$#_";
 
 /// Commands that only size delimiters or place limits: dropped.
 const SILENT: &[&str] = &["left", "right", "limits", "nolimits"];
@@ -853,30 +692,6 @@ fn push_operator(out: &mut String, name: &str, chars: &[char], next: usize) {
     if spaced {
         out.push(' ');
     }
-}
-
-/// The text of a `\text{…}`-style argument: escaped specials become
-/// themselves and the spacing commands become spaces.
-fn text_of(value: &str) -> String {
-    let mut out = String::new();
-    let mut rest = value.chars().peekable();
-    while let Some(c) = rest.next() {
-        match (c, rest.peek().copied()) {
-            ('\\', Some(n)) if SPECIALS.contains(n) => {
-                out.push(n);
-                rest.next();
-            }
-            ('\\', Some(',' | ' ' | ';')) => {
-                out.push(' ');
-                rest.next();
-            }
-            ('\\', Some('!')) => {
-                rest.next();
-            }
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// A matrix body as rows of cells: split on `\\` and `&`, but not on an
@@ -966,27 +781,6 @@ fn braced_raw(chars: &[char], start: usize) -> Option<(String, usize)> {
         i += 1;
     }
     None
-}
-
-fn superscript_char(ch: char) -> Option<char> {
-    match ch {
-        '0' => Some('⁰'), '1' => Some('¹'), '2' => Some('²'), '3' => Some('³'), '4' => Some('⁴'),
-        '5' => Some('⁵'), '6' => Some('⁶'), '7' => Some('⁷'), '8' => Some('⁸'), '9' => Some('⁹'),
-        '+' => Some('⁺'), '-' => Some('⁻'), '=' => Some('⁼'), '(' => Some('⁽'), ')' => Some('⁾'),
-        'n' => Some('ⁿ'), 'i' => Some('ⁱ'), _ => None,
-    }
-}
-
-fn subscript_char(ch: char) -> Option<char> {
-    match ch {
-        '0' => Some('₀'), '1' => Some('₁'), '2' => Some('₂'), '3' => Some('₃'), '4' => Some('₄'),
-        '5' => Some('₅'), '6' => Some('₆'), '7' => Some('₇'), '8' => Some('₈'), '9' => Some('₉'),
-        '+' => Some('₊'), '-' => Some('₋'), '=' => Some('₌'), '(' => Some('₍'), ')' => Some('₎'),
-        'a' => Some('ₐ'), 'e' => Some('ₑ'), 'h' => Some('ₕ'), 'i' => Some('ᵢ'), 'j' => Some('ⱼ'),
-        'k' => Some('ₖ'), 'l' => Some('ₗ'), 'm' => Some('ₘ'), 'n' => Some('ₙ'), 'o' => Some('ₒ'),
-        'p' => Some('ₚ'), 'r' => Some('ᵣ'), 's' => Some('ₛ'), 't' => Some('ₜ'), 'u' => Some('ᵤ'),
-        'v' => Some('ᵥ'), 'x' => Some('ₓ'), 'y' => Some('ᵧ'), _ => None,
-    }
 }
 
 /// The bullet a list item at this indent wears: the two glyphs alternate by
