@@ -124,17 +124,10 @@ impl App {
             return;
         }
         // `:42` and `:$`: a line, as `42G` and `G`, through the same motion
-        // so a fold opens, a block shows its source and read-only mode puts
-        // the line on top exactly as the keys do. Then on its first
-        // non-blank, as vim's `:42` is (`42G` here keeps column 0). Not
-        // read-only mode's `:$`: it scrolls to the end, and the cursor stays
-        // where the view's top row parks it.
+        // so a fold opens, a block shows its source, read-only mode puts the
+        // line on top and the column is kept exactly as the keys do.
         if let Some(m) = line_motion(cmd) {
             self.run(Command::bare(Action::Move(m)));
-            if !(self.view && m == Motion::BufferEnd) {
-                let col = self.first_non_blank(self.buffer.cursor.line);
-                self.buffer.cursor.set_col(col);
-            }
             return;
         }
         // NOT a forced `:e`: this editor spends `:e!` on the config. A command

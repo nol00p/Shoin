@@ -588,9 +588,10 @@ W B E :: the same, with whitespace-delimited words
 0 ^ $ :: line start · first non-blank · line end
 { } :: previous · next paragraph
 gg G :: first · last line. With a count, go to that line
-:42 :$ :: go to line 42, on its first non-blank · to the last line
+:42 :$ :: go to line 42 · to the last line
 1 to 9 :: start a count; 0 can follow another digit
 H M L :: top · middle · bottom of the screen
+> gg G :42 H M L and the page keys keep the column, as j and k do; so do dd >> <<.
 
 ## Folds — a list item with its sub-items, or a heading's section
 za :: fold or unfold here

@@ -36,7 +36,7 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 
 | Command | Does |
 |---|---|
-| `:42` | go to line 42, on its first non-blank character, like `42G`. `:0` is the first line, and a number past the end is the last |
+| `:42` | go to line 42, keeping the column, like `42G`. `:0` is the first line, and a number past the end is the last |
 | `:$` | go to the last line, like `G` |
 
 ## Buffers and panes

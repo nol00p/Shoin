@@ -543,6 +543,10 @@ impl App {
     /// Delete/change/yank whole lines `l1..=l2`.
     pub(super) fn operate_linewise(&mut self, op: Operator, l1: usize, l2: usize) {
         let last = self.buffer.last_line();
+        // The cursor's goal as a screen cell, read before the edit: a delete
+        // or shift puts the cursor back on it, as Neovim's 'nostartofline'.
+        let tw = self.config.editor.tab_width;
+        let cells = motion::goal_cells(&self.buffer, self.buffer.cursor, tw);
         // A closed fold at either end is taken whole: `dd` on one deletes
         // every line it stands for, as in vim.
         let (a, b) = self.fold_hidden().widen(l1.min(l2), l1.max(l2));
@@ -571,8 +575,11 @@ impl App {
             Operator::Delete => {
                 self.buffer.delete_chars(start, end);
                 self.store_register(text, true, true);
-                let nl = self.buffer.last_line();
-                self.buffer.cursor = Cursor::new(a.min(nl), 0);
+                // On the goal's column of the line now there, which becomes
+                // the goal: Neovim's `dd` from a long line onto `ab` and then
+                // `j` stays on `ab`'s column.
+                let line = a.min(self.buffer.last_line());
+                self.buffer.cursor = Cursor::new(line, motion::col_at_cells(&self.buffer, line, cells, tw));
             }
             Operator::Change => {
                 // With `auto_indent`, the line to type into keeps the first
@@ -599,8 +606,10 @@ impl App {
                 self.buffer.cursor = Cursor::new(a, 0);
             }
             Operator::Indent | Operator::Outdent => {
+                // The same screen column, not the same character, as
+                // Neovim's `>>`: the text moves under the cursor.
                 self.shift_lines(a, b, op == Operator::Outdent);
-                self.buffer.cursor = Cursor::new(a, self.first_non_blank(a));
+                self.buffer.cursor = Cursor::new(a, motion::col_at_cells(&self.buffer, a, cells, tw));
             }
         }
     }

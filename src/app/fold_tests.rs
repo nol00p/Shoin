@@ -655,17 +655,17 @@ fn zz_counts_a_fold_as_one_row() {
     assert_eq!(folds(&app), [(10, 40)]);
 }
 
-/// `:N` into a closed fold opens it, as `NG` does.
+/// `:N` into a closed fold opens it, as `NG` does, and keeps the column.
 #[test]
 fn colon_number_into_a_fold_opens_it() {
     let mut app = app_with(DOC);
     goto(&mut app, 2);
-    feed(&mut app, "zcgg");
+    feed(&mut app, "zcgg2l");
     assert_eq!(folds(&app), [(2, 5)]);
     for c in ":5".chars() {
         key(&mut app, KeyCode::Char(c));
     }
     key(&mut app, KeyCode::Enter);
-    assert_eq!((line(&app), app.buffer.cursor.col), (4, 4), "on `- deep`'s dash");
+    assert_eq!((line(&app), app.buffer.cursor.col), (4, 2), "the column `2l` left it on");
     assert!(folds(&app).is_empty(), "the jump opened it");
 }
