@@ -50,6 +50,12 @@
   line that starts with math no longer jumps left out of the text column,
   or to the pane's edge. Leading emphasis, code spans and links don't
   shift either, so `**Note:**` reveals at the text column (#163).
+- Display math: a closed `$$` block is laid out over several rows,
+  centred: fractions, sums and limits, roots, matrices, `cases` and
+  `aligned`. Put the cursor on any of its lines, or select across it, to
+  see and edit its TeX. A block too wide for the window keeps the
+  one-line Unicode form. `shoin --render` shows the layout; export is
+  unchanged (#77, #166, #167).
 
 **Lists**
 
