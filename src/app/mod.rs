@@ -1502,6 +1502,14 @@ impl App {
         let page = self.viewport_height();
         if let Some(res) = motion::resolve(&self.buffer, m, count, page, false, self.config.editor.tab_width) {
             self.buffer.cursor = res.target;
+            // Read-only shows a line jump's line from its first row: the
+            // kept column is edit mode's, and here it would be the column
+            // the view parked the cursor on in the line it left, which puts
+            // a later row of the target on top. `gg` and `G` scroll by rows
+            // above and never get here.
+            if self.view && matches!(m, Motion::GotoLine(_) | Motion::BufferStart | Motion::BufferEnd) {
+                self.buffer.cursor = Cursor::new(res.target.line, 0);
+            }
         }
     }
 

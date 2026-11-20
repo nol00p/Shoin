@@ -8740,3 +8740,373 @@ fn a_second_unnamed_buffer_reindexes_its_rows() {
     let at = |w: &str| prose.iter().position(|r| r.contains(w)).unwrap_or_else(|| panic!("{w}: {prose:#?}"));
     assert_eq!((at("bravo"), at("charlie")), (at("alpha") + 2, at("alpha") + 4), "{prose:#?}");
 }
+
+/// Fifty lines, each indented by its number modulo four, so a line's first
+/// non-blank column is not 0.
+fn numbered_lines() -> String {
+    (1..=50).map(|i| format!("{}line {i}\n", " ".repeat(i % 4))).collect()
+}
+
+/// `:N` goes to line N, counted from 1, keeping the column as `NG` does;
+/// `:0` and `:1` to the first line, a number past the end and `:$` to the
+/// last. Spaces around the number are allowed.
+#[test]
+fn colon_number_goes_to_that_line() {
+    let mut app = app_with(&numbered_lines());
+    feed(&mut app, "3l");
+    cmd(&mut app, ":30");
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (29, 3));
+    assert!(app.flash.as_ref().is_none_or(|f| !matches!(f.kind, FlashKind::Error)), "{:?}", app.flash.as_ref().map(|f| &f.text));
+    for (typed, line) in [(":0", 0), (":1", 0), (":999", 49), (":$", 49), (": 7 ", 6), (":30", 29)] {
+        cmd(&mut app, typed);
+        assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (line, 3), "{typed}");
+        assert_eq!(app.mode, Mode::Normal, "{typed}");
+    }
+    // Far past what a usize holds: still the last line.
+    cmd(&mut app, ":99999999999999999999999999");
+    assert_eq!(app.buffer.cursor.line, 49);
+    // The same place `NG` goes.
+    let mut other = app_with(&numbered_lines());
+    feed(&mut other, "5l30G");
+    let mut app = app_with(&numbered_lines());
+    feed(&mut app, "5l");
+    cmd(&mut app, ":30");
+    assert_eq!(app.buffer.cursor, other.buffer.cursor);
+}
+
+/// The lines the column rule was checked on in Neovim (`nvim --clean`,
+/// `ts=4 sw=4 et`, as Shoin's defaults): a long indented line, a short
+/// one, an empty one, tabs, wide characters.
+const STICKY: &str = "    abcdefghijklmno\nab\n\n\tx\tyz\n日本語テキスト\n  indented line here\nlast line of the file\n";
+
+/// Eighty lines: long ones, a short `ab` every seventh and an empty one
+/// every tenth, the file the paging and operator cases were checked on.
+fn sticky_long() -> String {
+    (1..=80)
+        .map(|i| match i {
+            _ if i % 10 == 0 => "\n".to_string(),
+            _ if i % 7 == 0 => "ab\n".to_string(),
+            _ => format!("  line {i:02} with some text here\n"),
+        })
+        .collect()
+}
+
+/// A fresh app on `text` with a 30-row window, after `keys`, where the
+/// control characters stand for `Ctrl-d` `Ctrl-u` `Ctrl-f` `Ctrl-b` and
+/// `Ctrl-r`.
+fn sticky_keys(text: &str, keys: &str) -> App {
+    let mut app = app_with(text);
+    app.term_size = (80, 30);
+    for c in keys.chars() {
+        match c {
+            '\u{4}' => ctrl(&mut app, 'd'),
+            '\u{15}' => ctrl(&mut app, 'u'),
+            '\u{6}' => ctrl(&mut app, 'f'),
+            '\u{2}' => ctrl(&mut app, 'b'),
+            '\u{12}' => ctrl(&mut app, 'r'),
+            c => feed(&mut app, &c.to_string()),
+        }
+    }
+    app
+}
+
+/// Run each `(keys, then a command line, (line, col))` case on a fresh app
+/// and list every one that lands elsewhere, so one run shows them all.
+fn sticky_misses(text: &str, cases: &[(&str, &str, (usize, usize))]) -> Vec<String> {
+    let mut misses = Vec::new();
+    for &(keys, typed, want) in cases {
+        let mut app = sticky_keys(text, keys);
+        if !typed.is_empty() {
+            cmd(&mut app, typed);
+        }
+        let got = (app.buffer.cursor.line, app.buffer.cursor.col);
+        if got != want {
+            misses.push(format!("{keys:?} {typed}: got {got:?}, Neovim {want:?}"));
+        }
+    }
+    misses
+}
+
+/// `G` `gg` `NG` `:N` `:$` `:0` keep the column `j` and `k` keep, as
+/// Neovim's default 'nostartofline' does: clamped to a short line, the goal
+/// from a longer one coming back, a screen cell across tabs and wide
+/// characters. Every expected place is what Neovim gave for the same keys,
+/// but for one after a tab that does not start its line.
+#[test]
+fn line_jumps_keep_the_column_as_neovim() {
+    let misses = sticky_misses(
+        STICKY,
+        &[
+            ("010lG", "", (6, 10)),
+            ("7G010lgg", "", (0, 10)),
+            ("010l2G", "", (1, 1)),
+            ("010l3G", "", (2, 0)),
+            ("06l4G", "", (3, 2)),
+            ("010l4G", "", (3, 4)),
+            ("010l5G", "", (4, 5)),
+            // Neovim says (0, 8): its second tab ends at the stop, cell 8,
+            // while Shoin draws every tab 4 cells wide, so `y` is at cell 9
+            // here and `k` lands on the same column (`cell_width`).
+            ("4G03l1G", "", (0, 9)),
+            ("4G03l5G", "", (4, 4)),
+            ("5G02l1G", "", (0, 4)),
+            ("5G02l4G", "", (3, 1)),
+            ("010l2G7G", "", (6, 10)),
+            ("010lj3Gk", "", (1, 1)),
+            ("06l4Gj", "", (4, 3)),
+            ("010l", ":7", (6, 10)),
+            ("010l", ":$", (6, 10)),
+            ("010l", ":0", (0, 10)),
+            ("010l", ":2", (1, 1)),
+            ("010l2G", ":7", (6, 10)),
+            ("7G010l", ":0", (0, 10)),
+        ],
+    );
+    assert!(misses.is_empty(), "{misses:#?}");
+}
+
+/// `H` `M` `L` and the paging keys keep the column too, and so does a
+/// linewise `d`, `>` or `<`, which then make the column they land on the
+/// goal. Lines from Neovim where the window size does not matter.
+#[test]
+fn screen_paging_and_linewise_operators_keep_the_column_as_neovim() {
+    let text = sticky_long();
+    let mut misses = sticky_misses(
+        &text,
+        &[
+            ("015l\u{4}\u{15}", "", (0, 15)),
+            ("015ldd", "", (0, 15)),
+            ("05j15ldd", "", (5, 1)),
+            ("05j15lddj", "", (6, 1)),
+            ("05j15ljdd", "", (6, 15)),
+            ("05j15ljddj", "", (7, 15)),
+            ("031j15ldG", "", (30, 15)),
+            ("05j15ljVd", "", (6, 15)),
+            ("05j15ljVdj", "", (7, 15)),
+            ("05j15ljdj", "", (6, 15)),
+            ("05j15ljdjk", "", (5, 15)),
+            ("015l>>", "", (0, 15)),
+            ("015l<<", "", (0, 15)),
+            ("05j15lj>>", "", (6, 5)),
+            ("05j15lj<<", "", (6, 1)),
+            ("05j15lj>>j", "", (7, 5)),
+            ("015lVj>", "", (0, 15)),
+            ("015lVj<", "", (0, 15)),
+            ("05j15lj>k", "", (5, 15)),
+            ("05j15ljVk>", "", (5, 15)),
+            ("05j15ljvk>", "", (5, 15)),
+        ],
+    );
+    // `H` `M` `L` and the paging keys land on a line the window size and
+    // `scroll_off` pick: only the column is Neovim's, 15 unless that line
+    // is `ab` or empty. `06j15l` stands on `ab`, so its goal is 1.
+    for keys in ["015lH", "05j15ljH", "06j15lH", "015lM", "015lL", "05j15ljL", "05j15lj\u{4}", "015l\u{6}", "015l\u{6}\u{2}", "05j15lj\u{6}\u{2}"] {
+        let app = sticky_keys(&text, keys);
+        let line = app.buffer.cursor.line;
+        let want = match line + 1 {
+            n if n % 10 == 0 => 0,
+            _ if keys.starts_with("06j") => 1,
+            n if n % 7 == 0 => 1,
+            _ => 15,
+        };
+        if app.buffer.cursor.col != want {
+            misses.push(format!("{keys:?}: col {} on line {line}, Neovim {want}", app.buffer.cursor.col));
+        }
+    }
+    // A goal from a long line survives `dd` onto another long one, and is
+    // the column it landed on after a clamp.
+    misses.extend(sticky_misses("ab\n    long line number one here\nshort\n", &[("j15lkddj", "", (1, 4))]));
+    assert!(misses.is_empty(), "{misses:#?}");
+}
+
+/// Anything else that starts with a digit or a sign is still not a
+/// command: no ranges, no offsets.
+#[test]
+fn colon_number_with_more_after_it_is_not_a_command() {
+    for typed in ["3x", "-2", "+1", "1,5", "$x", "3 4"] {
+        let mut app = app_with(&numbered_lines());
+        feed(&mut app, "5G");
+        cmd(&mut app, &format!(":{typed}"));
+        assert_eq!(app.buffer.cursor.line, 4, ":{typed} moved the cursor");
+        let flash = app.flash.as_ref().expect(typed);
+        assert!(matches!(flash.kind, FlashKind::Error), ":{typed}");
+        let said = flash.text.as_deref().unwrap_or("");
+        assert!(said.starts_with("not a command"), ":{typed}: {said}");
+    }
+}
+
+/// `:N` onto a display block's opening line shows its source, as `NG` does.
+#[test]
+fn colon_number_onto_a_math_block_reveals_it() {
+    let mut app = app_with(MATH_DOC);
+    cmd(&mut app, ":4");
+    assert_eq!(app.buffer.cursor.line, 3);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+    cmd(&mut app, ":$");
+    assert_eq!(app.active.start, app.active.end, "away again");
+}
+
+/// Read-only: `:N` puts its line on top, as `NG` does, even from inside a
+/// tall layout whose kept row puts the cursor on that very line.
+#[test]
+fn read_only_colon_number_puts_its_line_on_top() {
+    let mut app = app_with(&tall_math(12));
+    reader(&mut app);
+    feed(&mut app, "jjjjj");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!((app.scroll_hint(), app.buffer.cursor.line), (5, 2), "inside the layout, parked on its opener");
+    cmd(&mut app, ":3");
+    let screen = screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.buffer.cursor.line, 2);
+    let top = app.cache.borrow().locate(2, 0).0;
+    assert_eq!(app.scroll_hint(), top, "the layout's first row on top\n{screen:#?}");
+    let first = layout_rows(&app, 2)[0].clone();
+    assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains(&first), "{screen:#?}");
+    // An ordinary line: `after 3` is line 30.
+    cmd(&mut app, ":30");
+    let screen = screen_of(&mut app, READ_W, READ_H);
+    let top = app.cache.borrow().locate(29, 0).0;
+    assert_eq!(app.scroll_hint(), top, "{screen:#?}");
+    assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains("after 3"), "{screen:#?}");
+    assert!(app.view, "still read-only");
+    // `:$` is `G`: the end of the text, the last line on the bottom row.
+    cmd(&mut app, ":$");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.scroll_hint(), last_top(&app));
+    let mut other = app_with(&tall_math(12));
+    reader(&mut other);
+    feed(&mut other, "G");
+    screen_of(&mut other, READ_W, READ_H);
+    assert_eq!(app.buffer.cursor, other.buffer.cursor, "parked where `G` parks it");
+}
+
+/// Read-only: `NG` and `:N` show their line from its first wrapped row,
+/// as before #176. The sticky column is edit mode's: carried here, the
+/// column the view parked the cursor on in the line it left would put a
+/// later row of the target line on top.
+#[test]
+fn read_only_line_jumps_start_at_the_first_wrapped_row() {
+    let words = |p: &str| (0..60).map(|i| format!("{p}{i:02}")).collect::<Vec<_>>().join(" ");
+    let rest: String = (0..30).map(|i| format!("after {i}\n")).collect();
+    let text = format!("{}\n{}\n{rest}", words("a"), words("b"));
+    for keys in ["2G", ":2"] {
+        let mut app = app_with(&text);
+        reader(&mut app);
+        feed(&mut app, "jjj");
+        screen_of(&mut app, READ_W, READ_H);
+        assert!(app.buffer.cursor.col > 0, "{keys}: parked inside the first line");
+        if let Some(c) = keys.strip_prefix(':') {
+            cmd(&mut app, &format!(":{c}"));
+        } else {
+            feed(&mut app, keys);
+        }
+        let screen = screen_of(&mut app, READ_W, READ_H);
+        assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, 0), "{keys}");
+        let top = app.cache.borrow().locate(1, 0).0;
+        assert_eq!(app.scroll_hint(), top, "{keys}\n{screen:#?}");
+        assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains("b00"), "{keys}\n{screen:#?}");
+    }
+}
+
+/// Redo puts the cursor back where the linewise edit left it, not at the
+/// start of the range it removed or the end of the indent it added, and
+/// undo where the command began: Neovim's answers, each key string run
+/// with `u` and then `Ctrl-r` after it.
+#[test]
+fn undo_and_redo_of_linewise_edits_land_as_neovim() {
+    let text = "abcdefghijklmnop\n".repeat(4);
+    let mut cases = Vec::new();
+    for (keys, undo, redo) in [
+        ("08ldd", (0, 8), (0, 8)),
+        ("08l2>>", (0, 8), (0, 8)),
+        ("08l>>", (0, 8), (0, 8)),
+        ("08ldj", (0, 8), (0, 8)),
+        ("08ljVkd", (1, 8), (0, 8)),
+        ("08ljdG", (1, 8), (0, 8)),
+    ] {
+        // Undo of `Vkd` is where the command began, line 2: Neovim goes to
+        // the top line of the change, 1:8, and that predates the kept column.
+        cases.push((format!("{keys}u"), undo));
+        cases.push((format!("{keys}u\u{12}"), redo));
+    }
+    // The goal comes back with the redo: `j` keeps column 8.
+    cases.push(("08lddu\u{12}j".to_string(), (1, 8)));
+    let cases: Vec<_> = cases.iter().map(|(k, w)| (k.as_str(), "", *w)).collect();
+    let misses = sticky_misses(&text, &cases);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A goal set with the cursor on a tab is the tab's LAST cell, where
+/// Neovim draws the Normal-mode cursor: after `dd` lands on one, after `0`
+/// or `h` moves onto one. (`l0`, because a `0` already at column 0 moves
+/// nothing in Shoin and keeps the old goal.) Every case is Neovim's answer but the mid-line
+/// tab's: Shoin draws a tab as a fixed four cells, so `ab\tx`'s tab ends at
+/// cell 5 here and at cell 3 in Neovim (the round-2 difference).
+#[test]
+fn a_goal_set_on_a_tab_is_its_last_cell_as_neovim() {
+    let leading = "abcdefghijk\n\tx\nabcdefghijk\n";
+    let mid = "abcdefghijk\nab\tx\nabcdefghijk\n";
+    let two = "abcdefghijk\n\t\tx\nabcdefghijk\n";
+    let mut misses = Vec::new();
+    for (text, cases) in [
+        (
+            leading,
+            &[
+                ("02lddj", (1, 3)),
+                ("jl0j", (2, 3)),
+                ("jl0k", (0, 3)),
+                ("jl0dd", (1, 3)),
+                ("jfxhj", (2, 3)),
+                ("jfxhG", (2, 3)),
+                ("jfxhgg", (0, 3)),
+                ("jl0vj", (2, 3)),
+                ("jfxhjk", (1, 0)),
+            ][..],
+        ),
+        (
+            mid,
+            &[
+                ("02lddj", (1, 5)), // Neovim (1, 3)
+                ("02lddk", (0, 2)),
+                ("jfxhj", (2, 5)), // Neovim (2, 3)
+                ("jfxhgg", (0, 5)), // Neovim (0, 3)
+                ("jfxhjk", (1, 2)),
+                ("j0j", (2, 0)),
+            ][..],
+        ),
+        (two, &[("jl0j", (2, 3)), ("j0lj", (2, 7)), ("05lddj", (1, 7))][..]),
+    ] {
+        let cases: Vec<_> = cases.iter().map(|&(k, w)| (k, "", w)).collect();
+        misses.extend(sticky_misses(text, &cases));
+    }
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    // Insert mode's cursor stands before the tab, and so does its goal:
+    // Neovim's `i<Down>` from in front of `\tx` keeps column 0.
+    let mut app = sticky_keys(leading, "j0i");
+    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.sync_after_input();
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (2, 0));
+}
+
+/// A line jump, `j`/`k` or a linewise delete clamped to a line that ends in
+/// a combining mark lands on its base character, as Neovim's do: the mark
+/// is drawn in the base's cell. One mark, two, an enclosing one and a
+/// zero-width joiner, each after `ab`.
+#[test]
+fn clamping_never_lands_on_a_combining_mark() {
+    let mut misses = Vec::new();
+    for mark in ["\u{301}", "\u{301}\u{302}", "\u{20dd}", "\u{200d}"] {
+        let text = format!("abcdefghijk\nab{mark}\nabcdefghijk\n");
+        let cases = [
+            ("09ldd", "", (0, 1)),
+            ("09lj", "", (1, 1)),
+            ("09ljk", "", (0, 9)),
+            ("G09lk", "", (1, 1)),
+            ("09lddj", "", (1, 1)),
+            ("09l2G", "", (1, 1)),
+            ("09l", ":2", (1, 1)),
+        ];
+        misses.extend(sticky_misses(&text, &cases).into_iter().map(|m| format!("{mark:?} {m}")));
+    }
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}

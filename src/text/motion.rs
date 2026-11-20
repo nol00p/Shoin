@@ -295,32 +295,13 @@ pub fn resolve(
     };
 
     let mut target = target;
-    // Vertical motions keep the goal column; everything else resets it.
+    // Vertical motions keep the goal column, and so do the line jumps, as
+    // Neovim's 'nostartofline' (its default) has them: `G`, `gg`, `42G`, and
+    // through them `:42` and `H` `M` `L`. Everything else resets it.
     match motion {
-        Up | Down | HalfPageDown | HalfPageUp | PageDown | PageUp => {
-            // The goal in cells: measured once, on the line the goal column
-            // was set on, then carried from line to line. Both walks read the
-            // rope only as far as the goal, so `j` on a long line stays cheap.
-            let cells = cur.goal_cells.unwrap_or_else(|| {
-                let len = buffer.line_len(cur.line);
-                let upto = cur.goal_col.min(len);
-                let past = cur.goal_col - upto; // a goal past the line's end
-                let line = buffer.rope.line(cur.line.min(last_line));
-                line.chars().take(upto).map(|c| cell_width(c, tab)).sum::<usize>().saturating_add(past)
-            });
-            let len = buffer.line_len(target.line);
-            let mut at = 0usize;
-            let col = buffer
-                .rope
-                .line(target.line.min(last_line))
-                .chars()
-                .take(len)
-                .position(|c| {
-                    at += cell_width(c, tab);
-                    cells < at
-                })
-                .unwrap_or(len);
-            target.col = col.min(len.saturating_sub(1));
+        Up | Down | HalfPageDown | HalfPageUp | PageDown | PageUp | BufferStart | BufferEnd | GotoLine(_) => {
+            let cells = goal_cells(buffer, cur, tab);
+            target.col = col_at_cells(buffer, target.line, cells, tab);
             target.goal_col = cur.goal_col;
             target.goal_cells = Some(cells);
         }
@@ -337,6 +318,65 @@ pub fn resolve(
         return None;
     }
     Some(MotionResult { target, kind })
+}
+
+/// The screen cell `cur`'s goal column names: measured once, on the line
+/// the goal was set on, then carried from line to line in `goal_cells`.
+/// The walk reads the rope only as far as the goal, so `j` on a long line
+/// stays cheap.
+///
+/// A goal set on a tab is its LAST cell, where Normal mode draws the
+/// cursor, as Neovim has it: `0` onto `\tx` and then `j` lands under the
+/// tab's end. Insert mode's cursor stands before the tab, so its Up and
+/// Down seed the goal with [`goal_start_cells`] instead.
+pub fn goal_cells(buffer: &Buffer, cur: Cursor, tab: usize) -> usize {
+    cur.goal_cells.unwrap_or_else(|| {
+        let start = goal_start_cells(buffer, cur, tab);
+        let line = cur.line.min(buffer.last_line());
+        let on_tab = cur.goal_col < buffer.line_len(line) && buffer.rope.line(line).char(cur.goal_col) == '\t';
+        if on_tab {
+            start + cell_width('\t', tab).saturating_sub(1)
+        } else {
+            start
+        }
+    })
+}
+
+/// The first screen cell of the character at `cur`'s goal column, on
+/// `cur`'s line: the cells drawn before it.
+pub fn goal_start_cells(buffer: &Buffer, cur: Cursor, tab: usize) -> usize {
+    let len = buffer.line_len(cur.line);
+    let upto = cur.goal_col.min(len);
+    let past = cur.goal_col - upto; // a goal past the line's end
+    let line = buffer.rope.line(cur.line.min(buffer.last_line()));
+    line.chars().take(upto).map(|c| cell_width(c, tab)).sum::<usize>().saturating_add(past)
+}
+
+/// The column on `line` drawn at screen cell `cells`, a tab or a wide
+/// character taking each cell it covers, clamped to the line's last
+/// character: where `j` and `k` land for that goal.
+///
+/// A character drawn in no cells of its own (a combining mark, a joiner)
+/// belongs to the one before it, as Neovim's grapheme does, so the clamp
+/// lands on that base. Inside the line the walk already stops on the base,
+/// the first character to reach the goal's cell.
+pub fn col_at_cells(buffer: &Buffer, line: usize, cells: usize, tab: usize) -> usize {
+    let len = buffer.line_len(line);
+    let text = buffer.rope.line(line.min(buffer.last_line()));
+    let mut at = 0usize;
+    let col = text
+        .chars()
+        .take(len)
+        .position(|c| {
+            at += cell_width(c, tab);
+            cells < at
+        })
+        .unwrap_or(len);
+    let mut col = col.min(len.saturating_sub(1));
+    while col > 0 && cell_width(text.char(col), tab) == 0 {
+        col -= 1;
+    }
+    col
 }
 
 /// `cw` on a word: `e`, except that a cursor already on a word's last
@@ -632,6 +672,22 @@ mod tests {
         let mut b2 = buf("a long first line\nshort\nanother long line\n", 1, 4);
         b2.cursor.goal_col = 15;
         assert_eq!(go(&b2, Motion::Down, 1), Some((2, 15)));
+    }
+
+    /// `G`, `gg` and `42G` keep the goal as `j` and `k` do, Neovim's
+    /// 'nostartofline': clamped to a short line, and still the goal after.
+    #[test]
+    fn line_jumps_keep_the_goal_column() {
+        let text = "a long first line\nshort\nanother long line\n";
+        let mut b = buf(text, 0, 15);
+        let r = resolve(&b, Motion::GotoLine(1), 1, 10, false, 4).unwrap();
+        assert_eq!((r.target.line, r.target.col, r.target.goal_col), (1, 4, 15));
+        b.cursor = r.target;
+        assert_eq!(go(&b, Motion::BufferEnd, 1), Some((2, 15)), "the goal comes back");
+        assert_eq!(go(&b, Motion::BufferStart, 1), Some((0, 15)));
+        // Across a wide character, by screen cell: cell 4 is `語`'s first.
+        let b = buf("日本語です\nabcdefgh\n", 1, 4);
+        assert_eq!(go(&b, Motion::BufferStart, 1), Some((0, 2)));
     }
 
     /// `j` and `k` keep the screen cell, a tab counting its `tab` cells:

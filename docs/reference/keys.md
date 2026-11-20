@@ -466,6 +466,10 @@ In Normal mode on the word under the cursor, in Visual on the selection.
 
 ## Details
 
+- `gg`, `G`, `H`, `M`, `L`, `Ctrl-d`, `Ctrl-u`, `Ctrl-f` and `Ctrl-b` keep
+  the cursor's column, as `j` and `k` do: on a shorter line it stops at the
+  end, and a longer line gets the column back. `dd`, `>>` and `<<` leave
+  the cursor in that column too. This is Neovim's default.
 - `zt` and `zb` leave `editor.scroll_off` lines at the edge when there is
   room. `zt`, `zz` and `zb` have no effect in typewriter or read-only mode.
 - Normal and Visual share motions and prefixes except where a Visual entry

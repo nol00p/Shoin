@@ -98,6 +98,21 @@ pub(crate) fn canonical(table: &[(&'static str, &[&str])], typed: &str) -> Optio
         .map(|(name, _)| *name)
 }
 
+/// The motion a typed line number stands for: `:$` is `G`, `:N` is `NG`
+/// (counted from 1, so `:0` is the first line too, and a number too big to
+/// hold is past the end). Anything else, a sign, a range or a letter after
+/// the digits, is no line number.
+fn line_motion(cmd: &str) -> Option<Motion> {
+    if cmd == "$" {
+        return Some(Motion::BufferEnd);
+    }
+    if cmd.is_empty() || !cmd.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: usize = cmd.parse().unwrap_or(usize::MAX);
+    Some(Motion::GotoLine(n.saturating_sub(1)))
+}
+
 impl App {
     pub(crate) fn run_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
@@ -106,6 +121,13 @@ impl App {
             None => (cmd, ""),
         };
         if name.is_empty() {
+            return;
+        }
+        // `:42` and `:$`: a line, as `42G` and `G`, through the same motion
+        // so a fold opens, a block shows its source, read-only mode puts the
+        // line on top and the column is kept exactly as the keys do.
+        if let Some(m) = line_motion(cmd) {
+            self.run(Command::bare(Action::Move(m)));
             return;
         }
         // NOT a forced `:e`: this editor spends `:e!` on the config. A command

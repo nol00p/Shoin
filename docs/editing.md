@@ -97,6 +97,9 @@ again puts in the next match and `Shift-Tab` the one before; past either end,
 the line goes back to what you typed. The hint bar lists the matches. Every
 command is in the [command reference](reference/commands.md).
 
+A number goes to that line: `:42` is `42G`, and `:$` is the last line. Both
+keep the cursor's column, as `G` does.
+
 ## Insert mode
 
 `Enter` continues a list marker or a quote prefix, and ends the list when the

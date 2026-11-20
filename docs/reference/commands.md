@@ -32,6 +32,13 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 | `:redo` `:red` | redo, like `Ctrl-r` |
 | `:fixlist` | re-indent the list under the cursor, or every list a Visual selection touches, so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
 
+## Lines
+
+| Command | Does |
+|---|---|
+| `:42` | go to line 42, keeping the column, like `42G`. `:0` is the first line, and a number past the end is the last |
+| `:$` | go to the last line, like `G` |
+
 ## Buffers and panes
 
 | Command | Does |
@@ -126,6 +133,8 @@ Brackets mark the current match.
 - The force forms are `:write!` / `:w!`, `:saveas!` / `:sav!`, `:wq!` / `:x!`, `:qall!` / `:qa!` / `:Q!`, `:bdelete!` / `:bd!`,
   `:q!` and `:revert!`. `:e!` reloads the config.
 
+- `:42` and `:$` take no range or offset: `:1,5`, `:+1` and `:3x` are not
+  commands. Like `42G`, they open a fold they land in.
 - Names, paths and topics are in alphabetical order, ignoring case. Folders
   and files are mixed, and a folder ends in `/`.
 - Values are in the order the command lists them, `off` before `on`.

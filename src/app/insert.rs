@@ -137,6 +137,19 @@ impl App {
         true
     }
 
+    /// Up, Down and the page keys in Insert. The cursor stands before the
+    /// character it is on, a tab included, so a goal not yet measured is
+    /// that character's first cell, as Neovim's Insert has it, rather than
+    /// the tab's last cell a Normal-mode goal takes.
+    fn insert_move_by(&mut self, m: Motion) {
+        let c = self.buffer.cursor;
+        if c.goal_cells.is_none() {
+            let cells = motion::goal_start_cells(&self.buffer, c, self.config.editor.tab_width);
+            self.buffer.cursor.goal_cells = Some(cells);
+        }
+        self.move_by(m, 1);
+    }
+
     /// `input.escape_alias` (default `jk`).
     ///
     /// Deliberately NOT a keymap entry: the first character must land in the
@@ -449,15 +462,15 @@ impl App {
                     self.buffer.cursor = Cursor::new(c.line + 1, 0);
                 }
             }
-            KeyCode::Up => self.move_by(Motion::Up, 1),
-            KeyCode::Down => self.move_by(Motion::Down, 1),
+            KeyCode::Up => self.insert_move_by(Motion::Up),
+            KeyCode::Down => self.insert_move_by(Motion::Down),
             KeyCode::Home => self.buffer.cursor.set_col(0),
             KeyCode::End => {
                 let len = self.buffer.line_len(self.buffer.cursor.line);
                 self.buffer.cursor.set_col(len);
             }
-            KeyCode::PageUp => self.move_by(Motion::HalfPageUp, 1),
-            KeyCode::PageDown => self.move_by(Motion::HalfPageDown, 1),
+            KeyCode::PageUp => self.insert_move_by(Motion::HalfPageUp),
+            KeyCode::PageDown => self.insert_move_by(Motion::HalfPageDown),
             KeyCode::Delete => {
                 let idx = self.buffer.char_index(self.buffer.cursor);
                 if idx < self.buffer.rope.len_chars() {

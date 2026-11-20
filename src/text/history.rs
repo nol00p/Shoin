@@ -151,6 +151,18 @@ impl History {
         self.seal();
     }
 
+    /// Make `cursor` where redo leaves the cursor for the latest change: the
+    /// step being built, or the last one sealed when there is none.
+    pub fn set_redo_cursor(&mut self, cursor: Cursor) {
+        let change = match self.current.changes.last_mut() {
+            Some(c) => Some(c),
+            None => self.undo.last_mut().and_then(|(_, s)| Rc::make_mut(s).changes.last_mut()),
+        };
+        if let Some(c) = change {
+            c.cursor_after = cursor;
+        }
+    }
+
     /// Pop the last step for the caller to invert, moving it to the redo stack.
     pub fn undo(&mut self) -> Option<Rc<Step>> {
         self.seal();
