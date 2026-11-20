@@ -175,6 +175,7 @@ Files, and Config, which explains every option.
 
 - [Getting started](docs/getting-started.md) — install, requirements, first run
 - [Live preview](docs/live-preview.md) — how concealment works
+- [Math](docs/math.md) — inline `$…$` as Unicode, `$$` blocks laid out over several rows
 - [Editing](docs/editing.md) — motions, operators, text objects, lists, registers,
   [folding](docs/editing.md#folding), [the `:` command line](docs/editing.md#the-command-line)
 - [Clipboard](docs/clipboard.md) — system clipboard, SSH, pasting

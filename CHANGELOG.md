@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Docs**
+
+- A Math page: inline and display math, editing a block, when a block is
+  not laid out, export, and the supported commands, with a recording
+  (#170).
+
 ## 0.2.5
 
 **Math**
