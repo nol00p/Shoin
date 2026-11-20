@@ -10,6 +10,7 @@ pub mod hidden;
 pub mod hints;
 pub mod indent;
 pub mod layout;
+pub mod math;
 pub mod numbers;
 pub mod pane;
 pub mod print;
