@@ -145,17 +145,26 @@ Saving the file applies it to the running editor. See
 fits laid out, as the editor draws it away from the cursor. See
 [Reading](reading.md).
 
-Export keeps the TeX. The layout is for the screen only.
+Export does not use the editor's layout, which is for the screen only.
 
 | Format | What happens to math |
 |---|---|
 | `md` | written as it is in the file |
 | `txt` | the TeX, as written; inline math loses its `$` signs, display blocks keep their `$$` lines |
-| `html` | `<span class="math inline">\(…\)</span>` and `<div class="math display">\[…\]</div>` |
+| `html` | MathML, which browsers draw, when `pandoc` is installed; the TeX otherwise |
 | `pdf` | pandoc reads it as math; Typst and LaTeX engines typeset it |
 
-The HTML page has no script in it, so a browser shows the TeX between
-`\(` `\)` and `\[` `\]`. Add MathJax or KaTeX to the page to typeset it.
+HTML export turns each formula into MathML with `pandoc`, the same tool
+PDF export needs. The page still has no script and fetches nothing. Each
+formula sits in `<span class="math inline">` or
+`<div class="math display">` (a `<span>` when it is inside a paragraph).
+
+Without `pandoc` on your `PATH`, the page keeps the TeX between `\(` `\)`
+and `\[` `\]`, and the export says so: `math left as TeX: no pandoc` on
+the status line, or on stderr from `shoin --export`. Install pandoc from
+your package manager or from pandoc.org, or add MathJax or KaTeX to the
+page yourself.
+
 With `export_follows_settings = true` and `math = false`, `txt`, `html` and
 `pdf` treat `$` as a dollar sign. See [Export](export.md).
 
@@ -187,8 +196,8 @@ With `export_follows_settings = true` and `math = false`, `txt`, `html` and
 
 ## Details
 
-- A command Shoin doesn't know is kept as literal text, backslash and all:
-  `\mathcal{F}` shows `\mathcalF`.
+- An unknown command and its braced arguments are drawn as literal text:
+  `\mathcal{F}` shows as `\mathcal{F}`, nested braces kept.
 - A blank line inside a block ends it there, unclosed. Keep a block's
   lines together.
 - `$$x$$ and more text` on one line is a paragraph that holds display math;
@@ -203,3 +212,8 @@ With `export_follows_settings = true` and `math = false`, `txt`, `html` and
 - A script that can't be written in Unicode letters keeps its `^{…}` or
   `_{…}`, with the symbols inside converted: `x^{\mathbf{\alpha t}}`
   shows `x^{α t}`.
+- In an HTML export, a formula pandoc can't read keeps its TeX; the rest
+  are still MathML. Math never makes an export fail.
+- If pandoc fails, or hasn't finished after 10 seconds, every formula
+  keeps its TeX and the export says `math left as TeX: pandoc failed` or
+  `math left as TeX: pandoc timed out`.

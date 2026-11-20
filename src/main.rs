@@ -233,7 +233,13 @@ fn main() -> Result<()> {
             let flat = transclude::compile::compile(src, &config.transclude)?;
             match format {
                 export::Format::Text => print_out(&export::plain::render(&flat, page.measure, page.justify, &page.md))?,
-                export::Format::Html => print_out(&export::html::render(&flat, &title, &page))?,
+                export::Format::Html => {
+                    let (html, note) = export::html::render_math(&flat, &title, &page);
+                    if let Some(note) = note {
+                        eprintln!("{note}");
+                    }
+                    print_out(&html)?
+                }
                 _ => print_out(&flat)?,
             }
             return Ok(());
@@ -242,8 +248,13 @@ fn main() -> Result<()> {
             .out
             .clone()
             .unwrap_or_else(|| export::default_path(src, format));
-        export::write(src, &dest, format, &config.transclude, &page)?;
+        // The math note (`export::write`) goes to stderr with the path, so
+        // the export still composes in a script.
+        let note = export::write(src, &dest, format, &config.transclude, &page)?;
         eprintln!("{}", dest.display());
+        if let Some(note) = note {
+            eprintln!("{note}");
+        }
         return Ok(());
     }
 
