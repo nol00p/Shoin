@@ -1234,16 +1234,12 @@ impl App {
                 self.theme = Theme::from_config(&new.theme).unwrap_or_default();
                 self.keymap = keymap;
                 let was_mouse = self.config.input.mouse;
-                let was_math = self.config.markdown.math;
                 self.config = new;
-                // Every open document, not only the current one: a split pane
-                // shows another document's block kinds too.
-                if self.config.markdown.math != was_math {
-                    let math = self.config.markdown.math;
-                    for doc in &mut self.docs {
-                        doc.blocks = BlockCache::build(&doc.buffer, math, self.config.editor.tab_width);
-                    }
-                }
+                // `[markdown] math` or `tab_width` may have changed: every
+                // document's kinds are rebuilt under the new values, and the
+                // active set widened over the blocks they now hold, before
+                // the next frame rather than at the next key.
+                self.refresh_blocks();
                 self.clipboard.set_background(self.config.editor.clipboard_background);
                 // A reload re-reads the file, which knows nothing about `--zen`
                 // or a `:zen` toggle — put those back on top of it.

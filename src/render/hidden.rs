@@ -112,7 +112,14 @@ pub fn math_blocks(blocks: &BlockCache) -> &[Range<usize>] {
 
 /// The closed display math block holding `line`, if there is one: a binary
 /// search of `math_blocks`.
+///
+/// Every line of a block is a math line, so any other line is turned away by
+/// its kind before the blocks are looked for: typing prose, which drops them
+/// at each edit, never finds them again.
 pub fn math_block_at(blocks: &BlockCache, line: usize) -> Option<Range<usize>> {
+    if blocks.kinds.get(line) != Some(&BlockKind::MathBlock) {
+        return None;
+    }
     let found = math_blocks(blocks);
     let i = found.partition_point(|b| b.end <= line);
     found.get(i).filter(|b| b.start <= line).cloned()

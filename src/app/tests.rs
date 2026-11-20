@@ -8161,5 +8161,52 @@ fn closed_block_ranges_are_kept_with_the_kinds() {
     // A blank line ends a block: it is no longer closed.
     feed(&mut app, "o");
     esc(&mut app);
+    assert!(app.blocks.closed_math().is_none(), "the cursor's blank line is not math");
+    feed(&mut app, "k");
     assert_eq!(app.blocks.closed_math(), Some(&[][..]));
+}
+
+// ── #77 fix round 2 ─────────────────────────────────────────────────────
+
+/// Turning `[markdown] math` on by saving the watched config, with the
+/// cursor on a block's opening line and no key pressed, shows the whole
+/// block raw on the next frame: the reload widens the active set over the
+/// block it just made, rather than leaving the one-line set of a math-off
+/// document to conceal the body and closer until the next input.
+#[test]
+fn a_config_reload_that_enables_math_widens_the_active_set() {
+    let mut cfg = Config::default();
+    cfg.markdown.math = false;
+    let mut app = app_with_config(MATH_DOC, cfg);
+    app.buffer.cursor = Cursor::new(2, 0);
+    app.sync_after_input();
+    assert_eq!((app.active.start, app.active.end), (2, 2), "math off: one line");
+
+    let conf = two_files().join("shoin.conf");
+    std::fs::write(&conf, "[markdown]\nmath = true\n").unwrap();
+    app.watcher = ConfigWatcher::new(Some(conf)).unwrap();
+    app.reload_config();
+    app.refresh_blocks(); // what the event loop does before the frame
+    assert!(app.config.markdown.math);
+    assert_eq!((app.active.start, app.active.end), (2, 5), "the whole block, raw");
+    let rows = screen_of(&mut app, 60, 20);
+    assert!(rows.iter().any(|r| r.contains("x + y")), "the body shows raw: {rows:#?}");
+}
+
+/// Typing prose away from any math block never looks for the blocks: the
+/// active set rejects a line that is not math by its kind, so the ranges
+/// dropped by an edit are not rebuilt for every key.
+#[test]
+#[allow(clippy::single_range_in_vec_init)] // block ranges, not a range to expand
+fn typing_prose_does_not_rebuild_the_block_ranges() {
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(0, 0);
+    feed(&mut app, "ihello world");
+    assert!(app.blocks.closed_math().is_none(), "never looked for");
+    esc(&mut app);
+    feed(&mut app, "j");
+    assert!(app.blocks.closed_math().is_none(), "the blank line is not math either");
+    feed(&mut app, "j");
+    assert_eq!(app.blocks.closed_math(), Some(&[2..6][..]), "a math line looks them up");
+    assert_eq!((app.active.start, app.active.end), (2, 5));
 }
