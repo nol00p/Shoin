@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+**Editing**
+
+- `:42` goes to line 42 and `:$` to the last line. Like `42G`, it opens a
+  fold it lands in and puts the line on top in read-only mode (#176).
+- `G`, `gg`, `42G`, `:42`, `H`, `M` and `L` keep the cursor's column, as
+  `j` and `k` do, and so do `dd` and `>>` / `<<`: Neovim's default. They
+  went to column 0 or to the first non-blank. Undo and redo put the cursor
+  back where Neovim does, a column remembered on a tab is the tab's last
+  cell, and the cursor never lands on a combining accent (#176).
+
 **Math**
 
 - HTML export shows math as MathML, drawn by the browser with no script,
