@@ -317,7 +317,12 @@ impl<'a> Parser<'a> {
                 }
                 let replacement = symbol(name);
                 if replacement.is_empty() {
-                    return Some(Atom::text(&one_line(&format!("\\{name}"))));
+                    let arguments = self.rest;
+                    while self.peek() == Token::Char('{') {
+                        self.raw_group()?;
+                    }
+                    let arguments = &arguments[..arguments.len() - self.rest.len()];
+                    return Some(Atom::text(&one_line(&format!("\\{name}{arguments}"))));
                 }
                 return Some(Atom::text(replacement));
             }
