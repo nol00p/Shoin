@@ -23,6 +23,20 @@ $$
 \sum_{k=0}^{\infty} \frac{x^k}{k!} = e^x
 $$
 
+The quadratic formula has a square root in the numerator.
+
+$$
+x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}
+$$
+
+Letter scripts can use Unicode.
+
+$$
+e^x \quad x^{ab} \quad e^{\alpha t} \quad A^T \quad x_\beta
+$$
+
+Inline formulas can use the same scripts, as in $e^x$ and $x_\beta$.
+
 A matrix:
 
 $$

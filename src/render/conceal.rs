@@ -445,6 +445,10 @@ impl ConcealMap {
 }
 
 pub(super) fn render_latex(input: &str) -> String {
+    render_latex_with_spaces(input, None)
+}
+
+fn render_latex_with_spaces(input: &str, mut math_spaces: Option<&mut Vec<usize>>) -> String {
     let mut out = String::new();
     let chars: Vec<char> = input.trim().chars().collect();
     let mut i = 0;
@@ -583,8 +587,9 @@ pub(super) fn render_latex(input: &str) -> String {
             // being typed, its `{` is just the next character.
             let mut is_braced = false;
             let mut value = String::new();
-            if let Some((group, end)) = braced(&chars, i) {
-                value = group;
+            let mut ignored_spaces = Vec::new();
+            if let Some((group, end)) = braced_raw(&chars, i) {
+                value = render_latex_with_spaces(&group, Some(&mut ignored_spaces));
                 i = end;
                 is_braced = true;
             } else if chars.get(i) == Some(&'\\') {
@@ -600,8 +605,13 @@ pub(super) fn render_latex(input: &str) -> String {
 
             // Convert to Unicode scripts only if every character in the group has a script form.
             // Otherwise, keep the marker and value as written (e.g. F_z -> F_z, e^{i\pi} -> e^{iπ}).
+            // Ignore source math whitespace for conversion while preserving it in the fallback.
+            let mut ignored_spaces = ignored_spaces.into_iter().peekable();
             let mapped: Option<String> = value
-                .chars()
+                .char_indices()
+                .filter_map(|(offset, c)| {
+                    if ignored_spaces.next_if_eq(&offset).is_some() { None } else { Some(c) }
+                })
                 .map(|c| if superscript { superscript_char(c) } else { subscript_char(c) })
                 .collect();
 
@@ -618,6 +628,11 @@ pub(super) fn render_latex(input: &str) -> String {
                 }
             }
         } else {
+            if ch.is_ascii_whitespace() {
+                if let Some(spaces) = &mut math_spaces {
+                    spaces.push(out.len());
+                }
+            }
             out.push(ch);
         }
     }
@@ -1167,7 +1182,7 @@ mod tests {
         );
         assert_eq!(
             shown("$$ \\nabla \\times \\vec{F} = \\begin{vmatrix} \\hat{i} & \\hat{j} & \\hat{k} \\\\ \\partial_x & \\partial_y & \\partial_z \\\\ F_x & F_y & F_z \\end{vmatrix} $$"),
-            "∇ × F⃗ = | î  ĵ  k̂ │ ∂ₓ  ∂ᵧ  ∂_z │ Fₓ  Fᵧ  F_z |"
+            "∇ × F⃗ = | î  ĵ  k̂ │ ∂ₓ  ∂_y  ∂_z │ Fₓ  F_y  F_z |"
         );
         assert_eq!(shown("$\\frac{a+b}{c}$"), "(a+b)⁄c");
         assert_eq!(shown("$\\sqrt{x+1}$"), "√(x+1)");
@@ -1175,6 +1190,32 @@ mod tests {
         assert_eq!(shown("$e^{i\\pi}$"), "e^{iπ}");
         assert_eq!(shown("$\\left( x \\right)$"), "( x )");
         assert_eq!(shown("$\\phi \\neq \\varphi$"), "ϕ ≠ φ");
+    }
+
+    #[test]
+    fn inline_letter_scripts() {
+        for (source, expected) in [
+            (r"$e^x$", "eˣ"),
+            (r"$x^{ab}$", "xᵃᵇ"),
+            (r"$x^q$", "x^q"),
+            (r"$x^{aq}$", "x^{aq}"),
+            (r"$x_y$", "x_y"),
+            (r"$A^T$", "Aᵀ"),
+            (r"$x_\beta$", "xᵦ"),
+            (r"$x^{\alpha\beta\gamma\delta\epsilon\theta\iota\phi\chi}$", "xᵅᵝᵞᵟᵋᶿᶥᵠᵡ"),
+            (r"$x_{\beta\gamma\rho\phi\chi}$", "xᵦᵧᵨᵩᵪ"),
+        ] {
+            assert_eq!(shown(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn inline_script_command_separator() {
+        assert_eq!(shown(r"$e^{\alpha t}$"), "eᵅᵗ");
+        assert_eq!(shown(r"$x^{a b}$"), "xᵃᵇ");
+        assert_eq!(shown(r"$x^{a q}$"), "x^{a q}");
+        assert_eq!(shown(r"$x^{a\,b}$"), "x^{a b}");
+        assert_eq!(shown(r"$\alpha t$"), "α t");
     }
 
     #[test]

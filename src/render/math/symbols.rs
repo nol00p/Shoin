@@ -165,7 +165,18 @@ pub(in crate::render) fn superscript_char(ch: char) -> Option<char> {
         '0' => Some('⁰'), '1' => Some('¹'), '2' => Some('²'), '3' => Some('³'), '4' => Some('⁴'),
         '5' => Some('⁵'), '6' => Some('⁶'), '7' => Some('⁷'), '8' => Some('⁸'), '9' => Some('⁹'),
         '+' => Some('⁺'), '-' => Some('⁻'), '=' => Some('⁼'), '(' => Some('⁽'), ')' => Some('⁾'),
-        'n' => Some('ⁿ'), 'i' => Some('ⁱ'), _ => None,
+        'a' => Some('ᵃ'), 'b' => Some('ᵇ'), 'c' => Some('ᶜ'), 'd' => Some('ᵈ'), 'e' => Some('ᵉ'),
+        'f' => Some('ᶠ'), 'g' => Some('ᵍ'), 'h' => Some('ʰ'), 'i' => Some('ⁱ'), 'j' => Some('ʲ'),
+        'k' => Some('ᵏ'), 'l' => Some('ˡ'), 'm' => Some('ᵐ'), 'n' => Some('ⁿ'), 'o' => Some('ᵒ'),
+        'p' => Some('ᵖ'), 'r' => Some('ʳ'), 's' => Some('ˢ'), 't' => Some('ᵗ'), 'u' => Some('ᵘ'),
+        'v' => Some('ᵛ'), 'w' => Some('ʷ'), 'x' => Some('ˣ'), 'y' => Some('ʸ'), 'z' => Some('ᶻ'),
+        'A' => Some('ᴬ'), 'B' => Some('ᴮ'), 'D' => Some('ᴰ'), 'E' => Some('ᴱ'), 'G' => Some('ᴳ'),
+        'H' => Some('ᴴ'), 'I' => Some('ᴵ'), 'J' => Some('ᴶ'), 'K' => Some('ᴷ'), 'L' => Some('ᴸ'),
+        'M' => Some('ᴹ'), 'N' => Some('ᴺ'), 'O' => Some('ᴼ'), 'P' => Some('ᴾ'), 'R' => Some('ᴿ'),
+        'T' => Some('ᵀ'), 'U' => Some('ᵁ'), 'V' => Some('ⱽ'), 'W' => Some('ᵂ'),
+        'α' => Some('ᵅ'), 'β' => Some('ᵝ'), 'γ' => Some('ᵞ'), 'δ' => Some('ᵟ'),
+        'ϵ' | 'ε' => Some('ᵋ'), 'θ' => Some('ᶿ'), 'ι' => Some('ᶥ'),
+        'ϕ' | 'φ' => Some('ᵠ'), 'χ' => Some('ᵡ'), _ => None,
     }
 }
 
@@ -177,7 +188,9 @@ pub(in crate::render) fn subscript_char(ch: char) -> Option<char> {
         'a' => Some('ₐ'), 'e' => Some('ₑ'), 'h' => Some('ₕ'), 'i' => Some('ᵢ'), 'j' => Some('ⱼ'),
         'k' => Some('ₖ'), 'l' => Some('ₗ'), 'm' => Some('ₘ'), 'n' => Some('ₙ'), 'o' => Some('ₒ'),
         'p' => Some('ₚ'), 'r' => Some('ᵣ'), 's' => Some('ₛ'), 't' => Some('ₜ'), 'u' => Some('ᵤ'),
-        'v' => Some('ᵥ'), 'x' => Some('ₓ'), 'y' => Some('ᵧ'), _ => None,
+        'v' => Some('ᵥ'), 'x' => Some('ₓ'),
+        'β' => Some('ᵦ'), 'γ' => Some('ᵧ'), 'ρ' => Some('ᵨ'),
+        'ϕ' | 'φ' => Some('ᵩ'), 'χ' => Some('ᵪ'), _ => None,
     }
 }
 
