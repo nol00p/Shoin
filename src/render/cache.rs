@@ -410,12 +410,15 @@ impl RenderCache {
 
         // A closed display block is laid out unless it is shown raw: the
         // active set touches it (and then holds all of it, `App::active_set`),
-        // or a closed fold hides any of it, which folds it as text.
+        // or a closed fold hides any of it, which folds it as text. Only on
+        // kinds built for this text: kinds left over from another revision
+        // (a document changed before `App::refresh_blocks` reached it) could
+        // name a block that is no longer closed, and hide its lines.
         let folds = doc.folds_in(pane);
         self.folded = hidden::of(folds, &[]);
         self.laid_out.clear();
-        if conceal_on {
-            for b in hidden::math_blocks(&doc.blocks, &doc.buffer) {
+        if conceal_on && doc.blocks.revision == doc.buffer.revision {
+            for b in hidden::math_blocks(&doc.blocks).iter().cloned() {
                 let active = current && app.active.start < b.end && app.active.end >= b.start;
                 if !active && self.folded.count_in(b.clone()) == 0 && self.lay_out(app, b.clone()) {
                     self.laid_out.push(b);

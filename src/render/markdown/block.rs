@@ -236,6 +236,16 @@ pub struct BlockCache {
     /// tabbed line is, so which item the line is in: changing it means a
     /// rebuild too.
     pub tab_width: usize,
+    /// Whether a display math block is still open leaving the last line: the
+    /// carry after it, which no entry of `carry` holds. Kept so that telling
+    /// a block closed on the last line from one left open there needs no
+    /// second read of that line.
+    pub math_open_at_end: bool,
+    /// The closed display math blocks (`render::hidden::math_blocks`), found
+    /// on the first lookup after the kinds change and kept until they change
+    /// again: a cursor move looks a block up in this list rather than walking
+    /// the kinds.
+    pub(crate) closed_math: std::cell::OnceCell<Vec<std::ops::Range<usize>>>,
 }
 
 impl BlockCache {
@@ -270,7 +280,16 @@ impl BlockCache {
             revision: buffer.revision,
             math,
             tab_width,
+            math_open_at_end: matches!(cur.open, Open::InMath),
+            closed_math: Default::default(),
         }
+    }
+
+    /// The closed display blocks as last found, or `None` when they have not
+    /// been looked for since the kinds last changed.
+    #[cfg(test)]
+    pub fn closed_math(&self) -> Option<&[std::ops::Range<usize>]> {
+        self.closed_math.get().map(Vec::as_slice)
     }
 
     /// The state entering `line` of `buffer`, classified from the top.
@@ -306,6 +325,8 @@ impl BlockCache {
         // rebuilding there made every edit to a note's title cost the whole
         // document.
         let start = edited.saturating_sub(1);
+        // Whatever the scan changes, the closed blocks are found again.
+        self.closed_math.take();
 
         // No valid entering state to resume from — rebuild wholesale.
         if start >= self.carry.len() {
@@ -390,8 +411,16 @@ impl BlockCache {
                     }
                 }
             }
+            // Leaving the last line: the state no entry holds. A scan that
+            // stops earlier left the lines below as they were, so it too.
+            if i + 1 == n {
+                self.math_open_at_end = matches!(next.open, Open::InMath);
+            }
             cur = next;
             i += 1;
+        }
+        if n == 0 {
+            self.math_open_at_end = false;
         }
         self.revision = buffer.revision;
         last

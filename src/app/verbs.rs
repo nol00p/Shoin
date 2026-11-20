@@ -228,11 +228,19 @@ impl App {
         let fresh = self.blocks.revision == self.buffer.revision;
         let laid_out = self.config.layout.conceal && self.buffer.syntax == crate::text::buffer::Syntax::Markdown;
         if fresh && laid_out {
-            let block = |line| crate::render::hidden::math_block_at(&self.blocks, &self.buffer, line);
-            if let Some(b) = block(set.start) {
+            // Binary searches of the blocks kept with the kinds: a cursor move
+            // does not walk the block it is in.
+            let block = |line| crate::render::hidden::math_block_at(&self.blocks, line);
+            let first = block(set.start);
+            // A cursor alone (or a selection within one block) needs one.
+            let last = match &first {
+                Some(b) if b.contains(&set.end) => first.clone(),
+                _ => block(set.end),
+            };
+            if let Some(b) = first {
                 set.start = b.start;
             }
-            if let Some(b) = block(set.end) {
+            if let Some(b) = last {
                 set.end = b.end - 1;
             }
         }
@@ -267,6 +275,8 @@ impl App {
         // Built here, not by `refresh_blocks`: both buffers are at revision 0,
         // which it would take to mean nothing changed.
         self.blocks = BlockCache::build(&self.buffer, self.config.markdown.math, self.config.editor.tab_width);
+        // Widened over a display block the cursor starts on, as at startup.
+        self.active = self.active_set(None);
     }
 
     /// Turn zen mode on or off, remembering what it hid so leaving it restores

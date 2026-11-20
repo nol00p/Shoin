@@ -50,13 +50,28 @@ impl App {
                 // A click focuses the pane it landed in first — otherwise it
                 // would be mapped through the geometry of a different one.
                 let pane_before = self.focus_pane;
+                let shown = (self.current(), self.active.clone());
                 if let Some(id) = frame::pane_at(self, area, m.column, m.row) {
                     self.focus_pane_id(id);
                     if let Some(t) = self.tree.as_mut() {
                         t.focused = false;
                     }
                 }
-                if let Some(cursor) = frame::locate_click(self, area, m.column, m.row) {
+                // Focus restores the pane's own cursor, and with it the active
+                // set, which can show a display block raw that was laid out
+                // over fewer rows a moment ago (#77). The click is read against
+                // the rows that were on screen: the previous active set on the
+                // same document, none on another (a pane without the cursor's
+                // document reveals nothing).
+                let focused = std::mem::take(&mut self.active);
+                self.active = match (self.focus_pane == pane_before, self.current() == shown.0) {
+                    (true, _) => focused.clone(),
+                    (false, true) => shown.1,
+                    (false, false) => crate::render::conceal::ActiveSet::none(),
+                };
+                let located = frame::locate_click(self, area, m.column, m.row);
+                self.active = focused;
+                if let Some(cursor) = located {
                     self.buffer.cursor = cursor;
                     // Typing goes on here as a new session (`focus_pane_id`):
                     // its undo step starts at the click.

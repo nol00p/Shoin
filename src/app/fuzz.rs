@@ -197,8 +197,16 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         app.refresh_blocks();
         app.refresh_focus();
         let fresh = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-        if fresh.kinds != app.blocks.kinds || fresh.carry != app.blocks.carry {
+        if fresh.kinds != app.blocks.kinds
+            || fresh.carry != app.blocks.carry
+            || fresh.math_open_at_end != app.blocks.math_open_at_end
+        {
             return Err(format!("step {step}: block cache differs from a rebuild\ntext: {:?}", text(&app)));
+        }
+        // The closed math blocks kept with the kinds are the ones a rebuild finds.
+        let (kept, rebuilt) = (crate::render::hidden::math_blocks(&app.blocks), crate::render::hidden::math_blocks(&fresh));
+        if kept != rebuilt {
+            return Err(format!("step {step}: kept math blocks {kept:?}, a rebuild finds {rebuilt:?}\ntext: {:?}", text(&app)));
         }
         let c = app.buffer.cursor;
         if c.line >= app.buffer.line_count().max(1) || c.col > app.buffer.line_len(c.line) {
@@ -268,7 +276,7 @@ fn math_invariants(app: &App) -> Result<(), String> {
     let markdown = app.buffer.syntax == crate::text::buffer::Syntax::Markdown;
     let fresh = app.blocks.revision == app.buffer.revision;
     let a = &app.active;
-    let blocks = crate::render::hidden::math_blocks(&app.blocks, &app.buffer);
+    let blocks = crate::render::hidden::math_blocks(&app.blocks).to_vec();
     if fresh && markdown && app.config.layout.conceal && !app.view {
         for b in &blocks {
             let touches = a.start < b.end && a.end >= b.start;
