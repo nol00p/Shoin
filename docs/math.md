@@ -206,9 +206,8 @@ With `export_follows_settings = true` and `math = false`, `txt`, `html` and
 - A block inside a closed fold stays folded; opening the fold shows it laid
   out.
 - In a read-only view (`shoin -R`, `:view`) a layout taller than the pane
-  can't be scrolled through: the view stops with its first rows at the top,
-  and the lines below it can't be reached. Press `i` to edit, where the
-  cursor walks into the block, or make the window taller.
+  scrolls a row at a time like any other text, so `j`, `Ctrl-d` and `G`
+  reach its last row and the lines below it.
 - A script that can't be written in Unicode letters keeps its `^{…}` or
   `_{…}`, with the symbols inside converted: `x^{\mathbf{\alpha t}}`
   shows `x^{α t}`.
