@@ -220,6 +220,52 @@ fn a_whole_kitty_picture_is_put_without_a_crop() {
     std::fs::remove_dir_all(&d).ok();
 }
 
+/// Two panes showing the same picture: moving focus between them moves no
+/// picture, so it sends nothing. The focused pane is drawn last, which used
+/// to swap the two placements and re-place (Kitty) or re-send (iTerm2) both
+/// on every `<C-w>w`.
+#[test]
+fn moving_focus_between_two_panes_repaints_no_picture() {
+    let d = std::env::temp_dir().join(format!("shoin-paint-focus-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let mut png = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89,
+    ];
+    png[16..20].copy_from_slice(&200u32.to_be_bytes());
+    png[20..24].copy_from_slice(&100u32.to_be_bytes());
+    std::fs::write(d.join("photo.png"), &png).unwrap();
+    std::fs::write(d.join("note.md"), "top\n![[photo.png]]\nafter\n").unwrap();
+    for protocol in [crate::image::Protocol::Kitty, crate::image::Protocol::Iterm2] {
+        let mut app = App::new(Config::default(), Some(d.join("note.md")), None).unwrap();
+        app.embed_mode = crate::transclude::Mode::Short;
+        app.image_protocol = protocol;
+        app.term_size = (120, 30);
+        app.split_pane(true);
+        let paint = |app: &mut App| {
+            app.refresh_blocks();
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+            t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+            let places = app.visible_pictures();
+            let out = app.picture_bytes(&places);
+            *app.painted.borrow_mut() = (places.clone(), app.term_size);
+            (places, out)
+        };
+        let (places, out) = paint(&mut app);
+        assert_eq!(places.len(), 2, "one picture per pane: {places:?}");
+        assert!(out.is_some(), "the first paint draws them");
+        for _ in 0..2 {
+            app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+            feed(&mut app, "w");
+            let (again, out) = paint(&mut app);
+            assert_eq!(again.len(), 2, "{protocol:?}: {again:?}");
+            assert_eq!(out, None, "{protocol:?}: focus moved, no picture did");
+        }
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
 /// Read-only mode refuses every way of changing the text, and says so,
 /// while moving, yanking and searching still work.
 #[test]
@@ -8671,4 +8717,26 @@ fn read_only_split_keeps_the_row_in_a_tall_layout() {
     screen_of(&mut app, READ_W, READ_H);
     assert_eq!(app.layout.ids().len(), 2);
     assert_eq!(app.scroll_hint(), 5, "the new pane");
+}
+
+/// A second `open_unnamed` replaces the block kinds at the same revision and
+/// the same settings. The row index has to follow: here the table took no
+/// spacing between its rows, and the prose that replaced it does.
+#[test]
+fn a_second_unnamed_buffer_reindexes_its_rows() {
+    let mut app = app_with("");
+    app.config.markdown.tables = false;
+    app.config.layout.line_spacing = 1;
+    app.open_unnamed(Buffer::unnamed(b"| a | b |\n|---|---|\n| 1 | 2 |\n".to_vec()).unwrap());
+    let table = screen_of(&mut app, 80, 20);
+    let starts: Vec<usize> = (0..3).map(|l| app.cache.borrow().locate(l, 0).0).collect();
+    assert_eq!(starts, [0, 1, 2], "no spacing inside a table: {table:#?}");
+
+    app.open_unnamed(Buffer::unnamed(b"alpha\nbravo\ncharlie\n".to_vec()).unwrap());
+    let prose = screen_of(&mut app, 80, 20);
+    let cache = app.cache.borrow();
+    let starts: Vec<usize> = (0..3).map(|l| cache.locate(l, 0).0).collect();
+    assert_eq!(starts, [0, 2, 4], "a spacer row after each prose line: {prose:#?}");
+    let at = |w: &str| prose.iter().position(|r| r.contains(w)).unwrap_or_else(|| panic!("{w}: {prose:#?}"));
+    assert_eq!((at("bravo"), at("charlie")), (at("alpha") + 2, at("alpha") + 4), "{prose:#?}");
 }

@@ -246,6 +246,21 @@ pub struct BlockCache {
     /// again: a cursor move looks a block up in this list rather than walking
     /// the kinds.
     pub(crate) closed_math: std::cell::OnceCell<Vec<std::ops::Range<usize>>>,
+    /// Which classification this is: a number no other build or rescan in
+    /// the process has, taken by every [`BlockCache::build_from`] and
+    /// [`BlockCache::invalidate_from`]. The revision cannot say that: a
+    /// buffer swapped for another at the same revision
+    /// (`App::open_unnamed`) gets new kinds under the same number. The render
+    /// cache keys on this instead.
+    pub generation: u64,
+}
+
+/// The next [`BlockCache::generation`]. Process-wide, so two documents'
+/// caches never share one either.
+fn next_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl BlockCache {
@@ -282,6 +297,7 @@ impl BlockCache {
             tab_width,
             math_open_at_end: matches!(cur.open, Open::InMath),
             closed_math: Default::default(),
+            generation: next_generation(),
         }
     }
 
@@ -327,6 +343,7 @@ impl BlockCache {
         let start = edited.saturating_sub(1);
         // Whatever the scan changes, the closed blocks are found again.
         self.closed_math.take();
+        self.generation = next_generation();
 
         // No valid entering state to resume from — rebuild wholesale.
         if start >= self.carry.len() {

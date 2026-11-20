@@ -232,6 +232,11 @@ pub struct RenderCache {
     /// line. `None` means the entries and the document may have diverged, which
     /// is the only state that has to pay for the verification walk.
     verified: Option<u64>,
+    /// The [`BlockCache::generation`](crate::render::markdown::block::BlockCache::generation)
+    /// the entries were last brought in step with. It moves with the
+    /// revision on an edit, but also without it when the classification is
+    /// replaced whole (`App::open_unnamed`), and then no other sign says so.
+    blocks_seen: u64,
     /// `App::disk_epoch` when the embed lines were last expanded. Their
     /// expansion reads the notes they name from disk, so it goes stale without
     /// the line itself changing.
@@ -263,8 +268,9 @@ struct IndexKey {
     revision: u64,
     /// Bumped by every entry built, so by every change to one.
     builds: u64,
-    /// The block kinds: what is a display block, and line spacing.
-    blocks: (u64, bool, usize),
+    /// The block kinds' generation: what is a display block, and line
+    /// spacing. Every rebuild or rescan of them takes a new one.
+    blocks: u64,
     current: bool,
     active: ActiveSet,
     conceal: bool,
@@ -323,9 +329,10 @@ impl RenderCache {
         }
 
         // Lines whose text may differ from what their entry was built from.
-        // At an unchanged revision there are none, unless the line count says
-        // the buffer itself was swapped for one at the same revision (piped
-        // text replacing the blank buffer starts at 0 too): then all of them.
+        // At an unchanged revision there are none, unless the buffer itself
+        // was swapped for one at the same revision (piped text replacing the
+        // blank buffer starts at 0 too, and so does a second pipe): then all
+        // of them. The line count says so when it changed.
         let mut suspect = 0..0;
         if self.revision != doc.buffer.revision {
             suspect = self.splice(doc);
@@ -334,7 +341,20 @@ impl RenderCache {
         } else if self.entries.len() != n {
             suspect = 0..n;
             self.seen = None;
+        } else if self.blocks_seen != doc.blocks.generation {
+            // The block kinds moved without the revision: the walk below
+            // checks every entry's kind again. The text moved too only if the
+            // buffer was swapped, and a swapped-in rope shares no chunk with
+            // the one the entries were built from; a reclassification of the
+            // same text (kinds caught up after a sync that ran ahead of them)
+            // keeps it, and costs no text comparison.
+            if !self.seen.as_ref().is_some_and(|old| shares_chunks(old, &doc.buffer.rope)) {
+                suspect = 0..n;
+                self.seen = None;
+            }
+            self.verified = None;
         }
+        self.blocks_seen = doc.blocks.generation;
 
         // RULE 1, and it is worth stating why it is safe rather than only that
         // it is fast. An entry is a function of the line's text, its block kind,
@@ -388,7 +408,7 @@ impl RenderCache {
             lines: n,
             revision: doc.buffer.revision,
             builds: self.builds,
-            blocks: (doc.blocks.revision, doc.blocks.math, doc.blocks.tab_width),
+            blocks: doc.blocks.generation,
             current: std::ptr::eq(doc, &app.docs[app.current()]),
             active: app.active.clone(),
             conceal: app.config.layout.conceal,
@@ -1527,5 +1547,25 @@ mod tests {
         assert_eq!(cache.entry(2).unwrap().block, BlockKind::Paragraph);
     }
 
+    /// A sync that runs between an edit and `refresh_blocks` sees the old
+    /// block kinds at the new revision. The kinds that catch up afterwards,
+    /// at the same revision, still reach the entries and the row index: here
+    /// an opened fence turns the prose below it into code.
+    #[test]
+    fn kinds_that_catch_up_at_the_same_revision_reach_the_entries() {
+        let mut app = app_with("alpha\nbravo\ncharlie\n");
+        sync(&mut app);
+        app.buffer.insert_str(Cursor::new(0, 0), "```\n");
+        // Ahead of the kinds: they still describe the text before the edit.
+        app.cache.borrow_mut().sync(&app, MEASURE);
+        let builds = sync(&mut app);
+        let cache = app.cache.borrow();
+        let block = &cache.entry(2).unwrap().block;
+        assert!(matches!(block, BlockKind::FenceBody { .. }), "{block:?}");
+        assert_eq!(block, &app.blocks.kinds[2]);
+        drop(cache);
+        assert_eq!(sync(&mut app), builds, "and settles there");
+    }
 }
+
 
