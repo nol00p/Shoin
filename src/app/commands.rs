@@ -98,6 +98,21 @@ pub(crate) fn canonical(table: &[(&'static str, &[&str])], typed: &str) -> Optio
         .map(|(name, _)| *name)
 }
 
+/// The motion a typed line number stands for: `:$` is `G`, `:N` is `NG`
+/// (counted from 1, so `:0` is the first line too, and a number too big to
+/// hold is past the end). Anything else, a sign, a range or a letter after
+/// the digits, is no line number.
+fn line_motion(cmd: &str) -> Option<Motion> {
+    if cmd == "$" {
+        return Some(Motion::BufferEnd);
+    }
+    if cmd.is_empty() || !cmd.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: usize = cmd.parse().unwrap_or(usize::MAX);
+    Some(Motion::GotoLine(n.saturating_sub(1)))
+}
+
 impl App {
     pub(crate) fn run_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
@@ -106,6 +121,20 @@ impl App {
             None => (cmd, ""),
         };
         if name.is_empty() {
+            return;
+        }
+        // `:42` and `:$`: a line, as `42G` and `G`, through the same motion
+        // so a fold opens, a block shows its source and read-only mode puts
+        // the line on top exactly as the keys do. Then on its first
+        // non-blank, as vim's `:42` is (`42G` here keeps column 0). Not
+        // read-only mode's `:$`: it scrolls to the end, and the cursor stays
+        // where the view's top row parks it.
+        if let Some(m) = line_motion(cmd) {
+            self.run(Command::bare(Action::Move(m)));
+            if !(self.view && m == Motion::BufferEnd) {
+                let col = self.first_non_blank(self.buffer.cursor.line);
+                self.buffer.cursor.set_col(col);
+            }
             return;
         }
         // NOT a forced `:e`: this editor spends `:e!` on the config. A command

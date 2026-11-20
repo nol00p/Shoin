@@ -8740,3 +8740,96 @@ fn a_second_unnamed_buffer_reindexes_its_rows() {
     let at = |w: &str| prose.iter().position(|r| r.contains(w)).unwrap_or_else(|| panic!("{w}: {prose:#?}"));
     assert_eq!((at("bravo"), at("charlie")), (at("alpha") + 2, at("alpha") + 4), "{prose:#?}");
 }
+
+/// Fifty lines, each indented by its number modulo four, so a line's first
+/// non-blank column is not 0.
+fn numbered_lines() -> String {
+    (1..=50).map(|i| format!("{}line {i}\n", " ".repeat(i % 4))).collect()
+}
+
+/// `:N` goes to line N, counted from 1, on its first non-blank, as `NG`
+/// does; `:0` and `:1` to the first line, a number past the end and `:$`
+/// to the last. Spaces around the number are allowed.
+#[test]
+fn colon_number_goes_to_that_line() {
+    let mut app = app_with(&numbered_lines());
+    cmd(&mut app, ":30");
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (29, 2));
+    assert!(app.flash.as_ref().is_none_or(|f| !matches!(f.kind, FlashKind::Error)), "{:?}", app.flash.as_ref().map(|f| &f.text));
+    for (typed, line) in [(":0", 0), (":1", 0), (":999", 49), (":$", 49), (": 7 ", 6), (":30", 29)] {
+        cmd(&mut app, typed);
+        assert_eq!(app.buffer.cursor.line, line, "{typed}");
+        assert_eq!(app.buffer.cursor.col, app.first_non_blank(line), "{typed}");
+        assert_eq!(app.mode, Mode::Normal, "{typed}");
+    }
+    // Far past what a usize holds: still the last line.
+    cmd(&mut app, ":99999999999999999999999999");
+    assert_eq!(app.buffer.cursor.line, 49);
+    // The same place `NG^` goes.
+    let mut other = app_with(&numbered_lines());
+    feed(&mut other, "30G^");
+    let mut app = app_with(&numbered_lines());
+    cmd(&mut app, ":30");
+    assert_eq!(app.buffer.cursor, other.buffer.cursor);
+}
+
+/// Anything else that starts with a digit or a sign is still not a
+/// command: no ranges, no offsets.
+#[test]
+fn colon_number_with_more_after_it_is_not_a_command() {
+    for typed in ["3x", "-2", "+1", "1,5", "$x", "3 4"] {
+        let mut app = app_with(&numbered_lines());
+        feed(&mut app, "5G");
+        cmd(&mut app, &format!(":{typed}"));
+        assert_eq!(app.buffer.cursor.line, 4, ":{typed} moved the cursor");
+        let flash = app.flash.as_ref().expect(typed);
+        assert!(matches!(flash.kind, FlashKind::Error), ":{typed}");
+        let said = flash.text.as_deref().unwrap_or("");
+        assert!(said.starts_with("not a command"), ":{typed}: {said}");
+    }
+}
+
+/// `:N` onto a display block's opening line shows its source, as `NG` does.
+#[test]
+fn colon_number_onto_a_math_block_reveals_it() {
+    let mut app = app_with(MATH_DOC);
+    cmd(&mut app, ":4");
+    assert_eq!(app.buffer.cursor.line, 3);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+    cmd(&mut app, ":$");
+    assert_eq!(app.active.start, app.active.end, "away again");
+}
+
+/// Read-only: `:N` puts its line on top, as `NG` does, even from inside a
+/// tall layout whose kept row puts the cursor on that very line.
+#[test]
+fn read_only_colon_number_puts_its_line_on_top() {
+    let mut app = app_with(&tall_math(12));
+    reader(&mut app);
+    feed(&mut app, "jjjjj");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!((app.scroll_hint(), app.buffer.cursor.line), (5, 2), "inside the layout, parked on its opener");
+    cmd(&mut app, ":3");
+    let screen = screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.buffer.cursor.line, 2);
+    let top = app.cache.borrow().locate(2, 0).0;
+    assert_eq!(app.scroll_hint(), top, "the layout's first row on top\n{screen:#?}");
+    let first = layout_rows(&app, 2)[0].clone();
+    assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains(&first), "{screen:#?}");
+    // An ordinary line: `after 3` is line 30.
+    cmd(&mut app, ":30");
+    let screen = screen_of(&mut app, READ_W, READ_H);
+    let top = app.cache.borrow().locate(29, 0).0;
+    assert_eq!(app.scroll_hint(), top, "{screen:#?}");
+    assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains("after 3"), "{screen:#?}");
+    assert!(app.view, "still read-only");
+    // `:$` is `G`: the end of the text, the last line on the bottom row.
+    cmd(&mut app, ":$");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.scroll_hint(), last_top(&app));
+    let mut other = app_with(&tall_math(12));
+    reader(&mut other);
+    feed(&mut other, "G");
+    screen_of(&mut other, READ_W, READ_H);
+    assert_eq!(app.buffer.cursor, other.buffer.cursor, "parked where `G` parks it");
+}

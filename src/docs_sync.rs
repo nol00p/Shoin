@@ -221,7 +221,9 @@ fn command_groups(page: &str) -> AliasGroups {
         // Force forms are checked by running the documented commands.
         let mut names = code_spans(cell).filter_map(|span| span.strip_prefix(':'))
             .filter_map(|span| span.split_whitespace().next())
-            .filter(|name| !name.ends_with('!'));
+            .filter(|name| !name.ends_with('!'))
+            // `:42` and `:$` are a line, not a name in the table.
+            .filter(|name| name.starts_with(|c: char| c.is_ascii_alphabetic()));
         if let Some(name) = names.next() {
             groups.insert((name.to_string(), names.map(str::to_string).collect()));
         }

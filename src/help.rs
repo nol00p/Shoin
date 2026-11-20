@@ -588,6 +588,7 @@ W B E :: the same, with whitespace-delimited words
 0 ^ $ :: line start · first non-blank · line end
 { } :: previous · next paragraph
 gg G :: first · last line. With a count, go to that line
+:42 :$ :: go to line 42, on its first non-blank · to the last line
 1 to 9 :: start a count; 0 can follow another digit
 H M L :: top · middle · bottom of the screen
 
@@ -595,7 +596,7 @@ H M L :: top · middle · bottom of the screen
 za :: fold or unfold here
 zc zo :: fold · unfold; zc again folds the next one out. In Visual, every fold in the selected lines
 zM zR :: fold every item and section · unfold everything
-> A folded line ends with … N lines. j k Ctrl-d Ctrl-u step over it; a search or G that lands inside opens it. dd takes the whole fold; o opens a line below it. Each pane folds on its own. Folds last until you quit and never change the file.
+> A folded line ends with … N lines. j k Ctrl-d Ctrl-u step over it; a search, G or :42 that lands inside opens it. dd takes the whole fold; o opens a line below it. Each pane folds on its own. Folds last until you quit and never change the file.
 
 ## Along the line
 f{c} t{c} :: to the next c · to just before it
