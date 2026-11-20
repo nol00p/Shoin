@@ -55,6 +55,11 @@ impl App {
         if let Some(box_) = self.overlay.get() {
             places.retain(|p| !p.overlaps(box_));
         }
+        // In screen order, not the order the panes were drawn in: the focused
+        // pane is drawn last, so moving focus between two panes that show the
+        // same pictures would reorder an unchanged frame, and `picture_bytes`
+        // would repaint it. Panes do not overlap, so the position is unique.
+        places.sort_by_key(|p| (p.y, p.x));
         places
     }
 

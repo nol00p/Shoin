@@ -84,9 +84,13 @@ pub fn render(frame: &mut Frame, app: &App) {
     // than one measure clipped in half.
     let geo = app.layout.geometry(pane_area(app, area));
     let mut caret = None;
-    for (id, rect) in &geo.panes {
-        let Some(pane) = app.layout.pane(*id) else { continue };
-        if let Some(pos) = render_pane(frame, app, pane, *rect, *id == app.focus_pane) {
+    // The focused pane last: the render cache then ends the frame with its
+    // row index, which is the one the next key's motion reads, so a pane of
+    // another width on the same document costs that key no re-parse.
+    let (focused, others): (Vec<_>, Vec<_>) = geo.panes.iter().copied().partition(|(id, _)| *id == app.focus_pane);
+    for (id, rect) in others.into_iter().chain(focused) {
+        let Some(pane) = app.layout.pane(id) else { continue };
+        if let Some(pos) = render_pane(frame, app, pane, rect, id == app.focus_pane) {
             caret = Some(pos);
         }
     }
@@ -294,8 +298,8 @@ fn render_pane(
     };
     let (cursor_row, cursor_offset) = cache.locate(cursor.line, cursor.col);
     let top = scroll_offset(
-        cursor_row,
-        cache.total_rows(),
+        view_row(app, &cache, cursor, cursor_row, app.reading_top(pane.id)),
+        scroll_end(app, doc.buffer.last_line(), &cache),
         &lay,
         &cfg.layout,
         cfg.editor.scroll_off,
@@ -1313,8 +1317,8 @@ pub fn visible_line_range(app: &App, area: Rect) -> Option<(usize, usize)> {
 
     let (cursor_row, _) = cache.locate(app.buffer.cursor.line, app.buffer.cursor.col);
     let top = scroll_offset(
-        cursor_row,
-        cache.total_rows(),
+        view_row(app, &cache, app.buffer.cursor, cursor_row, app.reading_top(app.focus_pane)),
+        scroll_end(app, app.buffer.last_line(), &cache),
         &lay,
         &cfg.layout,
         cfg.editor.scroll_off,
@@ -1389,6 +1393,135 @@ pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Curs
     let first = cache.locate(line, 0).0 == row;
     let col = if first { cursor.col } else { target.start_col };
     Some((new_top, Cursor::new(line, col.min(len))))
+}
+
+/// Where read-only mode's view starts in one pane. Kept by line, not by
+/// row, so a reflow of the lines above it (a resize) leaves the view where
+/// it was within its own line: on the same row of a laid-out block, on the
+/// same words of a wrapped line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadingTop {
+    /// The cursor parked for it: on the row's line, at the source column of
+    /// its first character, or at the start of a line whose rows have no
+    /// columns of their own (a laid-out display block's, an embed's, line
+    /// spacing's). While the cursor is still this one, the view starts here.
+    pub cursor: Cursor,
+    /// Which of the line's rows it is, line spacing's included.
+    within: usize,
+    /// For a row of the line's text, the column of the drawn text it starts
+    /// at: what finds it again once the line has wrapped another way.
+    col: Option<usize>,
+}
+
+/// The [`ReadingTop`] for a view that starts at `row`.
+fn reading_top(cache: &RenderCache, row: usize, tab: usize) -> Option<ReadingTop> {
+    let r = cache.row(row)?;
+    let line = r.line();
+    let within = row - cache.line_span(line).start;
+    let text = r.editable && !r.is_spacer();
+    let col = if text { source_col(cache, line, r.start_col, tab) } else { 0 };
+    Some(ReadingTop { cursor: Cursor::new(line, col), within, col: text.then_some(r.start_col) })
+}
+
+/// The row a [`ReadingTop`] stands for in the rows as they are now. `None`
+/// once its line takes no rows (folded away, or gone).
+fn kept_row(cache: &RenderCache, top: &ReadingTop) -> Option<usize> {
+    let line = top.cursor.line;
+    let span = cache.line_span(line);
+    if span.is_empty() {
+        return None;
+    }
+    Some(match top.col {
+        // The last row of the text starting at or before it. Not `locate`:
+        // a column where one row ends and the next starts is the end of
+        // the first one to it, as a cursor past a row's last character.
+        Some(col) => span
+            .clone()
+            .take_while(|&r| cache.row(r).is_some_and(|r| r.editable && !r.is_spacer() && r.start_col <= col))
+            .last()
+            .unwrap_or(span.start),
+        None => span.start + top.within.min(span.len() - 1),
+    })
+}
+
+/// The source column of `line`'s drawn column `display_col`, measured in
+/// cells as the line is drawn: where a click there, or a row starting
+/// there, puts the cursor.
+fn source_col(cache: &RenderCache, line: usize, display_col: usize, tab: usize) -> usize {
+    let Some(entry) = cache.entry(line) else { return 0 };
+    let len = entry.source.chars().count();
+    if !cache.is_concealed(line) {
+        return display_col.min(len);
+    }
+    let before: String = entry.cmap.display_text(&entry.source).chars().take(display_col).collect();
+    entry.cmap.source_col(&entry.source, text_width(&before, tab), tab).min(len)
+}
+
+/// The row `scroll_offset` is to keep in view: the cursor's own, except in
+/// read-only mode, where the view's top is where the reader scrolled to.
+///
+/// Read-only mode makes the cursor the top of the screen, but a display
+/// block laid out over many rows, an embed and the air of line spacing
+/// have a single cursor position for all their rows. So the top the
+/// reader scrolled to, `kept`, stands as long as the cursor is the one
+/// parked for it; a cursor moved anywhere else puts its own row on top,
+/// and so does a jump that lands on the same one (`App::forget_reading`).
+fn view_row(app: &App, cache: &RenderCache, cursor: Cursor, cursor_row: usize, kept: Option<ReadingTop>) -> usize {
+    match kept {
+        Some(top) if app.view && (top.cursor.line, top.cursor.col) == (cursor.line, cursor.col) => {
+            kept_row(cache, &top).unwrap_or(cursor_row)
+        }
+        _ => cursor_row,
+    }
+}
+
+/// The rows `scroll_offset` may scroll through. In read-only mode they end
+/// with the last line's own: the empty line after a final newline has a
+/// row too, but the cursor never stands on it, so a view that started
+/// there could not be kept. Drawing and scrolling both end here.
+fn scroll_end(app: &App, last_line: usize, cache: &RenderCache) -> usize {
+    let total = cache.total_rows();
+    if !app.view {
+        return total;
+    }
+    (cache.line_rows(last_line).1 + 1).min(total)
+}
+
+/// Read-only mode's view of the focused pane, moved: `to` gets the row the
+/// view starts at now, the last row it can start at (the one that shows
+/// the last line of the text at the bottom) and the pane's height, and
+/// answers with the row to start at, or `None` to leave the view as it
+/// is. The answer is clamped to the text. Returns the new top, and where
+/// it is kept.
+///
+/// Rows, not lines: every row is reachable, a laid-out display block's,
+/// an embed's and a wrapped line's included.
+pub fn reading_view(
+    app: &App,
+    area: Rect,
+    to: impl FnOnce(usize, usize, usize) -> Option<usize>,
+) -> Option<(usize, ReadingTop)> {
+    let cfg = &app.config;
+    let rect = focused_rect(app, area)?;
+    // No frame yet, or a pane squeezed to nothing: there is no view to move.
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    let lay = Layout::compute(&cfg.layout, rect.width, rect.height, 0);
+
+    let mut cache = app.cache.borrow_mut();
+    cache.sync(app, lay.measure);
+
+    if cache.total_rows() == 0 {
+        return None;
+    }
+    let height = (lay.height as usize).max(1);
+    let last_top = scroll_end(app, app.buffer.last_line(), &cache).saturating_sub(height);
+    let cursor = app.buffer.cursor;
+    let (cursor_row, _) = cache.locate(cursor.line, cursor.col);
+    let row = view_row(app, &cache, cursor, cursor_row, app.reading_top(app.focus_pane));
+    let top = to(row, last_top, height)?.min(last_top);
+    Some((top, reading_top(&cache, top, cfg.editor.tab_width)?))
 }
 
 /// `zt` `zz` `zb`: the focused pane's top row that puts the cursor's line at
@@ -1485,8 +1618,8 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
 
     let (cursor_row, _) = cache.locate(app.buffer.cursor.line, app.buffer.cursor.col);
     let top = scroll_offset(
-        cursor_row,
-        cache.total_rows(),
+        view_row(app, &cache, app.buffer.cursor, cursor_row, app.reading_top(app.focus_pane)),
+        scroll_end(app, app.buffer.last_line(), &cache),
         &lay,
         &cfg.layout,
         cfg.editor.scroll_off,
@@ -1565,15 +1698,7 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
         display_col = vr.end_col.saturating_sub(1).max(vr.start_col);
     }
 
-    let len = entry.source.chars().count();
-    let src_col = if concealed {
-        let cell = text_width(&display_text[..display_col.min(display_text.len())].iter().collect::<String>(), tab);
-        entry.cmap.source_col(&entry.source, cell, tab).min(len)
-    } else {
-        display_col.min(len)
-    };
-
-    Some(Cursor::new(line, src_col))
+    Some(Cursor::new(line, source_col(&cache, line, display_col, tab)))
 }
 
 /// A centered floating input for `:` commands — the spotlight box. Drawn last,

@@ -29,6 +29,7 @@ impl App {
         if let Some(pane) = self.layout.pane_mut(self.focus_pane) {
             pane.doc = i;
             pane.scroll.set(0);
+            self.reading.remove(&self.focus_pane);
             // A pane arriving at a document picks up where that document was
             // left, not where this pane was in the last one.
             pane.cursor = cursor;
@@ -96,6 +97,8 @@ impl App {
         }
         let gone = self.current();
         self.docs.remove(gone);
+        // Panes on the documents after it now show other indices.
+        self.reading.clear();
         // Every pane showing a document after the removed one shifts down; the
         // ones that were showing the removed document fall back to its
         // neighbour, which is what `min` does here.

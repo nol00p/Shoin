@@ -220,6 +220,52 @@ fn a_whole_kitty_picture_is_put_without_a_crop() {
     std::fs::remove_dir_all(&d).ok();
 }
 
+/// Two panes showing the same picture: moving focus between them moves no
+/// picture, so it sends nothing. The focused pane is drawn last, which used
+/// to swap the two placements and re-place (Kitty) or re-send (iTerm2) both
+/// on every `<C-w>w`.
+#[test]
+fn moving_focus_between_two_panes_repaints_no_picture() {
+    let d = std::env::temp_dir().join(format!("shoin-paint-focus-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let mut png = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89,
+    ];
+    png[16..20].copy_from_slice(&200u32.to_be_bytes());
+    png[20..24].copy_from_slice(&100u32.to_be_bytes());
+    std::fs::write(d.join("photo.png"), &png).unwrap();
+    std::fs::write(d.join("note.md"), "top\n![[photo.png]]\nafter\n").unwrap();
+    for protocol in [crate::image::Protocol::Kitty, crate::image::Protocol::Iterm2] {
+        let mut app = App::new(Config::default(), Some(d.join("note.md")), None).unwrap();
+        app.embed_mode = crate::transclude::Mode::Short;
+        app.image_protocol = protocol;
+        app.term_size = (120, 30);
+        app.split_pane(true);
+        let paint = |app: &mut App| {
+            app.refresh_blocks();
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+            t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+            let places = app.visible_pictures();
+            let out = app.picture_bytes(&places);
+            *app.painted.borrow_mut() = (places.clone(), app.term_size);
+            (places, out)
+        };
+        let (places, out) = paint(&mut app);
+        assert_eq!(places.len(), 2, "one picture per pane: {places:?}");
+        assert!(out.is_some(), "the first paint draws them");
+        for _ in 0..2 {
+            app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+            feed(&mut app, "w");
+            let (again, out) = paint(&mut app);
+            assert_eq!(again.len(), 2, "{protocol:?}: {again:?}");
+            assert_eq!(out, None, "{protocol:?}: focus moved, no picture did");
+        }
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
 /// Read-only mode refuses every way of changing the text, and says so,
 /// while moving, yanking and searching still work.
 #[test]
@@ -8209,4 +8255,488 @@ fn typing_prose_does_not_rebuild_the_block_ranges() {
     feed(&mut app, "j");
     assert_eq!(app.blocks.closed_math(), Some(&[2..6][..]), "a math line looks them up");
     assert_eq!((app.active.start, app.active.end), (2, 5));
+}
+
+// ------------------------------------------- read-only past a tall block
+
+/// A 20-row matrix in display math after a line of prose, then `after`
+/// lines of prose. No trailing newline.
+fn tall_math(after: usize) -> String {
+    let rows: Vec<String> = (0..20).map(|i| format!("a_{{{i}}} & b_{{{i}}}")).collect();
+    let mut t = format!("intro\n\n$$\n\\begin{{pmatrix}}\n{}\n\\end{{pmatrix}}\n$$", rows.join(" \\\\\n"));
+    for i in 0..after {
+        t.push_str(&format!("\nafter {i}"));
+    }
+    t
+}
+
+/// The size the read-only tests draw at: the text area is shorter than
+/// the 20 rows of the matrix.
+const READ_W: u16 = 60;
+const READ_H: u16 = 12;
+
+/// `app` read-only and drawn once.
+fn reader(app: &mut App) {
+    app.set_view(true);
+    app.term_size = (READ_W, READ_H);
+    screen_of(app, READ_W, READ_H);
+}
+
+/// A key, then the frame it leaves.
+fn read_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Vec<String> {
+    app.on_key(KeyEvent::new(code, mods));
+    app.sync_after_input();
+    screen_of(app, READ_W, READ_H)
+}
+
+/// The row the view would start at if it showed the end: the last row the
+/// view's top can reach, with the last line on the bottom row. The empty
+/// line after a final newline is not part of it.
+fn last_top(app: &App) -> usize {
+    let cache = app.cache.borrow();
+    let end = cache.line_rows(app.buffer.last_line()).1 + 1;
+    end - app.viewport_height()
+}
+
+/// Every row a key sequence brings to the screen in read-only mode, from
+/// the frame it starts on: `step` pressed until the view stops moving.
+fn read_through(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Vec<String> {
+    let mut seen = screen_of(app, READ_W, READ_H);
+    let mut top = app.scroll_hint();
+    for _ in 0..200 {
+        seen.extend(read_key(app, code, mods));
+        if app.scroll_hint() == top {
+            return seen;
+        }
+        top = app.scroll_hint();
+    }
+    panic!("{code:?} never stopped");
+}
+
+/// Whether `want` is drawn on one of `rows`.
+fn drawn(rows: &[String], want: &str) -> bool {
+    rows.iter().any(|r| r.contains(want))
+}
+
+/// The layout's own rows, as drawn.
+fn layout_rows(app: &App, line: usize) -> Vec<String> {
+    math_rows(app, line).into_iter().map(|(_, s)| s.trim().to_string()).collect()
+}
+
+/// `j` moves the view down one row at a time, through every row of a
+/// layout taller than the pane and on to the lines after it, as it does
+/// through ordinary lines; `k` comes back the same way.
+#[test]
+fn read_only_j_and_k_go_row_by_row_through_a_tall_layout() {
+    for after in [0, 3] {
+        let mut app = app_with(&tall_math(after));
+        reader(&mut app);
+        let rows = layout_rows(&app, 2);
+        assert_eq!(rows.len(), 20, "laid out, taller than the pane");
+        let end = last_top(&app);
+        for top in 1..=end {
+            let screen = read_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+            assert_eq!(app.scroll_hint(), top, "after {after}: one row per j\n{screen:#?}");
+        }
+        let screen = read_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.scroll_hint(), end, "the end stops it");
+        assert!(drawn(&screen, rows.last().unwrap()), "the layout's last row\n{screen:#?}");
+        if after > 0 {
+            assert!(drawn(&screen, &format!("after {}", after - 1)), "the last line\n{screen:#?}");
+        }
+        for top in (0..end).rev() {
+            read_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+            assert_eq!(app.scroll_hint(), top, "after {after}: one row per k");
+        }
+    }
+}
+
+/// Every scrolling key reaches the layout's last row and the line after
+/// it going down, and its first rows and the line before it going up.
+#[test]
+fn read_only_paging_keys_reach_past_a_tall_layout() {
+    let ctrl = KeyModifiers::CONTROL;
+    let none = KeyModifiers::NONE;
+    let pairs = [
+        ((KeyCode::Char('j'), none), (KeyCode::Char('k'), none)),
+        ((KeyCode::Char('d'), ctrl), (KeyCode::Char('u'), ctrl)),
+        ((KeyCode::Char('f'), ctrl), (KeyCode::Char('b'), ctrl)),
+        ((KeyCode::Down, none), (KeyCode::Up, none)),
+    ];
+    for after in [0, 3] {
+        for ((down, dm), (up, um)) in pairs {
+            let mut app = app_with(&tall_math(after));
+            reader(&mut app);
+            let rows = layout_rows(&app, 2);
+            let seen = read_through(&mut app, down, dm);
+            assert_eq!(app.scroll_hint(), last_top(&app), "{down:?} reaches the end");
+            for row in &rows {
+                assert!(drawn(&seen, row), "{down:?} after {after}: {row} never shown");
+            }
+            if after > 0 {
+                assert!(drawn(&seen, "after 0") && drawn(&seen, &format!("after {}", after - 1)), "{down:?}");
+            }
+            let seen = read_through(&mut app, up, um);
+            assert_eq!(app.scroll_hint(), 0, "{up:?} back to the top");
+            for row in &rows {
+                assert!(drawn(&seen, row), "{up:?} after {after}: {row} never shown");
+            }
+            assert!(drawn(&seen, "intro"));
+        }
+    }
+}
+
+/// The wheel scrolls through a tall layout too, three rows a notch.
+#[test]
+fn read_only_wheel_scrolls_through_a_tall_layout() {
+    let mut app = app_with(&tall_math(3));
+    reader(&mut app);
+    let rows = layout_rows(&app, 2);
+    let mut seen = screen_of(&mut app, READ_W, READ_H);
+    for _ in 0..20 {
+        app.scroll_view(3);
+        app.sync_after_input();
+        seen.extend(screen_of(&mut app, READ_W, READ_H));
+    }
+    assert_eq!(app.scroll_hint(), last_top(&app));
+    for row in &rows {
+        assert!(drawn(&seen, row), "{row} never shown");
+    }
+    assert!(drawn(&seen, "after 2"));
+    app.scroll_view(-3);
+    app.sync_after_input();
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.scroll_hint(), last_top(&app) - 3);
+}
+
+/// `G` shows the end of the file, `gg` the start, wherever the end falls.
+#[test]
+fn read_only_g_shows_the_end_past_a_tall_layout() {
+    for after in [0, 3] {
+        let mut app = app_with(&tall_math(after));
+        reader(&mut app);
+        let rows = layout_rows(&app, 2);
+        feed(&mut app, "G");
+        let screen = screen_of(&mut app, READ_W, READ_H);
+        assert_eq!(app.scroll_hint(), last_top(&app), "after {after}\n{screen:#?}");
+        let last = if after > 0 { format!("after {}", after - 1) } else { rows.last().unwrap().clone() };
+        assert!(drawn(&screen, &last), "after {after}: {last}\n{screen:#?}");
+        // One row back from the end, not the whole layout.
+        feed(&mut app, "k");
+        screen_of(&mut app, READ_W, READ_H);
+        assert_eq!(app.scroll_hint(), last_top(&app) - 1);
+        feed(&mut app, "gg");
+        let screen = screen_of(&mut app, READ_W, READ_H);
+        assert_eq!(app.scroll_hint(), 0);
+        assert!(drawn(&screen, "intro"));
+    }
+}
+
+/// A search still brings its match to the top from inside a layout, and
+/// a resize that moves the rows keeps the view on the same line.
+#[test]
+fn read_only_search_and_resize_from_inside_a_tall_layout() {
+    let mut app = app_with(&tall_math(12));
+    reader(&mut app);
+    feed(&mut app, "jjjjj");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.scroll_hint(), 5, "inside the layout");
+    cmd(&mut app, "/after 3");
+    let screen = screen_of(&mut app, READ_W, READ_H);
+    let top = app.cache.borrow().locate(app.buffer.cursor.line, 0).0;
+    assert_eq!(app.scroll_hint(), top, "the match is the top\n{screen:#?}");
+    assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains("after 3"), "{screen:#?}");
+    // Narrower: the matrix is still laid out, the cursor's line still on top.
+    app.term_size = (40, READ_H);
+    screen_of(&mut app, 40, READ_H);
+    let top = app.cache.borrow().locate(app.buffer.cursor.line, 0).0;
+    assert_eq!(app.scroll_hint(), top);
+}
+
+/// An embedded note taller than the pane: the same rule, row by row
+/// through the box and on to the lines after it, and `G` to the end.
+#[test]
+fn read_only_scrolls_through_a_tall_embed() {
+    let d = std::env::temp_dir().join(format!("shoin-tall-embed-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    let frag: String = (1..=20).map(|i| format!("frag line {i}\n")).collect();
+    std::fs::write(d.join("frag.md"), frag).unwrap();
+    for host in ["intro\n\n![[frag]]", "intro\n\n![[frag]]\nafter 0\nafter 1\nafter 2\n"] {
+        std::fs::write(d.join("host.md"), host).unwrap();
+        let mut app = App::new(Config::default(), Some(d.join("host.md")), None).unwrap();
+        app.embed_mode = crate::transclude::Mode::Short;
+        reader(&mut app);
+        let end = last_top(&app);
+        let mut seen = Vec::new();
+        for top in 1..=end {
+            seen.extend(read_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE));
+            assert_eq!(app.scroll_hint(), top, "{host:?}: one row per j");
+        }
+        assert!(drawn(&seen, "frag line 20"), "{host:?}\n{seen:#?}");
+        if host.contains("after") {
+            assert!(drawn(&seen, "after 2"), "{host:?}");
+        }
+        feed(&mut app, "gg");
+        screen_of(&mut app, READ_W, READ_H);
+        assert_eq!(app.scroll_hint(), 0);
+        feed(&mut app, "G");
+        let screen = screen_of(&mut app, READ_W, READ_H);
+        assert_eq!(app.scroll_hint(), end, "{host:?}\n{screen:#?}");
+        let seen = read_through(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.scroll_hint(), 0);
+        assert!(drawn(&seen, "frag line 10"), "{host:?}");
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
+/// A wrapped paragraph taller than the pane is scrolled the same way: a
+/// row per `j`, so its middle is not skipped.
+#[test]
+fn read_only_j_goes_row_by_row_through_a_wrapped_paragraph() {
+    let words: Vec<String> = (0..150).map(|i| format!("word{i}")).collect();
+    let mut app = app_with(&format!("intro\n{}\nafter wrap\n", words.join(" ")));
+    reader(&mut app);
+    let end = last_top(&app);
+    assert!(end > 3);
+    let mut seen = Vec::new();
+    for top in 1..=end {
+        seen.extend(read_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.scroll_hint(), top);
+    }
+    assert!(drawn(&seen, "word149") && drawn(&seen, "after wrap"));
+}
+
+/// Edit mode keeps its line motions: `j` from the line before a tall
+/// layout steps onto its opening line, which shows its source.
+#[test]
+fn edit_mode_j_still_steps_by_line_into_a_tall_layout() {
+    let mut app = app_with(&tall_math(3));
+    app.term_size = (READ_W, READ_H);
+    screen_of(&mut app, READ_W, READ_H);
+    feed(&mut app, "jj");
+    assert_eq!(app.buffer.cursor.line, 2);
+    feed(&mut app, "G");
+    assert_eq!(app.buffer.cursor.line, app.buffer.last_line());
+}
+
+/// With a final newline, the end is still the last line: `G` puts it on the
+/// bottom row, and `j` and `Ctrl-f` there leave the view where it is.
+#[test]
+fn read_only_end_is_the_last_line_with_a_final_newline() {
+    let mut app = app_with(&format!("{}\n", tall_math(3)));
+    reader(&mut app);
+    let end = last_top(&app);
+    assert_eq!(end + 1, app.cache.borrow().total_rows() - app.viewport_height(), "one row for the empty line");
+    feed(&mut app, "G");
+    let screen = screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.scroll_hint(), end);
+    assert!(drawn(&screen, "after 2"), "{screen:#?}");
+    for code in [KeyCode::Char('j'), KeyCode::Down] {
+        read_key(&mut app, code, KeyModifiers::NONE);
+        assert_eq!(app.scroll_hint(), end, "{code:?}");
+    }
+    read_key(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    assert_eq!(app.scroll_hint(), end);
+    feed(&mut app, "k");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.scroll_hint(), end - 1, "k moves at once");
+}
+
+/// A wrapped line of bold words: every word's `**` is concealed, so a row's
+/// first column in the drawn text is not its column in the source.
+fn bold_words(n: usize) -> String {
+    let words: Vec<String> = (0..n).map(|i| format!("**w{i}**")).collect();
+    format!("intro\n{}\nafter\n", words.join(" "))
+}
+
+/// The word the view's top row starts with, as drawn.
+fn top_word(app: &App) -> String {
+    let cache = app.cache.borrow();
+    let row = cache.row(app.scroll_hint()).unwrap();
+    let entry = cache.entry(row.line()).unwrap();
+    let shown: String = entry.cmap.display_text(&entry.source).chars().skip(row.start_col).collect();
+    shown.split(' ').next().unwrap().to_string()
+}
+
+/// Scrolled onto a later row of a wrapped line with concealed markup, the
+/// cursor stands on that row's first visible character in the SOURCE: `i`
+/// and `:view` put the caret there, and `yiw` and `*` take its word.
+#[test]
+fn read_only_cursor_on_a_wrapped_row_is_a_source_column() {
+    let text = bold_words(300);
+    let source = text.lines().nth(1).unwrap().to_string();
+    let onto_row = |app: &mut App| {
+        reader(app);
+        // Down to the line's second row: the rows before it are the intro's,
+        // and line spacing's, if any.
+        let second = app.cache.borrow().line_rows(1).0 + 1;
+        for _ in 0..second {
+            read_key(app, KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        assert_eq!(app.scroll_hint(), second);
+        assert_eq!(app.cache.borrow().row(second).unwrap().line(), 1);
+        let word = top_word(app);
+        assert_ne!(word, "w0", "a later row of the line");
+        let col = source.find(&format!("**{word}**")).unwrap() + 2;
+        (word, col)
+    };
+
+    let mut app = app_with(&text);
+    let (word, col) = onto_row(&mut app);
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, col), "on {word}");
+    feed(&mut app, "yiw");
+    assert_eq!(app.registers.get(&'"').map(|r| r.text.clone()), Some(word.clone()));
+    feed(&mut app, "*");
+    assert_eq!(app.search.as_ref().map(|s| s.pattern.clone()), Some(word.clone()));
+
+    let mut app = app_with(&text);
+    let (word, col) = onto_row(&mut app);
+    feed(&mut app, "ii");
+    assert!(matches!(app.mode, Mode::Insert));
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, col), "i puts the caret on {word}");
+
+    let mut app = app_with(&text);
+    let (word, col) = onto_row(&mut app);
+    cmd(&mut app, ":view");
+    assert!(!app.view);
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, col), ":view leaves it on {word}");
+}
+
+/// Widening the pane reflows a paragraph above a tall layout: the view
+/// stays on the same row of the layout, not its first.
+#[test]
+fn read_only_reflow_above_keeps_the_row_in_a_tall_layout() {
+    let words: Vec<String> = (0..80).map(|i| format!("word{i}")).collect();
+    let text = format!("{}\n{}", words.join(" "), tall_math(12));
+    let mut app = app_with(&text);
+    app.term_size = (40, READ_H);
+    app.set_view(true);
+    screen_of(&mut app, 40, READ_H);
+    let opener = 3;
+    let into = 10;
+    let start = app.cache.borrow().line_rows(opener).0;
+    for _ in 0..start + into {
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.sync_after_input();
+        screen_of(&mut app, 40, READ_H);
+    }
+    assert_eq!(app.scroll_hint(), start + into, "inside the layout");
+    let row = layout_rows(&app, opener)[into].clone();
+    app.term_size = (120, READ_H);
+    let screen = screen_of(&mut app, 120, READ_H);
+    let start = app.cache.borrow().line_rows(opener).0;
+    assert_eq!(app.scroll_hint(), start + into, "the same row of the layout\n{screen:#?}");
+    assert!(screen.iter().find(|r| !r.trim().is_empty()).unwrap().contains(&row), "{row} on top\n{screen:#?}");
+    // And a key moves on from there.
+    read_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+    app.term_size = (120, READ_H);
+    screen_of(&mut app, 120, READ_H);
+    assert_eq!(app.scroll_hint(), start + into + 1);
+}
+
+/// Holding `j` does not rebuild the row index on input, nor re-parse the
+/// document, even with a second, narrower pane on it.
+#[test]
+fn read_only_motions_reuse_the_focused_row_index() {
+    for split in [false, true] {
+        let mut app = app_with(&tall_math(30));
+        app.term_size = (100, READ_H);
+        if split {
+            app.split_pane(true);
+            ctrl(&mut app, 'w');
+            feed(&mut app, ">");
+        }
+        app.set_view(true);
+        screen_of(&mut app, 100, READ_H);
+        for _ in 0..5 {
+            let (builds, indexes) = {
+                let c = app.cache.borrow();
+                (c.builds(), c.indexes())
+            };
+            app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+            app.sync_after_input();
+            let c = app.cache.borrow();
+            assert_eq!(c.builds(), builds, "split {split}: no re-parse on input");
+            assert!(c.indexes() <= indexes + 1, "split {split}: one row index at most, got {}", c.indexes() - indexes);
+            drop(c);
+            screen_of(&mut app, 100, READ_H);
+        }
+        assert_eq!(app.scroll_hint(), 5);
+    }
+}
+
+/// `3G`, and a search whose one match is the opening line, land on the
+/// cursor the view keeps for every row of the layout: they still show its
+/// first row on top.
+#[test]
+fn read_only_explicit_jumps_to_the_parked_cursor_show_the_line() {
+    let keys: [&dyn Fn(&mut App); 2] = [&|app| feed(app, "3G"), &|app| cmd(app, "/$$ \\begin")];
+    for (i, jump) in keys.iter().enumerate() {
+        let mut app = app_with(&tall_math(12).replace("$$\n\\begin", "$$ \\begin"));
+        reader(&mut app);
+        assert_eq!(layout_rows(&app, 2).len(), 20, "laid out");
+        feed(&mut app, "jjjjjjj");
+        screen_of(&mut app, READ_W, READ_H);
+        assert_eq!(app.scroll_hint(), 7);
+        let parked = app.buffer.cursor;
+        jump(&mut app);
+        let screen = screen_of(&mut app, READ_W, READ_H);
+        assert_eq!(app.buffer.cursor, parked, "jump {i} lands on the same cursor");
+        assert_eq!(app.scroll_hint(), 2, "jump {i}: the layout's first row on top\n{screen:#?}");
+    }
+}
+
+/// After `G`, a taller pane shows the end with one more row above it, and
+/// `k` moves exactly one row from what is drawn.
+#[test]
+fn read_only_end_is_the_same_for_drawing_and_scrolling() {
+    let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let mut app = app_with(&text);
+    reader(&mut app);
+    feed(&mut app, "G");
+    screen_of(&mut app, READ_W, READ_H);
+    let end = app.scroll_hint();
+    app.term_size = (READ_W, READ_H + 1);
+    let screen = screen_of(&mut app, READ_W, READ_H + 1);
+    assert_eq!(app.scroll_hint(), end - 1, "the last line stays on the bottom row\n{screen:#?}");
+    app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    app.sync_after_input();
+    screen_of(&mut app, READ_W, READ_H + 1);
+    assert_eq!(app.scroll_hint(), end - 2, "k moves one row");
+}
+
+/// A split from inside a tall layout starts the new pane on the same row.
+#[test]
+fn read_only_split_keeps_the_row_in_a_tall_layout() {
+    let mut app = app_with(&tall_math(12));
+    reader(&mut app);
+    feed(&mut app, "jjjjj");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.scroll_hint(), 5);
+    cmd(&mut app, ":vsplit");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.layout.ids().len(), 2);
+    assert_eq!(app.scroll_hint(), 5, "the new pane");
+}
+
+/// A second `open_unnamed` replaces the block kinds at the same revision and
+/// the same settings. The row index has to follow: here the table took no
+/// spacing between its rows, and the prose that replaced it does.
+#[test]
+fn a_second_unnamed_buffer_reindexes_its_rows() {
+    let mut app = app_with("");
+    app.config.markdown.tables = false;
+    app.config.layout.line_spacing = 1;
+    app.open_unnamed(Buffer::unnamed(b"| a | b |\n|---|---|\n| 1 | 2 |\n".to_vec()).unwrap());
+    let table = screen_of(&mut app, 80, 20);
+    let starts: Vec<usize> = (0..3).map(|l| app.cache.borrow().locate(l, 0).0).collect();
+    assert_eq!(starts, [0, 1, 2], "no spacing inside a table: {table:#?}");
+
+    app.open_unnamed(Buffer::unnamed(b"alpha\nbravo\ncharlie\n".to_vec()).unwrap());
+    let prose = screen_of(&mut app, 80, 20);
+    let cache = app.cache.borrow();
+    let starts: Vec<usize> = (0..3).map(|l| cache.locate(l, 0).0).collect();
+    assert_eq!(starts, [0, 2, 4], "a spacer row after each prose line: {prose:#?}");
+    let at = |w: &str| prose.iter().position(|r| r.contains(w)).unwrap_or_else(|| panic!("{w}: {prose:#?}"));
+    assert_eq!((at("bravo"), at("charlie")), (at("alpha") + 2, at("alpha") + 4), "{prose:#?}");
 }

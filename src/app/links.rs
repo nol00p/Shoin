@@ -135,6 +135,7 @@ impl App {
         match link::section_line(&text, section) {
             Some(line) => {
                 self.buffer.cursor = Cursor::new(line, 0);
+                self.forget_reading();
                 self.sync_after_input();
             }
             None => self.notify(

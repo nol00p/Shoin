@@ -212,8 +212,9 @@ See [Reading](../reading.md#read-only).
 
 | Key | Does |
 |---|---|
-| `j` `k` | scroll a line down / up |
+| `j` `k` | scroll a row down / up |
 | `Ctrl-d` `Ctrl-u` | half a page down / up |
+| `Ctrl-f` `Ctrl-b` | a page down / up |
 | `gg` `G` | top / bottom |
 | `/` `?` `n` `N` | search |
 | `q` | close the buffer. Quit if it is the last one |

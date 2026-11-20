@@ -22,6 +22,19 @@ impl App {
         self.focused_pane().map(|p| p.scroll.get()).unwrap_or(0)
     }
 
+    /// Where read-only mode's view in `pane` was scrolled to, if it was.
+    pub fn reading_top(&self, pane: PaneId) -> Option<frame::ReadingTop> {
+        self.reading.get(&pane).copied()
+    }
+
+    /// Let go of where the focused pane's read-only view was scrolled to:
+    /// a jump (a search, `5G`) puts its line on top, even when it lands on
+    /// the cursor already parked for that view, at the start of a laid-out
+    /// block the view is inside, say.
+    pub(super) fn forget_reading(&mut self) {
+        self.reading.remove(&self.focus_pane);
+    }
+
     /// The whole area panes are laid out in — the frame minus the tree sidebar
     /// and the status line, matching what the renderer does.
     pub(super) fn pane_area(&self) -> Rect {
@@ -49,6 +62,9 @@ impl App {
         self.next_pane_id += 1;
         if self.layout.split(self.focus_pane, vertical, Pane { id, doc, scroll: std::cell::Cell::new(scroll), weight: crate::render::pane::EVEN, cursor }) {
             self.copy_folds(self.focus_pane, id);
+            if let Some(top) = self.reading_top(self.focus_pane) {
+                self.reading.insert(id, top);
+            }
             self.focus_pane = id;
             self.touch_status();
         }
