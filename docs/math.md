@@ -196,8 +196,8 @@ With `export_follows_settings = true` and `math = false`, `txt`, `html` and
 
 ## Details
 
-- A command Shoin doesn't know is kept as literal text, backslash and all:
-  `\mathcal{F}` shows `\mathcalF`.
+- An unknown command and its braced arguments are drawn as literal text:
+  `\mathcal{F}` shows as `\mathcal{F}`, nested braces kept.
 - A blank line inside a block ends it there, unclosed. Keep a block's
   lines together.
 - `$$x$$ and more text` on one line is a paragraph that holds display math;
@@ -214,3 +214,6 @@ With `export_follows_settings = true` and `math = false`, `txt`, `html` and
   shows `x^{α t}`.
 - In an HTML export, a formula pandoc can't read keeps its TeX; the rest
   are still MathML. Math never makes an export fail.
+- If pandoc fails, or hasn't finished after 10 seconds, every formula
+  keeps its TeX and the export says `math left as TeX: pandoc failed` or
+  `math left as TeX: pandoc timed out`.

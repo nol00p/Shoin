@@ -557,96 +557,192 @@ fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<(
 /// The HTML page's formulas as MathML, through `pandoc` (an
 /// [`html::Convert`]).
 ///
-/// One run for the whole page, not one per formula: [`mathml_source`] puts
-/// them in one document, [`mathml_split`] takes pandoc's page apart again.
-/// MathML rather than a script such as MathJax: browsers draw it natively,
-/// and the page keeps its promise of no script and nothing to fetch.
+/// A constant number of runs for the whole page, not one per formula: a
+/// first, empty one asks pandoc which version of its document format it
+/// reads ([`api_version`]); the second converts [`mathml_source`], a
+/// document holding every formula, and [`mathml_split`] takes pandoc's page
+/// apart again. MathML rather than a script such as MathJax: browsers draw
+/// it natively, and the page keeps its promise of no script and nothing to
+/// fetch.
+///
+/// Both runs share a deadline of [`PANDOC_LIMIT`], so a `pandoc` that hangs
+/// cannot hang the export or the editor.
 ///
 /// The `Err` notes are short for the same reason as `write_pdf`'s: they end
 /// a one-row status line.
 pub(crate) fn pandoc_mathml(formulas: &[html::Formula]) -> std::result::Result<Vec<Option<String>>, &'static str> {
-    use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
-
     let Some(tool) = which("pandoc") else {
         return Err("math left as TeX: no pandoc");
     };
-    const FAILED: &str = "math left as TeX: pandoc failed";
+    mathml_with(&tool, formulas, PANDOC_LIMIT)
+}
+
+/// How long [`pandoc_mathml`] waits for `pandoc`, both runs together.
+const PANDOC_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const PANDOC_FAILED: &str = "math left as TeX: pandoc failed";
+const PANDOC_TIMED_OUT: &str = "math left as TeX: pandoc timed out";
+
+/// [`pandoc_mathml`] with the program and the time limit given.
+fn mathml_with(tool: &Path, formulas: &[html::Formula], limit: std::time::Duration) -> std::result::Result<Vec<Option<String>>, &'static str> {
+    let deadline = std::time::Instant::now() + limit;
+    let empty = run_until(tool, &["--from=markdown", "--to=json"], String::new(), deadline)?;
+    let api = api_version(&empty).ok_or(PANDOC_FAILED)?;
+    // `--mathml` rather than 3.x's `--math-method=mathml`, which older
+    // pandocs reject; newer ones accept it with a warning on stderr.
+    let page = run_until(tool, &["--from=json", "--to=html", "--mathml"], mathml_source(formulas, api), deadline)?;
+    Ok(mathml_split(&page, formulas.len()))
+}
+
+/// Run `tool` with `input` on its stdin and return its stdout, or a note
+/// when it cannot be run, fails, or is not done by `deadline`; then it is
+/// killed and reaped.
+fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Instant) -> std::result::Result<String, &'static str> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+
     let mut child = Command::new(tool)
-        // `--mathml` rather than 3.x's `--math-method=mathml`, which older
-        // pandocs reject; newer ones accept it with a warning on stderr.
-        .args(["--from=markdown", "--to=html", "--mathml"])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // A formula pandoc cannot read is a warning there; it keeps its TeX.
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| FAILED)?;
-    // Written from a thread so a long page cannot fill both pipes at once.
-    let mut stdin = child.stdin.take().ok_or(FAILED)?;
-    let source = mathml_source(formulas);
-    let writer = std::thread::spawn(move || stdin.write_all(source.as_bytes()));
-    let mut page = String::new();
-    let read = child.stdout.take().ok_or(FAILED)?.read_to_string(&mut page);
-    let wrote = writer.join().map_err(|_| FAILED)?;
-    let status = child.wait().map_err(|_| FAILED)?;
-    if read.is_err() || wrote.is_err() || !status.success() {
-        return Err(FAILED);
-    }
-    Ok(mathml_split(&page, formulas.len()))
-}
-
-/// The marker before formula `i` in [`mathml_source`]. An HTML comment,
-/// which pandoc passes through as it is, while the text of a formula that
-/// falls out of math is escaped (`&lt;!--`): a formula cannot forge one.
-fn mathml_marker(i: usize) -> String {
-    format!("<!-- shoin-math {i} -->")
-}
-
-/// One Markdown document holding every formula, each in a paragraph of its
-/// own after its marker.
-///
-/// Inline TeX is trimmed, since pandoc does not read `$ x$` as math, and a
-/// display formula loses its blank lines, which would end the paragraph
-/// (they mean nothing in TeX math).
-fn mathml_source(formulas: &[html::Formula]) -> String {
-    let mut doc = String::new();
-    for (i, f) in formulas.iter().enumerate() {
-        doc.push_str(&mathml_marker(i));
-        doc.push_str("\n\n");
-        if f.display {
-            let tex: Vec<&str> = f.tex.lines().filter(|l| !l.trim().is_empty()).collect();
-            doc.push_str(&format!("$${}$$", tex.join("\n")));
-        } else {
-            doc.push_str(&format!("${}$", f.tex.trim()));
+        .map_err(|_| PANDOC_FAILED)?;
+    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(PANDOC_FAILED);
+    };
+    // Writing and reading on threads of their own: a long page cannot fill
+    // both pipes at once, and a child that stops answering leaves them
+    // blocked rather than the export. Killing the child normally ends them;
+    // if something it started still holds a pipe, they are left behind, but
+    // the export goes on.
+    let (wrote_tx, wrote) = mpsc::channel();
+    std::thread::spawn(move || wrote_tx.send(stdin.write_all(input.as_bytes()).is_ok()));
+    let (read_tx, read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let ok = stdout.read_to_string(&mut out).is_ok();
+        read_tx.send(ok.then_some(out))
+    });
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    let late = |e| match e {
+        mpsc::RecvTimeoutError::Timeout => PANDOC_TIMED_OUT,
+        mpsc::RecvTimeoutError::Disconnected => PANDOC_FAILED,
+    };
+    let mut finish = || {
+        let out = read.recv_timeout(left()).map_err(late)?;
+        let wrote = wrote.recv_timeout(left()).map_err(late)?;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok((out, wrote, status)),
+                Ok(None) if left().is_zero() => return Err(PANDOC_TIMED_OUT),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
+                Err(_) => return Err(PANDOC_FAILED),
+            }
         }
-        doc.push_str("\n\n");
+    };
+    match finish() {
+        Ok((Some(page), true, status)) if status.success() => Ok(page),
+        Ok(_) => Err(PANDOC_FAILED),
+        Err(note) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(note)
+        }
     }
+}
+
+/// The version of pandoc's document format in `json`, pandoc's JSON
+/// output for an empty document: `1,23,1,2` from
+/// `{"pandoc-api-version":[1,23,1,2],…}`. pandoc reads a JSON document
+/// only when its version matches its own, so [`mathml_source`] writes
+/// this one.
+fn api_version(json: &str) -> Option<&str> {
+    const KEY: &str = "\"pandoc-api-version\":[";
+    let start = json.find(KEY)? + KEY.len();
+    let v = &json[start..start + json[start..].find(']')?];
+    (!v.is_empty() && v.split(',').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).then_some(v)
+}
+
+/// The `id` of the `<div>` that holds formula `i` in [`mathml_source`]'s
+/// document, as pandoc writes it into the page: `<div id="shoin-math-3">`.
+const MATHML_DIV: &str = "<div id=\"shoin-math-";
+
+/// One pandoc document (its JSON form, for pandoc-api-version `api`) that
+/// holds every formula, each a math element in a `<div>` of its own.
+///
+/// JSON rather than Markdown: each formula is a string inside a math
+/// element, so its text cannot end the element or start another, whatever
+/// `$$` or HTML it contains. In pandoc's page it is MathML, or escaped
+/// text when pandoc cannot read it, so it cannot forge a `<div>` either.
+fn mathml_source(formulas: &[html::Formula], api: &str) -> String {
+    let mut doc = format!("{{\"pandoc-api-version\":[{api}],\"meta\":{{}},\"blocks\":[");
+    for (i, f) in formulas.iter().enumerate() {
+        if i > 0 {
+            doc.push(',');
+        }
+        let kind = if f.display { "DisplayMath" } else { "InlineMath" };
+        doc.push_str(&format!(
+            "{{\"t\":\"Div\",\"c\":[[\"shoin-math-{i}\",[],[]],[{{\"t\":\"Plain\",\"c\":[{{\"t\":\"Math\",\"c\":[{{\"t\":\"{kind}\"}},"
+        ));
+        json_string(&mut doc, &f.tex);
+        doc.push_str("]}]}]]}");
+    }
+    doc.push_str("]}");
     doc
 }
 
-/// pandoc's page cut back into formulas: what follows each marker, when it
-/// is one `<math>` element and nothing else; `None` otherwise — a formula
-/// pandoc could not convert comes back as text, so it keeps its TeX.
-///
-/// A marker missing, repeated or out of order means the pieces cannot be
-/// matched to the formulas, so none are converted.
-fn mathml_split(page: &str, n: usize) -> Vec<Option<String>> {
-    let mut at: Vec<(usize, usize)> = Vec::with_capacity(n);
-    for i in 0..n {
-        let marker = mathml_marker(i);
-        let mut found = page.match_indices(&marker);
-        match (found.next(), found.next()) {
-            (Some((pos, _)), None) if at.last().is_none_or(|&(prev, _)| prev < pos) => at.push((pos, marker.len())),
-            _ => return vec![None; n],
+/// `s` as a JSON string, quotes included.
+fn json_string(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
         }
+    }
+    out.push('"');
+}
+
+/// pandoc's page cut back into formulas: what is inside each formula's
+/// `<div>`, when it is one `<math>` element and nothing else; `None`
+/// otherwise — a formula pandoc could not convert comes back as text, so it
+/// keeps its TeX.
+///
+/// One pass over the page, each `<div>` checked as it comes: one missing,
+/// repeated or out of order means the pieces cannot be matched to the
+/// formulas, so none are converted.
+fn mathml_split(page: &str, n: usize) -> Vec<Option<String>> {
+    // Where each formula's `<div>` starts, and where its content does.
+    let mut at: Vec<(usize, usize)> = Vec::with_capacity(n);
+    let mut from = 0;
+    while let Some(found) = page[from..].find(MATHML_DIV) {
+        let start = from + found;
+        let number = start + MATHML_DIV.len();
+        let digits = page[number..].bytes().take_while(u8::is_ascii_digit).count();
+        let content = number + digits + "\">".len();
+        let in_step = page[number + digits..].starts_with("\">") && page[number..number + digits].parse() == Ok(at.len());
+        if !in_step || at.len() == n {
+            return vec![None; n];
+        }
+        at.push((start, content));
+        from = content;
+    }
+    if at.len() != n {
+        return vec![None; n];
     }
     (0..n)
         .map(|i| {
-            let start = at[i].0 + at[i].1;
-            let end = at.get(i + 1).map_or(page.len(), |&(pos, _)| pos);
-            let piece = page[start..end].trim();
-            let piece = piece.strip_prefix("<p>").and_then(|p| p.strip_suffix("</p>")).unwrap_or(piece).trim();
+            let end = at.get(i + 1).map_or(page.len(), |&(start, _)| start);
+            let piece = page[at[i].1..end].trim();
+            let piece = piece.strip_suffix("</div>")?.trim();
             // Export puts its own wrapper around it, so one pandoc adds goes.
             let piece = ["<span class=\"math inline\">", "<span class=\"math display\">"]
                 .iter()
@@ -719,10 +815,26 @@ fn engine_args(engine: &str) -> &'static [&'static str] {
 
 /// The first executable named `name` on `PATH`.
 fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    which_in(name, &std::env::var_os("PATH")?)
+}
+
+/// [`which`] in the folders of `path`, a `PATH`-style list.
+fn which_in(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
         .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+        .find(|p| runnable(p))
+}
+
+/// A regular file (or a link to one) that may be run: not a folder, nor,
+/// on Unix, a file without an execute bit, which `exec` would refuse.
+fn runnable(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    p.is_file()
 }
 
 /// The text of a list item, past its marker and any checkbox, read the way
@@ -1323,21 +1435,47 @@ mod tests {
 
     #[test]
     fn the_formulas_go_to_pandoc_as_one_document() {
-        let doc = mathml_source(&[formula(" x^2 ", false), formula("a\n\n  \nb", true)]);
-        assert_eq!(doc, "<!-- shoin-math 0 -->\n\n$x^2$\n\n<!-- shoin-math 1 -->\n\n$$a\nb$$\n\n");
+        let doc = mathml_source(&[formula(" x^2 ", false), formula("a\n\n\"b\\c\u{1}", true)], "1,23,1,2");
+        assert_eq!(
+            doc,
+            "{\"pandoc-api-version\":[1,23,1,2],\"meta\":{},\"blocks\":[\
+             {\"t\":\"Div\",\"c\":[[\"shoin-math-0\",[],[]],[{\"t\":\"Plain\",\"c\":[{\"t\":\"Math\",\"c\":[{\"t\":\"InlineMath\"},\" x^2 \"]}]}]]},\
+             {\"t\":\"Div\",\"c\":[[\"shoin-math-1\",[],[]],[{\"t\":\"Plain\",\"c\":[{\"t\":\"Math\",\"c\":[{\"t\":\"DisplayMath\"},\"a\\n\\n\\\"b\\\\c\\u0001\"]}]}]]}\
+             ]}"
+        );
+        assert_eq!(mathml_source(&[], "1,23"), "{\"pandoc-api-version\":[1,23],\"meta\":{},\"blocks\":[]}");
     }
 
-    /// What pandoc 3.14 wrote for a converted inline and display formula, one
-    /// that fell out of math, and one it could not convert.
+    /// The review's case: TeX holding `$$`, a marker of the old Markdown
+    /// framing and a `<div>` stays inside its one JSON string.
+    #[test]
+    fn formula_text_stays_one_json_string() {
+        let tex = "x\ny $$ remainder\n<!-- shoin-math 1 -->\n<div id=\"shoin-math-1\">\nz";
+        let doc = mathml_source(&[formula(tex, true), formula("y", false)], "1,23");
+        assert!(doc.contains(r#"{"t":"DisplayMath"},"x\ny $$ remainder\n<!-- shoin-math 1 -->\n<div id=\"shoin-math-1\">\nz"]"#), "{doc}");
+        assert_eq!(doc.matches("\"t\":\"Div\"").count(), 2);
+    }
+
+    #[test]
+    fn the_api_version_comes_from_pandocs_empty_document() {
+        assert_eq!(api_version("{\"pandoc-api-version\":[1,23,1,2],\"meta\":{},\"blocks\":[]}\n"), Some("1,23,1,2"));
+        assert_eq!(api_version("{\"pandoc-api-version\":[1,17]}"), Some("1,17"));
+        for bad in ["", "[]", "{\"blocks\":[]}", "{\"pandoc-api-version\":[]}", "{\"pandoc-api-version\":[1,,2]}", "{\"pandoc-api-version\":[1,\"x\"]}", "{\"pandoc-api-version\":[1,2"] {
+            assert_eq!(api_version(bad), None, "{bad}");
+        }
+    }
+
+    /// pandoc 3.14's page for a converted inline and display formula and one
+    /// it could not convert; an older pandoc's span wrapper.
     #[test]
     fn pandocs_page_is_cut_back_into_formulas() {
-        let page = "<!-- shoin-math 0 -->\n\
-            <p><math display=\"inline\" xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mi>x</mi>\
-            <annotation encoding=\"application/x-tex\">x</annotation></semantics></math></p>\n\
-            <!-- shoin-math 1 -->\n\
-            <p><math display=\"block\" xmlns=\"http://www.w3.org/1998/Math/MathML\"><mfrac><mi>a</mi><mi>b</mi></mfrac></math></p>\n\
-            <!-- shoin-math 2 -->\n<p>$\\frac{a$</p>\n\
-            <!-- shoin-math 3 -->\n<p><span class=\"math inline\">$\\foo{x}$</span></p>\n";
+        let page = "<div id=\"shoin-math-0\">\n\
+            <math display=\"inline\" xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mi>x</mi>\
+            <annotation encoding=\"application/x-tex\">x</annotation></semantics></math>\n</div>\n\
+            <div id=\"shoin-math-1\">\n\
+            <math display=\"block\" xmlns=\"http://www.w3.org/1998/Math/MathML\"><mfrac><mi>a</mi><mi>b</mi></mfrac></math>\n</div>\n\
+            <div id=\"shoin-math-2\">\n<span class=\"math inline\">$x \\foo{y} &amp; &lt;b&gt;$</span>\n</div>\n\
+            <div id=\"shoin-math-3\">\n<span class=\"math display\"><math>a</math></span>\n</div>\n";
         let got = mathml_split(page, 4);
         assert_eq!(
             got,
@@ -1345,27 +1483,134 @@ mod tests {
                 Some("<math display=\"inline\"><semantics><mi>x</mi><annotation encoding=\"application/x-tex\">x</annotation></semantics></math>".into()),
                 Some("<math display=\"block\"><mfrac><mi>a</mi><mi>b</mi></mfrac></math>".into()),
                 None,
-                None,
+                Some("<math>a</math>".into()),
             ]
         );
-        // A pandoc that wraps its MathML in a span of its own.
-        assert_eq!(
-            mathml_split("<!-- shoin-math 0 -->\n<p><span class=\"math display\"><math>a</math></span></p>", 1),
-            vec![Some("<math>a</math>".into())]
-        );
-        // Two formulas in one piece are not one formula.
-        assert_eq!(mathml_split("<!-- shoin-math 0 -->\n<p><math>a</math> <math>b</math></p>", 1), vec![None]);
+        // Two formulas in one piece are not one formula, nor is one whose
+        // `<div>` does not close.
+        assert_eq!(mathml_split("<div id=\"shoin-math-0\">\n<math>a</math> <math>b</math>\n</div>", 1), vec![None]);
+        assert_eq!(mathml_split("<div id=\"shoin-math-0\">\n<math>a</math>", 1), vec![None]);
     }
 
-    /// Markers that cannot be matched to formulas, one by one, convert none.
+    fn mathml_div(i: impl std::fmt::Display) -> String {
+        format!("<div id=\"shoin-math-{i}\">\n<math>{i}</math>\n</div>\n")
+    }
+
+    /// `<div>`s that cannot be matched to formulas, one by one, convert none.
     #[test]
-    fn markers_out_of_step_convert_nothing() {
-        let m = |i| format!("{}\n<p><math>{i}</math></p>\n", mathml_marker(i));
+    fn divs_out_of_step_convert_nothing() {
+        let m = |i: u32| mathml_div(i);
         assert_eq!(mathml_split(&(m(0) + &m(1)), 2), vec![Some("<math>0</math>".into()), Some("<math>1</math>".into())]);
         assert_eq!(mathml_split(&m(0), 2), vec![None, None], "one missing");
+        assert_eq!(mathml_split(&(m(0) + &m(1)), 1), vec![None], "one too many");
         assert_eq!(mathml_split(&(m(1) + &m(0)), 2), vec![None, None], "out of order");
         assert_eq!(mathml_split(&(m(0) + &m(0) + &m(1)), 2), vec![None, None], "repeated");
+        assert_eq!(mathml_split(&(m(0) + &mathml_div("1x")), 2), vec![None, None], "not a number");
+        assert_eq!(mathml_split(&(m(0) + &mathml_div("")), 2), vec![None, None], "no number");
         assert_eq!(mathml_split("", 0), Vec::<Option<String>>::new());
+    }
+
+    /// A file at `dir/name` holding `body`, made executable or not.
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str, exec: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 })).unwrap();
+        if exec {
+            // Another test thread forking while the file was open for writing
+            // makes exec fail with "text file busy" for a moment.
+            for _ in 0..100 {
+                match std::process::Command::new(&p).env("SHOIN_PROBE", "1").status() {
+                    Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    _ => break,
+                }
+            }
+        }
+        p
+    }
+
+    /// A `pandoc` that never answers is killed at the deadline, and the math
+    /// stays TeX.
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_pandoc_times_out() {
+        let d = vault("stall");
+        let tool = script(&d, "pandoc", "#!/bin/sh\n[ -n \"$SHOIN_PROBE\" ] && exit 0\nexec sleep 30\n", true);
+        let t = std::time::Instant::now();
+        let got = mathml_with(&tool, &[formula("x", false)], std::time::Duration::from_millis(300));
+        assert_eq!(got, Err("math left as TeX: pandoc timed out"));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The runner end to end with a `pandoc` that answers like the real one:
+    /// two runs, the second reading the JSON document; a failing one leaves
+    /// the math as TeX.
+    #[cfg(unix)]
+    #[test]
+    fn a_fake_pandoc_converts_in_two_runs() {
+        let d = vault("fake");
+        let log = d.join("log");
+        let body = format!(
+            "#!/bin/sh\n[ -n \"$SHOIN_PROBE\" ] && exit 0\necho \"$*\" >> '{}'\n\
+             case \"$1\" in --from=markdown) cat >/dev/null; echo '{{\"pandoc-api-version\":[1,23,1,2],\"meta\":{{}},\"blocks\":[]}}';;\n\
+             *) grep -q '\"pandoc-api-version\":\\[1,23,1,2\\]' || exit 3; printf '<div id=\"shoin-math-0\">\\n<math>x</math>\\n</div>\\n';;\nesac\n",
+            log.display()
+        );
+        let tool = script(&d, "pandoc", &body, true);
+        let limit = std::time::Duration::from_secs(10);
+        assert_eq!(mathml_with(&tool, &[formula("x", false)], limit), Ok(vec![Some("<math>x</math>".into())]));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "--from=markdown --to=json\n--from=json --to=html --mathml\n");
+
+        let broken = script(&d, "broken", "#!/bin/sh\n[ -n \"$SHOIN_PROBE\" ] && exit 0\nexit 1\n", true);
+        assert_eq!(mathml_with(&broken, &[formula("x", false)], limit), Err("math left as TeX: pandoc failed"));
+        assert_eq!(mathml_with(&d.join("missing"), &[formula("x", false)], limit), Err("math left as TeX: pandoc failed"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A file named `pandoc` that cannot be run is passed over for the next
+    /// folder's.
+    #[cfg(unix)]
+    #[test]
+    fn path_lookup_skips_files_that_cannot_run() {
+        let d = vault("which");
+        let (a, b, c) = (d.join("a"), d.join("b"), d.join("c"));
+        for dir in [&a, &b, &c] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        script(&a, "pandoc", "not a program", false);
+        std::fs::create_dir_all(b.join("pandoc")).unwrap();
+        let good = script(&c, "pandoc", "#!/bin/sh\n", true);
+        let path = std::env::join_paths([&a, &b, &c]).unwrap();
+        assert_eq!(which_in("pandoc", &path), Some(good));
+        assert_eq!(which_in("pandoc", &std::env::join_paths([&a, &b]).unwrap()), None);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Cutting pandoc's page apart takes one pass, however many formulas.
+    #[test]
+    fn many_formulas_split_in_one_pass() {
+        let n = 20_000;
+        let mut page = String::new();
+        for i in 0..n {
+            page.push_str(&format!("<div id=\"shoin-math-{i}\">\n<math display=\"inline\"><mi>x</mi></math>\n</div>\n"));
+        }
+        let t = std::time::Instant::now();
+        let got = mathml_split(&page, n);
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(got.iter().all(|m| m.as_deref() == Some("<math display=\"inline\"><mi>x</mi></math>")));
+    }
+
+    /// The review's case: a display formula whose text holds `$$` and a
+    /// marker. It may stay TeX, but the next formula still converts.
+    #[test]
+    #[ignore = "needs pandoc on PATH"]
+    fn pandoc_formula_text_cannot_change_the_framing() {
+        let text = "$$x\ny $$ remainder\n<!-- shoin-math 1 -->\nz$$\n\n$y$\n";
+        let (page, note) = html::render_math(text, "t", &html::Page::default());
+        assert_eq!(note, None, "pandoc is not on PATH");
+        assert!(page.contains("<span class=\"math inline\"><math"), "$y$ stayed TeX: {page}");
     }
 
     /// The real thing, where pandoc is installed: `cargo test -- --ignored
