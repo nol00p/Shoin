@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+**Math**
+
+- HTML export shows math as MathML, drawn by the browser with no script,
+  when `pandoc` is installed. Without it, formulas stay TeX and the export
+  says `math left as TeX: no pandoc`; a formula pandoc can't read keeps
+  its TeX on its own (#173).
+- Display math draws an unknown command with its braced arguments as
+  written: `\mathcal{F}` shows `\mathcal{F}`, not `\mathcalF` (#172).
+
+**Reading**
+
+- Read-only mode (`-R`, `:view`) scrolls through a display math block, an
+  embed or a wrapped line taller than the window, and on to the lines
+  below it. `j` `k` move a screen row, as in `less`, and `Ctrl-f` `Ctrl-b`
+  a page (#174).
+
 **Docs**
 
 - A Math page: inline and display math, editing a block, when a block is
