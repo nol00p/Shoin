@@ -109,17 +109,38 @@ impl MathBox {
         Self::join(vec![self, scripts], limit)
     }
 
-    pub fn root(mut self, index: Option<Self>, limit: usize) -> Option<Self> {
-        self.rows.insert(0, "‾".repeat(self.width));
-        self.baseline += 1;
-        let mut parts = Vec::new();
-        if let Some(index) = index {
-            parts.push(index.unicode_script(true)
-                .unwrap_or_else(|| Self::stack(Some(index), Self::text(""), None)));
+    pub fn root(self, index: Option<Self>, limit: usize) -> Option<Self> {
+        let height = self.rows.len();
+        let index = index.map(|index| index.unicode_script(true).unwrap_or(index))
+            .unwrap_or_else(|| Self::text(""));
+        let prefix = (height + 1).max(index.width);
+        let width = prefix + self.width + 1;
+        if width > limit {
+            return None;
         }
-        parts.push(Self::text("√"));
-        parts.push(self);
-        Self::join(parts, limit)
+
+        let baseline = index.rows.len() + self.baseline;
+        let mut rows = index.pad(prefix, Align::Right).rows;
+        // The index's last row shares the bar. Taller indices extend above it.
+        let (bar, above_bar) = rows.split_last_mut()?;
+        let right_padding = " ".repeat(self.width + 1);
+        for row in above_bar {
+            row.push_str(&right_padding);
+        }
+        bar.push_str(&"_".repeat(self.width + 1));
+
+        let left = " ".repeat(prefix - height - 1);
+        for (row, argument) in self.rows.into_iter().enumerate() {
+            let rise = height - row - 1;
+            let gap = " ".repeat(row);
+            if rise == 0 {
+                rows.push(format!("{left}╲╱{gap}{argument} "));
+            } else {
+                let indent = " ".repeat(rise + 1);
+                rows.push(format!("{left}{indent}╱{gap}{argument} "));
+            }
+        }
+        Some(Self { width, baseline, rows })
     }
 
     pub fn enclose(self, open: &str, close: &str, limit: usize) -> Option<Self> {

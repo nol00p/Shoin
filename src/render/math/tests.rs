@@ -20,8 +20,8 @@ fn fractions() {
 fn scripts_and_limits() {
     check(r"x^2 a_i x^{10}", &["x²aᵢx¹⁰"]);
     check(r"F_z", &["F ", " z"]);
-    check(r"x^{a+b}_{z}", &[" a+b", "x   ", "  z "]);
-    check(r"x^{z+1}", &[" z+1", "x   "]);
+    check(r"x^{a+b}_{z}", &[" ᵃ⁺ᵇ", "x   ", "  z "]);
+    check(r"x^{z+1}", &["xᶻ⁺¹"]);
     check(r"\sum_{i=1}^n", &[" n ", " ∑ ", "i=1"]);
     check(r"\int_0^1", &[" ¹", "∫ ", " ₀"]);
     check(r"\lim_{x\to0} x", &["lim x", "x→0  "]);
@@ -37,7 +37,7 @@ fn scripts_and_limits() {
 #[test]
 fn stacked_limits_leave_room_for_adjacent_boxes() {
     check(r"\sum_{k=0}^{\infty} \frac{x^k}{k!}",
-        &["     k", " ∞  x ", " ∑  ──", "k=0 k!"]);
+        &[" ∞  xᵏ", " ∑  ──", "k=0 k!"]);
     check(r"\lim_{x\to0}\frac{\sin x}{x}",
         &["    sin x", "lim ─────", "x→0   x  "]);
     check(r"a + \sum_{i=1}^{n}i", &["     n   ", "a +  ∑  i", "    i=1  "]);
@@ -132,12 +132,41 @@ fn matrices_and_delimiters() {
 }
 
 #[test]
+fn letter_scripts() {
+    check(r"e^x", &["eˣ"]);
+    check(r"x^{ab}", &["xᵃᵇ"]);
+    check(r"x^{abcdefghijklmnoprstuvwxyz}", &["xᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ"]);
+    check(r"x^{ABDEGHIJKLMNOPRTUVW}", &["xᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ"]);
+    check(r"x^q", &[" q", "x "]);
+    check(r"x^{aq}", &[" aq", "x  "]);
+    check(r"x_y", &["x ", " y"]);
+    check(r"e^{\alpha t}", &["eᵅᵗ"]);
+    check(r"A^T", &["Aᵀ"]);
+    check(r"x_\beta", &["xᵦ"]);
+    check(r"x^{\alpha\beta\gamma\delta\epsilon\theta\iota\phi\chi}", &["xᵅᵝᵞᵟᵋᶿᶥᵠᵡ"]);
+    check(r"x_{\beta\gamma\rho\phi\chi}", &["xᵦᵧᵨᵩᵪ"]);
+}
+
+#[test]
 fn roots() {
-    check(r"\sqrt{x}", &[" ‾", "√x"]);
-    check(r"\sqrt[3]{x}", &["  ‾", "³√x"]);
-    check(r"\sqrt[z]{x}", &["z ‾", " √x"]);
+    check(r"\sqrt{x}", &["  __", "╲╱x "]);
+    check(r"\sqrt{x+1}", &["  ______", "╲╱x + 1 "]);
+    check(r"\sqrt[3]{x}", &[" ³__", "╲╱x "]);
+    check(r"\sqrt[q]{x}", &[" q__", "╲╱x "]);
+    check(r"\sqrt[123]{猫}", &["¹²³___", " ╲╱猫 "]);
+    check(r"\sqrt[\frac{1}{2}]{x}", &[" 1  ", " ─  ", " 2__", "╲╱x "]);
+    check(r"\sqrt{\frac{a+b}{c}}", &["    ______", "   ╱a + b ", "  ╱ ───── ", "╲╱    c   "]);
+    check(r"\sqrt[3]{\frac{a+b}{c}}", &["   ³______", "   ╱a + b ", "  ╱ ───── ", "╲╱    c   "]);
     check(r"\sqrt{\frac{\frac{1}{2}}{x+1}}",
-        &[" ‾‾‾‾‾", "   1  ", "   ─  ", "   2  ", "√─────", " x + 1"]);
+        &["      ______", "     ╱  1   ", "    ╱   ─   ", "   ╱    2   ", "  ╱   ───── ", "╲╱    x + 1 "]);
+}
+
+#[test]
+fn roots_compose_with_other_boxes() {
+    check(r"\sqrt{\sqrt{x}}", &["   _____", "  ╱  __ ", "╲╱ ╲╱x  "]);
+    check(r"x^{\sqrt{y}}", &["   __", " ╲╱y ", "x    "]);
+    check(r"\frac{\sqrt{x}}{y}", &["  __", "╲╱x ", "────", " y  "]);
+    check(r"\begin{matrix}\sqrt{x}&a\\b&c\end{matrix}", &["  __   ", "╲╱x   a", " b    c"]);
 }
 
 #[test]
