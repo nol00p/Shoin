@@ -7,6 +7,7 @@ feature does; the edge cases are under **Details** at the end.
 
 - [Getting started](getting-started.md) — install, requirements, first run
 - [Live preview](live-preview.md) — the cursor's line is raw, the rest is finished
+- [Math](math.md) — inline `$…$` as Unicode, `$$` blocks laid out over several rows
 - [Editing](editing.md) — motions, operators, text objects, lists, registers, Insert mode,
   [folding](editing.md#folding), [the `:` command line](editing.md#the-command-line)
 - [Clipboard](clipboard.md) — the system clipboard, over SSH too, and pasting

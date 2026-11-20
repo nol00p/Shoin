@@ -68,6 +68,14 @@ highlighted in seventeen languages.
   <img src="docs/media/formatting.gif" alt="A note with headings, bold, italic, a quote, tasks, a table and code; the cursor's line shows its Markdown, and a new table row lines the columns up on Esc" width="800">
 </p>
 
+**Math** — inline `$…$` drawn in Unicode and `$$` blocks laid out over
+several rows; the cursor on a block shows its TeX, and an edit shows in the
+layout as soon as the cursor leaves.
+
+<p align="center">
+  <img src="docs/media/math.gif" alt="A note with a sum and its limits, a matrix beside cases and the quadratic formula laid out over several rows; the cursor shows a block's TeX, a row added to the matrix appears in its layout, and inline math shows eˣ and xᵦ off the cursor's line" width="800">
+</p>
+
 **Editing prose with Vim's grammar** — `ciw` and `.`, moving a paragraph with
 `dap` and `p`, `ci(`, list items that continue themselves, undo and redo.
 
