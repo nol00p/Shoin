@@ -22,7 +22,6 @@ fn scripts_and_limits() {
     check(r"F_z", &["F ", " z"]);
     check(r"x^{a+b}_{z}", &[" a+b", "x   ", "  z "]);
     check(r"x^{z+1}", &[" z+1", "x   "]);
-    check(r"x^{\frac{1}{2}}", &[" 1", " ─", " 2", "x "]);
     check(r"\sum_{i=1}^n", &[" n ", " ∑ ", "i=1"]);
     check(r"\int_0^1", &[" ¹", "∫ ", " ₀"]);
     check(r"\lim_{x\to0} x", &["lim x", "x→0  "]);
@@ -32,6 +31,62 @@ fn scripts_and_limits() {
     ] {
         check(&format!(r"\{command}_i^n"), &["n", glyph, "i"]);
     }
+}
+
+#[test]
+fn superscript_uses_its_baseline() {
+    check(r"x^{\frac{1}{2}}", &[" 1", " ─", "x2"]);
+    check(r"x^{\frac{1}{2}}_z", &[" 1", " ─", "x2", " z"]);
+    check(r"x^{\frac{1}{2}}_{\frac{a}{b}}", &[" 1 ", " ─ ", "x2a", "  ─", "  b"]);
+}
+
+#[test]
+fn subscript_uses_its_baseline() {
+    check(r"x_{\frac{1}{2}}", &["x1", " ─", " 2"]);
+}
+
+#[test]
+fn script_with_empty_first_row() {
+    check(r"x^{\begin{gather}\\̂\end{gather}}", &[" ", "x̂"]);
+}
+
+#[test]
+fn zero_width_parts_join_only_occupied_rows() {
+    let count = 12_000;
+    let tex = format!("{}\\begin{{gather}}{}x\\end{{gather}}", "̂".repeat(count), "x\\\\".repeat(count));
+    let start = std::time::Instant::now();
+    let rows = layout(&tex, 1).unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
+    assert_eq!(rows.len(), count + 1);
+    assert_eq!(rows[count / 2], format!("{}x", "̂".repeat(count)));
+}
+
+#[test]
+fn accent_skips_baseline_padding() {
+    check(r"\hat{\sum_{i=1}}", &[" ∑̂ ", "i=1"]);
+}
+
+#[test]
+fn explicit_negative_space_suppresses_operator_spacing() {
+    check(r"\sin\!x", &["sinx"]);
+    check(r"\sin x", &["sin x"]);
+    check(r"x\!\sin\!\theta", &["xsinθ"]);
+}
+
+#[test]
+fn column_separators_require_a_column_environment() {
+    assert_eq!(layout("a&b", 80), None);
+    assert_eq!(layout(r"\begin{gather}a&b\end{gather}", 80), None);
+    check(r"a\&b", &["a&b"]);
+}
+
+#[test]
+fn fallback_requires_paired_delimiters() {
+    assert_eq!(layout(r"\begin{custom}\left(x\end{custom}", 80), None);
+    assert_eq!(layout(r"\begin{custom}x\right)\end{custom}", 80), None);
+    assert_eq!(layout(r"\begin{custom}{\left(x}\right)\end{custom}", 80), None);
+    assert_eq!(layout(r"\begin{custom}\left(\begin{inner}x\right)\end{inner}\end{custom}", 80), None);
+    check(r"\begin{custom}\left(\left[x\right]\right)\end{custom}", &["([x])"]);
 }
 
 #[test]
@@ -149,6 +204,12 @@ fn display_math_examples() {
         r"\begin{cases}x^2 & \text{if } x>0 \\ 0 & \text{otherwise}\end{cases}",
         r"\begin{aligned}a &= b \\ abc &= d+1\end{aligned}",
         r"\sqrt{\frac{\frac{1}{2}}{x+1}}",
+        r"x^{\frac{1}{2}}",
+        r"x_{\frac{1}{2}}",
+        r"x^{\begin{gather}\\̂\end{gather}}",
+        r"\hat{\sum_{i=1}}",
+        r"\sin\!x",
+        r"a\&b",
     ] {
         println!("{tex}");
         for row in layout(tex, 80).unwrap() {

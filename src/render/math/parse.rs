@@ -116,12 +116,12 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse(mut self) -> Option<MathBox> {
-        let rows = self.equations(0, false)?;
+        let rows = self.equations(0, false, false)?;
         (self.peek() == Token::End).then_some(())?;
-        self.center(rows)
+        Some(center_rows(rows.into_iter().flatten().collect()))
     }
 
-    fn equations(&mut self, depth: usize, script: bool) -> Option<Vec<Vec<MathBox>>> {
+    fn equations(&mut self, depth: usize, script: bool, allow_columns: bool) -> Option<Vec<Vec<MathBox>>> {
         let mut rows = Vec::new();
         loop {
             let mut columns = Vec::new();
@@ -129,6 +129,9 @@ impl<'a> Parser<'a> {
                 columns.push(self.sequence(depth, script, None)?);
                 if !self.take(Token::Char('&')) {
                     break;
+                }
+                if !allow_columns {
+                    return None;
                 }
             }
             let more = self.take(Token::Command("\\"));
@@ -168,7 +171,7 @@ impl<'a> Parser<'a> {
             {
                 atom.kind = Kind::Ordinary;
             }
-            if atom.box_.width == 0 && atom.box_.rows[0].is_empty() {
+            if atom.kind != Kind::Space && atom.box_.width == 0 && atom.box_.rows.iter().all(String::is_empty) {
                 continue;
             }
             let first_alphanumeric = atom.box_.rows[atom.box_.baseline].chars().next().is_some_and(char::is_alphanumeric);
@@ -265,7 +268,10 @@ impl<'a> Parser<'a> {
             "vec" | "hat" => {
                 let mut value = self.argument(depth, script)?.box_;
                 let row = &mut value.rows[value.baseline];
-                *row = accent_command(name, row);
+                let content = row.trim_start();
+                let start = row.len() - content.len();
+                let accented = accent_command(name, content);
+                row.replace_range(start.., &accented);
                 value
             }
             "left" => {
@@ -278,6 +284,7 @@ impl<'a> Parser<'a> {
             "begin" => self.environment(depth, script)?,
             "end" | "right" | "\\" | "" => return None,
             "limits" | "nolimits" => MathBox::text(""),
+            "!" => return Some(Atom { kind: Kind::Space, ..Atom::text("") }),
             name if OPERATORS.contains(&name) => {
                 let limits = if matches!(name, "lim" | "max" | "min" | "sup" | "inf") {
                     Limits::Below
@@ -365,12 +372,12 @@ impl<'a> Parser<'a> {
                 return Some(MathBox::text(one_line(&render_latex(body))));
             }
         };
-        let rows = self.equations(depth, script)?;
+        let rows = self.equations(depth, script, kind.is_some())?;
         self.take(Token::Command("end")).then_some(())?;
         (self.raw_group()?.trim() == name).then_some(())?;
         match kind {
             Some(kind) => grid(rows, kind, self.width)?.enclose(open, close, self.width),
-            None => self.center(rows),
+            None => Some(center_rows(rows.into_iter().flatten().collect())),
         }
     }
 
@@ -380,18 +387,33 @@ impl<'a> Parser<'a> {
         let start = self.rest;
         let mut environments = vec![(name, 0)];
         let mut braces = 0usize;
+        let mut delimiters = Vec::new();
         loop {
             let before = self.rest;
             let (next, rest) = token(before);
             self.rest = rest;
             match next {
                 Token::Char('{') => braces += 1,
-                Token::Char('}') => braces = braces.checked_sub(1)?,
+                Token::Char('}') => {
+                    if delimiters.last() == Some(&(braces, environments.len())) {
+                        return None;
+                    }
+                    braces = braces.checked_sub(1)?;
+                }
+                Token::Command("left") => delimiters.push((braces, environments.len())),
+                Token::Command("right") => {
+                    if delimiters.pop()? != (braces, environments.len()) {
+                        return None;
+                    }
+                }
                 Token::Command("begin") => {
                     let nested = self.raw_group()?.trim();
                     environments.push((nested, braces));
                 }
                 Token::Command("end") => {
+                    if delimiters.last() == Some(&(braces, environments.len())) {
+                        return None;
+                    }
                     let (expected, open_braces) = environments.pop()?;
                     if self.raw_group()?.trim() != expected || braces != open_braces {
                         return None;
@@ -409,20 +431,6 @@ impl<'a> Parser<'a> {
                 return None;
             }
         }
-    }
-
-    fn center(&self, rows: Vec<Vec<MathBox>>) -> Option<MathBox> {
-        let equations = rows.into_iter().map(|cells| {
-            let mut parts = Vec::new();
-            for cell in cells {
-                if !parts.is_empty() {
-                    parts.push(MathBox::text("  "));
-                }
-                parts.push(cell);
-            }
-            MathBox::join(parts, self.width)
-        }).collect::<Option<Vec<_>>>()?;
-        Some(center_rows(equations))
     }
 }
 

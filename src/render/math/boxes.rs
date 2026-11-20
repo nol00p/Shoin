@@ -34,11 +34,15 @@ impl MathBox {
         let mut rows = vec![String::new(); baseline + descent + 1];
         for part in parts {
             let start = baseline - part.baseline;
-            for (index, row) in rows.iter_mut().enumerate() {
-                if let Some(content) = index.checked_sub(start).and_then(|i| part.rows.get(i)) {
-                    row.push_str(content);
-                } else {
-                    row.push_str(&" ".repeat(part.width));
+            let part_height = part.rows.len();
+            let (before, rest) = rows.split_at_mut(start);
+            for (row, content) in rest[..part_height].iter_mut().zip(part.rows) {
+                row.push_str(&content);
+            }
+            if part.width > 0 {
+                let padding = " ".repeat(part.width);
+                for row in before.iter_mut().chain(&mut rest[part_height..]) {
+                    row.push_str(&padding);
                 }
             }
         }
@@ -89,20 +93,45 @@ impl MathBox {
         self.rows[0].chars().map(map).collect::<Option<String>>().map(Self::text)
     }
 
+    fn shift_script(mut self, upper: bool) -> Self {
+        if upper {
+            self.baseline += 1;
+            if self.baseline == self.rows.len() {
+                self.rows.push(" ".repeat(self.width));
+            }
+        } else if self.baseline == 0 {
+            self.rows.insert(0, " ".repeat(self.width));
+        } else {
+            self.baseline -= 1;
+        }
+        self
+    }
+
     pub fn side_scripts(self, upper: Option<Self>, lower: Option<Self>, limit: usize) -> Option<Self> {
-        let parts = match (upper, lower) {
+        let scripts = match (upper, lower) {
             (None, None) => return Some(self),
             (Some(up), None) => up.unicode_script(true)
-                .unwrap_or_else(|| Self::stack(Some(up), Self::text(""), None)),
+                .unwrap_or_else(|| up.shift_script(true)),
             (None, Some(down)) => down.unicode_script(false)
-                .unwrap_or_else(|| Self::stack(None, Self::text(""), Some(down))),
-            (Some(up), Some(down)) => Self::stack(
-                Some(up.unicode_script(true).unwrap_or(up)),
-                Self::text(""),
-                Some(down.unicode_script(false).unwrap_or(down)),
-            ),
+                .unwrap_or_else(|| down.shift_script(false)),
+            (Some(up), Some(down)) => {
+                let up = up.unicode_script(true).unwrap_or(up);
+                let down = down.unicode_script(false).unwrap_or(down);
+                let inner_rows = up.descent() + down.baseline;
+                match inner_rows {
+                    0 => Self::stack(Some(up), Self::text(""), Some(down)),
+                    1 => {
+                        let baseline = up.baseline + 1;
+                        let mut pair = Self::stack(None, up, Some(down));
+                        pair.baseline = baseline;
+                        pair
+                    }
+                    // Give overlapping rows separate columns so both scripts stay visible.
+                    _ => return Self::join(vec![self, up.shift_script(true), down.shift_script(false)], limit),
+                }
+            }
         };
-        Self::join(vec![self, parts], limit)
+        Self::join(vec![self, scripts], limit)
     }
 
     pub fn root(mut self, index: Option<Self>, limit: usize) -> Option<Self> {
