@@ -25,10 +25,12 @@ Headings, **bold**, *italic*, ~~strikethrough~~, `==highlight==`, `` `code` ``,
 links and `[[wiki links]]`, `#tags`, lists with bullets and task boxes, block
 quotes, tables, and fenced code. A fence that names its language is
 syntax-highlighted, in seventeen languages; `:set code_syntax off` turns that
-off. Inline math `$…$` and math blocks `$$…$$` conceal common LaTeX commands
-into Unicode symbols (such as `\rightarrow` → `→`, `\alpha` → `α`, `x^2` → `x²`),
-one line at a time; `math = false` under `[markdown]` in `input.conf` turns
-that off.
+off. Inline math `$…$` conceals common LaTeX commands into Unicode symbols
+(such as `\rightarrow` → `→`, `\alpha` → `α`, `x^2` → `x²`). A display block
+between `$$` lines is laid out over several rows, centred: fractions stacked
+over a bar, sums with their limits above and below, matrices in tall brackets.
+Put the cursor on any line of the block to see and edit all of its TeX.
+`math = false` under `[markdown]` in `input.conf` turns both off.
 [`examples/formatting.md`](../examples/formatting.md) exercises all of it;
 [`math.md`](../examples/math.md), [`quoted-list.md`](../examples/quoted-list.md)
 and [`tab-list.md`](../examples/tab-list.md) beside it show one thing each.
@@ -39,6 +41,13 @@ and [`tab-list.md`](../examples/tab-list.md) beside it show one thing each.
   markers you can't see.
 - An `![[embed]]` on the cursor's line also shows its raw source, which is why
   embedded text can't be edited by accident. See [Notes](notes.md).
+- A display block is laid out only once it is closed by a second `$$`, and
+  only if it fits the text width. Otherwise each of its lines conceals on its
+  own, into Unicode symbols, as inline math does. A block under a list item
+  is centred in the room under the item. `j` and `k` step through the
+  block's lines one at a time, and a click on the layout puts the cursor on
+  its first line. `shoin -p` prints the layout; export writes the TeX as
+  before. A `$$` block inside a blockquote is not laid out.
 - Table rows never wrap. A row wider than the pane stays on one line and is
   clipped at the edge. Shoin lines the columns up in the file when you
   leave Insert, or on `ga`. See [Writing](writing.md#writer-verbs).

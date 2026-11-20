@@ -133,7 +133,7 @@ impl App {
     /// The lines the focused pane's closed folds hide in the current
     /// document. Only folds: what `j`, `dd` and `p` treat as one line.
     pub(super) fn fold_hidden(&self) -> Hidden {
-        hidden::of(self.folds())
+        hidden::of(self.folds(), &[])
     }
 
     /// The line `count` shown lines down (or up) from `from`, a closed fold

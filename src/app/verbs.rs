@@ -214,12 +214,29 @@ impl App {
 
     /// The lines shown raw: the cursor's (or the selection's), or none at all
     /// in read-only mode, where there is nothing to edit under a cursor.
+    ///
+    /// A closed display math block the set touches is laid out over several
+    /// rows when the cursor is away (#77), so the set widens to all of it:
+    /// the whole source shows while any line of it is being edited. Read off
+    /// the block kinds, so they must be in step with the text: when they are
+    /// not, nothing widens.
     pub(super) fn active_set(&self, anchor: Option<Cursor>) -> ActiveSet {
         if self.view {
-            ActiveSet::none()
-        } else {
-            ActiveSet::compute(&self.mode, &self.buffer.cursor, anchor)
+            return ActiveSet::none();
         }
+        let mut set = ActiveSet::compute(&self.mode, &self.buffer.cursor, anchor);
+        let fresh = self.blocks.revision == self.buffer.revision;
+        let laid_out = self.config.layout.conceal && self.buffer.syntax == crate::text::buffer::Syntax::Markdown;
+        if fresh && laid_out {
+            let block = |line| crate::render::hidden::math_block_at(&self.blocks, &self.buffer, line);
+            if let Some(b) = block(set.start) {
+                set.start = b.start;
+            }
+            if let Some(b) = block(set.end) {
+                set.end = b.end - 1;
+            }
+        }
+        set
     }
 
     /// Enter or leave read-only mode, for every open buffer: a page to read,

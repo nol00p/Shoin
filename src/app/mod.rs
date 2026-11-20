@@ -1427,6 +1427,10 @@ impl App {
             self.clamp_reading_cursor();
         }
         self.keep_cursor_out_of_folds();
+        // `active_set` reads the block kinds, which an edit has just left
+        // behind the text. Brought up to date here (a no-op at an unchanged
+        // revision) rather than only before the next frame.
+        self.refresh_blocks();
         // The selection exists in Visual only, and only where it was made.
         // Every way out — Esc, an operator, `:`, `/`, Insert, another pane or
         // document, the file tree — lands here, so this is where its state is

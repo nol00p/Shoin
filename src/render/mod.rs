@@ -16,6 +16,7 @@ pub mod print;
 pub mod quote;
 pub mod splash;
 pub mod markdown;
+pub mod math;
 pub mod theme;
 #[cfg(test)]
 mod perf_long_line;

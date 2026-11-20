@@ -7694,3 +7694,314 @@ fn escape_after_a_register_prefix_drops_the_pending_command() {
     assert_eq!(text(&app), "a\nb\nc\nd\ne\n", "nothing deleted");
     assert_eq!(app.buffer.cursor.line, 2);
 }
+
+// ── Display math laid out over several rows (#77) ──────────────────────────
+//
+// Written to hold whatever `render::math::layout` draws: they assert on row
+// counts, positions, hidden lines and centring, and read the rows themselves
+// back from the cache rather than spelling them out.
+
+/// A paragraph, a closed block of four lines (2..=5), and a paragraph.
+const MATH_DOC: &str = "intro\n\n$$\n\\frac{a}{b}\nx + y\n$$\n\nafter\n";
+
+/// Draw `app` into a `w`×`h` terminal and return its rows as text.
+fn screen_of(app: &mut App, w: u16, h: u16) -> Vec<String> {
+    app.refresh_blocks();
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+    let buf = t.backend().buffer().clone();
+    (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect()
+}
+
+/// The rows the layout of the block opened at `line` draws this frame.
+fn math_rows(app: &App, line: usize) -> Vec<(usize, String)> {
+    let cache = app.cache.borrow();
+    (0..).map_while(|i| cache.math_row(line, i).map(|(p, s)| (p, s.to_string()))).collect()
+}
+
+/// The measure a `w`×`h` frame draws at.
+fn measure_of(app: &App, w: u16, h: u16) -> usize {
+    crate::render::layout::Layout::compute(&app.config.layout, w, h, 0).measure as usize
+}
+
+/// A closed block draws its layout on its opening line, and the rest of its
+/// lines take no rows; the paragraph after it starts right below the layout.
+#[test]
+fn a_closed_math_block_lays_out_on_its_opening_line() {
+    let mut app = app_with(MATH_DOC);
+    screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    assert!(!rows.is_empty(), "laid out");
+    let cache = app.cache.borrow();
+    assert_eq!(cache.line_rows(2), (2, 2 + rows.len() - 1));
+    for line in 3..=5 {
+        assert_eq!(cache.hidden().shown(line), 2, "line {line} takes no rows");
+    }
+    assert_eq!(cache.locate(6, 0).0, 2 + rows.len(), "the blank line follows the layout");
+    let row = cache.row(3).unwrap();
+    assert_eq!((row.line(), row.embedded(), row.editable), (2, Some(1), false));
+}
+
+/// A one-line `$$…$$` lays out on itself.
+#[test]
+fn a_one_line_math_block_lays_out() {
+    let mut app = app_with("intro\n\n$$\\sum_{i=1}^{n} i$$\n\nafter\n");
+    screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    assert!(!rows.is_empty());
+    let cache = app.cache.borrow();
+    assert_eq!(cache.locate(3, 0).0, 2 + rows.len());
+}
+
+/// An unclosed block (bounded by a blank line) and a block too wide for the
+/// measure keep today's form: one row per line, nothing hidden.
+#[test]
+fn unclosed_and_too_wide_blocks_keep_their_per_line_form() {
+    let mut app = app_with("intro\n$$\n\\alpha\n\nafter\n");
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 1).is_empty());
+    assert_eq!(app.cache.borrow().locate(4, 0).0, 4, "every line one row");
+
+    let wide = (0..30).map(|i| format!("a_{i}")).collect::<Vec<_>>().join(" + ");
+    let mut app = app_with(&format!("intro\n$$\n{wide}\n$$\nafter\n"));
+    screen_of(&mut app, 40, 20);
+    assert!(math_rows(&app, 1).is_empty(), "too wide: no layout");
+    let cache = app.cache.borrow();
+    assert!(cache.hidden().ranges().is_empty());
+    assert!(cache.locate(4, 0).0 > 4, "the wide line wraps as it did");
+}
+
+/// The cursor on any line of a block, or a Visual selection touching it,
+/// shows all of its source: the active set widens to the whole block.
+#[test]
+fn a_cursor_or_selection_in_a_block_reveals_all_of_it() {
+    for line in 2..=5 {
+        let mut app = app_with(MATH_DOC);
+        app.buffer.cursor = Cursor::new(line, 0);
+        app.sync_after_input();
+        assert_eq!((app.active.start, app.active.end), (2, 5), "cursor on {line}");
+        screen_of(&mut app, 60, 20);
+        assert!(math_rows(&app, 2).is_empty(), "raw while the cursor is on {line}");
+        let cache = app.cache.borrow();
+        assert_eq!(cache.locate(7, 0).0, 7, "every line takes its row");
+    }
+    // A selection from above that reaches the opening line.
+    let mut app = app_with(MATH_DOC);
+    feed(&mut app, "Vjj");
+    assert_eq!((app.active.start, app.active.end), (0, 5));
+    // One from below that reaches the closing line.
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(7, 0);
+    feed(&mut app, "vkk");
+    assert_eq!((app.active.start, app.active.end), (2, 7));
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty());
+    // Read-only mode shows the layout wherever the cursor is.
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(3, 0);
+    app.set_view(true);
+    screen_of(&mut app, 60, 20);
+    assert!(!math_rows(&app, 2).is_empty());
+}
+
+/// `j` from above lands on the opening line and `k` from below on the
+/// closing one; either shows the block's source. A search landing inside
+/// does too.
+#[test]
+fn j_and_k_step_into_a_block_from_either_side() {
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(1, 0);
+    feed(&mut app, "j");
+    assert_eq!(app.buffer.cursor.line, 2);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+    feed(&mut app, "jjjj");
+    assert_eq!(app.buffer.cursor.line, 6, "j walks through the block's lines");
+
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(6, 0);
+    feed(&mut app, "k");
+    assert_eq!(app.buffer.cursor.line, 5);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+
+    let mut app = app_with(MATH_DOC);
+    cmd(&mut app, "/x + y");
+    assert_eq!(app.buffer.cursor.line, 4);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+    feed(&mut app, "G");
+    assert_eq!(app.active.start, app.active.end, "away again");
+}
+
+/// A click on any row of the layout puts the cursor on the opening line.
+#[test]
+fn a_click_on_a_layout_row_lands_on_the_opening_line() {
+    let mut app = app_with(MATH_DOC);
+    app.term_size = (60, 20);
+    app.buffer.cursor = Cursor::new(7, 0);
+    app.sync_after_input();
+    let screen = screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    let last = rows.last().unwrap().1.trim().to_string();
+    let y = screen.iter().position(|r| r.contains(&last)).expect("the layout is on screen");
+    let x = screen[y].find(&last).unwrap() as u16;
+    press(&mut app, x, y as u16);
+    release(&mut app, x, y as u16);
+    assert_eq!(app.buffer.cursor, Cursor::new(2, 0));
+    assert_eq!((app.active.start, app.active.end), (2, 5), "and shows its source");
+}
+
+/// The box is centred in the measure, or in what the opening line's
+/// indentation leaves of it, and drawn there.
+#[test]
+fn a_layout_is_centred_in_the_room_its_indentation_leaves() {
+    let width = |s: &str| unicode_width::UnicodeWidthStr::width(s);
+    let mut app = app_with(MATH_DOC);
+    let screen = screen_of(&mut app, 60, 20);
+    let m = measure_of(&app, 60, 20);
+    let rows = math_rows(&app, 2);
+    let (pad, first) = &rows[0];
+    assert_eq!(*pad, (m - width(first)) / 2);
+    assert!(rows.iter().all(|(p, r)| p == pad && width(r) == width(first)), "one box");
+    let y = screen.iter().position(|r| r.contains(first.trim_end())).unwrap();
+    let left = screen[y].chars().take_while(|c| *c == ' ').count();
+    let lead = first.chars().take_while(|c| *c == ' ').count();
+    assert_eq!(left - lead, (60 - m) / 2 + pad, "drawn where the cache says");
+
+    let mut app = app_with("- item\n\n    $$\n    \\frac{a}{b}\n    $$\n");
+    screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    let (pad, first) = &rows[0];
+    assert_eq!(*pad, 4 + (m - 4 - width(first)) / 2);
+}
+
+/// A block inside a closed fold stays folded away with it; opening the fold
+/// shows it laid out.
+#[test]
+fn a_block_in_a_closed_fold_stays_hidden() {
+    let mut app = app_with("# A\n$$\nx\n$$\ntext\n# B\nend\n");
+    feed(&mut app, "zc");
+    screen_of(&mut app, 60, 20);
+    {
+        let cache = app.cache.borrow();
+        assert_eq!(cache.hidden().run(1), Some(1..5));
+        assert_eq!(cache.hidden().ranges().len(), 1);
+        assert_eq!(cache.locate(5, 0).0, 1);
+    }
+    assert!(math_rows(&app, 1).is_empty());
+    feed(&mut app, "zo");
+    screen_of(&mut app, 60, 20);
+    assert!(!math_rows(&app, 1).is_empty());
+}
+
+/// Line spacing puts no air inside a layout, and the usual spacing after it.
+#[test]
+fn line_spacing_goes_after_a_layout_not_inside_it() {
+    let mut app = app_with("intro\n$$\n\\frac{a}{b}\nx\n$$\nafter\n");
+    app.config.layout.line_spacing = 1;
+    screen_of(&mut app, 60, 30);
+    let n = math_rows(&app, 1).len();
+    let cache = app.cache.borrow();
+    let start = cache.locate(1, 0).0;
+    assert_eq!(start, 2, "intro and its spacing");
+    for r in start..start + n {
+        assert!(!cache.row(r).unwrap().is_spacer(), "row {r} is the layout");
+    }
+    assert!(cache.row(start + n).unwrap().is_spacer());
+    assert_eq!(cache.locate(5, 0).0, start + n + 1);
+}
+
+/// `--render` prints the layout: the rows between the paragraphs are the
+/// blank line, the layout's rows and the blank line.
+#[test]
+fn render_prints_the_layout() {
+    let mut app = app_with(MATH_DOC);
+    let page = crate::render::print::styled(&mut app, 60);
+    let plain = strip_ansi(&page);
+    let lines: Vec<&str> = plain.lines().collect();
+    let at = |w: &str| lines.iter().position(|l| l.contains(w)).unwrap();
+    let rows = math_rows(&app, 2);
+    assert_eq!(at("after") - at("intro"), rows.len() + 3);
+    for (i, (_, row)) in rows.iter().enumerate() {
+        assert!(lines[at("intro") + 2 + i].contains(row.trim_end()), "{plain}");
+    }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut esc = false;
+    for c in s.chars() {
+        match (esc, c) {
+            (false, '\x1b') => esc = true,
+            (false, c) => out.push(c),
+            (true, c) if c.is_ascii_alphabetic() => esc = false,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The layout depends on every line of the block: an edit to a middle line
+/// lays it out again once the cursor leaves, and nothing else does.
+#[test]
+fn editing_a_middle_line_lays_the_block_out_again() {
+    let mut app = app_with(MATH_DOC);
+    screen_of(&mut app, 60, 20);
+    let before = math_rows(&app, 2);
+    let layouts = app.cache.borrow().layouts();
+    app.buffer.cursor = Cursor::new(4, 0);
+    app.sync_after_input();
+    feed(&mut app, "A + z");
+    screen_of(&mut app, 60, 20);
+    esc(&mut app);
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty(), "still raw in Normal on the block");
+    feed(&mut app, "G");
+    screen_of(&mut app, 60, 20);
+    let after = math_rows(&app, 2);
+    assert!(!after.is_empty());
+    assert_ne!(after, before, "the new text is laid out");
+    assert_eq!(app.cache.borrow().layouts(), layouts + 1, "once");
+}
+
+/// Moving the cursor around a document of many blocks, in and out of them,
+/// parses nothing and lays out nothing again.
+#[test]
+fn moving_around_many_blocks_lays_out_nothing_again() {
+    let doc: String = (0..12)
+        .map(|i| format!("para {i}\n\n$$\n\\frac{{{i}}}{{2}}\ny_{i}\n$$\n\n$$x^{i}$$\n\n"))
+        .collect();
+    let mut app = app_with(&doc);
+    screen_of(&mut app, 60, 20);
+    let (builds, layouts) = {
+        let c = app.cache.borrow();
+        (c.builds(), c.layouts())
+    };
+    assert_eq!(layouts, 24, "every block once");
+    for _ in 0..(12 * 9) {
+        feed(&mut app, "j");
+        screen_of(&mut app, 60, 20);
+    }
+    feed(&mut app, "gg");
+    screen_of(&mut app, 60, 20);
+    let c = app.cache.borrow();
+    assert_eq!(c.builds(), builds, "no line parsed again");
+    assert_eq!(c.layouts(), layouts, "no block laid out again");
+}
+
+/// `[markdown] math` off, or concealment off, keeps every block as it was.
+#[test]
+fn math_or_conceal_off_lays_out_nothing() {
+    let mut app = app_with(MATH_DOC);
+    app.config.markdown.math = false;
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty());
+    assert_eq!(app.cache.borrow().locate(7, 0).0, 7);
+
+    let mut app = app_with(MATH_DOC);
+    app.config.layout.conceal = false;
+    app.buffer.cursor = Cursor::new(3, 0);
+    app.sync_after_input();
+    assert_eq!((app.active.start, app.active.end), (3, 3), "nothing to widen for");
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty());
+    assert_eq!(app.cache.borrow().locate(7, 0).0, 7);
+}
