@@ -1072,6 +1072,9 @@ impl App {
         };
         // Edits are counted from the first document as it opened.
         app.mark_dot();
+        // The cursor may open on a display block: the first frame shows all
+        // of it raw, as every frame after an input event does.
+        app.active = app.active_set(None);
         Ok(app)
     }
 
@@ -1151,41 +1154,44 @@ impl App {
     /// once past the last one the carry re-converges. Only when no
     /// line was reported (a wholesale buffer swap, or a cache that never
     /// matched the document's length) does it fall back to a full rebuild.
+    ///
+    /// Every open document, not only the current one: a split pane shows
+    /// another document's kinds, and a reload from disk (`check_disk`) changes
+    /// documents that have no focus. When the current document's kinds change,
+    /// the active set is worked out again from them (`active_set` widens it
+    /// over a display block), so a change that came from no input event, a
+    /// reload, still shows the block it put under the cursor raw.
     pub(crate) fn refresh_blocks(&mut self) {
         // `[markdown] math` decides what a `$$` line opens and `tab_width`
         // how deep a tabbed line is; a cache built under other values is
-        // wrong everywhere, not just at an edit. Every document, since a
-        // split pane shows another one's kinds and a config reload (`:e!`)
-        // changes the settings for them all.
+        // wrong everywhere, not just at an edit. A config reload (`:e!`)
+        // changes the settings for every document.
         let (math, tab_width) = (self.config.markdown.math, self.config.editor.tab_width);
-        if !self.blocks.built_for(math, tab_width) {
-            for doc in self.docs.iter_mut().filter(|d| !d.blocks.built_for(math, tab_width)) {
+        let current = self.current();
+        let mut moved = false;
+        for (i, doc) in self.docs.iter_mut().enumerate() {
+            if !doc.blocks.built_for(math, tab_width) {
                 doc.blocks = BlockCache::build(&doc.buffer, math, tab_width);
                 doc.buffer.clear_dirty();
+            } else if doc.blocks.revision == doc.buffer.revision {
+                doc.buffer.clear_dirty();
+                continue;
+            } else {
+                match doc.buffer.take_dirty() {
+                    // `invalidate_from` takes the EDITED lines — it resumes a
+                    // line earlier itself — and falls back to a full build when
+                    // it has no valid carry state to resume from (the head of
+                    // the file, or a shorter cache).
+                    Some((line, last)) => {
+                        doc.blocks.invalidate_from(&doc.buffer, line, last);
+                    }
+                    None => doc.blocks = BlockCache::build(&doc.buffer, math, tab_width),
+                }
             }
-            return;
+            moved |= i == current;
         }
-        if self.blocks.revision == self.buffer.revision {
-            self.buffer.clear_dirty();
-            return;
-        }
-        match self.buffer.take_dirty() {
-            // `invalidate_from` takes the EDITED lines — it resumes a line
-            // earlier itself — and falls back to a full build when it has no
-            // valid carry state to resume from (the head of the file, or a
-            // shorter cache).
-            Some((line, last)) => {
-                // Split the borrow: `blocks` and `buffer` are two fields of one
-                // document, and the deref that reaches them takes all of `self`.
-                let i = self.current();
-                let doc = &mut self.docs[i];
-                doc.blocks.invalidate_from(&doc.buffer, line, last);
-            }
-            None => {
-                let i = self.current();
-                let doc = &mut self.docs[i];
-                doc.blocks = BlockCache::build(&doc.buffer, self.config.markdown.math, self.config.editor.tab_width);
-            }
+        if moved {
+            self.active = self.active_set(self.anchor);
         }
     }
 
@@ -1228,16 +1234,12 @@ impl App {
                 self.theme = Theme::from_config(&new.theme).unwrap_or_default();
                 self.keymap = keymap;
                 let was_mouse = self.config.input.mouse;
-                let was_math = self.config.markdown.math;
                 self.config = new;
-                // Every open document, not only the current one: a split pane
-                // shows another document's block kinds too.
-                if self.config.markdown.math != was_math {
-                    let math = self.config.markdown.math;
-                    for doc in &mut self.docs {
-                        doc.blocks = BlockCache::build(&doc.buffer, math, self.config.editor.tab_width);
-                    }
-                }
+                // `[markdown] math` or `tab_width` may have changed: every
+                // document's kinds are rebuilt under the new values, and the
+                // active set widened over the blocks they now hold, before
+                // the next frame rather than at the next key.
+                self.refresh_blocks();
                 self.clipboard.set_background(self.config.editor.clipboard_background);
                 // A reload re-reads the file, which knows nothing about `--zen`
                 // or a `:zen` toggle — put those back on top of it.
@@ -1427,6 +1429,10 @@ impl App {
             self.clamp_reading_cursor();
         }
         self.keep_cursor_out_of_folds();
+        // `active_set` reads the block kinds, which an edit has just left
+        // behind the text. Brought up to date here (a no-op at an unchanged
+        // revision) rather than only before the next frame.
+        self.refresh_blocks();
         // The selection exists in Visual only, and only where it was made.
         // Every way out — Esc, an operator, `:`, `/`, Insert, another pane or
         // document, the file tree — lands here, so this is where its state is

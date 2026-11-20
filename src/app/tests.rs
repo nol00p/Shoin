@@ -7694,3 +7694,519 @@ fn escape_after_a_register_prefix_drops_the_pending_command() {
     assert_eq!(text(&app), "a\nb\nc\nd\ne\n", "nothing deleted");
     assert_eq!(app.buffer.cursor.line, 2);
 }
+
+// ── Display math laid out over several rows (#77) ──────────────────────────
+//
+// Written to hold whatever `render::math::layout` draws: they assert on row
+// counts, positions, hidden lines and centring, and read the rows themselves
+// back from the cache rather than spelling them out.
+
+/// A paragraph, a closed block of four lines (2..=5), and a paragraph.
+const MATH_DOC: &str = "intro\n\n$$\n\\frac{a}{b}\nx + y\n$$\n\nafter\n";
+
+/// Draw `app` into a `w`×`h` terminal and return its rows as text.
+fn screen_of(app: &mut App, w: u16, h: u16) -> Vec<String> {
+    app.refresh_blocks();
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+    let buf = t.backend().buffer().clone();
+    (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect()
+}
+
+/// The rows the layout of the block opened at `line` draws this frame.
+fn math_rows(app: &App, line: usize) -> Vec<(usize, String)> {
+    let cache = app.cache.borrow();
+    (0..).map_while(|i| cache.math_row(line, i).map(|(p, s)| (p, s.to_string()))).collect()
+}
+
+/// The measure a `w`×`h` frame draws at.
+fn measure_of(app: &App, w: u16, h: u16) -> usize {
+    crate::render::layout::Layout::compute(&app.config.layout, w, h, 0).measure as usize
+}
+
+/// A closed block draws its layout on its opening line, and the rest of its
+/// lines take no rows; the paragraph after it starts right below the layout.
+#[test]
+fn a_closed_math_block_lays_out_on_its_opening_line() {
+    let mut app = app_with(MATH_DOC);
+    screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    assert!(!rows.is_empty(), "laid out");
+    let cache = app.cache.borrow();
+    assert_eq!(cache.line_rows(2), (2, 2 + rows.len() - 1));
+    for line in 3..=5 {
+        assert_eq!(cache.hidden().shown(line), 2, "line {line} takes no rows");
+    }
+    assert_eq!(cache.locate(6, 0).0, 2 + rows.len(), "the blank line follows the layout");
+    let row = cache.row(3).unwrap();
+    assert_eq!((row.line(), row.embedded(), row.editable), (2, Some(1), false));
+}
+
+/// A one-line `$$…$$` lays out on itself.
+#[test]
+fn a_one_line_math_block_lays_out() {
+    let mut app = app_with("intro\n\n$$\\sum_{i=1}^{n} i$$\n\nafter\n");
+    screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    assert!(!rows.is_empty());
+    let cache = app.cache.borrow();
+    assert_eq!(cache.locate(3, 0).0, 2 + rows.len());
+}
+
+/// An unclosed block (bounded by a blank line) and a block too wide for the
+/// measure keep today's form: one row per line, nothing hidden.
+#[test]
+fn unclosed_and_too_wide_blocks_keep_their_per_line_form() {
+    let mut app = app_with("intro\n$$\n\\alpha\n\nafter\n");
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 1).is_empty());
+    assert_eq!(app.cache.borrow().locate(4, 0).0, 4, "every line one row");
+
+    let wide = (0..30).map(|i| format!("a_{i}")).collect::<Vec<_>>().join(" + ");
+    let mut app = app_with(&format!("intro\n$$\n{wide}\n$$\nafter\n"));
+    screen_of(&mut app, 40, 20);
+    assert!(math_rows(&app, 1).is_empty(), "too wide: no layout");
+    let cache = app.cache.borrow();
+    assert!(cache.hidden().ranges().is_empty());
+    assert!(cache.locate(4, 0).0 > 4, "the wide line wraps as it did");
+}
+
+/// The cursor on any line of a block, or a Visual selection touching it,
+/// shows all of its source: the active set widens to the whole block.
+#[test]
+fn a_cursor_or_selection_in_a_block_reveals_all_of_it() {
+    for line in 2..=5 {
+        let mut app = app_with(MATH_DOC);
+        app.buffer.cursor = Cursor::new(line, 0);
+        app.sync_after_input();
+        assert_eq!((app.active.start, app.active.end), (2, 5), "cursor on {line}");
+        screen_of(&mut app, 60, 20);
+        assert!(math_rows(&app, 2).is_empty(), "raw while the cursor is on {line}");
+        let cache = app.cache.borrow();
+        assert_eq!(cache.locate(7, 0).0, 7, "every line takes its row");
+    }
+    // A selection from above that reaches the opening line.
+    let mut app = app_with(MATH_DOC);
+    feed(&mut app, "Vjj");
+    assert_eq!((app.active.start, app.active.end), (0, 5));
+    // One from below that reaches the closing line.
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(7, 0);
+    feed(&mut app, "vkk");
+    assert_eq!((app.active.start, app.active.end), (2, 7));
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty());
+    // Read-only mode shows the layout wherever the cursor is.
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(3, 0);
+    app.set_view(true);
+    screen_of(&mut app, 60, 20);
+    assert!(!math_rows(&app, 2).is_empty());
+}
+
+/// `j` from above lands on the opening line and `k` from below on the
+/// closing one; either shows the block's source. A search landing inside
+/// does too.
+#[test]
+fn j_and_k_step_into_a_block_from_either_side() {
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(1, 0);
+    feed(&mut app, "j");
+    assert_eq!(app.buffer.cursor.line, 2);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+    feed(&mut app, "jjjj");
+    assert_eq!(app.buffer.cursor.line, 6, "j walks through the block's lines");
+
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(6, 0);
+    feed(&mut app, "k");
+    assert_eq!(app.buffer.cursor.line, 5);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+
+    let mut app = app_with(MATH_DOC);
+    cmd(&mut app, "/x + y");
+    assert_eq!(app.buffer.cursor.line, 4);
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+    feed(&mut app, "G");
+    assert_eq!(app.active.start, app.active.end, "away again");
+}
+
+/// A click on any row of the layout puts the cursor on the opening line.
+#[test]
+fn a_click_on_a_layout_row_lands_on_the_opening_line() {
+    let mut app = app_with(MATH_DOC);
+    app.term_size = (60, 20);
+    app.buffer.cursor = Cursor::new(7, 0);
+    app.sync_after_input();
+    let screen = screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    let last = rows.last().unwrap().1.trim().to_string();
+    let y = screen.iter().position(|r| r.contains(&last)).expect("the layout is on screen");
+    let x = screen[y].find(&last).unwrap() as u16;
+    press(&mut app, x, y as u16);
+    release(&mut app, x, y as u16);
+    assert_eq!(app.buffer.cursor, Cursor::new(2, 0));
+    assert_eq!((app.active.start, app.active.end), (2, 5), "and shows its source");
+}
+
+/// The box is centred in the measure, or in what the opening line's
+/// indentation leaves of it, and drawn there.
+#[test]
+fn a_layout_is_centred_in_the_room_its_indentation_leaves() {
+    let width = |s: &str| unicode_width::UnicodeWidthStr::width(s);
+    let mut app = app_with(MATH_DOC);
+    let screen = screen_of(&mut app, 60, 20);
+    let m = measure_of(&app, 60, 20);
+    let rows = math_rows(&app, 2);
+    let (pad, first) = &rows[0];
+    assert_eq!(*pad, (m - width(first)) / 2);
+    assert!(rows.iter().all(|(p, r)| p == pad && width(r) == width(first)), "one box");
+    let y = screen.iter().position(|r| r.contains(first.trim_end())).unwrap();
+    let left = screen[y].chars().take_while(|c| *c == ' ').count();
+    let lead = first.chars().take_while(|c| *c == ' ').count();
+    assert_eq!(left - lead, (60 - m) / 2 + pad, "drawn where the cache says");
+
+    let mut app = app_with("- item\n\n    $$\n    \\frac{a}{b}\n    $$\n");
+    screen_of(&mut app, 60, 20);
+    let rows = math_rows(&app, 2);
+    let (pad, first) = &rows[0];
+    assert_eq!(*pad, 4 + (m - 4 - width(first)) / 2);
+}
+
+/// A block inside a closed fold stays folded away with it; opening the fold
+/// shows it laid out.
+#[test]
+fn a_block_in_a_closed_fold_stays_hidden() {
+    let mut app = app_with("# A\n$$\nx\n$$\ntext\n# B\nend\n");
+    feed(&mut app, "zc");
+    screen_of(&mut app, 60, 20);
+    {
+        let cache = app.cache.borrow();
+        assert_eq!(cache.hidden().run(1), Some(1..5));
+        assert_eq!(cache.hidden().ranges().len(), 1);
+        assert_eq!(cache.locate(5, 0).0, 1);
+    }
+    assert!(math_rows(&app, 1).is_empty());
+    feed(&mut app, "zo");
+    screen_of(&mut app, 60, 20);
+    assert!(!math_rows(&app, 1).is_empty());
+}
+
+/// Line spacing puts no air inside a layout, and the usual spacing after it.
+#[test]
+fn line_spacing_goes_after_a_layout_not_inside_it() {
+    let mut app = app_with("intro\n$$\n\\frac{a}{b}\nx\n$$\nafter\n");
+    app.config.layout.line_spacing = 1;
+    screen_of(&mut app, 60, 30);
+    let n = math_rows(&app, 1).len();
+    let cache = app.cache.borrow();
+    let start = cache.locate(1, 0).0;
+    assert_eq!(start, 2, "intro and its spacing");
+    for r in start..start + n {
+        assert!(!cache.row(r).unwrap().is_spacer(), "row {r} is the layout");
+    }
+    assert!(cache.row(start + n).unwrap().is_spacer());
+    assert_eq!(cache.locate(5, 0).0, start + n + 1);
+}
+
+/// `--render` prints the layout: the rows between the paragraphs are the
+/// blank line, the layout's rows and the blank line.
+#[test]
+fn render_prints_the_layout() {
+    let mut app = app_with(MATH_DOC);
+    let page = crate::render::print::styled(&mut app, 60);
+    let plain = strip_ansi(&page);
+    let lines: Vec<&str> = plain.lines().collect();
+    let at = |w: &str| lines.iter().position(|l| l.contains(w)).unwrap();
+    let rows = math_rows(&app, 2);
+    assert_eq!(at("after") - at("intro"), rows.len() + 3);
+    for (i, (_, row)) in rows.iter().enumerate() {
+        assert!(lines[at("intro") + 2 + i].contains(row.trim_end()), "{plain}");
+    }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut esc = false;
+    for c in s.chars() {
+        match (esc, c) {
+            (false, '\x1b') => esc = true,
+            (false, c) => out.push(c),
+            (true, c) if c.is_ascii_alphabetic() => esc = false,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The layout depends on every line of the block: an edit to a middle line
+/// lays it out again once the cursor leaves, and nothing else does.
+#[test]
+fn editing_a_middle_line_lays_the_block_out_again() {
+    let mut app = app_with(MATH_DOC);
+    screen_of(&mut app, 60, 20);
+    let before = math_rows(&app, 2);
+    let layouts = app.cache.borrow().layouts();
+    app.buffer.cursor = Cursor::new(4, 0);
+    app.sync_after_input();
+    feed(&mut app, "A + z");
+    screen_of(&mut app, 60, 20);
+    esc(&mut app);
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty(), "still raw in Normal on the block");
+    feed(&mut app, "G");
+    screen_of(&mut app, 60, 20);
+    let after = math_rows(&app, 2);
+    assert!(!after.is_empty());
+    assert_ne!(after, before, "the new text is laid out");
+    assert_eq!(app.cache.borrow().layouts(), layouts + 1, "once");
+}
+
+/// Moving the cursor around a document of many blocks, in and out of them,
+/// parses nothing and lays out nothing again.
+#[test]
+fn moving_around_many_blocks_lays_out_nothing_again() {
+    let doc: String = (0..12)
+        .map(|i| format!("para {i}\n\n$$\n\\frac{{{i}}}{{2}}\ny_{i}\n$$\n\n$$x^{i}$$\n\n"))
+        .collect();
+    let mut app = app_with(&doc);
+    screen_of(&mut app, 60, 20);
+    let (builds, layouts) = {
+        let c = app.cache.borrow();
+        (c.builds(), c.layouts())
+    };
+    assert_eq!(layouts, 24, "every block once");
+    for _ in 0..(12 * 9) {
+        feed(&mut app, "j");
+        screen_of(&mut app, 60, 20);
+    }
+    feed(&mut app, "gg");
+    screen_of(&mut app, 60, 20);
+    let c = app.cache.borrow();
+    assert_eq!(c.builds(), builds, "no line parsed again");
+    assert_eq!(c.layouts(), layouts, "no block laid out again");
+}
+
+/// `[markdown] math` off, or concealment off, keeps every block as it was.
+#[test]
+fn math_or_conceal_off_lays_out_nothing() {
+    let mut app = app_with(MATH_DOC);
+    app.config.markdown.math = false;
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty());
+    assert_eq!(app.cache.borrow().locate(7, 0).0, 7);
+
+    let mut app = app_with(MATH_DOC);
+    app.config.layout.conceal = false;
+    app.buffer.cursor = Cursor::new(3, 0);
+    app.sync_after_input();
+    assert_eq!((app.active.start, app.active.end), (3, 3), "nothing to widen for");
+    screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 2).is_empty());
+    assert_eq!(app.cache.borrow().locate(7, 0).0, 7);
+}
+
+// ── #77 fix round: kinds and the active set kept in step outside input ────
+
+/// A Markdown file `name` holding `text`, in a fresh scratch directory.
+fn math_file(name: &str, text: &str) -> PathBuf {
+    let dir = two_files();
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// The document whose file is `name`.
+fn doc_index(app: &App, name: &str) -> usize {
+    app.docs
+        .iter()
+        .position(|d| d.buffer.path.as_ref().is_some_and(|p| p.ends_with(name)))
+        .expect("the document is open")
+}
+
+/// A file that opens with the cursor on a closed block shows all of its
+/// source on the very first frame, before any key: the active set is widened
+/// at startup, not only after the first input event.
+#[test]
+fn a_file_opened_on_a_block_shows_its_source_on_the_first_frame() {
+    let path = math_file("first.md", "$$\nx\n$$\nAfter\n");
+    let mut app = App::new(Config::default(), Some(path), None).unwrap();
+    assert_eq!((app.active.start, app.active.end), (0, 2), "widened at startup");
+    let screen = screen_of(&mut app, 60, 20);
+    assert!(math_rows(&app, 0).is_empty(), "raw, not laid out");
+    let cache = app.cache.borrow();
+    assert!(cache.hidden().ranges().is_empty(), "nothing hidden");
+    assert_eq!(cache.locate(3, 0).0, 3, "every line takes its row");
+    let shown: Vec<&str> = screen.iter().map(|r| r.trim()).filter(|r| !r.is_empty()).collect();
+    assert_eq!(shown.iter().filter(|r| **r == "$$").count(), 2, "both delimiters raw: {shown:?}");
+}
+
+/// A reload that turns the cursor's line into a closed block widens the
+/// active set as the kinds are refreshed for the next frame, with no input
+/// event in between.
+#[test]
+fn a_reload_that_makes_the_cursor_line_a_block_widens_the_active_set() {
+    let (mut app, path) = app_on_disk("math-reload", "prose\nmore\n");
+    app.buffer.cursor = Cursor::new(0, 0);
+    app.sync_after_input();
+    write_settled(&path, "$$\nx\n$$\nmore\n");
+    assert!(app.check_disk());
+    app.refresh_blocks(); // what the event loop does before the frame
+    assert_eq!((app.active.start, app.active.end), (0, 2));
+    screen_of(&mut app, 60, 20);
+    assert!(app.cache.borrow().hidden().ranges().is_empty(), "nothing hidden");
+    let _ = std::fs::remove_file(path);
+}
+
+/// A document reloaded in a pane that does not have focus gets kinds for its
+/// new text before that pane is drawn: a block the reload left unclosed is not
+/// laid out on the old kinds, and none of its lines is hidden.
+#[test]
+fn a_background_reload_refreshes_that_documents_kinds() {
+    let a = math_file("a.md", "Intro\n$$\nx\n$$\nEnd\n");
+    let b = a.with_file_name("b.md");
+    std::fs::write(&b, "other\n").unwrap();
+    let mut app = app_with("scratch\n");
+    app.term_size = (100, 20);
+    app.open_file(a.clone());
+    app.split_pane(true);
+    app.open_file(b);
+    let ai = doc_index(&app, "a.md");
+    screen_of(&mut app, 100, 20);
+    assert!(!app.docs[ai].cache.borrow().hidden().ranges().is_empty(), "laid out before");
+
+    write_settled(&a, "Intro\n$$\nx\ny\nEnd\n");
+    assert!(app.check_disk());
+    app.refresh_blocks();
+    let d = &app.docs[ai];
+    assert_eq!(d.blocks.revision, d.buffer.revision, "the reloaded kinds are fresh");
+    let screen = screen_of(&mut app, 100, 20);
+    assert!(app.docs[ai].cache.borrow().hidden().ranges().is_empty(), "nothing hidden");
+    assert!(screen.iter().any(|r| r.contains('y')), "the new line shows: {screen:?}");
+}
+
+/// Kinds built for another revision of the text are never used to lay a
+/// block out: the index treats them as no blocks at all.
+#[test]
+fn stale_kinds_lay_nothing_out() {
+    let mut app = app_with("Intro\n$$\nx\n$$\nEnd\n");
+    screen_of(&mut app, 60, 20);
+    assert!(!app.cache.borrow().hidden().ranges().is_empty());
+    // An edit the kinds have not caught up with: the block is unclosed now.
+    app.buffer.replace_all("Intro\n$$\nx\ny\nEnd\n");
+    let doc = &app.docs[app.current()];
+    let mut cache = doc.cache.borrow_mut();
+    cache.sync_doc(&app, doc, app.focus_pane, 60);
+    assert!(cache.hidden().ranges().is_empty(), "stale kinds: nothing laid out");
+}
+
+/// A click on a layout row of a pane without focus, whose own cursor sits in
+/// that block, lands on the block's opening line: the click is read against
+/// the rows that were on screen, not the raw ones focusing reveals.
+#[test]
+fn a_click_into_another_pane_reads_the_rows_that_were_on_screen() {
+    let a = math_file("a.md", MATH_DOC);
+    let b = a.with_file_name("b.md");
+    std::fs::write(&b, "other\n").unwrap();
+    let mut app = app_with("scratch\n");
+    app.term_size = (100, 20);
+    app.open_file(a);
+    // The cursor this pane keeps: inside the block.
+    app.buffer.cursor = Cursor::new(3, 0);
+    app.sync_after_input();
+    let left = app.focus_pane;
+    app.split_pane(true);
+    app.open_file(b);
+    assert_ne!(app.focus_pane, left);
+    let screen = screen_of(&mut app, 100, 20);
+    let ai = doc_index(&app, "a.md");
+    let rows: Vec<String> = {
+        let cache = app.docs[ai].cache.borrow();
+        (0..).map_while(|i| cache.math_row(2, i).map(|(_, s)| s.trim().to_string())).collect()
+    };
+    assert!(rows.len() >= 2, "a layout of several rows: {rows:?}");
+    let last = rows.last().unwrap();
+    let area = Rect { x: 0, y: 0, width: 100, height: 20 };
+    let (x, y) = screen
+        .iter()
+        .enumerate()
+        .find_map(|(y, r)| {
+            let x = r.find(last.as_str())?;
+            let x = r[..x].chars().count() as u16;
+            (frame::pane_at(&app, area, x, y as u16) == Some(left)).then_some((x, y as u16))
+        })
+        .expect("the layout's last row is in the left pane");
+    press(&mut app, x, y);
+    release(&mut app, x, y);
+    assert_eq!(app.focus_pane, left);
+    assert_eq!(app.buffer.cursor, Cursor::new(2, 0), "the opening line");
+}
+
+/// The closed blocks are found once per classification and kept with it: an
+/// edit drops them, the next lookup finds them again, and cursor moves read
+/// the kept list.
+#[test]
+#[allow(clippy::single_range_in_vec_init)] // block ranges, not a range to expand
+fn closed_block_ranges_are_kept_with_the_kinds() {
+    let mut app = app_with(MATH_DOC);
+    assert!(app.blocks.closed_math().is_none(), "not looked for yet");
+    app.buffer.cursor = Cursor::new(3, 0);
+    app.sync_after_input();
+    assert_eq!(app.blocks.closed_math(), Some(&[2..6][..]), "found by the lookup");
+    feed(&mut app, "j");
+    assert_eq!(app.blocks.closed_math(), Some(&[2..6][..]));
+    feed(&mut app, "Oz");
+    esc(&mut app);
+    assert_eq!(app.blocks.closed_math(), Some(&[2..7][..]), "found again after the edit");
+    // A blank line ends a block: it is no longer closed.
+    feed(&mut app, "o");
+    esc(&mut app);
+    assert!(app.blocks.closed_math().is_none(), "the cursor's blank line is not math");
+    feed(&mut app, "k");
+    assert_eq!(app.blocks.closed_math(), Some(&[][..]));
+}
+
+// ── #77 fix round 2 ─────────────────────────────────────────────────────
+
+/// Turning `[markdown] math` on by saving the watched config, with the
+/// cursor on a block's opening line and no key pressed, shows the whole
+/// block raw on the next frame: the reload widens the active set over the
+/// block it just made, rather than leaving the one-line set of a math-off
+/// document to conceal the body and closer until the next input.
+#[test]
+fn a_config_reload_that_enables_math_widens_the_active_set() {
+    let mut cfg = Config::default();
+    cfg.markdown.math = false;
+    let mut app = app_with_config(MATH_DOC, cfg);
+    app.buffer.cursor = Cursor::new(2, 0);
+    app.sync_after_input();
+    assert_eq!((app.active.start, app.active.end), (2, 2), "math off: one line");
+
+    let conf = two_files().join("shoin.conf");
+    std::fs::write(&conf, "[markdown]\nmath = true\n").unwrap();
+    app.watcher = ConfigWatcher::new(Some(conf)).unwrap();
+    app.reload_config();
+    app.refresh_blocks(); // what the event loop does before the frame
+    assert!(app.config.markdown.math);
+    assert_eq!((app.active.start, app.active.end), (2, 5), "the whole block, raw");
+    let rows = screen_of(&mut app, 60, 20);
+    assert!(rows.iter().any(|r| r.contains("x + y")), "the body shows raw: {rows:#?}");
+}
+
+/// Typing prose away from any math block never looks for the blocks: the
+/// active set rejects a line that is not math by its kind, so the ranges
+/// dropped by an edit are not rebuilt for every key.
+#[test]
+#[allow(clippy::single_range_in_vec_init)] // block ranges, not a range to expand
+fn typing_prose_does_not_rebuild_the_block_ranges() {
+    let mut app = app_with(MATH_DOC);
+    app.buffer.cursor = Cursor::new(0, 0);
+    feed(&mut app, "ihello world");
+    assert!(app.blocks.closed_math().is_none(), "never looked for");
+    esc(&mut app);
+    feed(&mut app, "j");
+    assert!(app.blocks.closed_math().is_none(), "the blank line is not math either");
+    feed(&mut app, "j");
+    assert_eq!(app.blocks.closed_math(), Some(&[2..6][..]), "a math line looks them up");
+    assert_eq!((app.active.start, app.active.end), (2, 5));
+}

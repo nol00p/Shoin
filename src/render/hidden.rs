@@ -6,13 +6,15 @@
 //! each line in it zero rows, so drawing, scrolling, `locate` and mouse
 //! hit-testing all skip it without knowing why it is hidden.
 //!
-//! The set is built by `of` from every source of hidden lines. Folds are the
-//! only one today; a laid-out `$$…$$` block (#77) would add the lines after its
-//! opening `$$` while the cursor is outside it, and draw the layout as rows of
-//! the opening line, the way an embed draws its target.
+//! The set is built by `of` from every source of hidden lines: closed folds,
+//! and display math blocks laid out over several rows (#77). A laid-out block
+//! draws its layout as rows of its opening `$$` line, the way an embed draws
+//! its target, and the lines after it take zero rows. `math_blocks` and
+//! `math_block_at` find the blocks that can be laid out: the CLOSED ones.
 
 use std::ops::Range;
 
+use crate::render::markdown::block::{BlockCache, BlockKind, Open};
 use crate::text::fold::Folds;
 
 /// Line ranges that take zero rows: sorted, disjoint, never touching.
@@ -87,15 +89,167 @@ impl Hidden {
     }
 }
 
-/// Every line that takes no rows this frame: today, the lines closed folds
-/// hide.
-pub fn of(folds: &Folds) -> Hidden {
-    Hidden::from_ranges(folds.ranges())
+/// Every line that takes no rows this frame: the lines closed folds hide, and
+/// the lines after the opening line of each display block in `laid_out` (whole
+/// blocks, as `math_blocks` gives them). Fold motions pass no blocks: `j`, `dd`
+/// and `zc` see folds only.
+pub fn of(folds: &Folds, laid_out: &[Range<usize>]) -> Hidden {
+    Hidden::from_ranges(folds.ranges().chain(laid_out.iter().map(|b| b.start + 1..b.end)))
+}
+
+/// Every closed display math block in the document, top to bottom, as whole
+/// line ranges: the opening `$$` line through the line that closes it. A
+/// one-line `$$…$$` is a block of one line. A block left open (bounded by a
+/// blank line or the end of the file) is not one: it keeps its per-line form.
+///
+/// Read off the block kinds and the carry state the classifier already
+/// cached, and reads no text. Found once per classification and kept with it
+/// (`BlockCache::closed_math`), so after the first lookup it costs nothing
+/// until the kinds change.
+pub fn math_blocks(blocks: &BlockCache) -> &[Range<usize>] {
+    blocks.closed_math.get_or_init(|| scan(blocks))
+}
+
+/// The closed display math block holding `line`, if there is one: a binary
+/// search of `math_blocks`.
+///
+/// Every line of a block is a math line, so any other line is turned away by
+/// its kind before the blocks are looked for: typing prose, which drops them
+/// at each edit, never finds them again.
+pub fn math_block_at(blocks: &BlockCache, line: usize) -> Option<Range<usize>> {
+    if blocks.kinds.get(line) != Some(&BlockKind::MathBlock) {
+        return None;
+    }
+    let found = math_blocks(blocks);
+    let i = found.partition_point(|b| b.end <= line);
+    found.get(i).filter(|b| b.start <= line).cloned()
+}
+
+/// Walk the kinds once for `math_blocks`.
+fn scan(blocks: &BlockCache) -> Vec<Range<usize>> {
+    let n = blocks.kinds.len().min(blocks.carry.len());
+    let mut out = Vec::new();
+    let mut line = 0;
+    while line < n {
+        if opens_math(blocks, line) {
+            match block_from(blocks, line, n) {
+                Ok(b) => {
+                    line = b.end;
+                    out.push(b);
+                }
+                Err(past) => line = past,
+            }
+        } else {
+            line += 1;
+        }
+    }
+    out
+}
+
+/// Whether `line` opens a display block: a math line no block is open into.
+fn opens_math(blocks: &BlockCache, line: usize) -> bool {
+    blocks.kinds[line] == BlockKind::MathBlock && !in_open_math(blocks, line)
+}
+
+/// Whether a display block is open entering `line`.
+fn in_open_math(blocks: &BlockCache, line: usize) -> bool {
+    matches!(blocks.carry[line].open, Open::InMath)
+}
+
+/// Whether a display block is still open leaving `line`. The carry entering
+/// the next line says; after the last line, the state the classifier kept.
+fn leaves_open(blocks: &BlockCache, line: usize, n: usize) -> bool {
+    if line + 1 < n {
+        in_open_math(blocks, line + 1)
+    } else {
+        blocks.math_open_at_end
+    }
+}
+
+/// The block opened at `start`: `Ok` with its lines when a line closes it,
+/// `Err` with the first line past it when nothing does.
+fn block_from(blocks: &BlockCache, start: usize, n: usize) -> Result<Range<usize>, usize> {
+    let mut line = start;
+    loop {
+        if !leaves_open(blocks, line, n) {
+            return Ok(start..line + 1);
+        }
+        line += 1;
+        // Still open where the next line is not math (the blank line that
+        // bounds it) or at the end of the file: unclosed.
+        if line >= n || blocks.kinds[line] != BlockKind::MathBlock {
+            return Err(line);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::buffer::Buffer;
+
+    fn blocks(text: &str) -> (Vec<Range<usize>>, BlockCache) {
+        let mut b = Buffer::empty();
+        b.insert_str(crate::text::cursor::Cursor::new(0, 0), text);
+        let c = BlockCache::build(&b, true, 4);
+        (math_blocks(&c).to_vec(), c)
+    }
+
+    /// Closed blocks, one-line blocks and blocks that run into each other are
+    /// found; an unclosed one (bounded by a blank line, or the end of the
+    /// file) is not.
+    #[test]
+    fn closed_math_blocks_are_found_and_unclosed_ones_are_not() {
+        let (found, c) = blocks("p\n$$\nx\n$$\n$$y$$\n$$ a\nb $$\n\n$$\nopen\n\n- i\n  $$\n  z\n  $$\n$$\nlast");
+        assert_eq!(found, vec![1..4, 4..5, 5..7, 12..15]);
+        assert_eq!(math_block_at(&c, 2), Some(1..4));
+        assert_eq!(math_block_at(&c, 3), Some(1..4));
+        assert_eq!(math_block_at(&c, 4), Some(4..5));
+        assert_eq!(math_block_at(&c, 6), Some(5..7));
+        assert_eq!(math_block_at(&c, 9), None, "unclosed");
+        assert_eq!(math_block_at(&c, 0), None);
+        assert_eq!(math_block_at(&c, 16), None, "open at the end of the file");
+        // A block closed on the file's last line, with no newline after it.
+        let (found, ..) = blocks("$$\nx\n$$");
+        assert_eq!(found, vec![0..3]);
+        let (found, ..) = blocks("$$\nx");
+        assert!(found.is_empty());
+    }
+
+    /// The state after the last line, kept by the classifier, follows edits
+    /// there: closing a block on the last line (no newline after it) makes it
+    /// a block, and opening the closer again unmakes it, with no full build.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // block ranges, not a range to expand
+    fn a_block_closed_on_the_last_line_follows_edits_to_it() {
+        use crate::text::cursor::Cursor;
+        let mut b = Buffer::empty();
+        b.insert_str(Cursor::new(0, 0), "p\n$$\nx");
+        let mut c = BlockCache::build(&b, true, 4);
+        assert!(c.math_open_at_end);
+        assert!(math_blocks(&c).is_empty());
+        b.insert_str(Cursor::new(2, 1), "$$");
+        let (line, last) = b.take_dirty().unwrap();
+        c.invalidate_from(&b, line, last);
+        assert!(!c.math_open_at_end);
+        assert_eq!(math_blocks(&c), &[1..3]);
+        assert_eq!(math_block_at(&c, 2), Some(1..3));
+        // `x\$$`: an escaped dollar and a lone one, which close nothing.
+        b.insert_str(Cursor::new(2, 1), "\\");
+        let (line, last) = b.take_dirty().unwrap();
+        c.invalidate_from(&b, line, last);
+        assert!(c.math_open_at_end, "open again");
+        assert!(math_blocks(&c).is_empty());
+    }
+
+    #[test]
+    fn laid_out_blocks_hide_all_but_their_opening_line() {
+        let h = of(&Folds::default(), &[2..5, 7..8]);
+        assert_eq!(h.run(3), Some(3..5));
+        assert_eq!(h.ranges().len(), 1);
+        assert_eq!(h.shown(4), 2);
+        assert_eq!(h.last_of(2), 4);
+    }
 
     #[test]
     fn ranges_merge_and_answer_by_line() {

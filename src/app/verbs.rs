@@ -214,12 +214,37 @@ impl App {
 
     /// The lines shown raw: the cursor's (or the selection's), or none at all
     /// in read-only mode, where there is nothing to edit under a cursor.
+    ///
+    /// A closed display math block the set touches is laid out over several
+    /// rows when the cursor is away (#77), so the set widens to all of it:
+    /// the whole source shows while any line of it is being edited. Read off
+    /// the block kinds, so they must be in step with the text: when they are
+    /// not, nothing widens.
     pub(super) fn active_set(&self, anchor: Option<Cursor>) -> ActiveSet {
         if self.view {
-            ActiveSet::none()
-        } else {
-            ActiveSet::compute(&self.mode, &self.buffer.cursor, anchor)
+            return ActiveSet::none();
         }
+        let mut set = ActiveSet::compute(&self.mode, &self.buffer.cursor, anchor);
+        let fresh = self.blocks.revision == self.buffer.revision;
+        let laid_out = self.config.layout.conceal && self.buffer.syntax == crate::text::buffer::Syntax::Markdown;
+        if fresh && laid_out {
+            // Binary searches of the blocks kept with the kinds: a cursor move
+            // does not walk the block it is in.
+            let block = |line| crate::render::hidden::math_block_at(&self.blocks, line);
+            let first = block(set.start);
+            // A cursor alone (or a selection within one block) needs one.
+            let last = match &first {
+                Some(b) if b.contains(&set.end) => first.clone(),
+                _ => block(set.end),
+            };
+            if let Some(b) = first {
+                set.start = b.start;
+            }
+            if let Some(b) = last {
+                set.end = b.end - 1;
+            }
+        }
+        set
     }
 
     /// Enter or leave read-only mode, for every open buffer: a page to read,
@@ -250,6 +275,8 @@ impl App {
         // Built here, not by `refresh_blocks`: both buffers are at revision 0,
         // which it would take to mean nothing changed.
         self.blocks = BlockCache::build(&self.buffer, self.config.markdown.math, self.config.editor.tab_width);
+        // Widened over a display block the cursor starts on, as at startup.
+        self.active = self.active_set(None);
     }
 
     /// Turn zen mode on or off, remembering what it hid so leaving it restores

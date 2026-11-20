@@ -40,9 +40,10 @@ impl App {
         // Coming back to a document re-reads its embeds: the notes they name
         // may have been written, or created, while it was out of sight.
         self.disk_changed();
-        // The block cache of a document edited while it was in the background
-        // (there is no such path today, but reload could add one) resyncs on
-        // the next frame through the usual revision check.
+        // The kinds of a document changed while it was in the background (a
+        // reload from disk) are brought up to date before the active set is
+        // widened from them.
+        self.refresh_blocks();
         self.active = self.active_set(None);
         self.touch_status();
     }

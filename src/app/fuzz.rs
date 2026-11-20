@@ -60,6 +60,9 @@ const DOCS: &[&str] = &[
     "| only | header |\n| - | - |\n\n|x|\n|-|\n|\\||\n\n> - quoted list\n> > nested quote\n\n-\n- \n1.\n* * *\n   ***\n#\n## \n###### six\n####### seven\n",
     "> ---\n> - a\n>   - a1\n>\t- b\n>- c\n> 1. x\n> 2. y\n> > - deeper\n>\n> 10. j\n>    - k\nlazy\n\n- out\n  > - in an item\n",
     "a\u{2028}b\u{c}c\rd\n\u{feff}bom\n\u{200b}zero width\u{301}combining\n",
+    // Display math: closed, one-line, run together, under list items, left
+    // open, in a quote, under a heading to fold, and closed on the last line.
+    "Intro\n\n$$\n\\frac{a}{b}\n$$\n$$x^2$$\n$$ a\nb $$\n\n- item\n  $$\n  \\sum_{i=1}^{n} i\n  $$\n  - nested\n\n    $$y$$\n\n$$\nunclosed\n\n> $$\n> q\n> $$\n\n# H\n$$\n\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}\n$$\ntext\n$$\nlast\n$$",
 ];
 
 /// One session of `steps` random events from `seed`. Every event is pushed to
@@ -194,8 +197,16 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         app.refresh_blocks();
         app.refresh_focus();
         let fresh = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
-        if fresh.kinds != app.blocks.kinds || fresh.carry != app.blocks.carry {
+        if fresh.kinds != app.blocks.kinds
+            || fresh.carry != app.blocks.carry
+            || fresh.math_open_at_end != app.blocks.math_open_at_end
+        {
             return Err(format!("step {step}: block cache differs from a rebuild\ntext: {:?}", text(&app)));
+        }
+        // The closed math blocks kept with the kinds are the ones a rebuild finds.
+        let (kept, rebuilt) = (crate::render::hidden::math_blocks(&app.blocks), crate::render::hidden::math_blocks(&fresh));
+        if kept != rebuilt {
+            return Err(format!("step {step}: kept math blocks {kept:?}, a rebuild finds {rebuilt:?}\ntext: {:?}", text(&app)));
         }
         let c = app.buffer.cursor;
         if c.line >= app.buffer.line_count().max(1) || c.col > app.buffer.line_len(c.line) {
@@ -223,6 +234,7 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         }
         term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
         let _ = app.visible_pictures();
+        math_invariants(&app).map_err(|e| format!("step {step}: {e}\ntext: {:?}", text(&app)))?;
     }
     // Undo everything: the text must come back. Only checked when the session
     // ends on the buffer it started with.
@@ -252,6 +264,50 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
     }
     if text(&app) != fin {
         return Err(format!("redoing everything did not restore the final text\nundo steps {n}\nwant {fin:?}\n got {:?}", text(&app)));
+    }
+    Ok(())
+}
+
+/// Display math laid out over several rows (#77): the active set never cuts
+/// a closed block (it holds all of it or none), the cursor is never on a
+/// laid-out line, and the row index maps every row to a line, in order, with
+/// every line's rows where `line_rows` says.
+fn math_invariants(app: &App) -> Result<(), String> {
+    let markdown = app.buffer.syntax == crate::text::buffer::Syntax::Markdown;
+    let fresh = app.blocks.revision == app.buffer.revision;
+    let a = &app.active;
+    let blocks = crate::render::hidden::math_blocks(&app.blocks).to_vec();
+    if fresh && markdown && app.config.layout.conceal && !app.view {
+        for b in &blocks {
+            let touches = a.start < b.end && a.end >= b.start;
+            if touches && (a.start > b.start || a.end + 1 < b.end) {
+                return Err(format!("active {}..={} cuts math block {b:?}", a.start, a.end));
+            }
+        }
+    }
+    // A sync of its own, so the index describes this text whatever the frame
+    // drew (a pane squeezed to nothing draws none).
+    let mut cache = app.cache.borrow_mut();
+    cache.sync(app, 40);
+    let c = app.buffer.cursor;
+    if !app.view {
+        if let Some(b) = blocks.iter().find(|b| b.contains(&c.line)) {
+            if cache.math_row(b.start, 0).is_some() {
+                return Err(format!("cursor {c:?} is on laid-out block {b:?}"));
+            }
+        }
+    }
+    let mut prev = 0;
+    for r in 0..cache.total_rows() {
+        let row = cache.row(r).ok_or(format!("row {r} of {} is missing", cache.total_rows()))?;
+        if row.line() < prev {
+            return Err(format!("row {r} goes back to line {} from {prev}", row.line()));
+        }
+        prev = row.line();
+        let (first, last) = cache.line_rows(row.line());
+        if !row.is_spacer() && !(first..=last).contains(&r) {
+            return Err(format!("row {r} of line {} outside its rows {first}..={last}", row.line()));
+        }
     }
     Ok(())
 }

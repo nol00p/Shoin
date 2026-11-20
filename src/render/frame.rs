@@ -323,8 +323,9 @@ fn render_pane(
     // long line wraps to many rows.
     let mut current: Option<(usize, DisplayLine, Vec<char>)> = None;
     // The lines this pane's closed folds hide, to say how many after each
-    // fold's line.
-    let folded = cache.hidden().clone();
+    // fold's line. Folds only: a laid-out display block hides lines too, but
+    // they are not folded, and `j` steps through them.
+    let folded = cache.folded().clone();
     // The cursor line's chars, kept when the loop moves past it, for placing
     // the caret below without collecting the line a second time.
     let mut cursor_chars: Option<Vec<char>> = None;
@@ -360,6 +361,12 @@ fn render_pane(
                 width: lay.measure,
                 height: 1,
             };
+            // A laid-out display block's rows aren't in the rope either.
+            if let Some((pad, text)) = cache.math_row(row.line(), index) {
+                render_math_row(frame, app, pad, text, r, bg);
+                leave(&mut current);
+                continue;
+            }
             let view = (text_area.y, text_area.y + lay.height);
             render_embed_row(frame, app, &cache, row.line(), index, r, view, bg);
             leave(&mut current);
@@ -594,6 +601,14 @@ fn outline_row(w: usize, edge: Edge, label: Option<&str>) -> String {
         }
         None => format!("{l}{}{r}", fill.to_string().repeat(inner)),
     }
+}
+
+/// One row of a laid-out display math block (#77): the box, `pad` cells in,
+/// in the style a math line wears (`markdown::style_line_with`).
+fn render_math_row(frame: &mut Frame, app: &App, pad: usize, text: &str, rect: Rect, bg: ratatui::style::Color) {
+    let style = ThemeStyle { fg: app.theme.code, bg: app.theme.code_bg, attrs: Default::default() }.to_ratatui();
+    let line = Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(text.to_string(), style)]);
+    frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
 }
 
 /// Draw one row of an expanded `![[…]]`.
@@ -3948,7 +3963,12 @@ mod tests {
         ];
         for (line, needle, back) in cases {
             let (revealed, concealed, margin) = reveal_columns(line, needle, true);
-            assert_eq!(concealed, Some(margin), "{line:?} concealed starts at the text column");
+            // A display block away from the cursor is laid out, centred, and
+            // `a_layout_is_centred_in_the_room_its_indentation_leaves` holds
+            // it there; here it is the revealed line that matters.
+            if !line.starts_with("$$") {
+                assert_eq!(concealed, Some(margin), "{line:?} concealed starts at the text column");
+            }
             assert_eq!(revealed, Some(margin - back), "{line:?} revealed");
         }
         // The visible text of a line that opens with block markers stays put.

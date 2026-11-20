@@ -19,6 +19,16 @@
 //!      known to hold the same text, so reading it again would only confirm
 //!      that — and at 100,000 lines that confirmation was ~20 ms a keystroke.
 //!
+//! A laid-out display math block (#77) breaks "a function of the line's own
+//! text": its layout depends on every line of the block. It is kept on the
+//! opening line's entry as a `MathLayout`, keyed by the build serials (`id`) of
+//! the block's other lines. Any edit to one of them rebuilds that line's entry,
+//! which gives it a new serial, so the key no longer matches and the block is
+//! laid out again the next time it is shown; the opening line's own text, the
+//! measure and the style key reach it through the entry itself, which is
+//! rebuilt when any of them moves. An unchanged block is checked by comparing
+//! a few integers, and laid out once.
+//!
 //! What is NOT cached here is anything frame-local: focus dim, the search
 //! highlight, the Visual selection, the command-box dim. Those are overlays
 //! applied to a clone of the cached spans, for VISIBLE lines only — which is
@@ -68,6 +78,28 @@ pub struct LineEntry {
     /// and preview is on. Captured when the line is parsed, so the target is
     /// read once per edit rather than once per frame.
     pub embed: Option<Expansion>,
+    /// The serial of the build that made this entry: unique for the cache's
+    /// lifetime, so a changed serial means a rebuilt line. A display block's
+    /// layout is keyed by its lines' serials.
+    id: u64,
+    /// On the opening line of a closed display block: the block laid out, as
+    /// last computed. Kept while the block is shown raw, so leaving it costs
+    /// nothing when it did not change.
+    math: Option<MathLayout>,
+}
+
+/// A display math block laid out over several rows (`render::math::layout`).
+pub struct MathLayout {
+    /// The serials of the block's lines after the opening one, when it was
+    /// laid out. A different list (an edited line, a line added or removed)
+    /// means the layout is stale.
+    key: Vec<u64>,
+    /// The rows, all one width; `None` when the block did not fit or did not
+    /// parse, and keeps its per-line form.
+    rows: Option<Vec<String>>,
+    /// Cells from the left of the measure to the box: the opening line's
+    /// indentation, then half of what the box leaves of the rest.
+    pad: usize,
 }
 
 impl LineEntry {
@@ -184,8 +216,18 @@ pub struct RenderCache {
     /// `entries.len() + 1` long after a sync.
     row_starts: Vec<usize>,
     /// The lines that take no rows in the current row index
-    /// (`render::hidden`): the closed folds of the pane it was built for.
+    /// (`render::hidden`): the closed folds of the pane it was built for, and
+    /// the laid-out display blocks.
     hidden: Hidden,
+    /// The lines that pane's closed folds hide, alone: what a fold's label
+    /// and relative line numbers count, as `j` does.
+    folded: Hidden,
+    /// The display blocks drawn laid out in the current row index, whole and
+    /// top to bottom.
+    laid_out: Vec<std::ops::Range<usize>>,
+    /// Display blocks laid out since startup. Instrumentation, like `builds`:
+    /// it grows when a block changes, not with frames or cursor moves.
+    layouts: u64,
     /// The buffer revision at which every entry was last verified against its
     /// line. `None` means the entries and the document may have diverged, which
     /// is the only state that has to pay for the verification walk.
@@ -298,9 +340,10 @@ impl RenderCache {
                     }
                 });
                 if !valid {
-                    self.entries[line] =
-                        Some(Box::new(build(app, doc, line, block.clone(), measure)));
                     self.builds += 1;
+                    let mut entry = build(app, doc, line, block.clone(), measure);
+                    entry.id = self.builds;
+                    self.entries[line] = Some(Box::new(entry));
                 }
             }
             self.verified = Some(doc.buffer.revision);
@@ -365,11 +408,29 @@ impl RenderCache {
         self.row_starts.clear();
         self.row_starts.reserve(n + 1);
 
-        self.hidden = hidden::of(doc.folds_in(pane));
+        // A closed display block is laid out unless it is shown raw: the
+        // active set touches it (and then holds all of it, `App::active_set`),
+        // or a closed fold hides any of it, which folds it as text. Only on
+        // kinds built for this text: kinds left over from another revision
+        // (a document changed before `App::refresh_blocks` reached it) could
+        // name a block that is no longer closed, and hide its lines.
+        let folds = doc.folds_in(pane);
+        self.folded = hidden::of(folds, &[]);
+        self.laid_out.clear();
+        if conceal_on && doc.blocks.revision == doc.buffer.revision {
+            for b in hidden::math_blocks(&doc.blocks).iter().cloned() {
+                let active = current && app.active.start < b.end && app.active.end >= b.start;
+                if !active && self.folded.count_in(b.clone()) == 0 && self.lay_out(app, b.clone()) {
+                    self.laid_out.push(b);
+                }
+            }
+        }
+        self.hidden = hidden::of(folds, &self.laid_out);
         let ranges = self.hidden.ranges();
-        // The next run of hidden lines at or below `line`, walked alongside
-        // rather than searched per line.
+        // The next run of hidden lines at or below `line`, and the next
+        // laid-out block, walked alongside rather than searched per line.
         let mut next = 0usize;
+        let mut next_block = 0usize;
         let mut rows = 0usize;
         for line in 0..n {
             let concealed = conceal_on && !(current && app.active.contains(line));
@@ -386,7 +447,14 @@ impl RenderCache {
             // An embed expands only when it is NOT the active line — the
             // active-line rule, applied to embeds exactly as to `**bold**`.
             // That is also what keeps the cursor from ever being inside one.
-            rows += content_rows(self.entries[line].as_deref(), concealed);
+            while self.laid_out.get(next_block).is_some_and(|b| b.start < line) {
+                next_block += 1;
+            }
+            let entry = self.entries[line].as_deref();
+            rows += match self.laid_out.get(next_block).filter(|b| b.start == line) {
+                Some(_) => layout_rows(entry).map_or(1, <[String]>::len),
+                None => content_rows(entry, concealed),
+            };
             // Spacing goes between a line and the next one SHOWN, so before
             // a hidden run it is the spacing the run's last line would take.
             let last = match run {
@@ -398,9 +466,85 @@ impl RenderCache {
         self.row_starts.push(rows);
     }
 
+    /// Lay out the closed display block `b` if its layout is missing or
+    /// stale, and say whether it fits. See the module doc for the key.
+    fn lay_out(&mut self, app: &App, b: std::ops::Range<usize>) -> bool {
+        let serial = |e: &Option<Box<LineEntry>>| e.as_ref().map_or(0, |e| e.id);
+        let rest = &self.entries[b.start + 1..b.end];
+        let Some(opener) = self.entries[b.start].as_deref() else { return false };
+        if let Some(m) = &opener.math {
+            if m.key.iter().copied().eq(rest.iter().map(serial)) {
+                return m.rows.is_some();
+            }
+        }
+        let tab = app.config.editor.tab_width;
+        let lines: Vec<&str> = self.entries[b.clone()]
+            .iter()
+            .map(|e| e.as_ref().map_or("", |e| e.source.as_str()))
+            .collect();
+        let tex = tex_of(&lines);
+        let ws: String = opener.source.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let indent = usize::from(text_width(&ws, tab));
+        let room = usize::from(self.measure).saturating_sub(indent);
+        let rows = crate::render::math::layout(&tex, room).filter(|r| !r.is_empty());
+        let pad = rows.as_ref().map_or(0, |r| {
+            let w = usize::from(text_width(&r[0], tab));
+            indent + room.saturating_sub(w) / 2
+        });
+        let key = rest.iter().map(serial).collect();
+        let fits = rows.is_some();
+        if let Some(e) = self.entries[b.start].as_deref_mut() {
+            e.math = Some(MathLayout { key, rows, pad });
+        }
+        self.layouts += 1;
+        fits
+    }
+
     /// The lines that take no rows in the current row index.
+    #[cfg(test)]
     pub fn hidden(&self) -> &Hidden {
         &self.hidden
+    }
+
+    /// The lines the pane's closed folds hide, without the laid-out display
+    /// blocks: what a fold's label and relative line numbers count.
+    pub fn folded(&self) -> &Hidden {
+        &self.folded
+    }
+
+    /// The layout `line` draws instead of itself this frame, when it opens a
+    /// laid-out display block.
+    fn laid_out_rows(&self, line: usize) -> Option<&[String]> {
+        self.laid_out.binary_search_by_key(&line, |b| b.start).ok()?;
+        layout_rows(self.entry(line))
+    }
+
+    /// Row `index` of the layout `line` draws, and the cells to its left
+    /// within the measure.
+    pub fn math_row(&self, line: usize, index: usize) -> Option<(usize, &str)> {
+        let row = self.laid_out_rows(line)?.get(index)?;
+        let pad = self.entry(line)?.math.as_ref()?.pad;
+        Some((pad, row.as_str()))
+    }
+
+    /// How many rows `line`'s own content takes this frame.
+    fn own_rows(&self, line: usize) -> usize {
+        match self.laid_out_rows(line) {
+            Some(rows) => rows.len(),
+            None => content_rows(self.entry(line), self.is_concealed(line)),
+        }
+    }
+
+    /// Lines parsed since startup.
+    #[cfg(test)]
+    pub fn builds(&self) -> u64 {
+        self.builds
+    }
+
+    /// Display blocks laid out since startup.
+    #[cfg(test)]
+    pub fn layouts(&self) -> u64 {
+        self.layouts
     }
 
     /// Total visual rows in the document, as currently revealed.
@@ -438,9 +582,20 @@ impl RenderCache {
         // Line spacing's rows trail the line's own, so anything past its
         // content is air. It answers with the line it follows, which is what
         // makes a click in the gap land somewhere sensible.
-        if within >= content_rows(Some(entry), concealed) {
+        if within >= self.own_rows(line) {
             return Some(VisualRow {
                 source: RowSource::Spacer(line),
+                start_col: 0,
+                end_col: 0,
+                hanging: 0,
+                editable: false,
+            });
+        }
+        // A laid-out display block: its rows are not in the rope either, and
+        // a click on one lands on the opening line, as on an embed.
+        if self.laid_out_rows(line).is_some() {
+            return Some(VisualRow {
+                source: RowSource::Embedded { line, index: within },
                 start_col: 0,
                 end_col: 0,
                 hanging: 0,
@@ -477,7 +632,7 @@ impl RenderCache {
     pub fn line_rows(&self, line: usize) -> (usize, usize) {
         let line = self.hidden.shown(line);
         let Some(&first) = self.row_starts.get(line) else { return (0, 0) };
-        let rows = content_rows(self.entry(line), self.is_concealed(line));
+        let rows = self.own_rows(line);
         (first, first + rows.saturating_sub(1))
     }
 
@@ -495,6 +650,10 @@ impl RenderCache {
             return (0, 0);
         };
         let base = self.row_starts.get(line).copied().unwrap_or(0);
+        // A laid-out block has no columns: its first row stands for it.
+        if self.laid_out_rows(line).is_some() {
+            return (base, 0);
+        }
         let wrap = entry.wrap(self.is_concealed(line));
         for (i, (start, end)) in wrap.iter().enumerate() {
             if col >= *start && col <= *end {
@@ -515,6 +674,33 @@ fn content_rows(entry: Option<&LineEntry>, concealed: bool) -> usize {
         Some(e) => e.wrap(false).len(),
         None => 1,
     }
+}
+
+/// The layout cached on an opening line, when the block fit.
+fn layout_rows(entry: Option<&LineEntry>) -> Option<&[String]> {
+    entry?.math.as_ref()?.rows.as_deref()
+}
+
+/// The TeX of a display block from its lines: the text between its `$$`
+/// delimiters, each line's leading indentation removed, joined with '\n'.
+fn tex_of(lines: &[&str]) -> String {
+    let last = lines.len().saturating_sub(1);
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let mut s = line.trim_start();
+        if i == 0 {
+            s = s.strip_prefix("$$").unwrap_or(s).trim_start();
+        }
+        if i == last {
+            let t = s.trim_end();
+            s = t.strip_suffix("$$").unwrap_or(t).trim_end();
+        }
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(s);
+    }
+    out
 }
 
 /// Blank rows to leave after `line` — `layout.line_spacing`, minus the places
@@ -674,6 +860,8 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         hang_raw,
         hang_concealed,
         embed,
+        id: 0,
+        math: None,
     }
 }
 
