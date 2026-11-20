@@ -182,6 +182,18 @@ fn equations() {
 }
 
 #[test]
+fn unknown_command_arguments_stay_literal() {
+    check(r"\foo{x} + \mathcal{F}", &[r"\foo{x} + \mathcal{F}"]);
+    check(r"\foo{a}{b}", &[r"\foo{a}{b}"]);
+    check(r"\foo{{x} \frac{a}{b} & y^2 \}}", &[r"\foo{{x} \frac{a}{b} & y^2 \}}"]);
+    check(r"\foo {a}  {b}", &[r"\foo {a}  {b}"]);
+    check(r"\alpha{x}", &["αx"]);
+    assert!(layout(r"\foo{猫}", 8).is_some());
+    assert_eq!(layout(r"\foo{猫}", 7), None);
+    assert_eq!(layout(r"\foo{a", 80), None);
+}
+
+#[test]
 fn shared_symbols_and_fallbacks() {
     check(r"\foo + \alpha", &[r"\foo + α"]);
     check(r"\begin{custom}\frac{1}{2} & \alpha \\ F_z\end{custom}",
