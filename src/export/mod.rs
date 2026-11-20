@@ -77,13 +77,17 @@ pub fn default_path(source: &Path, format: Format) -> PathBuf {
 ///
 /// `page` only reaches HTML, which is the one format with a look of its own to
 /// get right; the others are text and are the same on every machine.
+///
+/// The `Some` it returns is a note to add to the report that the file was
+/// written: the HTML page kept its math as TeX (no `pandoc`, see
+/// [`html::render_math`]). The export itself still succeeded.
 pub fn write(
     source: &Path,
     dest: &Path,
     format: Format,
     cfg: &TranscludeConfig,
     page: &html::Page,
-) -> Result<()> {
+) -> Result<Option<&'static str>> {
     // Every file the compile read is part of what is being exported, so
     // writing onto any of them would destroy the document: the source, an
     // embedded note, an embedded picture. `sources` starts with the source.
@@ -122,14 +126,16 @@ pub fn write(
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "document".into());
-            std::fs::write(dest, html::render(&flat, &title, page)).with_context(|| short(dest))?
+            let (html, note) = html::render_math(&flat, &title, page);
+            std::fs::write(dest, html).with_context(|| short(dest))?;
+            return Ok(note);
         }
         Format::Pdf => {
             let flat = rebase_images(&flat, source, None, &page.md);
             write_pdf(&flat, source, dest, page.md.math)?
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Every local picture file `markdown` links to (`![alt](img/p.png)`),
@@ -546,6 +552,115 @@ fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<(
         bail!("pandoc: {why}");
     }
     Ok(())
+}
+
+/// The HTML page's formulas as MathML, through `pandoc` (an
+/// [`html::Convert`]).
+///
+/// One run for the whole page, not one per formula: [`mathml_source`] puts
+/// them in one document, [`mathml_split`] takes pandoc's page apart again.
+/// MathML rather than a script such as MathJax: browsers draw it natively,
+/// and the page keeps its promise of no script and nothing to fetch.
+///
+/// The `Err` notes are short for the same reason as `write_pdf`'s: they end
+/// a one-row status line.
+pub(crate) fn pandoc_mathml(formulas: &[html::Formula]) -> std::result::Result<Vec<Option<String>>, &'static str> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let Some(tool) = which("pandoc") else {
+        return Err("math left as TeX: no pandoc");
+    };
+    const FAILED: &str = "math left as TeX: pandoc failed";
+    let mut child = Command::new(tool)
+        // `--mathml` rather than 3.x's `--math-method=mathml`, which older
+        // pandocs reject; newer ones accept it with a warning on stderr.
+        .args(["--from=markdown", "--to=html", "--mathml"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        // A formula pandoc cannot read is a warning there; it keeps its TeX.
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| FAILED)?;
+    // Written from a thread so a long page cannot fill both pipes at once.
+    let mut stdin = child.stdin.take().ok_or(FAILED)?;
+    let source = mathml_source(formulas);
+    let writer = std::thread::spawn(move || stdin.write_all(source.as_bytes()));
+    let mut page = String::new();
+    let read = child.stdout.take().ok_or(FAILED)?.read_to_string(&mut page);
+    let wrote = writer.join().map_err(|_| FAILED)?;
+    let status = child.wait().map_err(|_| FAILED)?;
+    if read.is_err() || wrote.is_err() || !status.success() {
+        return Err(FAILED);
+    }
+    Ok(mathml_split(&page, formulas.len()))
+}
+
+/// The marker before formula `i` in [`mathml_source`]. An HTML comment,
+/// which pandoc passes through as it is, while the text of a formula that
+/// falls out of math is escaped (`&lt;!--`): a formula cannot forge one.
+fn mathml_marker(i: usize) -> String {
+    format!("<!-- shoin-math {i} -->")
+}
+
+/// One Markdown document holding every formula, each in a paragraph of its
+/// own after its marker.
+///
+/// Inline TeX is trimmed, since pandoc does not read `$ x$` as math, and a
+/// display formula loses its blank lines, which would end the paragraph
+/// (they mean nothing in TeX math).
+fn mathml_source(formulas: &[html::Formula]) -> String {
+    let mut doc = String::new();
+    for (i, f) in formulas.iter().enumerate() {
+        doc.push_str(&mathml_marker(i));
+        doc.push_str("\n\n");
+        if f.display {
+            let tex: Vec<&str> = f.tex.lines().filter(|l| !l.trim().is_empty()).collect();
+            doc.push_str(&format!("$${}$$", tex.join("\n")));
+        } else {
+            doc.push_str(&format!("${}$", f.tex.trim()));
+        }
+        doc.push_str("\n\n");
+    }
+    doc
+}
+
+/// pandoc's page cut back into formulas: what follows each marker, when it
+/// is one `<math>` element and nothing else; `None` otherwise — a formula
+/// pandoc could not convert comes back as text, so it keeps its TeX.
+///
+/// A marker missing, repeated or out of order means the pieces cannot be
+/// matched to the formulas, so none are converted.
+fn mathml_split(page: &str, n: usize) -> Vec<Option<String>> {
+    let mut at: Vec<(usize, usize)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let marker = mathml_marker(i);
+        let mut found = page.match_indices(&marker);
+        match (found.next(), found.next()) {
+            (Some((pos, _)), None) if at.last().is_none_or(|&(prev, _)| prev < pos) => at.push((pos, marker.len())),
+            _ => return vec![None; n],
+        }
+    }
+    (0..n)
+        .map(|i| {
+            let start = at[i].0 + at[i].1;
+            let end = at.get(i + 1).map_or(page.len(), |&(pos, _)| pos);
+            let piece = page[start..end].trim();
+            let piece = piece.strip_prefix("<p>").and_then(|p| p.strip_suffix("</p>")).unwrap_or(piece).trim();
+            // Export puts its own wrapper around it, so one pandoc adds goes.
+            let piece = ["<span class=\"math inline\">", "<span class=\"math display\">"]
+                .iter()
+                .find_map(|open| piece.strip_prefix(open)?.strip_suffix("</span>"))
+                .unwrap_or(piece);
+            let one = piece.starts_with("<math")
+                && piece.ends_with("</math>")
+                && piece.matches("<math").count() == 1
+                && piece.matches("</math>").count() == 1;
+            // In an HTML page the parser puts `<math>` in the MathML
+            // namespace by itself, and the page names no address.
+            one.then(|| piece.replacen(" xmlns=\"http://www.w3.org/1998/Math/MathML\"", "", 1))
+        })
+        .collect()
 }
 
 /// `--resource-path=<document's folder>:<working directory>`.
@@ -1198,5 +1313,74 @@ mod tests {
         write(&src, &d.join("parts/out.md"), Format::Markdown, &TranscludeConfig::default(), &html::Page::default())
             .unwrap();
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    // -- MathML through pandoc ------------------------------------------------
+
+    fn formula(tex: &str, display: bool) -> html::Formula {
+        html::Formula { tex: tex.into(), display }
+    }
+
+    #[test]
+    fn the_formulas_go_to_pandoc_as_one_document() {
+        let doc = mathml_source(&[formula(" x^2 ", false), formula("a\n\n  \nb", true)]);
+        assert_eq!(doc, "<!-- shoin-math 0 -->\n\n$x^2$\n\n<!-- shoin-math 1 -->\n\n$$a\nb$$\n\n");
+    }
+
+    /// What pandoc 3.14 wrote for a converted inline and display formula, one
+    /// that fell out of math, and one it could not convert.
+    #[test]
+    fn pandocs_page_is_cut_back_into_formulas() {
+        let page = "<!-- shoin-math 0 -->\n\
+            <p><math display=\"inline\" xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mi>x</mi>\
+            <annotation encoding=\"application/x-tex\">x</annotation></semantics></math></p>\n\
+            <!-- shoin-math 1 -->\n\
+            <p><math display=\"block\" xmlns=\"http://www.w3.org/1998/Math/MathML\"><mfrac><mi>a</mi><mi>b</mi></mfrac></math></p>\n\
+            <!-- shoin-math 2 -->\n<p>$\\frac{a$</p>\n\
+            <!-- shoin-math 3 -->\n<p><span class=\"math inline\">$\\foo{x}$</span></p>\n";
+        let got = mathml_split(page, 4);
+        assert_eq!(
+            got,
+            vec![
+                Some("<math display=\"inline\"><semantics><mi>x</mi><annotation encoding=\"application/x-tex\">x</annotation></semantics></math>".into()),
+                Some("<math display=\"block\"><mfrac><mi>a</mi><mi>b</mi></mfrac></math>".into()),
+                None,
+                None,
+            ]
+        );
+        // A pandoc that wraps its MathML in a span of its own.
+        assert_eq!(
+            mathml_split("<!-- shoin-math 0 -->\n<p><span class=\"math display\"><math>a</math></span></p>", 1),
+            vec![Some("<math>a</math>".into())]
+        );
+        // Two formulas in one piece are not one formula.
+        assert_eq!(mathml_split("<!-- shoin-math 0 -->\n<p><math>a</math> <math>b</math></p>", 1), vec![None]);
+    }
+
+    /// Markers that cannot be matched to formulas, one by one, convert none.
+    #[test]
+    fn markers_out_of_step_convert_nothing() {
+        let m = |i| format!("{}\n<p><math>{i}</math></p>\n", mathml_marker(i));
+        assert_eq!(mathml_split(&(m(0) + &m(1)), 2), vec![Some("<math>0</math>".into()), Some("<math>1</math>".into())]);
+        assert_eq!(mathml_split(&m(0), 2), vec![None, None], "one missing");
+        assert_eq!(mathml_split(&(m(1) + &m(0)), 2), vec![None, None], "out of order");
+        assert_eq!(mathml_split(&(m(0) + &m(0) + &m(1)), 2), vec![None, None], "repeated");
+        assert_eq!(mathml_split("", 0), Vec::<Option<String>>::new());
+    }
+
+    /// The real thing, where pandoc is installed: `cargo test -- --ignored
+    /// pandoc`. Every formula of `examples/math.md` is MathML.
+    #[test]
+    #[ignore = "needs pandoc on PATH"]
+    fn pandoc_turns_the_example_math_into_mathml() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/math.md");
+        let text = std::fs::read_to_string(&src).unwrap();
+        let (page, note) = html::render_math(&text, "math", &html::Page::default());
+        assert_eq!(note, None, "pandoc is not on PATH");
+        assert!(!page.contains("\\(") && !page.contains("\\["), "a formula stayed TeX: {page}");
+        let formulas = page.matches("class=\"math ").count();
+        assert!(formulas > 10, "{page}");
+        assert_eq!(page.matches("<math ").count(), formulas, "{page}");
+        assert!(!page.contains("<script") && !page.contains("http"), "{page}");
     }
 }

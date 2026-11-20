@@ -10,6 +10,9 @@
 //!
 //!   - **One file, no assets.** The CSS is inlined and there is no script, no
 //!     font and no image fetch. What you export is what you can email.
+//!     Math is the one exception to "no tool": with `pandoc` on PATH it is
+//!     turned into MathML (`render_math`), which browsers draw without a
+//!     script; without it, the TeX stays, and the page is still complete.
 //!   - **It looks like the editor it came from.** The page is drawn from the
 //!     live `[theme]` and `layout.measure`, so a document exported from a
 //!     customised shoin arrives in that shoin's colors and column width — down
@@ -58,13 +61,71 @@ impl Default for Page {
     }
 }
 
-/// Convert a Markdown document to a complete HTML page.
+/// Convert a Markdown document to a complete HTML page, its math left as TeX
+/// (`\(…\)`, `\[…\]`) whether or not pandoc is installed: the page the
+/// tests compare against. Export uses [`render_math`].
 ///
 /// `fallback_title` names the page when the document has no `# Heading` of its
 /// own to be named after — normally the file's stem.
+#[cfg(test)]
 pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
+    let body = Body::new(&page.md, &page.base).run(text);
+    wrap(&body, text, fallback_title, page)
+}
+
+/// One formula for a [`Convert`]: its TeX, without the `$` or `$$` around it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Formula {
+    pub tex: String,
+    /// `$$…$$`, on its own lines or inside a paragraph.
+    pub display: bool,
+}
+
+/// Turns every formula of a page into MathML in one go: one entry per
+/// formula, `None` for one it could not convert (that one keeps its TeX).
+/// `Err` says why none were, in a few words for the status line.
+pub type Convert<'a> = &'a dyn Fn(&[Formula]) -> Result<Vec<Option<String>>, &'static str>;
+
+/// Convert a Markdown document to a complete HTML page, its math turned into
+/// MathML by `pandoc` (`export::pandoc_mathml`). The note is set when the
+/// math stayed TeX (`\(…\)`, `\[…\]`): `export` adds it to the message
+/// that reports the file written.
+///
+/// `fallback_title` names the page when the document has no `# Heading` of its
+/// own to be named after — normally the file's stem.
+pub fn render_math(text: &str, fallback_title: &str, page: &Page) -> (String, Option<&'static str>) {
+    render_with(text, fallback_title, page, &super::pandoc_mathml)
+}
+
+/// [`render_math`] with any converter, so the splicing is tested without
+/// pandoc.
+///
+/// Two walks rather than placeholders in the output: the first writes the
+/// TeX, as if there were no converter, and collects the formulas in the
+/// order it meets them; the second meets them in the same order and takes
+/// each one's conversion.
+/// A placeholder would need a string no document can contain. A page with
+/// no math, or with `math` off, never runs the converter.
+pub fn render_with(text: &str, fallback_title: &str, page: &Page, convert: Convert) -> (String, Option<&'static str>) {
+    let (tex_body, math) = Body::new(&page.md, &page.base).run_math(text);
+    let Math::Collect(formulas) = math else { unreachable!("a walk starts out collecting") };
+    if formulas.is_empty() {
+        return (wrap(&tex_body, text, fallback_title, page), None);
+    }
+    match convert(&formulas) {
+        Err(why) => (wrap(&tex_body, text, fallback_title, page), Some(why)),
+        Ok(mut done) => {
+            done.resize(formulas.len(), None);
+            let mut body = Body::new(&page.md, &page.base);
+            body.math = std::cell::RefCell::new(Math::Splice { done, next: 0 });
+            (wrap(&body.run(text), text, fallback_title, page), None)
+        }
+    }
+}
+
+/// The page around a rendered body.
+fn wrap(body: &str, text: &str, fallback_title: &str, page: &Page) -> String {
     let md = &page.md;
-    let body = Body::new(md, &page.base).run(text);
     let title = first_heading(text, md).unwrap_or_else(|| fallback_title.to_string());
 
     let mut out = String::with_capacity(body.len() + 4096);
@@ -76,7 +137,7 @@ pub fn render(text: &str, fallback_title: &str, page: &Page) -> String {
     out.push_str(&stylesheet(page));
     let main_class = if page.justify { " class=\"justify\"" } else { "" };
     out.push_str(&format!("</style>\n</head>\n<body>\n<main{main_class}>\n"));
-    out.push_str(&body);
+    out.push_str(body);
     out.push_str("</main>\n</body>\n</html>\n");
     out
 }
@@ -138,6 +199,10 @@ struct Body<'a> {
     table: Vec<String>,
     /// Raw lines of the display math block being accumulated.
     math_block: Vec<String>,
+    /// The formulas met so far, or their conversions (see `render_with`).
+    /// A cell, since inline math is reached from free functions the walk
+    /// calls while it holds other fields.
+    math: std::cell::RefCell<Math>,
     /// The open fence: its language, the lexer state, and its indent, which
     /// is stripped from its lines.
     fence: Option<(Option<Lang>, Cont, usize)>,
@@ -183,11 +248,18 @@ impl<'a> Body<'a> {
             held: super::Held::default(),
             table: Vec::new(),
             math_block: Vec::new(),
+            math: std::cell::RefCell::new(Math::Collect(Vec::new())),
             fence: None,
         }
     }
 
-    fn run(mut self, text: &str) -> String {
+    fn run(self, text: &str) -> String {
+        self.run_math(text).0
+    }
+
+    /// The body, and the formulas it met or what was left of their
+    /// conversions.
+    fn run_math(mut self, text: &str) -> (String, Math) {
         let mut carry = Carry::default();
         for (i, line) in text.lines().enumerate() {
             let (kind, next) = classify(line, &carry, i == 0, self.md.math, COMMONMARK_TAB);
@@ -204,7 +276,7 @@ impl<'a> Body<'a> {
             self.line(line, &kind, math_continues);
         }
         self.close_all();
-        self.out
+        (self.out, self.math.into_inner())
     }
 
     fn line(&mut self, line: &str, kind: &BlockKind, math_continues: bool) {
@@ -249,7 +321,7 @@ impl<'a> Body<'a> {
                 self.out.push_str(&format!(
                     "<h{n} id=\"{}\">{}</h{n}>\n",
                     escape_attr(&id),
-                    inline_html(body, self.md, self.base)
+                    inline_html(body, self.md, self.base, &self.math)
                 ));
             }
 
@@ -387,13 +459,13 @@ impl<'a> Body<'a> {
             match &l.brk {
                 Some(text) if i < last => {
                     run.push(text);
-                    runs.push(inline_html(run.join(" ").trim(), self.md, self.base));
+                    runs.push(inline_html(run.join(" ").trim(), self.md, self.base, &self.math));
                     run.clear();
                 }
                 _ => run.push(&l.text),
             }
         }
-        runs.push(inline_html(run.join(" ").trim(), self.md, self.base));
+        runs.push(inline_html(run.join(" ").trim(), self.md, self.base, &self.math));
         let html = runs.join("<br>\n");
         // Inside an item the text IS the item; everywhere else — including
         // inside a blockquote — it is a paragraph of its own.
@@ -528,10 +600,11 @@ impl<'a> Body<'a> {
         };
         let at = |i: usize| align.get(i).copied().unwrap_or("");
         let base = self.base;
+        let math = &self.math;
         let cell = |tag: &str, i: usize, text: &str, md: &MarkdownConfig| {
             let a = at(i);
             let style = if a.is_empty() { String::new() } else { format!(" style=\"text-align:{a}\"") };
-            format!("<{tag}{style}>{}</{tag}>", inline_html(text, md, base))
+            format!("<{tag}{style}>{}</{tag}>", inline_html(text, md, base, math))
         };
 
         self.out.push_str("<table>\n");
@@ -568,10 +641,9 @@ impl<'a> Body<'a> {
         let trimmed = raw.trim();
         let without_open = trimmed.strip_prefix("$$").unwrap_or(trimmed);
         let inner = without_open.strip_suffix("$$").unwrap_or(without_open).trim();
-        self.out.push_str(&format!(
-            "<div class=\"math display\">\\[{}\\]</div>\n",
-            escape(inner)
-        ));
+        let html = math_html(&self.math, inner, true, "div");
+        self.out.push_str(&html);
+        self.out.push('\n');
         if self.item_open {
             self.item_filled = true;
         }
@@ -655,8 +727,8 @@ impl<'a> Body<'a> {
 // ---------------------------------------------------------------------------
 
 /// One line's inline markup as HTML.
-fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> String {
-    inline_in(line, md, base, false)
+fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path, math: &std::cell::RefCell<Math>) -> String {
+    inline_in(line, md, base, math, false)
 }
 
 /// `inline_html`, with `in_link` set inside a link's text.
@@ -667,7 +739,13 @@ fn inline_html(line: &str, md: &MarkdownConfig, base: &std::path::Path) -> Strin
 /// here each kind keeps its own arm for its tag): code, math, tags and an
 /// image's alt text are what they say. In a link's text a nested link is its
 /// text, since HTML forbids an anchor inside an anchor.
-fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: bool) -> String {
+fn inline_in(
+    line: &str,
+    md: &MarkdownConfig,
+    base: &std::path::Path,
+    math: &std::cell::RefCell<Math>,
+    in_link: bool,
+) -> String {
     let chars: Vec<char> = line.chars().collect();
     let spans = inline::scan(line, md);
     if spans.is_empty() {
@@ -682,7 +760,7 @@ fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: b
         out.push_str(&escape_chars(&chars[i..sp.outer.start]));
         let inner: String = chars[sp.inner.clone()].iter().collect();
         let whole: String = chars[sp.outer.clone()].iter().collect();
-        let prose = || inline_in(&inner, md, base, in_link);
+        let prose = || inline_in(&inner, md, base, math, in_link);
         match sp.kind {
             Inline::Bold => out.push_str(&format!("<strong>{}</strong>", prose())),
             Inline::Italic => out.push_str(&format!("<em>{}</em>", prose())),
@@ -693,7 +771,7 @@ fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: b
             Inline::Link if in_link => out.push_str(&prose()),
             Inline::Link => {
                 let (url, title) = inline::destination(sp, line).unwrap_or_else(|| (inner.clone(), None));
-                let text = inline_in(&inner, md, base, true);
+                let text = inline_in(&inner, md, base, math, true);
                 out.push_str(&format!("<a href=\"{}\"{}>{text}</a>", safe_href(&url), title_attr(title)));
             }
             Inline::Autolink if in_link => out.push_str(&escape(&inner)),
@@ -714,11 +792,8 @@ fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: b
             Inline::WikiLink => out.push_str(&wiki_link(&inner)),
             Inline::Tag => out.push_str(&format!("<span class=\"tag\">{}</span>", escape(&whole))),
             Inline::Latex => {
-                if whole.starts_with("$$") && whole.ends_with("$$") {
-                    out.push_str(&format!("<span class=\"math display\">\\[{}\\]</span>", escape(&inner)));
-                } else {
-                    out.push_str(&format!("<span class=\"math inline\">\\({}\\)</span>", escape(&inner)));
-                }
+                let display = whole.starts_with("$$") && whole.ends_with("$$");
+                out.push_str(&math_html(math, &inner, display, "span"));
             }
             // The backslash was markup; what it protected is literal text.
             Inline::Escape => out.push_str(&escape(&inner)),
@@ -727,6 +802,39 @@ fn inline_in(line: &str, md: &MarkdownConfig, base: &std::path::Path, in_link: b
     }
     out.push_str(&escape_chars(&chars[i.min(chars.len())..]));
     out
+}
+
+/// The formulas of one walk: collected as they are met, or spliced in.
+enum Math {
+    Collect(Vec<Formula>),
+    /// Each formula's MathML, `None` where it stays TeX; `next` is the
+    /// formula the walk meets next.
+    Splice { done: Vec<Option<String>>, next: usize },
+}
+
+/// One formula as HTML, in a `tag` with pandoc's classes (`math inline`,
+/// `math display`), so the stylesheet and anyone's own CSS reach it either
+/// way: its MathML when the walk has one, otherwise its escaped TeX between
+/// `\(…\)` or `\[…\]`.
+fn math_html(math: &std::cell::RefCell<Math>, tex: &str, display: bool, tag: &str) -> String {
+    let class = if display { "math display" } else { "math inline" };
+    let converted = match &mut *math.borrow_mut() {
+        Math::Collect(all) => {
+            all.push(Formula { tex: tex.to_string(), display });
+            None
+        }
+        Math::Splice { done, next } => {
+            let one = done.get_mut(*next).and_then(Option::take);
+            *next += 1;
+            one
+        }
+    };
+    let inner = match converted {
+        Some(mathml) => mathml,
+        None if display => format!("\\[{}\\]", escape(tex)),
+        None => format!("\\({}\\)", escape(tex)),
+    };
+    format!("<{tag} class=\"{class}\">{inner}</{tag}>")
 }
 
 /// A wiki link's `(note, heading, label)`: `|` renames it, `#` names a
@@ -1989,4 +2097,119 @@ mod tests {
         }
     }
 
+    // -- Math through a converter (`render_with`) ---------------------------
+
+    /// A stand-in for pandoc: `<math>` around the escaped TeX, with the
+    /// display mode pandoc writes; a formula holding `bad` is rejected.
+    fn fake(formulas: &[Formula]) -> Result<Vec<Option<String>>, &'static str> {
+        Ok(formulas
+            .iter()
+            .map(|f| {
+                let mode = if f.display { "block" } else { "inline" };
+                (!f.tex.contains("bad")).then(|| format!("<math display=\"{mode}\">{}</math>", escape(&f.tex)))
+            })
+            .collect())
+    }
+
+    fn page_body(page: &str) -> &str {
+        let start = page.find("<main>\n").unwrap() + "<main>\n".len();
+        &page[start..page.find("</main>").unwrap()]
+    }
+
+    #[test]
+    fn math_becomes_mathml_in_the_same_wrappers() {
+        let doc = "Inline $a^2$ here.\n\n$$\n\\frac{1}{2}\n$$\n\n$$E=mc^2$$ is famous\n";
+        let (page, note) = render_with(doc, "t", &Page::default(), &fake);
+        assert_eq!(note, None);
+        assert_eq!(
+            page_body(&page),
+            "<p>Inline <span class=\"math inline\"><math display=\"inline\">a^2</math></span> here.</p>\n\
+             <div class=\"math display\"><math display=\"block\">\\frac{1}{2}</math></div>\n\
+             <p><span class=\"math display\"><math display=\"block\">E=mc^2</math></span> is famous</p>\n"
+        );
+        // Still one self-contained file.
+        assert!(!page.contains("<script") && !page.contains("http"), "{page}");
+    }
+
+    /// The converter sees every formula once, in page order, wherever it
+    /// sits: a heading, a list, a quote, a table cell, inside emphasis.
+    #[test]
+    fn every_formula_reaches_the_converter_in_order() {
+        let doc = "# T $h$\n\n- $l$\n\n> $q$\n\n| $c$ |\n|---|\n\n**$b$** [$k$](u)\n\n$$\nd\n$$\n";
+        let seen = std::cell::RefCell::new(Vec::new());
+        let spy = |f: &[Formula]| {
+            seen.borrow_mut().extend(f.iter().cloned());
+            fake(f)
+        };
+        let (page, _) = render_with(doc, "t", &Page::default(), &spy);
+        let tex: Vec<(String, bool)> = seen.into_inner().into_iter().map(|f| (f.tex, f.display)).collect();
+        let want = [("h", false), ("l", false), ("q", false), ("c", false), ("b", false), ("k", false), ("d", true)];
+        assert_eq!(tex, want.map(|(t, d)| (t.to_string(), d)));
+        for (t, d) in want {
+            let mode = if d { "block" } else { "inline" };
+            assert!(page.contains(&format!("<math display=\"{mode}\">{t}</math>")), "{t}: {page}");
+        }
+        assert!(!page.contains("\\("), "{page}");
+    }
+
+    #[test]
+    fn a_rejected_formula_keeps_its_tex_alone() {
+        let doc = "$a$ and $bad<1$ and $c$\n\n$$\nbad\n$$\n\n$$\nd\n$$\n";
+        let (page, note) = render_with(doc, "t", &Page::default(), &fake);
+        assert_eq!(note, None);
+        assert_eq!(
+            page_body(&page),
+            "<p><span class=\"math inline\"><math display=\"inline\">a</math></span> and \
+             <span class=\"math inline\">\\(bad&lt;1\\)</span> and \
+             <span class=\"math inline\"><math display=\"inline\">c</math></span></p>\n\
+             <div class=\"math display\">\\[bad\\]</div>\n\
+             <div class=\"math display\"><math display=\"block\">d</math></div>\n"
+        );
+    }
+
+    /// No pandoc: the page is the one export always wrote, byte for byte,
+    /// and the note says why.
+    #[test]
+    fn without_a_converter_the_page_is_unchanged_and_says_why() {
+        let doc = "# M\n\nInline $a<b$ & $$x$$ text.\n\n$$\ny\n$$\n";
+        let none = |_: &[Formula]| Err("math left as TeX: no pandoc");
+        let (page, note) = render_with(doc, "t", &Page::default(), &none);
+        assert_eq!(page, render(doc, "t", &Page::default()));
+        assert_eq!(note, Some("math left as TeX: no pandoc"));
+    }
+
+    /// No math, or `math` off: pandoc is never run, and nothing is noted.
+    #[test]
+    fn a_page_without_math_never_runs_the_converter() {
+        let boom = |_: &[Formula]| -> Result<Vec<Option<String>>, &'static str> { panic!("ran the converter") };
+        let (page, note) = render_with("# A\n\nno math, $5 and $6\n", "t", &Page::default(), &boom);
+        assert_eq!((page, note), (render("# A\n\nno math, $5 and $6\n", "t", &Page::default()), None));
+        let off = Page { md: MarkdownConfig { math: false, ..MarkdownConfig::default() }, ..Page::default() };
+        let doc = "$x$ and\n\n$$\ny\n$$\n";
+        assert_eq!(render_with(doc, "t", &off, &boom), (render(doc, "t", &off), None));
+    }
+
+    /// The MathML goes in as it is; everything around it is escaped as
+    /// before, and so is the TeX of a formula that stays TeX.
+    #[test]
+    fn prose_around_spliced_mathml_is_still_escaped() {
+        let doc = "a < b & $x<y$ > \"c\" $bad&z$ **<i>$w$</i>**\n";
+        let (page, _) = render_with(doc, "t", &Page::default(), &fake);
+        assert_eq!(
+            page_body(&page),
+            "<p>a &lt; b &amp; <span class=\"math inline\"><math display=\"inline\">x&lt;y</math></span> \
+             &gt; &quot;c&quot; <span class=\"math inline\">\\(bad&amp;z\\)</span> \
+             <strong>&lt;i&gt;<span class=\"math inline\"><math display=\"inline\">w</math></span>&lt;/i&gt;</strong></p>\n"
+        );
+        well_formed(page_body(&page)).unwrap();
+    }
+
+    /// A converter that answers for fewer formulas than it was given leaves
+    /// the rest as TeX rather than misplacing anything.
+    #[test]
+    fn a_short_answer_leaves_the_rest_as_tex() {
+        let short = |_: &[Formula]| Ok(vec![Some("<math>1</math>".to_string())]);
+        let (page, _) = render_with("$a$ $b$\n", "t", &Page::default(), &short);
+        assert!(page.contains("<span class=\"math inline\"><math>1</math></span> <span class=\"math inline\">\\(b\\)</span>"), "{page}");
+    }
 }

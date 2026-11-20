@@ -239,12 +239,15 @@ impl App {
         };
         match crate::export::write(source, &dest, format, &self.config.transclude, &page) {
             Err(e) => self.notify(format!("export: {e}"), FlashKind::Error),
-            Ok(()) => {
+            Ok(note) => {
                 let name = dest
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| dest.display().to_string());
-                self.notify(format!("{name} exported"), FlashKind::Info);
+                // The note goes last: on a narrow status line it is the part
+                // that is cut, and the file written is what matters most.
+                let note = note.map(|n| format!(" · {n}")).unwrap_or_default();
+                self.notify(format!("{name} exported{note}"), FlashKind::Info);
             }
         }
     }
