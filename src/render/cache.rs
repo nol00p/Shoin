@@ -37,7 +37,7 @@
 use crate::app::{App, BufferState};
 use crate::render::pane::PaneId;
 use crate::config::schema::{GlyphConfig, MarkdownConfig};
-use crate::render::conceal::{ConcealCtx, ConcealMap};
+use crate::render::conceal::{ActiveSet, ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
 use crate::render::hidden::{self, Hidden};
 use crate::render::layout::{
@@ -243,6 +243,33 @@ pub struct RenderCache {
     /// EDITS, not with frames, and the instrumentation is here so a test can
     /// hold it to that.
     verifications: u64,
+    /// What the row index was last built from (see `IndexKey`).
+    indexed: Option<IndexKey>,
+    /// Row indexes built since startup. Instrumentation, like `builds`: it
+    /// grows when what the index is built from changes, not with every sync.
+    indexes: u64,
+}
+
+/// Everything the row index is a function of, besides the entries, which
+/// `builds` stands for: a sync that finds these unchanged keeps the index
+/// it has. Several panes on one document share the cache and each sync
+/// brings it to its own; this is what lets a key's motion reuse the index
+/// the frame left for the focused pane, rather than walk every line again.
+#[derive(Clone, Debug, PartialEq)]
+struct IndexKey {
+    pane: PaneId,
+    measure: u16,
+    lines: usize,
+    revision: u64,
+    /// Bumped by every entry built, so by every change to one.
+    builds: u64,
+    /// The block kinds: what is a display block, and line spacing.
+    blocks: (u64, bool, usize),
+    current: bool,
+    active: ActiveSet,
+    conceal: bool,
+    spacing: u16,
+    folded: Hidden,
 }
 
 impl RenderCache {
@@ -355,7 +382,23 @@ impl RenderCache {
             self.seen = Some(doc.buffer.rope.clone());
         }
 
-        self.index(app, doc, pane, n);
+        let key = IndexKey {
+            pane,
+            measure,
+            lines: n,
+            revision: doc.buffer.revision,
+            builds: self.builds,
+            blocks: (doc.blocks.revision, doc.blocks.math, doc.blocks.tab_width),
+            current: std::ptr::eq(doc, &app.docs[app.current()]),
+            active: app.active.clone(),
+            conceal: app.config.layout.conceal,
+            spacing: app.config.layout.line_spacing,
+            folded: hidden::of(doc.folds_in(pane), &[]),
+        };
+        if self.indexed.as_ref() != Some(&key) {
+            self.index(app, doc, pane, n);
+            self.indexed = Some(key);
+        }
     }
 
     /// Find the lines an edit touched by comparing the buffer with the text
@@ -402,6 +445,7 @@ impl RenderCache {
         // showing another one conceals throughout — there is no cursor in it to
         // reveal anything.
         let current = std::ptr::eq(doc, &app.docs[app.current()]);
+        self.indexes += 1;
         self.conceal_on = conceal_on;
         self.concealed.clear();
         self.concealed.reserve(n);
@@ -541,6 +585,18 @@ impl RenderCache {
         self.builds
     }
 
+    /// The measure the cache was last synced at.
+    #[cfg(test)]
+    pub fn measure(&self) -> u16 {
+        self.measure
+    }
+
+    /// Row indexes built since startup.
+    #[cfg(test)]
+    pub fn indexes(&self) -> u64 {
+        self.indexes
+    }
+
     /// Display blocks laid out since startup.
     #[cfg(test)]
     pub fn layouts(&self) -> u64 {
@@ -634,6 +690,16 @@ impl RenderCache {
         let Some(&first) = self.row_starts.get(line) else { return (0, 0) };
         let rows = self.own_rows(line);
         (first, first + rows.saturating_sub(1))
+    }
+
+    /// Every row `line` takes, line spacing's included: none for a line
+    /// hidden in a fold or a laid-out block, all of the block's for its
+    /// opening line.
+    pub fn line_span(&self, line: usize) -> std::ops::Range<usize> {
+        match (self.row_starts.get(line), self.row_starts.get(line + 1)) {
+            (Some(&a), Some(&b)) => a..b,
+            _ => 0..0,
+        }
     }
 
     /// Which visual row holds a source position, and the column offset within

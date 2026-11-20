@@ -40,6 +40,7 @@ impl App {
         match found {
             Some(idx) => {
                 self.buffer.cursor = self.idx_to_cursor(idx);
+                self.forget_reading();
                 let sigil = if backward { "?" } else { "/" };
                 self.notify(format!("{sigil}{pattern}"), FlashKind::Info);
             }

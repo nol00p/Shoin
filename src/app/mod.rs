@@ -246,6 +246,12 @@ pub struct App {
     /// An edit was just refused in read-only mode, so an `i` now means "let
     /// me edit" rather than being refused again.
     edit_offered: bool,
+    /// Where read-only mode's view starts, by pane: the row each was
+    /// scrolled to, kept by line, and the cursor parked for it.
+    reading: HashMap<PaneId, frame::ReadingTop>,
+    /// A read-only motion moved the view this input, already within the
+    /// text: `sync_after_input` has nothing left to clamp.
+    reading_clamped: bool,
     /// How much of an `![[…]]` line expands in place. Starts at
     /// `transclude.embed`; `:embed [mode]` changes it.
     pub embed_mode: crate::transclude::Mode,
@@ -1012,6 +1018,8 @@ impl App {
             configured,
             view: false,
             edit_offered: false,
+            reading: HashMap::new(),
+            reading_clamped: false,
             embed_mode: crate::transclude::Mode::parse(&config.transclude.embed)
                 .unwrap_or_default(),
             last_embed_mode: crate::transclude::Mode::Short,
@@ -1425,7 +1433,8 @@ impl App {
         }
         let len = self.buffer.line_len(self.buffer.cursor.line);
         self.buffer.cursor.clamp(len, past_end);
-        if self.view {
+        let clamped = std::mem::take(&mut self.reading_clamped);
+        if self.view && !clamped {
             self.clamp_reading_cursor();
         }
         self.keep_cursor_out_of_folds();
@@ -1478,8 +1487,13 @@ impl App {
     }
 
     fn move_by(&mut self, m: Motion, count: usize) {
-        if self.view && self.reading_move(m, count) {
-            return;
+        if self.view {
+            if self.reading_move(m, count) {
+                return;
+            }
+            // `5G`, `H`, `w`: a jump, whose line goes on top even when it
+            // is where the cursor already was.
+            self.forget_reading();
         }
         if self.fold_move(m, count) {
             return;

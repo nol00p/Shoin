@@ -69,8 +69,9 @@ cursor's too, and there's no caret. The keys scroll the page, as in `less`:
 
 | Key | Does |
 |---|---|
-| `j` `k` | scroll a line down / up |
+| `j` `k` | scroll a row down / up |
 | `Ctrl-d` `Ctrl-u` | half a page down / up |
+| `Ctrl-f` `Ctrl-b` | a page down / up |
 | `gg` `G` | top / bottom |
 | `/` `?` `n` `N` | search |
 | `q` | quit |
@@ -94,6 +95,9 @@ action, so it can be rebound.
   `LESS` isn't, so colour reaches `less`.
 - Text that isn't valid UTF-8, piped or from a file, is refused with an
   error, never converted.
+- Read-only mode scrolls by screen rows, as `less` does. A wrapped line,
+  an embed or a laid-out math block taller than the window is scrolled
+  through a row at a time, and on to the lines below it.
 - `-R` applies to every buffer opened after it too, by `:e`, `gf` or the
   file tree, until `:view`, `<leader>v` or `i` turns it off.
 - In read-only mode `q` acts like `:q`: it closes the page, and refuses if

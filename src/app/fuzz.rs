@@ -270,6 +270,7 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
             }
         }
         term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+        index_invariant(&app).map_err(|e| format!("step {step}: {e}\ntext: {:?}", text(&app)))?;
         let _ = app.visible_pictures();
         math_invariants(&app).map_err(|e| format!("step {step}: {e}\ntext: {:?}", text(&app)))?;
     }
@@ -315,6 +316,28 @@ fn reading_rows(app: &App) -> Option<(usize, usize)> {
         None
     });
     got
+}
+
+/// The row index the cache keeps from the frame, the focused pane's, is the
+/// one a fresh cache builds at the same measure: a sync that keeps it
+/// (`IndexKey`) never misses a change to what it is built from.
+fn index_invariant(app: &App) -> Result<(), String> {
+    let mut cache = app.cache.borrow_mut();
+    let measure = cache.measure();
+    cache.sync(app, measure);
+    let mut fresh = crate::render::cache::RenderCache::default();
+    fresh.sync(app, measure);
+    for line in 0..app.buffer.line_count() {
+        let kept = (cache.line_span(line), cache.is_concealed(line));
+        let built = (fresh.line_span(line), fresh.is_concealed(line));
+        if kept != built {
+            return Err(format!("the kept row index has line {line} (rows, concealed) {kept:?}, a fresh one {built:?}"));
+        }
+    }
+    if cache.total_rows() != fresh.total_rows() {
+        return Err(format!("the kept row index has {} rows, a fresh one {}", cache.total_rows(), fresh.total_rows()));
+    }
+    Ok(())
 }
 
 /// Display math laid out over several rows (#77): the active set never cuts

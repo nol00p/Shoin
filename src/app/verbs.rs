@@ -206,13 +206,14 @@ impl App {
     /// when there is no view to move: no frame drawn yet, or no text.
     pub(super) fn reading_scroll(&mut self, to: impl FnOnce(usize, usize, usize) -> Option<usize>) -> bool {
         let area = Rect { x: 0, y: 0, width: self.term_size.0, height: self.term_size.1 };
-        let Some((top, cursor)) = frame::reading_view(self, area, to) else {
+        let Some((row, top)) = frame::reading_view(self, area, to) else {
             return false;
         };
         if let Some(pane) = self.focused_pane() {
-            pane.scroll.set(top);
+            pane.scroll.set(row);
         }
-        self.buffer.cursor = cursor;
+        self.buffer.cursor = top.cursor;
+        self.reading.insert(self.focus_pane, top);
         true
     }
 
@@ -229,7 +230,7 @@ impl App {
             Motion::Up | Motion::HalfPageUp | Motion::PageUp | Motion::BufferStart => false,
             _ => return false,
         };
-        self.reading_scroll(|row, last_top, height| {
+        let moved = self.reading_scroll(|row, last_top, height| {
             let by = match m {
                 Motion::Down | Motion::Up => count,
                 Motion::HalfPageDown | Motion::HalfPageUp => (height / 2).max(1),
@@ -238,7 +239,11 @@ impl App {
             };
             let row = row.min(last_top);
             Some(if down { row.saturating_add(by) } else { row.saturating_sub(by) })
-        })
+        });
+        // Clamped to the text already: the clamp after the key need not
+        // sync the cache a second time to find that out.
+        self.reading_clamped |= moved;
+        moved
     }
 
     /// The lines shown raw: the cursor's (or the selection's), or none at all
@@ -283,6 +288,8 @@ impl App {
     /// refusal, and otherwise takes two presses.
     pub fn set_view(&mut self, on: bool) {
         self.view = on;
+        // Coming back to read-only mode starts at the cursor's line.
+        self.reading.clear();
         // Entering says "i to edit", so the very next `i` does exactly that.
         self.edit_offered = on;
         for doc in &mut self.docs {
