@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.5
+
+**Math**
+
+- Display math: a closed `$$` block is laid out over several rows,
+  centred: fractions, sums and limits, roots, matrices, `cases` and
+  `aligned`. Put the cursor on any of its lines, or select across it, to
+  see and edit its TeX. A block too wide for the window keeps the
+  one-line Unicode form. `shoin --render` shows the layout; export is
+  unchanged (#77, #166, #167).
+- Roots in display math are drawn with a slanted stroke and a bar over
+  the argument, at any height. Scripts use Unicode letters wherever every
+  character has one, inline and in display math: `e^x` shows `eˣ`, `A^T`
+  `Aᵀ`, `x_\beta` `xᵦ`. `x_y` no longer shows a Greek gamma (#169).
 
 **Editing**
 
@@ -50,12 +63,6 @@
   line that starts with math no longer jumps left out of the text column,
   or to the pane's edge. Leading emphasis, code spans and links don't
   shift either, so `**Note:**` reveals at the text column (#163).
-- Display math: a closed `$$` block is laid out over several rows,
-  centred: fractions, sums and limits, roots, matrices, `cases` and
-  `aligned`. Put the cursor on any of its lines, or select across it, to
-  see and edit its TeX. A block too wide for the window keeps the
-  one-line Unicode form. `shoin --render` shows the layout; export is
-  unchanged (#77, #166, #167).
 
 **Lists**
 
