@@ -196,20 +196,49 @@ impl App {
     /// it would move with nothing on screen moving, and `k` would then seem
     /// dead until it came back — so it stops there, as `less` does at the end.
     pub(super) fn clamp_reading_cursor(&mut self) {
-        let height = self.viewport_height();
-        let line = {
-            let cache = self.cache.borrow();
-            let last_top = cache.total_rows().saturating_sub(height);
-            let (row, _) = cache.locate(self.buffer.cursor.line, 0);
-            if row <= last_top {
-                return;
-            }
-            match cache.row(last_top) {
-                Some(r) => r.line(),
-                None => return,
-            }
+        self.reading_scroll(|row, last_top, _| (row > last_top).then_some(last_top));
+    }
+
+    /// Move read-only mode's view: `to` answers with the row to start it at,
+    /// from the row it starts at now, the last one it can and the pane's
+    /// height (see [`frame::reading_view`]). The focused pane keeps that row
+    /// as its scroll, and the cursor moves to the line it belongs to. False
+    /// when there is no view to move: no frame drawn yet, or no text.
+    pub(super) fn reading_scroll(&mut self, to: impl FnOnce(usize, usize, usize) -> Option<usize>) -> bool {
+        let area = Rect { x: 0, y: 0, width: self.term_size.0, height: self.term_size.1 };
+        let Some((top, cursor)) = frame::reading_view(self, area, to) else {
+            return false;
         };
-        self.buffer.cursor = Cursor::new(line, 0);
+        if let Some(pane) = self.focused_pane() {
+            pane.scroll.set(top);
+        }
+        self.buffer.cursor = cursor;
+        true
+    }
+
+    /// The motions that scroll in read-only mode, made by rows rather than
+    /// lines, as `less` does: `j` `k` a row, `Ctrl-d` `Ctrl-u` half a page,
+    /// `Ctrl-f` `Ctrl-b` a page, `gg` `G` to either end. Every row is
+    /// reached, a display block's laid out over more rows than the pane has
+    /// included, which a cursor stepping by lines cannot do: the block has
+    /// one position for all its rows. True when `m` was one of them and was
+    /// made; with no view to move it is left to the line motions.
+    pub(super) fn reading_move(&mut self, m: Motion, count: usize) -> bool {
+        let down = match m {
+            Motion::Down | Motion::HalfPageDown | Motion::PageDown | Motion::BufferEnd => true,
+            Motion::Up | Motion::HalfPageUp | Motion::PageUp | Motion::BufferStart => false,
+            _ => return false,
+        };
+        self.reading_scroll(|row, last_top, height| {
+            let by = match m {
+                Motion::Down | Motion::Up => count,
+                Motion::HalfPageDown | Motion::HalfPageUp => (height / 2).max(1),
+                Motion::PageDown | Motion::PageUp => height,
+                _ => usize::MAX,
+            };
+            let row = row.min(last_top);
+            Some(if down { row.saturating_add(by) } else { row.saturating_sub(by) })
+        })
     }
 
     /// The lines shown raw: the cursor's (or the selection's), or none at all

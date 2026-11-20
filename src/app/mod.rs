@@ -1478,6 +1478,9 @@ impl App {
     }
 
     fn move_by(&mut self, m: Motion, count: usize) {
+        if self.view && self.reading_move(m, count) {
+            return;
+        }
         if self.fold_move(m, count) {
             return;
         }
@@ -1496,9 +1499,6 @@ impl App {
         if self.view || self.config.layout.typewriter {
             let m = if delta > 0 { Motion::Down } else { Motion::Up };
             self.move_by(m, delta.unsigned_abs());
-            if self.view {
-                self.clamp_reading_cursor();
-            }
             return;
         }
         let area = Rect { x: 0, y: 0, width: self.term_size.0, height: self.term_size.1 };

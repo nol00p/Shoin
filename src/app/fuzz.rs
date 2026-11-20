@@ -1,7 +1,8 @@
 //! The random-session test: drives a real `App` with random keys, pastes,
 //! mouse events, `:` commands, overlays, resizes and real files with embeds,
 //! and after every step renders a frame, checks the block cache against a full
-//! rebuild and checks the cursor is inside the text. At the end it undoes
+//! rebuild and checks the cursor is inside the text. In read-only mode a key
+//! that scrolls must move the view unless it is at that end. At the end it undoes
 //! everything and checks the original text is back, then redoes it all.
 //!
 //! It changes the working directory and `HOME` (to a temp folder), so it is
@@ -63,6 +64,9 @@ const DOCS: &[&str] = &[
     // Display math: closed, one-line, run together, under list items, left
     // open, in a quote, under a heading to fold, and closed on the last line.
     "Intro\n\n$$\n\\frac{a}{b}\n$$\n$$x^2$$\n$$ a\nb $$\n\n- item\n  $$\n  \\sum_{i=1}^{n} i\n  $$\n  - nested\n\n    $$y$$\n\n$$\nunclosed\n\n> $$\n> q\n> $$\n\n# H\n$$\n\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}\n$$\ntext\n$$\nlast\n$$",
+    // A matrix taller than most of the sizes, then lines, and a long wrapped
+    // line: read-only mode has to scroll through all of their rows.
+    "top\n\n$$\n\\begin{bmatrix}\na \\\\\nb \\\\\nc \\\\\nd \\\\\ne \\\\\nf \\\\\ng \\\\\nh \\\\\ni \\\\\nj \\\\\nk \\\\\nl\n\\end{bmatrix}\n$$\nafter one\nwords words words words words words words words words words words words words words words words words words words words words\n\n$$\n\\begin{pmatrix}\n1 \\\\\n2 \\\\\n3 \\\\\n4 \\\\\n5 \\\\\n6\n\\end{pmatrix}\n$$",
 ];
 
 /// One session of `steps` random events from `seed`. Every event is pushed to
@@ -94,6 +98,9 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         let roll = rng.below(100);
         let overlay = app.help.is_some() || app.finder.is_some() || app.diff.is_some();
         let insertish = matches!(app.mode, Mode::Insert | Mode::Command(_) | Mode::Search { .. } | Mode::Prompt(_));
+        // Where read-only mode's view stood before a key that scrolls it.
+        let reading = app.view && !overlay && matches!(app.mode, Mode::Normal) && app.pending.is_clean();
+        let before = if reading { reading_rows(&app) } else { None };
         let ev: Option<KeyEvent> = if roll < 3 {
             let c = ex[rng.below(ex.len())];
             trace.push(format!(":{c}"));
@@ -186,11 +193,41 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
             }
             Some(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
         };
+        // Down (true) or up (false), for a key that scrolls read-only mode.
+        let mut scrolls = None;
         if let Some(ev) = ev {
             let mods = if ev.modifiers.is_empty() { String::new() } else { format!("+{:?}", ev.modifiers) };
             trace.push(format!("{:?}{mods}", ev.code));
+            let ctrl = ev.modifiers == KeyModifiers::CONTROL;
+            scrolls = match ev.code {
+                KeyCode::Char('j') | KeyCode::Down if ev.modifiers.is_empty() => Some(true),
+                KeyCode::Char('k') | KeyCode::Up if ev.modifiers.is_empty() => Some(false),
+                KeyCode::Char('d' | 'f') if ctrl => Some(true),
+                KeyCode::Char('u' | 'b') if ctrl => Some(false),
+                _ => None,
+            };
             app.on_key(ev);
             app.sync_after_input();
+        }
+        // Read-only mode: a scrolling key moves the view a row or more,
+        // unless it already shows that end of the text. Every row is
+        // reachable, a tall layout's, an embed's and a wrapped line's too.
+        if let (Some(down), Some((row, last))) = (scrolls, before) {
+            if app.view {
+                if let Some((now, _)) = reading_rows(&app) {
+                    let stuck = if down { row < last && now <= row } else { row > 0 && now >= row };
+                    if stuck {
+                        let dir = if down { "down" } else { "up" };
+                        return Err(format!(
+                            "step {step}: read-only view stuck going {dir} at row {row} (last top {last}), \
+                             {w}x{h}, cursor {:?}, {} panes\ntext: {:?}",
+                            app.buffer.cursor,
+                            app.layout.ids().len(),
+                            text(&app)
+                        ));
+                    }
+                }
+            }
         }
         app.tree = None;
         app.quit = false;
@@ -266,6 +303,18 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         return Err(format!("redoing everything did not restore the final text\nundo steps {n}\nwant {fin:?}\n got {:?}", text(&app)));
     }
     Ok(())
+}
+
+/// Read-only mode's view of the focused pane: the row it starts at and the
+/// last row it can start at. `None` when there is no view to move.
+fn reading_rows(app: &App) -> Option<(usize, usize)> {
+    let area = ratatui::layout::Rect { x: 0, y: 0, width: app.term_size.0, height: app.term_size.1 };
+    let mut got = None;
+    crate::render::frame::reading_view(app, area, |row, last, _| {
+        got = Some((row.min(last), last));
+        None
+    });
+    got
 }
 
 /// Display math laid out over several rows (#77): the active set never cuts

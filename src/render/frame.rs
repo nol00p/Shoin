@@ -294,7 +294,7 @@ fn render_pane(
     };
     let (cursor_row, cursor_offset) = cache.locate(cursor.line, cursor.col);
     let top = scroll_offset(
-        cursor_row,
+        view_row(app, &cache, cursor, cursor_row, pane.scroll.get()),
         cache.total_rows(),
         &lay,
         &cfg.layout,
@@ -1313,7 +1313,7 @@ pub fn visible_line_range(app: &App, area: Rect) -> Option<(usize, usize)> {
 
     let (cursor_row, _) = cache.locate(app.buffer.cursor.line, app.buffer.cursor.col);
     let top = scroll_offset(
-        cursor_row,
+        view_row(app, &cache, app.buffer.cursor, cursor_row, app.scroll_hint()),
         cache.total_rows(),
         &lay,
         &cfg.layout,
@@ -1389,6 +1389,71 @@ pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Curs
     let first = cache.locate(line, 0).0 == row;
     let col = if first { cursor.col } else { target.start_col };
     Some((new_top, Cursor::new(line, col.min(len))))
+}
+
+/// The cursor read-only mode keeps for a view that starts at `row`: on the
+/// row's line, at the row's first column. A row that has no column of its
+/// own (one of a laid-out display block, an embed, line spacing) answers
+/// with the start of the line it belongs to.
+pub fn reading_cursor(row: &VisualRow) -> Cursor {
+    Cursor::new(row.line(), row.start_col)
+}
+
+/// The row `scroll_offset` is to keep in view: the cursor's own, except in
+/// read-only mode, where the view's top is where the reader scrolled to.
+///
+/// Read-only mode makes the cursor the top of the screen, but a display
+/// block laid out over many rows, an embed and the air of line spacing
+/// have a single cursor position for all their rows. So the top the
+/// reader scrolled to, `previous`, stands as long as the cursor is the
+/// one [`reading_cursor`] gives for it; a cursor moved anywhere else (a
+/// search, a mark, a resize that moved the rows) puts its own row on top.
+fn view_row(app: &App, cache: &RenderCache, cursor: Cursor, cursor_row: usize, previous: usize) -> usize {
+    match cache.row(previous) {
+        Some(row) if app.view && reading_cursor(&row) == cursor => previous,
+        _ => cursor_row,
+    }
+}
+
+/// Read-only mode's view of the focused pane, moved: `to` gets the row the
+/// view starts at now, the last row it can start at (the one that shows
+/// the last line of the text at the bottom) and the pane's height, and answers with the row to
+/// start at, or `None` to leave the view as it is. The answer is clamped
+/// to the text. Returns the new top and the cursor that stands for it.
+///
+/// Rows, not lines: every row is reachable, a laid-out display block's,
+/// an embed's and a wrapped line's included.
+pub fn reading_view(
+    app: &App,
+    area: Rect,
+    to: impl FnOnce(usize, usize, usize) -> Option<usize>,
+) -> Option<(usize, Cursor)> {
+    let cfg = &app.config;
+    let rect = focused_rect(app, area)?;
+    // No frame yet, or a pane squeezed to nothing: there is no view to move.
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    let lay = Layout::compute(&cfg.layout, rect.width, rect.height, 0);
+
+    let mut cache = app.cache.borrow_mut();
+    cache.sync(app, lay.measure);
+
+    let total = cache.total_rows();
+    if total == 0 {
+        return None;
+    }
+    let height = (lay.height as usize).max(1);
+    // The end is the last line's last row. The empty line after a final
+    // newline has a row too, but the cursor never stands on it, so a view
+    // starting there could not be kept.
+    let end = (cache.line_rows(app.buffer.last_line()).1 + 1).min(total);
+    let last_top = end.saturating_sub(height);
+    let cursor = app.buffer.cursor;
+    let (cursor_row, _) = cache.locate(cursor.line, cursor.col);
+    let row = view_row(app, &cache, cursor, cursor_row, app.scroll_hint());
+    let top = to(row, last_top, height)?.min(last_top);
+    Some((top, reading_cursor(&cache.row(top)?)))
 }
 
 /// `zt` `zz` `zb`: the focused pane's top row that puts the cursor's line at
@@ -1485,7 +1550,7 @@ fn locate(app: &App, area: Rect, col: u16, row: u16, clamp: bool) -> Option<Curs
 
     let (cursor_row, _) = cache.locate(app.buffer.cursor.line, app.buffer.cursor.col);
     let top = scroll_offset(
-        cursor_row,
+        view_row(app, &cache, app.buffer.cursor, cursor_row, app.scroll_hint()),
         cache.total_rows(),
         &lay,
         &cfg.layout,
