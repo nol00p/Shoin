@@ -98,7 +98,22 @@ the line goes back to what you typed. The hint bar lists the matches. Every
 command is in the [command reference](reference/commands.md).
 
 A number goes to that line: `:42` is `42G`, and `:$` is the last line. Both
-keep the cursor's column, as `G` does.
+keep the cursor's column, as `G` does. `:+3` and `:-2` count from the
+cursor's line, and `:$-1` from the last.
+
+A range before a command names the lines it works on: `:3,7d` deletes lines
+3 to 7, `:.,+2y` yanks the cursor's line and the two below, and `:%>`
+indents every line. `:` from Visual starts the line with `'<,'>`, the
+selected lines.
+
+```
+  :d   delete, as dd          :m {line}   move below a line; :m 0 is the top
+  :y   yank, as yy            :t {line}   copy below a line
+  :> :<  indent · outdent     :3,7w path  write only those lines
+```
+
+Without a range each works on the cursor's line. `:fixlist` takes a range
+too. The [command reference](reference/commands.md#lines) has the rest.
 
 ## Insert mode
 

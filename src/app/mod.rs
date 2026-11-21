@@ -942,6 +942,7 @@ mod insert;
 mod prompts;
 mod search;
 mod commands;
+mod range;
 #[cfg(test)] pub(crate) use commands::COMMANDS;
 mod complete;
 
@@ -1813,7 +1814,9 @@ impl App {
             Action::Command => {
                 self.completion = None;
                 self.command_selection = self.visual_anchor().map(|a| (a.line, self.buffer.cursor.line));
-                self.mode = Mode::Command(String::new());
+                // From Visual the line starts with the selection's lines, as vim's.
+                let prefill = if self.command_selection.is_some() { "'<,'>" } else { "" };
+                self.mode = Mode::Command(prefill.into());
             }
             Action::SearchForward => {
                 self.mode = Mode::Search { query: String::new(), reverse: false }

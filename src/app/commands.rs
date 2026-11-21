@@ -21,6 +21,8 @@ pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
     ("buffer", &["b"]),
     ("buffers", &["ls"]),
     ("close", &["clo"]),
+    ("copy", &["co", "cop", "t"]),
+    ("delete", &["d", "de", "del"]),
     ("diff", &["diffsplit"]),
     ("edit", &["e"]),
     ("embed", &[]),
@@ -28,6 +30,7 @@ pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
     ("fixlist", &[]),
     ("focus", &[]),
     ("help", &["h"]),
+    ("move", &["m", "mo", "mov"]),
     ("number", &["nu"]),
     ("only", &["on"]),
     ("q", &[]),
@@ -44,6 +47,7 @@ pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
     ("vsplit", &["vs", "vsp"]),
     ("wq", &["x"]),
     ("write", &["w"]),
+    ("yank", &["y", "ya", "yan"]),
     ("zen", &[]),
 ];
 
@@ -98,38 +102,32 @@ pub(crate) fn canonical(table: &[(&'static str, &[&str])], typed: &str) -> Optio
         .map(|(name, _)| *name)
 }
 
-/// The motion a typed line number stands for: `:$` is `G`, `:N` is `NG`
-/// (counted from 1, so `:0` is the first line too, and a number too big to
-/// hold is past the end). Anything else, a sign, a range or a letter after
-/// the digits, is no line number.
-fn line_motion(cmd: &str) -> Option<Motion> {
-    if cmd == "$" {
-        return Some(Motion::BufferEnd);
-    }
-    if cmd.is_empty() || !cmd.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let n: usize = cmd.parse().unwrap_or(usize::MAX);
-    Some(Motion::GotoLine(n.saturating_sub(1)))
-}
-
 impl App {
     pub(crate) fn run_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
+        if cmd.is_empty() {
+            return;
+        }
+        // `:42`, `:$`, `:.+3`, `:'<,'>`: a range alone goes to its last
+        // line, as `42G` and `G` do, through the same motion so a fold
+        // opens, a block shows its source, read-only mode puts the line on
+        // top and the column is kept exactly as the keys do.
+        let (range, rest) = range::parse(cmd);
+        if let (Some(r), "") = (range, rest) {
+            return self.jump_to_range(r);
+        }
+        match range::line_command(rest) {
+            Ok(Some(c)) => return self.run_line_command(range, c),
+            Err(e) => return self.notify(e, FlashKind::Error),
+            Ok(None) => {}
+        }
+        if range.is_some() {
+            return self.ranged_command(range, rest, cmd);
+        }
         let (name, arg) = match cmd.split_once(char::is_whitespace) {
             Some((n, a)) => (n, a.trim()),
             None => (cmd, ""),
         };
-        if name.is_empty() {
-            return;
-        }
-        // `:42` and `:$`: a line, as `42G` and `G`, through the same motion
-        // so a fold opens, a block shows its source, read-only mode puts the
-        // line on top and the column is kept exactly as the keys do.
-        if let Some(m) = line_motion(cmd) {
-            self.run(Command::bare(Action::Move(m)));
-            return;
-        }
         // NOT a forced `:e`: this editor spends `:e!` on the config. A command
         // that re-reads the file needs its own name (`:revert`) rather than a
         // second meaning for one that is taken.
@@ -251,6 +249,36 @@ impl App {
         }
         if WINDOW_COMMANDS.contains(&command) {
             self.end_recording();
+        }
+    }
+
+    /// A command other than the line commands, after a range: `:fixlist`
+    /// and `:w path` take one; any other is not a command with it.
+    fn ranged_command(&mut self, range: Option<range::Range>, rest: &str, cmd: &str) {
+        let (name, arg) = match rest.split_once(char::is_whitespace) {
+            Some((n, a)) => (n, a.trim()),
+            None => (rest, ""),
+        };
+        let (base, bang) = match name.strip_suffix('!') {
+            Some(b) => (b, true),
+            None => (name, false),
+        };
+        match canonical(COMMANDS, base) {
+            Some("fixlist") if !bang && arg.is_empty() => {
+                if self.refuse_read_only() {
+                    return;
+                }
+                if let Some(lines) = self.range_span(range, None) {
+                    self.fix_list_in(Some(lines));
+                    self.end_recording();
+                }
+            }
+            Some("write") => {
+                if let Some((a, b)) = self.range_span(range, None) {
+                    self.write_range(a, b, arg, bang);
+                }
+            }
+            _ => self.notify(format!("not a command: {cmd}"), FlashKind::Error),
         }
     }
 

@@ -283,14 +283,20 @@ impl App {
     /// CommonMark tools read it the way Shoin shows it (`Lists::realign`).
     /// One undo step; the cursor stays on the same character of text.
     ///
-    /// In Visual (or from a `:` typed in Visual) it re-indents every list the
-    /// selection touches: each touched line's top-level list, once, all in
-    /// the same undo step, and Visual ends as after `>`. A list inside a
-    /// blockquote is re-indented behind its markers.
+    /// In Visual it re-indents every list the selection touches: each
+    /// touched line's top-level list, once, all in the same undo step, and
+    /// Visual ends as after `>`. A list inside a blockquote is re-indented
+    /// behind its markers.
     pub(super) fn fix_list(&mut self) {
+        self.fix_list_in(None);
+    }
+
+    /// `fix_list` over every list lines `lines` touch, the first and last
+    /// line of a range typed before `:fixlist` (`:'<,'>fixlist` from Visual).
+    pub(super) fn fix_list_in(&mut self, lines: Option<(usize, usize)>) {
         self.refresh_blocks();
         let at = self.buffer.cursor;
-        let visual = self.visual_anchor().map(|a| (a.line, at.line)).or(self.command_selection);
+        let visual = self.visual_anchor().map(|a| (a.line, at.line)).or(lines);
         let (top, bot) = visual.map_or((at.line, at.line), |(a, b)| (a.min(b), a.max(b)));
         let bot = bot.min(self.buffer.last_line());
         let (tw, math) = (self.config.editor.tab_width, self.config.markdown.math);
@@ -341,7 +347,6 @@ impl App {
         }
         if visual.is_some() {
             self.end_visual();
-            self.command_selection = None;
         }
         if plans.is_empty() {
             return self.notify("not in a list", FlashKind::Error);

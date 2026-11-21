@@ -378,9 +378,35 @@ impl Buffer {
         Ok(())
     }
 
+    /// `:{range}w other.md`: lines `first..=last` written to `path` as a copy,
+    /// as `write_copy` writes the whole text. Each line ends in a newline,
+    /// except that a range ending on the last line follows the final-newline
+    /// rule a whole save would.
+    pub fn write_lines_copy(&self, path: &Path, first: usize, last: usize, policy: SavePolicy, force: bool) -> Result<()> {
+        if !force {
+            refuse_taken(path)?;
+        }
+        let start = self.rope.line_to_char(first);
+        let end = self.rope.line_to_char((last + 1).min(self.rope.len_lines()));
+        let part = ropey::Rope::from(self.rope.slice(start..end));
+        let mut opts = SaveOptions { keep_line: None, ..self.save_options(path, policy) };
+        if last < self.last_line() {
+            opts.final_newline = true;
+        }
+        save::write_atomic(path, &part, &opts)?;
+        Ok(())
+    }
+
     /// Whether `path` is this buffer's own file, by any spelling.
     pub fn is_own_file(&self, path: &Path) -> bool {
         self.path.as_deref().is_some_and(|ours| same_path(ours, path))
+    }
+
+    /// Whether writing to `path` would write this buffer's own file: by any
+    /// spelling, through a symlink, or through a hard link, which a save
+    /// writes in place (`write_atomic`). `:{range}w!` must never.
+    pub fn writes_own_file(&self, path: &Path) -> bool {
+        self.path.as_deref().is_some_and(|ours| same_path(ours, path) || same_inode(ours, path))
     }
 
     /// Re-read the file from disk, replacing the buffer's text.
@@ -618,6 +644,23 @@ fn same_path(a: &Path, b: &Path) -> bool {
             (std::fs::canonicalize(a), std::fs::canonicalize(b)),
             (Ok(x), Ok(y)) if x == y
         )
+}
+
+/// Whether `a` and `b` are one file on disk (links followed): the same
+/// device and inode. Unix only; elsewhere `same_path`'s canonical paths are
+/// all there is.
+#[cfg(unix)]
+fn same_inode(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    matches!(
+        (std::fs::metadata(a), std::fs::metadata(b)),
+        (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino()
+    )
+}
+
+#[cfg(not(unix))]
+fn same_inode(_: &Path, _: &Path) -> bool {
+    false
 }
 
 

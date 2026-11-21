@@ -589,6 +589,7 @@ W B E :: the same, with whitespace-delimited words
 { } :: previous · next paragraph
 gg G :: first · last line. With a count, go to that line
 :42 :$ :: go to line 42 · to the last line
+:+3 :-2 :.+3 :$-1 :: a line counted from the cursor's · from the last. A range, :3,7, goes to its last line
 1 to 9 :: start a count; 0 can follow another digit
 H M L :: top · middle · bottom of the screen
 > gg G :42 H M L and the page keys keep the column, as j and k do; so do dd >> <<.
@@ -698,6 +699,15 @@ Alt-j Alt-k :: move the item past the next · previous one, with its sub-items; 
 Tab Shift-Tab :: the same as >al <al, in Insert on the item's line
 :fixlist :: re-indent the list under the cursor, or each list a Visual selection touches, so GitHub and export read it as Shoin shows it, after a renumber across 9. to 10. Lists inside a > quote work too. Not on a key: bind fix_list under [keys.normal]
 > Refused when it would break the list: indenting a first item, outdenting a top-level one, a top-level list four columns in. In tmux a quick Esc j, in Normal or out of Visual, can arrive as Alt-j: set escape-time to 10 or less. On macOS the terminal must send Option as Meta (Esc+).
+
+## Lines on the command line — a range first: :3,7d :%y :'<,'>m 0
+:d :de :del :delete :: delete the lines into the register, as dd. :d a 3 takes register a and three lines
+:y :ya :yan :yank :: yank the lines, as yy
+:> :< :: indent · outdent the lines, as >> <<. :>> goes two levels
+:m :mo :mov :move :: move the lines below a line: :m 0 to the top, :m $ to the end
+:t :co :cop :copy :: copy the lines below a line
+:3,7w <path> :: write only those lines to path; ! overwrites
+> A range is two lines with a comma (3,7 or .,+4), % for every line, or '<,'>, the lines : from Visual starts with. Without one, each works on the cursor's line. A closed fold is taken whole. . does not repeat them.
 
 ## Registers
 \"a{cmd} :: use register a: \"ayy \"ap \"add
