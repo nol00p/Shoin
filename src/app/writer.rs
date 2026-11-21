@@ -493,7 +493,7 @@ impl App {
         // Indent is a LINE operation whatever motion named it: `>w` shifts the
         // whole line, exactly as in vim.
         if matches!(op, Operator::Indent | Operator::Outdent) {
-            return self.operate_linewise(op, a.line, b.line);
+            return self.operate_linewise(op, a.line, b.line, a);
         }
         let (lo, hi) = if (a.line, a.col) <= (b.line, b.col) {
             (a, b)
@@ -540,8 +540,12 @@ impl App {
         }
     }
 
-    /// Delete/change/yank whole lines `l1..=l2`.
-    pub(super) fn operate_linewise(&mut self, op: Operator, l1: usize, l2: usize) {
+    /// Delete/change/yank/case whole lines `l1..=l2`. `start` is where the
+    /// range begins as Neovim's operator sees it (`oap->start`): the earlier
+    /// of the cursor and where the motion landed, which a yank or a case
+    /// change leaves the cursor on and makes the goal (see
+    /// [`App::linewise_start`] and [`App::visual_line_start`]).
+    pub(super) fn operate_linewise(&mut self, op: Operator, l1: usize, l2: usize, start: Cursor) {
         let last = self.buffer.last_line();
         // The cursor's goal as a screen cell, read before the edit: a delete
         // or shift puts the cursor back on it, as Neovim's 'nostartofline'.
@@ -552,29 +556,27 @@ impl App {
         // every line it stands for, as in vim.
         let (a, b) = self.fold_hidden().widen(l1.min(l2), l1.max(l2));
         let b = b.min(last);
-        let start = self.buffer.rope.line_to_char(a);
+        let start_idx = self.buffer.rope.line_to_char(a);
         let end = if b < last {
             self.buffer.rope.line_to_char(b + 1)
         } else {
             self.buffer.rope.len_chars()
         };
-        let mut text = self.buffer.rope.slice(start..end).to_string();
+        let mut text = self.buffer.rope.slice(start_idx..end).to_string();
         if !text.ends_with('\n') {
             text.push('\n');
         }
         match op {
             Operator::Yank => {
                 self.store_register(text, true, false);
-                // `yy` and `yj` leave the cursor where it was; a range that
-                // starts above it (`yk`, `yip`) takes it to its first line.
-                let cur = self.buffer.cursor;
-                if a < cur.line {
-                    let col = cur.col.min(self.buffer.line_len(a).saturating_sub(1));
-                    self.buffer.cursor = Cursor::new(a, col);
-                }
+                // `yy` and `yj` leave the cursor where it was, `yk` where `k`
+                // put it, `yip` on the paragraph's first line; and the goal
+                // is that column now, as Neovim's: `yy` after `j` clamped to
+                // a short line forgets the longer line's column.
+                self.buffer.cursor = self.land_on(start);
             }
             Operator::Delete => {
-                self.buffer.delete_chars(start, end);
+                self.buffer.delete_chars(start_idx, end);
                 self.store_register(text, true, true);
                 // On the goal's column of the line now there, which becomes
                 // the goal: Neovim's `dd` from a long line onto `ab` and then
@@ -591,7 +593,7 @@ impl App {
                 } else {
                     String::new()
                 };
-                self.buffer.delete_chars(start, end);
+                self.buffer.delete_chars(start_idx, end);
                 self.store_register(text, true, true);
                 // Leave one line to type into.
                 let at = Cursor::new(a.min(self.buffer.line_count().saturating_sub(1)), 0);
@@ -604,8 +606,24 @@ impl App {
                 }
             }
             Operator::Lowercase | Operator::Uppercase => {
-                self.recase(start, end, op == Operator::Uppercase);
-                self.buffer.cursor = Cursor::new(a, 0);
+                let upper = op == Operator::Uppercase;
+                // Where the range starts, as a yank: `guu` on its line's
+                // first non-blank, `gUk` where `k` put it, `Vgu` at column 0;
+                // in the new text when the change made the line longer or
+                // shorter. Undo comes back to the start in the old text,
+                // redo to the landing, as Neovim's.
+                let before = self.land_on(start);
+                let after = self.recased_landing(before, |c, out| {
+                    if upper {
+                        out.extend(c.to_uppercase());
+                    } else {
+                        out.extend(c.to_lowercase());
+                    }
+                });
+                self.recase(start_idx, end, upper);
+                self.buffer.cursor = after;
+                self.land_for_undo(revision, before);
+                self.land_for_redo(revision);
             }
             Operator::Indent | Operator::Outdent => {
                 // The same screen column, not the same character, as
@@ -622,11 +640,87 @@ impl App {
     /// start of a deleted range, the end of an added indent). Only when the
     /// text changed since `revision`: otherwise the latest change belongs to
     /// an earlier command.
-    fn land_for_redo(&mut self, revision: u64) {
+    pub(super) fn land_for_redo(&mut self, revision: u64) {
         if self.buffer.revision != revision {
             let cursor = self.buffer.cursor;
             self.buffer.history.set_redo_cursor(cursor);
         }
+    }
+
+    /// Undo of the edit just made puts the cursor on `at` rather than where
+    /// the command began, as Neovim's does for a case change: the range's
+    /// start, a place in the text undo brings back. Only when the text
+    /// changed since `revision`, as [`App::land_for_redo`].
+    pub(super) fn land_for_undo(&mut self, revision: u64, at: Cursor) {
+        if self.buffer.revision != revision {
+            self.buffer.history.set_undo_cursor(at);
+        }
+    }
+
+    /// Where `p` lands once its line is recased by `map`, as Neovim's: it
+    /// keeps the byte column, and Neovim's mappings that change a length
+    /// (`ẞ` to `ß`) move what is under it. So `p` goes to the character whose
+    /// recased bytes hold that column, or the last one, and then to the
+    /// start of what `map` makes of it: never onto a combining mark `map`
+    /// added (`İ` lowercases to `i` and a dot here, `i` in Neovim).
+    pub(super) fn recased_landing(&self, p: Cursor, map: impl Fn(char, &mut String)) -> Cursor {
+        let chars: Vec<char> = self.buffer.line_text(p.line).chars().collect();
+        let Some(last) = chars.len().checked_sub(1) else {
+            return p;
+        };
+        let mapped: Vec<String> = chars
+            .iter()
+            .map(|&c| {
+                let mut out = String::new();
+                map(c, &mut out);
+                out
+            })
+            .collect();
+        let byte: usize = chars[..p.col.min(last)].iter().map(|c| c.len_utf8()).sum();
+        let mut at = 0;
+        let mut j = last;
+        for (i, (&c, m)) in chars.iter().zip(&mapped).enumerate() {
+            at += vim_recased_len(c, m);
+            if byte < at {
+                j = i;
+                break;
+            }
+        }
+        Cursor::new(p.line, mapped[..j].iter().map(|m| m.chars().count()).sum())
+    }
+
+    /// `p` as a Normal-mode cursor: on its line, on a character of it
+    /// (clamped, in case a case change shortened the line), and with the
+    /// goal taken afresh from where it stands.
+    pub(super) fn land_on(&self, p: Cursor) -> Cursor {
+        let line = p.line.min(self.buffer.last_line());
+        let col = p.col.min(self.buffer.line_len(line).saturating_sub(1));
+        Cursor::new(line, col)
+    }
+
+    /// Where a linewise operator over `from..=to` begins, as Neovim's
+    /// `oap->start`: the earlier of the two positions, or the first line at
+    /// column 0 when that is on a closed fold. `yk` and `gUk` land there.
+    pub(super) fn linewise_start(&self, from: Cursor, to: Cursor) -> Cursor {
+        let p = if (to.line, to.col) < (from.line, from.col) { to } else { from };
+        let h = self.fold_hidden();
+        let head = h.shown(p.line);
+        if head != p.line || h.run(p.line + 1).is_some() {
+            Cursor::new(head, 0)
+        } else {
+            Cursor::new(p.line, p.col)
+        }
+    }
+
+    /// `guu`'s second position, where vim's doubled operator moves before
+    /// it operates (`nv_lineop`): the last line's first non-blank, or its
+    /// last blank on a line of nothing else. Blanks are spaces and tabs only,
+    /// as vim's `beginline`: a no-break space is not one here, though
+    /// [`App::first_non_blank`] (`^`, indent) skips it.
+    pub(super) fn first_non_blank_on(&self, line: usize) -> Cursor {
+        let blanks = self.buffer.line_text(line).chars().take_while(|c| matches!(c, ' ' | '\t')).count();
+        let col = blanks.min(self.buffer.line_len(line).saturating_sub(1));
+        Cursor::new(line, col)
     }
 
     /// Rewrite an absolute char range in one case. Delete + insert so it is a
@@ -645,5 +739,21 @@ impl App {
         let at = self.idx_to_cursor(start);
         self.buffer.delete_chars(start, end);
         self.buffer.insert_str(at, &mapped);
+    }
+}
+
+/// How many bytes Neovim's case change makes of `c`, which Shoin maps to
+/// `mapped`. Neovim maps one character to one: the same as Shoin's where
+/// that is one character too; otherwise `i` for `İ`, `ẞ` for `ß`, and the
+/// character itself for the rest (`ﬁ`, `ŉ`), which Neovim leaves alone.
+fn vim_recased_len(c: char, mapped: &str) -> usize {
+    let mut it = mapped.chars();
+    match (it.next(), it.next()) {
+        (Some(m), None) => m.len_utf8(),
+        _ => match c {
+            'İ' => 'i'.len_utf8(),
+            'ß' => 'ẞ'.len_utf8(),
+            _ => c.len_utf8(),
+        },
     }
 }

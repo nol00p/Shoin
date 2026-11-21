@@ -161,7 +161,7 @@ pub fn visual(key: Key) -> Option<Verb> {
 
 /// The second key of a prefix. `g` carries the writer verbs and is
 /// shared by Normal and Visual; `<C-w>` moves between panes.
-pub fn after_prefix(prefix: char, key: Key, visual_mode: bool) -> Option<Verb> {
+pub fn after_prefix(prefix: char, key: Key) -> Option<Verb> {
     // `<C-w>` takes a DIRECTION, and an arrow key is one. Folded to the vim
     // letter here so the window commands stay a single `char` vocabulary —
     // everything after this point only ever sees `h`/`j`/`k`/`l`.
@@ -176,9 +176,9 @@ pub fn after_prefix(prefix: char, key: Key, visual_mode: bool) -> Option<Verb> {
     Some(match (prefix, c) {
         ('g', 'g') => Verb::Goto(Motion::BufferStart),
         // `gu`/`gU` take a motion like any operator; in Visual the selection is
-        // already the range, so `visual()` handles the bare `u`/`U` instead.
-        ('g', 'u') if !visual_mode => Verb::Operator(Operator::Lowercase),
-        ('g', 'U') if !visual_mode => Verb::Operator(Operator::Uppercase),
+        // already the range, as for the bare `u`/`U` there.
+        ('g', 'u') => Verb::Operator(Operator::Lowercase),
+        ('g', 'U') => Verb::Operator(Operator::Uppercase),
         ('g', 'b') => Verb::Act(Action::ToggleBold),
         ('g', 'i') => Verb::Act(Action::ToggleItalic),
         ('g', 'h') => Verb::Act(Action::ToggleHighlight),
