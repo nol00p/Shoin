@@ -511,8 +511,8 @@ fn render_latex_with_spaces(input: &str, mut math_spaces: Option<&mut Vec<usize>
                 }
             }
             if let Some(alphabet) = MathAlphabet::from_command(&name) {
-                let (value, end) = alphabet_argument(&chars, i);
-                if let Some(mapped) = value.and_then(|value| alphabet.render(&value)) {
+                let (mapped, end) = render_alphabet(alphabet, &chars, i);
+                if let Some(mapped) = mapped {
                     out.push_str(&mapped);
                 } else {
                     out.push('\\');
@@ -668,8 +668,8 @@ fn command_span(chars: &[char], start: usize) -> usize {
         return (start + 2).min(chars.len());
     }
     let name: String = chars[start + 1..end].iter().collect();
-    if MathAlphabet::from_command(&name).is_some() {
-        return alphabet_argument(chars, end).1;
+    if let Some(alphabet) = MathAlphabet::from_command(&name) {
+        return render_alphabet(alphabet, chars, end).1;
     }
     let arity = match name.as_str() {
         "frac" | "dfrac" => 2,
@@ -686,23 +686,34 @@ fn command_span(chars: &[char], start: usize) -> usize {
     end
 }
 
-/// The source argument and its end, including rejected forms that stay literal.
-fn alphabet_argument(chars: &[char], start: usize) -> (Option<String>, usize) {
+/// Render one letter-style argument. On rejection, include following groups
+/// in the literal command span, including the rest of an unclosed group.
+fn render_alphabet(alphabet: MathAlphabet, chars: &[char], start: usize) -> (Option<String>, usize) {
     let at = skip_math_spaces(chars, start);
-    match chars.get(at) {
-        Some('{') => braced_raw(chars, at).map_or((None, chars.len()), |(raw, end)| (Some(raw), end)),
+    let (mapped, mut end) = match chars.get(at) {
+        Some('{') => match braced_raw(chars, at) {
+            Some((raw, end)) => (alphabet.render(&raw), end),
+            None => return (None, chars.len()),
+        },
         Some('\\') if chars.get(at + 1) != Some(&'\\') => {
-            let mut end = name_end(chars, at + 1).max((at + 2).min(chars.len()));
-            loop {
-                let group = skip_math_spaces(chars, end);
-                let Some((_, next)) = braced_raw(chars, group) else { break };
-                end = next;
-            }
-            (None, end)
+            (None, name_end(chars, at + 1).max((at + 2).min(chars.len())))
         }
-        Some(c) if !matches!(c, '}' | '^' | '_' | '&' | '\\') => (Some(c.to_string()), at + 1),
-        _ => (None, start),
+        Some(&c) if !matches!(c, '}' | '^' | '_' | '&' | '\\') => {
+            (alphabet.render(c.encode_utf8(&mut [0; 4])), at + 1)
+        }
+        _ => return (None, start),
+    };
+    if mapped.is_none() {
+        loop {
+            let group = skip_math_spaces(chars, end);
+            if chars.get(group) != Some(&'{') {
+                break;
+            }
+            let Some((_, next)) = braced_raw(chars, group) else { return (None, chars.len()) };
+            end = next;
+        }
     }
+    (mapped, end)
 }
 
 fn skip_math_spaces(chars: &[char], start: usize) -> usize {
@@ -1319,6 +1330,24 @@ mod tests {
         ] {
             assert_eq!(shown(&format!("${tex}$")), tex);
         }
+    }
+
+    #[test]
+    fn rejected_alphabet_keeps_following_groups() {
+        for tex in [r"\mathcal{1}{\alpha}", r"\mathcal{1}  {{\alpha}} {\beta}",
+            r"\mathcal 1{\alpha}", r"\mathcal{1}{\alpha",
+        ] {
+            assert_eq!(shown(&format!("${tex}$")), tex);
+        }
+        assert_eq!(shown(r"$\mathcal{O}{\alpha}$"), "𝒪{α}");
+    }
+
+    #[test]
+    fn rejected_alphabet_keeps_unclosed_bare_command_group() {
+        for tex in [r"\mathbb\hat{\alpha", r"\mathbb \hat{R}  {{\alpha"] {
+            assert_eq!(shown(&format!("${tex}$")), tex);
+        }
+        assert_eq!(shown(r"$x^\mathbb\hat{\alpha$"), r"x^\mathbb\hat{\alpha");
     }
 
     #[test]

@@ -335,3 +335,20 @@ fn math_alphabet_layout() {
     check(r"\begin{pmatrix}\mathbb{R}&1\\abc&2\end{pmatrix}",
         &["⎛ ℝ   1⎞", "⎝abc  2⎠"]);
 }
+
+#[test]
+fn rejected_alphabet_keeps_following_groups() {
+    for tex in [r"\mathcal{1}{\alpha}", r"\mathcal{1}  {{\alpha}} {\beta}",
+        r"\mathcal 1{\alpha}",
+    ] {
+        check(tex, &[tex]);
+    }
+    check(r"\mathcal{O}{\alpha}", &["𝒪α"]);
+}
+
+#[test]
+fn rejected_alphabet_with_unclosed_group_uses_display_fallback() {
+    for tex in [r"\mathbb\hat{\alpha", r"\mathbb \hat{R}  {{\alpha", r"\mathcal{1}{\alpha"] {
+        assert_eq!(layout(tex, 80), None, "{tex}");
+    }
+}

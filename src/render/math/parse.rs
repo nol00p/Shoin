@@ -320,12 +320,7 @@ impl<'a> Parser<'a> {
                 }
                 let replacement = symbol(name);
                 if replacement.is_empty() {
-                    let arguments = self.rest;
-                    while self.peek() == Token::Char('{') {
-                        self.raw_group()?;
-                    }
-                    let arguments = &arguments[..arguments.len() - self.rest.len()];
-                    return Some(Atom::text(&one_line(&format!("\\{name}{arguments}"))));
+                    return self.literal_command(name, self.rest);
                 }
                 return Some(Atom::text(replacement));
             }
@@ -343,18 +338,22 @@ impl<'a> Parser<'a> {
             }
             Token::Command(command) if !matches!(command, "end" | "right" | "\\") => {
                 self.next();
-                while self.peek() == Token::Char('{') {
-                    self.raw_group()?;
-                }
                 None
             }
             _ => None,
         };
-        let text = mapped.unwrap_or_else(|| {
-            let source = &start[..start.len() - self.rest.len()];
-            one_line(&format!("\\{name}{source}"))
-        });
-        Some(Atom::text(&text))
+        match mapped {
+            Some(text) => Some(Atom::text(&text)),
+            None => self.literal_command(name, start),
+        }
+    }
+
+    fn literal_command(&mut self, name: &str, start: &str) -> Option<Atom> {
+        while self.peek() == Token::Char('{') {
+            self.raw_group()?;
+        }
+        let source = &start[..start.len() - self.rest.len()];
+        Some(Atom::text(&one_line(&format!("\\{name}{source}"))))
     }
 
     fn delimiter(&mut self) -> Option<&'static str> {
