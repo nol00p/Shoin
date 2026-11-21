@@ -687,7 +687,7 @@ fn render_embed_row(
             dim,
         )],
         Row::Error(msg) => screen_spans(msg, ThemeStyle::fg(theme.error).to_ratatui()),
-        Row::Body(text, block) => {
+        Row::Body(text, block, at) => {
             // Styled AND CONCEALED with the document's own rules. An embedded
             // line is never the active line — it is not in this rope at all —
             // so, like any line the cursor is not on, it always shows its
@@ -724,13 +724,14 @@ fn render_embed_row(
             };
             let chars: Vec<char> = shown.chars().collect();
             let tab = app.config.editor.tab_width;
-            out.extend(tabs_as_spaces(window_spans(&chars, &spans, 0, chars.len()), &chars, 0, tab));
+            // The row's tabs reach the stops of the whole embedded line.
+            out.extend(tabs_as_spaces(window_spans(&chars, &spans, 0, chars.len()), &chars, *at, tab));
             // Pad to the closing bar so the box has a straight right edge. The
             // content was wrapped to fit between the bars, so this only ever
             // adds space — but it is measured in display cells, not chars, so a
             // CJK line does not push the edge out.
             if bordered {
-                let used = 2 + text_width(&shown, tab) as usize;
+                let used = 2 + text_width_from(&shown, *at, tab) as usize;
                 out.push(Span::styled(
                     " ".repeat(width.saturating_sub(used + 2)) + " \u{2502}",
                     dim,
@@ -2884,6 +2885,31 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// An embedded line counts its tabs' stops from its concealed cells, as
+    /// a concealed line of the document does, and wraps on the cells it
+    /// draws: a link's hidden URL takes no room in the box.
+    #[test]
+    fn an_embedded_line_counts_stops_and_wraps_on_its_concealed_cells() {
+        let url = "https://example.com/a/really/long/path/that/goes/on/and/on/for/a/while";
+        let frag = format!("[a](url)\tb\n\n**cd**\te\n\nx\ty\n\n[f]({url}) tail\n");
+        let (d, mut app) = composition("top\n![[frag]]\n", &frag);
+        // Parsed first with concealment off, where the embed line shows its
+        // source: turning it on wraps the embed again, concealed.
+        app.config.layout.conceal = false;
+        app.config.layout.stable_gutter = false;
+        render_to(&app, 80, 24);
+        app.config.layout.conceal = true;
+        let buf = render_to(&app, 80, 24);
+        for (first, after) in [("a", "b"), ("c", "e"), ("x", "y")] {
+            let y = (0..24).find(|&y| row_text(&buf, y).contains(after)).unwrap();
+            let row = row_text(&buf, y);
+            assert_eq!(cell_of(&buf, y, after) - cell_of(&buf, y, first), 4, "{first}…{after}: {row:?}");
+        }
+        assert!((0..24).any(|y| row_text(&buf, y).contains("f tail")), "the URL takes no room");
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     /// Turning preview off puts the source back, and the row count with it.
     #[test]
     fn embed_preview_is_a_toggle() {
@@ -4137,6 +4163,40 @@ mod tests {
         (column(&revealed, needle.0), column(&concealed, needle.1), lay.margin_left)
     }
 
+    /// A tab in a quoted item's indent reaches its stop counted from the
+    /// line's start: in `> \t- x` it fills cells 2 and 3, with its guide on
+    /// 2, and the item's text is where the source puts it, with the gutter
+    /// steady or not. Its guide is as wide as the tab is in the source, so
+    /// where the bars are wider than the markers (`>> `, a bar and a space
+    /// for each `>`), the item moves by that much and no more, as one
+    /// indented with spaces does.
+    #[test]
+    fn a_quoted_indent_tab_reaches_its_stop_past_the_bar() {
+        // The line, the cell of its guide and of `x` concealed, and of `x`
+        // raw, from the bar or the first `>`.
+        for (doc, guide, x, raw_x) in [
+            ("> \t- x", 2u16, 6u16, 6u16),
+            ("> \t\t- x", 2, 10, 10),
+            ("> > \t- x", 4, 10, 10),
+            (">> \t- x", 4, 7, 6),
+            (">> - x", 0, 6, 5),
+        ] {
+            for stable in [false, true] {
+                let (raw, shown, m) = reveal_columns(doc, ("x", "x"), stable);
+                assert_eq!(shown, Some(m + x), "{doc:?}, stable_gutter {stable}");
+                if !stable {
+                    assert_eq!(raw, Some(m + raw_x), "{doc:?}");
+                } else if x == raw_x {
+                    assert_eq!(raw, shown, "{doc:?}");
+                }
+                if guide > 0 {
+                    let (_, at, m) = reveal_columns(doc, ("x", "\u{2502}"), stable);
+                    assert_eq!(at, Some(m + guide), "{doc:?}, stable_gutter {stable}");
+                }
+            }
+        }
+    }
+
     /// `layout.stable_gutter` moves a revealed line by its BLOCK markers
     /// only. A line that opens with math, emphasis or a link reveals at the
     /// text column like any other text: a display formula used to jump left
@@ -4740,6 +4800,40 @@ mod tests {
         let y = (0..buf.area.height).find(|&y| row_text(&buf, y).contains("abcd")).unwrap();
         assert!(row_text(&buf, y + 1).trim_start().starts_with("efgh"), "{:?}", row_text(&buf, y + 1));
         assert_eq!(cell_of(&buf, y + 1, "e"), cell_of(&buf, y, "a"));
+    }
+
+    /// The first char of a continuation row has its caret there, at the
+    /// row's first cell, not past the end of the row above: after a tab that
+    /// ends on the row's last cell, and after a space a row broke at. The
+    /// end of the line, where Insert and append put the cursor, stays on the
+    /// last row, past its last char.
+    #[test]
+    fn the_caret_on_a_continuation_rows_first_char_is_on_that_row() {
+        // The line, measure, cursor col, then the caret's row of the line
+        // and its cell from the row's first.
+        for (text, measure, col, row, x) in [
+            ("abcdef\tx", 8u16, 7usize, 1u16, 0u16),
+            ("abcdef\tx", 8, 8, 1, 1),
+            ("abcd\tefgh", 8, 5, 1, 0),
+            ("abcdefghijklmno pq rs", 16, 16, 1, 0),
+            ("abcdefghijklmno pq rs", 16, 15, 0, 15),
+            ("abcdef\t", 8, 7, 0, 8),
+            ("abcdefgh", 8, 8, 0, 8),
+        ] {
+            let mut app = app_with(&format!("top\n{text}\n"));
+            app.config.layout.measure = measure;
+            app.config.editor.tab_width = 4;
+            app.refresh_blocks();
+            app.mode = Mode::Insert;
+            app.buffer.cursor = Cursor::new(1, col);
+            let mut t = Terminal::new(TestBackend::new(40, 8)).unwrap();
+            t.draw(|f| render(f, &app)).unwrap();
+            let caret = t.get_cursor_position().unwrap();
+            let buf = t.backend().buffer().clone();
+            let y0 = (0..buf.area.height).find(|&y| row_text(&buf, y).contains("abcd")).unwrap();
+            let x0 = cell_of(&buf, y0, "a");
+            assert_eq!((caret.y - y0, caret.x - x0), (row, x), "{text:?} col {col}");
+        }
     }
 
     /// A tab-indented list draws as deep as it nests, with its guides on the

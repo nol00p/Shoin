@@ -162,6 +162,8 @@ struct StyleKey {
     /// layout setting does.
     hanging_indent: bool,
     stable_gutter: bool,
+    /// An embed's rows are wrapped on its lines as drawn, concealed or not.
+    conceal: bool,
     /// Reaches an embed's expansion: the search root, the depth cap, the
     /// heading offset and the border are all read while the line is parsed.
     transclude: crate::config::schema::TranscludeConfig,
@@ -179,6 +181,7 @@ impl StyleKey {
             && self.embed_mode == app.embed_mode
             && self.hanging_indent == app.config.layout.hanging_indent
             && self.stable_gutter == (app.config.layout.stable_gutter && app.config.layout.conceal)
+            && self.conceal == app.config.layout.conceal
             && self.transclude == app.config.transclude
     }
 
@@ -192,6 +195,7 @@ impl StyleKey {
             embed_mode: app.embed_mode,
             hanging_indent: app.config.layout.hanging_indent,
             stable_gutter: app.config.layout.stable_gutter && app.config.layout.conceal,
+            conceal: app.config.layout.conceal,
             transclude: app.config.transclude.clone(),
         }
     }
@@ -741,8 +745,12 @@ impl RenderCache {
             return (base, 0);
         }
         let wrap = entry.wrap(self.is_concealed(line));
+        // A row's end is the next row's first char: that row holds it. Only
+        // the last row holds its end, the end of the line, where Insert and
+        // append put the cursor.
+        let last = wrap.len().saturating_sub(1);
         for (i, (start, end)) in wrap.iter().enumerate() {
-            if col >= *start && col <= *end {
+            if col >= *start && (col < *end || (i == last && col == *end)) {
                 return (base + i, col - start);
             }
         }
@@ -900,6 +908,20 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
                 app.embed_mode,
                 app.config.markdown.math,
                 app.config.editor.tab_width,
+                // Each embedded line wraps on the text the frame draws for
+                // it, concealed with the same rules.
+                &|text, kind| {
+                    cfg.layout.conceal.then(|| {
+                        let inline = markdown::inline::scan_styled(text, &cfg.markdown);
+                        let ctx = ConcealCtx {
+                            glyphs: &cfg.glyphs,
+                            theme: &app.theme,
+                            measure,
+                            tab_width: cfg.editor.tab_width,
+                        };
+                        ConcealMap::build(text, kind, &inline, &ctx)
+                    })
+                },
             )
         })
     } else {

@@ -746,7 +746,7 @@ fn embed_rows_of(app: &App, doc: usize, line: usize) -> Vec<String> {
     x.rows
         .iter()
         .filter_map(|r| match r {
-            Row::Body(s, _) => Some(s.clone()),
+            Row::Body(s, _, _) => Some(s.clone()),
             Row::Error(s) => Some(s.clone()),
             _ => None,
         })
