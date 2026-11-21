@@ -428,7 +428,7 @@ impl Pending {
                     Resolution::Invalid
                 }
             },
-            Awaiting::Prefix(p) => match bindings::after_prefix(p, key, table.is_visual()) {
+            Awaiting::Prefix(p) => match bindings::after_prefix(p, key) {
                 Some(verb) => self.apply_verb(verb, table),
                 // An unknown second key drops the sequence, as vim does — but
                 // the user keymap may still bind it (`z` is a config prefix).

@@ -52,8 +52,9 @@ impl App {
         let cursor = self.buffer.cursor;
         let linewise = matches!(self.mode, Mode::VisualLine);
         if linewise {
+            let start = self.visual_line_start();
             self.end_visual();
-            self.operate_linewise(op, anchor.line, cursor.line);
+            self.operate_linewise(op, anchor.line, cursor.line, start);
             return;
         }
         // Visual selections are inclusive of the cursor character, and stop
@@ -78,15 +79,25 @@ impl App {
         match action {
             Action::PasteAfter => self.visual_paste(true, count),
             Action::PasteBefore => self.visual_paste(false, count),
-            Action::ToggleCase => self.visual_map_chars(|c, out| {
-                if c.is_uppercase() {
-                    out.extend(c.to_lowercase());
-                } else if c.is_lowercase() {
-                    out.extend(c.to_uppercase());
-                } else {
-                    out.push(c);
+            Action::ToggleCase => {
+                // `V~` lands as `VU` does, and undo and redo with it.
+                let lines = matches!(self.mode, Mode::VisualLine).then(|| self.visual_line_start());
+                let revision = self.buffer.revision;
+                self.visual_map_chars(|c, out| {
+                    if c.is_uppercase() {
+                        out.extend(c.to_lowercase());
+                    } else if c.is_lowercase() {
+                        out.extend(c.to_uppercase());
+                    } else {
+                        out.push(c);
+                    }
+                });
+                if let Some(start) = lines {
+                    self.buffer.cursor = self.land_on(start);
+                    self.land_for_undo(revision);
+                    self.land_for_redo(revision);
                 }
-            }),
+            }
             Action::ReplaceChar(r) => {
                 let r = *r;
                 self.visual_map_chars(move |_, out| out.push(r));
@@ -213,8 +224,23 @@ impl App {
     /// lines.
     fn visual_lines_operate(&mut self, op: Operator) {
         let (a, b) = self.visual_lines();
+        let start = self.visual_line_start();
         self.end_visual();
-        self.operate_linewise(op, a, b);
+        self.operate_linewise(op, a, b, start);
+    }
+
+    /// Where a Visual selection begins for a linewise operator, as Neovim's:
+    /// the cursor when it is above the anchor's line, else the anchor's line
+    /// at column 0. `Vky` and `VkU` stay where `k` put them; `Vy` and `VjU`
+    /// go to the line's start.
+    pub(super) fn visual_line_start(&self) -> Cursor {
+        let anchor = self.anchor.unwrap_or(self.buffer.cursor);
+        let cursor = self.buffer.cursor;
+        if cursor.line < anchor.line {
+            Cursor::new(cursor.line, cursor.col)
+        } else {
+            Cursor::new(anchor.line, 0)
+        }
     }
 
     /// `p` / `P` in Visual: replace the selection with the register, `count`
