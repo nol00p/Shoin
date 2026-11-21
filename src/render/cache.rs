@@ -41,7 +41,7 @@ use crate::render::conceal::{ActiveSet, ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
 use crate::render::hidden::{self, Hidden};
 use crate::render::layout::{
-    content_column, no_wrap, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow, MIN_WRAP_WIDTH,
+    content_column, no_wrap, tab_stop, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow, MIN_WRAP_WIDTH,
 };
 use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
@@ -870,7 +870,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         (0, 0)
     } else if matches!(block, BlockKind::ListItem { .. }) {
         let tw = cfg.editor.tab_width as u16;
-        (content_column(&source, tw, ""), content_column(&concealed, tw, &cfg.glyphs.indent_guide))
+        (content_column(&source, 0, tw, ""), content_column(&concealed, 0, tw, &cfg.glyphs.indent_guide))
     } else if let BlockKind::Quote(depth) = block {
         quote_hang(&source, &concealed, depth, cfg)
     } else {
@@ -964,11 +964,24 @@ fn quote_hang(source: &str, concealed: &str, depth: u8, cfg: &crate::config::Con
     };
     let hang = |lead: u16, content: u16| if content == 0 { 0 } else { lead + content };
     let markers: String = source.chars().take(inner.cut.keep).collect();
-    let lead_raw = text_width(&markers, tw) + inner.cut.skip as u16;
-    let raw = hang(lead_raw, content_column(&inner.cut.view, tw as u16, ""));
+    let cut = &inner.cut;
+    // A tab after the last marker reaches its stop in the source; the view
+    // writes it as the marker's space and `pad` spaces, which the stop
+    // stands in for.
+    let lead_raw = if cut.pad > 0 {
+        let at = usize::from(text_width(&markers, tw));
+        (at + tab_stop(at, tw)) as u16
+    } else {
+        text_width(&markers, tw) + cut.skip as u16
+    };
+    let view: String = cut.view.chars().skip(cut.pad).collect();
+    let raw = hang(lead_raw, content_column(&view, lead_raw, tw as u16, ""));
     let bars = crate::render::quote::bars(&cfg.glyphs.quote_bar, depth);
     let shown = match concealed.strip_prefix(bars.as_str()) {
-        Some(rest) => hang(text_width(&bars, tw), content_column(rest, tw as u16, &cfg.glyphs.indent_guide)),
+        Some(rest) => {
+            let lead = text_width(&bars, tw);
+            hang(lead, content_column(rest, lead, tw as u16, &cfg.glyphs.indent_guide))
+        }
         None => 0,
     };
     (raw, shown)

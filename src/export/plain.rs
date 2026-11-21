@@ -256,7 +256,7 @@ fn push_paragraph(out: &mut Vec<String>, prefix: &str, body: &str, measure: u16,
         if i == last {
             out.push(format!("{prefix}{}", row.trim_end()));
         } else {
-            let gaps = crate::render::align::justify_gaps(&row, measure, crate::render::markdown::block::COMMONMARK_TAB);
+            let gaps = crate::render::align::justify_gaps(&row, 0, measure, crate::render::markdown::block::COMMONMARK_TAB);
             out.push(format!("{prefix}{}", stretch(&row, &gaps)));
         }
     }

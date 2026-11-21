@@ -18,7 +18,7 @@ use std::path::Path;
 use super::link::Link;
 use super::Mode;
 use crate::config::schema::TranscludeConfig;
-use crate::render::layout::{char_window, wrap_chars};
+use crate::render::layout::{char_window, expand_tabs, phase, wrap_chars};
 use crate::render::markdown::block::{classify, BlockKind, Carry, COMMONMARK_TAB};
 
 /// A picture an embed reserved room for. The bytes ride along already
@@ -122,10 +122,14 @@ pub fn expand(
         // Sliced from one char vector: skipping to each row's start from the
         // line's beginning walked a long line once per row it wraps to.
         let chars: Vec<char> = line.chars().collect();
-        // A tab is wrapped as the `tab` cells the frame draws it as, the
-        // screen's rule, though the kind above counts it as CommonMark's 4.
+        // A tab is wrapped as the cells to its stop the frame draws it as,
+        // the screen's rule, though the kind above counts it as CommonMark's
+        // 4. Each row keeps it as those spaces: drawn alone, a row would
+        // lose the cells before it that its stops count from.
         for (a, b) in wrap_chars(&chars, inner, tab) {
-            rows.push(Row::Body(char_window(&chars, a, b), kind.clone()));
+            let row = char_window(&chars, a, b);
+            let row = expand_tabs(&row, phase(&chars, a, tab), tab).into_owned();
+            rows.push(Row::Body(row, kind.clone()));
         }
     }
     if rows.is_empty() || matches!(rows.last(), Some(Row::Top(_))) {

@@ -566,6 +566,7 @@ mod tests {
             assert!(w[0].starts_with("editor.tab_width") && w[0].contains("1 to 16"), "{w:?}");
         }
         assert_eq!(crate::render::layout::cell_width('\t', 0), 1);
+        assert_eq!(crate::render::layout::cell_width_at('\t', 3, 0), 1, "every cell is a stop");
     }
 
     /// A misspelt setting is REPORTED. It still falls back, but silently

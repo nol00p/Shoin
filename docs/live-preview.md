@@ -50,7 +50,8 @@ and [`tab-list.md`](../examples/tab-list.md) beside it show one thing each.
   the same hanging indent when an item wraps. The space after the last `>`
   belongs to the marker. A tab there is the marker's space plus
   `tab_width` − 1 columns of indent, as the list commands count it (see
-  [Editing](editing.md)), and still takes `tab_width` cells.
+  [Editing](editing.md)), and the text after it starts at the tab's stop,
+  where the line draws it with the cursor on it.
 - Styles nest. Emphasis, code spans and highlights inside a link's text are
   styled in the link's colour, and a link inside emphasis
   (`**see [docs](u)**`) is drawn as a link in the outer style, its address
