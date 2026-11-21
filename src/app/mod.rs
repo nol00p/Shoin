@@ -1626,9 +1626,10 @@ impl App {
             Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete),
             Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change),
             Action::YankLine => {
-                let line = self.buffer.cursor.line;
-                let last = self.buffer.last_line();
-                self.operate_linewise(Operator::Yank, line, line.saturating_add(count.saturating_sub(1)).min(last));
+                let cursor = self.buffer.cursor;
+                let (line, last) = (cursor.line, self.buffer.last_line());
+                let start = self.linewise_start(cursor, cursor);
+                self.operate_linewise(Operator::Yank, line, line.saturating_add(count.saturating_sub(1)).min(last), start);
             }
             // `3rx` replaces three characters, so this needs the count and
             // belongs here rather than in `apply_action`.
@@ -1753,9 +1754,23 @@ impl App {
             Target::Object { key, around } => self.operate_object(op, key, around, count),
             Target::Line => {
                 // `3dd` counts a closed fold as one line.
-                let l1 = self.buffer.cursor.line;
-                let l2 = self.shown_step(l1, true, count.saturating_sub(1)).unwrap_or(l1);
-                self.operate_linewise(op, l1, l2);
+                let from = self.buffer.cursor;
+                let l1 = from.line;
+                let step = self.shown_step(l1, true, count.saturating_sub(1));
+                let case = matches!(op, Operator::Lowercase | Operator::Uppercase);
+                // `2gUU` on the last line has no line to move to, so Neovim
+                // beeps and changes nothing (`3guu` with two lines left
+                // takes them both).
+                if case && count > 1 && step.is_none() {
+                    return;
+                }
+                let l2 = step.unwrap_or(l1);
+                // `guu` first moves to the last line's first non-blank, as
+                // vim's doubled operators but `yy` do: so `guu` lands there
+                // and `3guu` stays put, the earlier of the two.
+                let to = if case { self.first_non_blank_on(l2) } else { from };
+                let start = self.linewise_start(from, to);
+                self.operate_linewise(op, l1, l2, start);
             }
             Target::Selection => self.visual_operate(op),
         }

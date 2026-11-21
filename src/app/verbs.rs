@@ -434,7 +434,7 @@ impl App {
             return self.shift_list(op == Operator::Outdent, obj == 'L' && around, first.line, last.line);
         }
         if linewise {
-            self.operate_linewise(op, first.line, last.line);
+            self.operate_linewise(op, first.line, last.line, first);
         } else {
             self.operate_charwise(op, first, last, true);
         }
@@ -481,7 +481,8 @@ impl App {
             return;
         };
         if res.kind == Linewise {
-            return self.operate_linewise(op, from.line, res.target.line);
+            let start = self.linewise_start(from, res.target);
+            return self.operate_linewise(op, from.line, res.target.line, start);
         }
         let inclusive = res.kind == Inclusive;
         let (start, mut end) = if (res.target.line, res.target.col) < (from.line, from.col) {
@@ -497,12 +498,13 @@ impl App {
         if res.kind == Exclusive && end.col == 0 && end.line > start.line {
             let line = end.line - 1;
             if start.col <= self.first_non_blank(start.line) {
-                return self.operate_linewise(op, start.line, line);
+                let at = self.linewise_start(start, start);
+                return self.operate_linewise(op, start.line, line, at);
             }
             end = Cursor::new(line, self.buffer.line_len(line));
         }
         if op == Operator::Delete && self.delete_goes_linewise(start, end, inclusive) {
-            return self.operate_linewise(op, start.line, end.line);
+            return self.operate_linewise(op, start.line, end.line, start);
         }
         self.operate_charwise(op, start, end, inclusive)
     }

@@ -163,6 +163,17 @@ impl History {
         }
     }
 
+    /// Make `cursor` where undo leaves the cursor for the latest step, in
+    /// place of where its command began: the step being built, or the last
+    /// one sealed when there is none.
+    pub fn set_undo_cursor(&mut self, cursor: Cursor) {
+        if !self.current.changes.is_empty() {
+            self.pending_start = Some(cursor);
+        } else if let Some((_, s)) = self.undo.last_mut() {
+            Rc::make_mut(s).cursor_start = Some(cursor);
+        }
+    }
+
     /// Pop the last step for the caller to invert, moving it to the redo stack.
     pub fn undo(&mut self) -> Option<Rc<Step>> {
         self.seal();
