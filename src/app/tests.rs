@@ -9277,6 +9277,140 @@ fn undo_and_redo_of_a_linewise_case_change_land_as_neovim() {
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
 
+/// `2gUU` on the last line has no second line to take, so Neovim beeps and
+/// changes nothing: the cursor stays where it was. A count that runs past
+/// the end from higher up takes the lines there are and stays put, as
+/// `3guu` does; undo and redo come back to it.
+#[test]
+fn a_counted_case_change_past_the_end_as_neovim() {
+    let text = "first line here\n  second line\n   last words\n";
+    let mut misses = landing_misses(
+        text,
+        &[
+            ("G05l2gUU", (2, 5), (2, 5)),
+            ("G05l5gUU", (2, 5), (2, 5)),
+            ("G05l2gugu", (2, 5), (2, 5)),
+            ("G05lgUU", (2, 3), (2, 3)),
+            ("j05l3guu", (1, 5), (2, 5)),
+            ("j05l3gUU", (1, 5), (2, 5)),
+            ("gg05l9gUU", (0, 5), (1, 5)),
+        ],
+    );
+    misses.extend(sticky_misses(
+        text,
+        &[
+            // `2gUU` made no step: `u` undoes the `gUU` before it.
+            ("gg5lgUUG05l2gUUgg$u", "", (0, 0)),
+            ("j05l3gUUG$u", "", (1, 5)),
+            ("j05l3gUUG$uG$\u{12}", "", (1, 5)),
+            ("gg05l9gUUG$u", "", (0, 5)),
+            ("gg05l9gUUG$uG$\u{12}", "", (0, 5)),
+        ],
+    ));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    assert_eq!(sticky_keys(text, "G05l2gUU").buffer.line_text(2), "   last words");
+    let app = sticky_keys(text, "gg5lgUUG05l2gUUgg$u");
+    assert_eq!((app.buffer.line_text(0), app.buffer.line_text(2)), ("first line here".into(), "   last words".into()));
+    assert_eq!(sticky_keys(text, "j05l3gUU").buffer.line_text(2), "   LAST WORDS");
+}
+
+/// A case change that changes a line's length (`İ` lowercases to `i` and a
+/// combining dot here, `ß` uppercases to `SS`, `ﬁ` to `FI`) lands on the
+/// character Neovim's does. Neovim maps `İ` to `i` and `ß` to `ẞ` and
+/// keeps the byte column, so `0lguj` on `İİİabc` ends on the third `i`:
+/// here the start of that `i`, never its dot. Undo goes back to where the
+/// range started in the old text, redo to the landing in the new.
+#[test]
+fn a_case_change_that_changes_the_length_lands_as_neovim() {
+    let text = "İİİabc\nxyz\nİİİabcdef\n";
+    let mut misses = landing_misses(
+        text,
+        &[
+            ("0lguj", (0, 4), (1, 2)),
+            ("03lguj", (0, 8), (1, 2)),
+            ("05lguj", (0, 8), (1, 2)),
+            ("j3lguk", (0, 7), (1, 2)),
+            ("j2lguk", (0, 7), (1, 2)),
+            ("j3lVku", (0, 7), (1, 2)),
+            ("j3lVk~", (0, 7), (1, 2)),
+            ("0lVjgu", (0, 0), (1, 0)),
+        ],
+    );
+    let text2 = "aßbcde\nxyz\naẞbcde\naﬁbcde\nlast\n";
+    misses.extend(landing_misses(
+        text2,
+        &[
+            ("03lgUj", (0, 3), (1, 2)),
+            ("05lgUj", (0, 5), (1, 2)),
+            ("j3lgUk", (0, 1), (1, 1)),
+            ("j4lgUk", (0, 1), (1, 1)),
+            ("jj3lguj", (2, 4), (3, 4)),
+            ("jj4lguk", (1, 2), (2, 2)),
+            ("jjj3lgUj", (3, 4), (4, 3)),
+            ("jjj4lgUj", (3, 5), (4, 3)),
+            ("jjj3lguj", (3, 3), (4, 3)),
+            ("G3lgUk", (3, 4), (4, 3)),
+            ("G3lVkU", (3, 4), (4, 3)),
+            ("G3lVk~", (3, 4), (4, 3)),
+            ("4lVjU", (0, 0), (1, 0)),
+        ],
+    ));
+    let i = "İabc\nxyz\n";
+    misses.extend(sticky_misses(
+        i,
+        &[
+            ("0lguj", "", (0, 3)),
+            ("0lgujG$u", "", (0, 1)),
+            ("0lgujG$uG$\u{12}", "", (0, 3)),
+            ("j3lgukG$u", "", (0, 2)),
+            ("j3lgukG$uG$\u{12}", "", (0, 4)),
+        ],
+    ));
+    misses.extend(sticky_misses(
+        "aßbc\nxyz\n",
+        &[
+            ("03lgUjG$u", "", (0, 3)),
+            ("03lgUjG$uG$\u{12}", "", (0, 3)),
+            ("j3lgUkG$u", "", (0, 2)),
+            ("j3lgUkG$uG$\u{12}", "", (0, 1)),
+        ],
+    ));
+    misses.extend(sticky_misses(
+        "İİİabc\nxyz\n",
+        &[("03lgujG$u", "", (0, 3)), ("03lgujG$uG$\u{12}", "", (0, 8))],
+    ));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    // The text is Shoin's full case mapping, as before; `x` takes a letter.
+    let app = sticky_keys(i, "0lgujx");
+    assert_eq!(app.buffer.line_text(0), "i\u{307}ac");
+    assert_eq!(sticky_keys(text2, "03lgUj").buffer.line_text(0), "ASSBCDE");
+    assert_eq!(sticky_keys(text2, "G3lgUk").buffer.line_text(3), "AFIBCDE");
+}
+
+/// `guu`'s first non-blank skips only spaces and tabs, as Neovim's: a
+/// no-break space or an ideographic space is not blank there, though `^`
+/// and the indent commands still skip it.
+#[test]
+fn a_doubled_case_change_skips_only_spaces_and_tabs() {
+    let text = "\u{a0}ABC\nxyz long\n  \u{a0} ABC\nxyz long\n  \u{a0}\nxyz long\n\u{3000}ABC\nxyz\n";
+    let misses = landing_misses(
+        text,
+        &[
+            ("02lguu", (0, 0), (1, 0)),
+            ("02lgUU", (0, 0), (1, 0)),
+            ("02lgugu", (0, 0), (1, 0)),
+            ("2j05lguu", (2, 2), (3, 2)),
+            ("2j0lguu", (2, 1), (3, 1)),
+            ("2j03lgUU", (2, 2), (3, 2)),
+            ("4j02lguu", (4, 2), (5, 2)),
+            ("4j0lguu", (4, 1), (5, 1)),
+            ("6j02lguu", (6, 0), (7, 0)),
+        ],
+    );
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    assert_eq!(sticky_keys(text, "02lguu").buffer.line_text(0), "\u{a0}abc");
+}
+
 /// A linewise yank or case change whose range starts on a closed fold
 /// lands on the fold's line at column 0, as Neovim's (`zf2j` there, `zc`
 /// here); a Visual one does not.

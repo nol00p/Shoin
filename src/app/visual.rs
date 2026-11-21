@@ -81,9 +81,9 @@ impl App {
             Action::PasteBefore => self.visual_paste(false, count),
             Action::ToggleCase => {
                 // `V~` lands as `VU` does, and undo and redo with it.
-                let lines = matches!(self.mode, Mode::VisualLine).then(|| self.visual_line_start());
-                let revision = self.buffer.revision;
-                self.visual_map_chars(|c, out| {
+                // The landing is in the new text, as `VU`'s
+                // ([`App::recased_landing`]); undo goes to the old.
+                let toggle = |c: char, out: &mut String| {
                     if c.is_uppercase() {
                         out.extend(c.to_lowercase());
                     } else if c.is_lowercase() {
@@ -91,10 +91,16 @@ impl App {
                     } else {
                         out.push(c);
                     }
+                };
+                let lines = matches!(self.mode, Mode::VisualLine).then(|| {
+                    let before = self.land_on(self.visual_line_start());
+                    (before, self.recased_landing(before, toggle))
                 });
-                if let Some(start) = lines {
-                    self.buffer.cursor = self.land_on(start);
-                    self.land_for_undo(revision);
+                let revision = self.buffer.revision;
+                self.visual_map_chars(toggle);
+                if let Some((before, after)) = lines {
+                    self.buffer.cursor = after;
+                    self.land_for_undo(revision, before);
                     self.land_for_redo(revision);
                 }
             }

@@ -1755,14 +1755,19 @@ impl App {
                 // `3dd` counts a closed fold as one line.
                 let from = self.buffer.cursor;
                 let l1 = from.line;
-                let l2 = self.shown_step(l1, true, count.saturating_sub(1)).unwrap_or(l1);
+                let step = self.shown_step(l1, true, count.saturating_sub(1));
+                let case = matches!(op, Operator::Lowercase | Operator::Uppercase);
+                // `2gUU` on the last line has no line to move to, so Neovim
+                // beeps and changes nothing (`3guu` with two lines left
+                // takes them both).
+                if case && count > 1 && step.is_none() {
+                    return;
+                }
+                let l2 = step.unwrap_or(l1);
                 // `guu` first moves to the last line's first non-blank, as
                 // vim's doubled operators but `yy` do: so `guu` lands there
                 // and `3guu` stays put, the earlier of the two.
-                let to = match op {
-                    Operator::Lowercase | Operator::Uppercase => self.first_non_blank_on(l2),
-                    _ => from,
-                };
+                let to = if case { self.first_non_blank_on(l2) } else { from };
                 let start = self.linewise_start(from, to);
                 self.operate_linewise(op, l1, l2, start);
             }

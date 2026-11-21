@@ -606,12 +606,23 @@ impl App {
                 }
             }
             Operator::Lowercase | Operator::Uppercase => {
-                self.recase(start_idx, end, op == Operator::Uppercase);
+                let upper = op == Operator::Uppercase;
                 // Where the range starts, as a yank: `guu` on its line's
-                // first non-blank, `gUk` where `k` put it, `Vgu` at column 0.
-                // Undo and redo come back here too, as Neovim's.
-                self.buffer.cursor = self.land_on(start);
-                self.land_for_undo(revision);
+                // first non-blank, `gUk` where `k` put it, `Vgu` at column 0;
+                // in the new text when the change made the line longer or
+                // shorter. Undo comes back to the start in the old text,
+                // redo to the landing, as Neovim's.
+                let before = self.land_on(start);
+                let after = self.recased_landing(before, |c, out| {
+                    if upper {
+                        out.extend(c.to_uppercase());
+                    } else {
+                        out.extend(c.to_lowercase());
+                    }
+                });
+                self.recase(start_idx, end, upper);
+                self.buffer.cursor = after;
+                self.land_for_undo(revision, before);
                 self.land_for_redo(revision);
             }
             Operator::Indent | Operator::Outdent => {
@@ -636,15 +647,46 @@ impl App {
         }
     }
 
-    /// Undo of the edit just made puts the cursor where it is now rather
-    /// than where the command began, as Neovim's does for a case change:
-    /// it saves the cursor for undo after moving it to the range's start.
-    /// Only when the text changed since `revision`, as [`App::land_for_redo`].
-    pub(super) fn land_for_undo(&mut self, revision: u64) {
+    /// Undo of the edit just made puts the cursor on `at` rather than where
+    /// the command began, as Neovim's does for a case change: the range's
+    /// start, a place in the text undo brings back. Only when the text
+    /// changed since `revision`, as [`App::land_for_redo`].
+    pub(super) fn land_for_undo(&mut self, revision: u64, at: Cursor) {
         if self.buffer.revision != revision {
-            let cursor = self.buffer.cursor;
-            self.buffer.history.set_undo_cursor(cursor);
+            self.buffer.history.set_undo_cursor(at);
         }
+    }
+
+    /// Where `p` lands once its line is recased by `map`, as Neovim's: it
+    /// keeps the byte column, and Neovim's mappings that change a length
+    /// (`ẞ` to `ß`) move what is under it. So `p` goes to the character whose
+    /// recased bytes hold that column, or the last one, and then to the
+    /// start of what `map` makes of it: never onto a combining mark `map`
+    /// added (`İ` lowercases to `i` and a dot here, `i` in Neovim).
+    pub(super) fn recased_landing(&self, p: Cursor, map: impl Fn(char, &mut String)) -> Cursor {
+        let chars: Vec<char> = self.buffer.line_text(p.line).chars().collect();
+        let Some(last) = chars.len().checked_sub(1) else {
+            return p;
+        };
+        let mapped: Vec<String> = chars
+            .iter()
+            .map(|&c| {
+                let mut out = String::new();
+                map(c, &mut out);
+                out
+            })
+            .collect();
+        let byte: usize = chars[..p.col.min(last)].iter().map(|c| c.len_utf8()).sum();
+        let mut at = 0;
+        let mut j = last;
+        for (i, (&c, m)) in chars.iter().zip(&mapped).enumerate() {
+            at += vim_recased_len(c, m);
+            if byte < at {
+                j = i;
+                break;
+            }
+        }
+        Cursor::new(p.line, mapped[..j].iter().map(|m| m.chars().count()).sum())
     }
 
     /// `p` as a Normal-mode cursor: on its line, on a character of it
@@ -672,9 +714,12 @@ impl App {
 
     /// `guu`'s second position, where vim's doubled operator moves before
     /// it operates (`nv_lineop`): the last line's first non-blank, or its
-    /// last blank on a line of nothing else.
+    /// last blank on a line of nothing else. Blanks are spaces and tabs only,
+    /// as vim's `beginline`: a no-break space is not one here, though
+    /// [`App::first_non_blank`] (`^`, indent) skips it.
     pub(super) fn first_non_blank_on(&self, line: usize) -> Cursor {
-        let col = self.first_non_blank(line).min(self.buffer.line_len(line).saturating_sub(1));
+        let blanks = self.buffer.line_text(line).chars().take_while(|c| matches!(c, ' ' | '\t')).count();
+        let col = blanks.min(self.buffer.line_len(line).saturating_sub(1));
         Cursor::new(line, col)
     }
 
@@ -694,5 +739,21 @@ impl App {
         let at = self.idx_to_cursor(start);
         self.buffer.delete_chars(start, end);
         self.buffer.insert_str(at, &mapped);
+    }
+}
+
+/// How many bytes Neovim's case change makes of `c`, which Shoin maps to
+/// `mapped`. Neovim maps one character to one: the same as Shoin's where
+/// that is one character too; otherwise `i` for `İ`, `ẞ` for `ß`, and the
+/// character itself for the rest (`ﬁ`, `ŉ`), which Neovim leaves alone.
+fn vim_recased_len(c: char, mapped: &str) -> usize {
+    let mut it = mapped.chars();
+    match (it.next(), it.next()) {
+        (Some(m), None) => m.len_utf8(),
+        _ => match c {
+            'İ' => 'i'.len_utf8(),
+            'ß' => 'ẞ'.len_utf8(),
+            _ => c.len_utf8(),
+        },
     }
 }
