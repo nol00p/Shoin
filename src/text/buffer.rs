@@ -402,6 +402,13 @@ impl Buffer {
         self.path.as_deref().is_some_and(|ours| same_path(ours, path))
     }
 
+    /// Whether writing to `path` would write this buffer's own file: by any
+    /// spelling, through a symlink, or through a hard link, which a save
+    /// writes in place (`write_atomic`). `:{range}w!` must never.
+    pub fn writes_own_file(&self, path: &Path) -> bool {
+        self.path.as_deref().is_some_and(|ours| same_path(ours, path) || same_inode(ours, path))
+    }
+
     /// Re-read the file from disk, replacing the buffer's text.
     ///
     /// `Ok(false)` means the file's mtime moved but its CONTENT did not — a
@@ -637,6 +644,23 @@ fn same_path(a: &Path, b: &Path) -> bool {
             (std::fs::canonicalize(a), std::fs::canonicalize(b)),
             (Ok(x), Ok(y)) if x == y
         )
+}
+
+/// Whether `a` and `b` are one file on disk (links followed): the same
+/// device and inode. Unix only; elsewhere `same_path`'s canonical paths are
+/// all there is.
+#[cfg(unix)]
+fn same_inode(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    matches!(
+        (std::fs::metadata(a), std::fs::metadata(b)),
+        (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino()
+    )
+}
+
+#[cfg(not(unix))]
+fn same_inode(_: &Path, _: &Path) -> bool {
+    false
 }
 
 

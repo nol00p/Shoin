@@ -609,3 +609,439 @@ fn tab_completes_after_a_range() {
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
     assert_eq!(app.mode, Mode::Command("3,5delete".into()));
 }
+
+/// `:d`, `:m` and `:t` at both ends of a file, with and without a final
+/// newline, LF and CRLF: the file `:w` then writes and the cursor, as
+/// Neovim's (`nofixeol`, as Shoin's `final_newline = "preserve"`); `u`
+/// gives the text back and `Ctrl-r` the change. A blank line left last, or
+/// copied there, stays a line. Left out: deleting every line of a file that ends in a newline, which Neovim writes as an empty
+/// file and Shoin's save as one newline (`ggdG` then `:w` the same).
+const EOF_CASES: &[(&str, &str, &str, (usize, usize))] = &[
+    ("a\n\nb", "1d", "\nb", (0, 0)),
+    ("a\n\nb", "$d", "a\n", (1, 0)),
+    ("a\n\nb", "1,2d", "b", (0, 0)),
+    ("a\n\nb", "2,$d", "a", (0, 0)),
+    ("a\n\nb", "%d", "", (0, 0)),
+    ("a\n\nb", "1m $", "\nb\na", (2, 0)),
+    ("a\n\nb", "$m 0", "b\na\n", (0, 0)),
+    ("a\n\nb", "2m $", "a\nb\n", (2, 0)),
+    ("a\n\nb", "2m 0", "\na\nb", (0, 0)),
+    ("a\n\nb", "1,2m $", "b\na\n", (2, 0)),
+    ("a\n\nb", "2,$m 0", "\nb\na", (1, 0)),
+    ("a\n\nb", "1t $", "a\n\nb\na", (3, 0)),
+    ("a\n\nb", "$t 0", "b\na\n\nb", (0, 0)),
+    ("a\n\nb", "2t $", "a\n\nb\n", (3, 0)),
+    ("a\n\nb", "$t $", "a\n\nb\nb", (3, 0)),
+    ("a\n\nb", "1t 0", "a\na\n\nb", (0, 0)),
+    ("a\n\nb", "1,2t $", "a\n\nb\na\n", (4, 0)),
+    ("a\n\nb\n", "1d", "\nb\n", (0, 0)),
+    ("a\n\nb\n", "$d", "a\n\n", (1, 0)),
+    ("a\n\nb\n", "1,2d", "b\n", (0, 0)),
+    ("a\n\nb\n", "2,$d", "a\n", (0, 0)),
+    ("a\n\nb\n", "1m $", "\nb\na\n", (2, 0)),
+    ("a\n\nb\n", "$m 0", "b\na\n\n", (0, 0)),
+    ("a\n\nb\n", "2m $", "a\nb\n\n", (2, 0)),
+    ("a\n\nb\n", "2m 0", "\na\nb\n", (0, 0)),
+    ("a\n\nb\n", "1,2m $", "b\na\n\n", (2, 0)),
+    ("a\n\nb\n", "2,$m 0", "\nb\na\n", (1, 0)),
+    ("a\n\nb\n", "1t $", "a\n\nb\na\n", (3, 0)),
+    ("a\n\nb\n", "$t 0", "b\na\n\nb\n", (0, 0)),
+    ("a\n\nb\n", "2t $", "a\n\nb\n\n", (3, 0)),
+    ("a\n\nb\n", "$t $", "a\n\nb\nb\n", (3, 0)),
+    ("a\n\nb\n", "1t 0", "a\na\n\nb\n", (0, 0)),
+    ("a\n\nb\n", "1,2t $", "a\n\nb\na\n\n", (4, 0)),
+    ("\na\nb", "1d", "a\nb", (0, 0)),
+    ("\na\nb", "$d", "\na", (1, 0)),
+    ("\na\nb", "1,2d", "b", (0, 0)),
+    ("\na\nb", "2,$d", "", (0, 0)),
+    ("\na\nb", "%d", "", (0, 0)),
+    ("\na\nb", "1m $", "a\nb\n", (2, 0)),
+    ("\na\nb", "$m 0", "b\n\na", (0, 0)),
+    ("\na\nb", "2m $", "\nb\na", (2, 0)),
+    ("\na\nb", "2m 0", "a\n\nb", (0, 0)),
+    ("\na\nb", "1,2m $", "b\n\na", (2, 0)),
+    ("\na\nb", "2,$m 0", "a\nb\n", (1, 0)),
+    ("\na\nb", "1t $", "\na\nb\n", (3, 0)),
+    ("\na\nb", "$t 0", "b\n\na\nb", (0, 0)),
+    ("\na\nb", "2t $", "\na\nb\na", (3, 0)),
+    ("\na\nb", "$t $", "\na\nb\nb", (3, 0)),
+    ("\na\nb", "1t 0", "\n\na\nb", (0, 0)),
+    ("\na\nb", "1,2t $", "\na\nb\n\na", (4, 0)),
+    ("\na\nb\n", "1d", "a\nb\n", (0, 0)),
+    ("\na\nb\n", "$d", "\na\n", (1, 0)),
+    ("\na\nb\n", "1,2d", "b\n", (0, 0)),
+    ("\na\nb\n", "2,$d", "\n", (0, 0)),
+    ("\na\nb\n", "1m $", "a\nb\n\n", (2, 0)),
+    ("\na\nb\n", "$m 0", "b\n\na\n", (0, 0)),
+    ("\na\nb\n", "2m $", "\nb\na\n", (2, 0)),
+    ("\na\nb\n", "2m 0", "a\n\nb\n", (0, 0)),
+    ("\na\nb\n", "1,2m $", "b\n\na\n", (2, 0)),
+    ("\na\nb\n", "2,$m 0", "a\nb\n\n", (1, 0)),
+    ("\na\nb\n", "1t $", "\na\nb\n\n", (3, 0)),
+    ("\na\nb\n", "$t 0", "b\n\na\nb\n", (0, 0)),
+    ("\na\nb\n", "2t $", "\na\nb\na\n", (3, 0)),
+    ("\na\nb\n", "$t $", "\na\nb\nb\n", (3, 0)),
+    ("\na\nb\n", "1t 0", "\n\na\nb\n", (0, 0)),
+    ("\na\nb\n", "1,2t $", "\na\nb\n\na\n", (4, 0)),
+    ("a\nb\n\n", "1d", "b\n\n", (0, 0)),
+    ("a\nb\n\n", "$d", "a\nb\n", (1, 0)),
+    ("a\nb\n\n", "1,2d", "\n", (0, 0)),
+    ("a\nb\n\n", "2,$d", "a\n", (0, 0)),
+    ("a\nb\n\n", "1m $", "b\n\na\n", (2, 0)),
+    ("a\nb\n\n", "$m 0", "\na\nb\n", (0, 0)),
+    ("a\nb\n\n", "2m $", "a\n\nb\n", (2, 0)),
+    ("a\nb\n\n", "2m 0", "b\na\n\n", (0, 0)),
+    ("a\nb\n\n", "1,2m $", "\na\nb\n", (2, 0)),
+    ("a\nb\n\n", "2,$m 0", "b\n\na\n", (1, 0)),
+    ("a\nb\n\n", "1t $", "a\nb\n\na\n", (3, 0)),
+    ("a\nb\n\n", "$t 0", "\na\nb\n\n", (0, 0)),
+    ("a\nb\n\n", "2t $", "a\nb\n\nb\n", (3, 0)),
+    ("a\nb\n\n", "$t $", "a\nb\n\n\n", (3, 0)),
+    ("a\nb\n\n", "1t 0", "a\na\nb\n\n", (0, 0)),
+    ("a\nb\n\n", "1,2t $", "a\nb\n\na\nb\n", (4, 0)),
+    ("a\n\n\nb", "1d", "\n\nb", (0, 0)),
+    ("a\n\n\nb", "$d", "a\n\n", (2, 0)),
+    ("a\n\n\nb", "1,2d", "\nb", (0, 0)),
+    ("a\n\n\nb", "2,$d", "a", (0, 0)),
+    ("a\n\n\nb", "%d", "", (0, 0)),
+    ("a\n\n\nb", "1m $", "\n\nb\na", (3, 0)),
+    ("a\n\n\nb", "$m 0", "b\na\n\n", (0, 0)),
+    ("a\n\n\nb", "2m $", "a\n\nb\n", (3, 0)),
+    ("a\n\n\nb", "2m 0", "\na\n\nb", (0, 0)),
+    ("a\n\n\nb", "1,2m $", "\nb\na\n", (3, 0)),
+    ("a\n\n\nb", "2,$m 0", "\n\nb\na", (2, 0)),
+    ("a\n\n\nb", "1t $", "a\n\n\nb\na", (4, 0)),
+    ("a\n\n\nb", "$t 0", "b\na\n\n\nb", (0, 0)),
+    ("a\n\n\nb", "2t $", "a\n\n\nb\n", (4, 0)),
+    ("a\n\n\nb", "$t $", "a\n\n\nb\nb", (4, 0)),
+    ("a\n\n\nb", "1t 0", "a\na\n\n\nb", (0, 0)),
+    ("a\n\n\nb", "1,2t $", "a\n\n\nb\na\n", (5, 0)),
+    ("a\nb", "1d", "b", (0, 0)),
+    ("a\nb", "$d", "a", (0, 0)),
+    ("a\nb", "1,2d", "", (0, 0)),
+    ("a\nb", "2,$d", "a", (0, 0)),
+    ("a\nb", "%d", "", (0, 0)),
+    ("a\nb", "1m $", "b\na", (1, 0)),
+    ("a\nb", "$m 0", "b\na", (0, 0)),
+    ("a\nb", "2m $", "a\nb", (1, 0)),
+    ("a\nb", "2m 0", "b\na", (0, 0)),
+    ("a\nb", "1,2m $", "a\nb", (1, 0)),
+    ("a\nb", "2,$m 0", "b\na", (0, 0)),
+    ("a\nb", "1t $", "a\nb\na", (2, 0)),
+    ("a\nb", "$t 0", "b\na\nb", (0, 0)),
+    ("a\nb", "2t $", "a\nb\nb", (2, 0)),
+    ("a\nb", "$t $", "a\nb\nb", (2, 0)),
+    ("a\nb", "1t 0", "a\na\nb", (0, 0)),
+    ("a\nb", "1,2t $", "a\nb\na\nb", (3, 0)),
+    ("a\nb\n", "1d", "b\n", (0, 0)),
+    ("a\nb\n", "$d", "a\n", (0, 0)),
+    ("a\nb\n", "2,$d", "a\n", (0, 0)),
+    ("a\nb\n", "1m $", "b\na\n", (1, 0)),
+    ("a\nb\n", "$m 0", "b\na\n", (0, 0)),
+    ("a\nb\n", "2m $", "a\nb\n", (1, 0)),
+    ("a\nb\n", "2m 0", "b\na\n", (0, 0)),
+    ("a\nb\n", "1,2m $", "a\nb\n", (1, 0)),
+    ("a\nb\n", "2,$m 0", "b\na\n", (0, 0)),
+    ("a\nb\n", "1t $", "a\nb\na\n", (2, 0)),
+    ("a\nb\n", "$t 0", "b\na\nb\n", (0, 0)),
+    ("a\nb\n", "2t $", "a\nb\nb\n", (2, 0)),
+    ("a\nb\n", "$t $", "a\nb\nb\n", (2, 0)),
+    ("a\nb\n", "1t 0", "a\na\nb\n", (0, 0)),
+    ("a\nb\n", "1,2t $", "a\nb\na\nb\n", (3, 0)),
+    ("\n\na", "1d", "\na", (0, 0)),
+    ("\n\na", "$d", "\n", (1, 0)),
+    ("\n\na", "1,2d", "a", (0, 0)),
+    ("\n\na", "2,$d", "", (0, 0)),
+    ("\n\na", "%d", "", (0, 0)),
+    ("\n\na", "1m $", "\na\n", (2, 0)),
+    ("\n\na", "$m 0", "a\n\n", (0, 0)),
+    ("\n\na", "2m $", "\na\n", (2, 0)),
+    ("\n\na", "2m 0", "\n\na", (0, 0)),
+    ("\n\na", "1,2m $", "a\n\n", (2, 0)),
+    ("\n\na", "2,$m 0", "\na\n", (1, 0)),
+    ("\n\na", "1t $", "\n\na\n", (3, 0)),
+    ("\n\na", "$t 0", "a\n\n\na", (0, 0)),
+    ("\n\na", "2t $", "\n\na\n", (3, 0)),
+    ("\n\na", "$t $", "\n\na\na", (3, 0)),
+    ("\n\na", "1t 0", "\n\n\na", (0, 0)),
+    ("\n\na", "1,2t $", "\n\na\n\n", (4, 0)),
+    ("a\n\n", "1d", "\n", (0, 0)),
+    ("a\n\n", "$d", "a\n", (0, 0)),
+    ("a\n\n", "2,$d", "a\n", (0, 0)),
+    ("a\n\n", "1m $", "\na\n", (1, 0)),
+    ("a\n\n", "$m 0", "\na\n", (0, 0)),
+    ("a\n\n", "2m $", "a\n\n", (1, 0)),
+    ("a\n\n", "2m 0", "\na\n", (0, 0)),
+    ("a\n\n", "1,2m $", "a\n\n", (1, 0)),
+    ("a\n\n", "2,$m 0", "\na\n", (0, 0)),
+    ("a\n\n", "1t $", "a\n\na\n", (2, 0)),
+    ("a\n\n", "$t 0", "\na\n\n", (0, 0)),
+    ("a\n\n", "2t $", "a\n\n\n", (2, 0)),
+    ("a\n\n", "$t $", "a\n\n\n", (2, 0)),
+    ("a\n\n", "1t 0", "a\na\n\n", (0, 0)),
+    ("a\n\n", "1,2t $", "a\n\na\n\n", (3, 0)),
+    ("a\r\n\r\nb", "1d", "\r\nb", (0, 0)),
+    ("a\r\n\r\nb", "$d", "a\r\n", (1, 0)),
+    ("a\r\n\r\nb", "1,2d", "b", (0, 0)),
+    ("a\r\n\r\nb", "2,$d", "a", (0, 0)),
+    ("a\r\n\r\nb", "%d", "", (0, 0)),
+    ("a\r\n\r\nb", "1m $", "\r\nb\r\na", (2, 0)),
+    ("a\r\n\r\nb", "$m 0", "b\r\na\r\n", (0, 0)),
+    ("a\r\n\r\nb", "2m $", "a\r\nb\r\n", (2, 0)),
+    ("a\r\n\r\nb", "2m 0", "\r\na\r\nb", (0, 0)),
+    ("a\r\n\r\nb", "1,2m $", "b\r\na\r\n", (2, 0)),
+    ("a\r\n\r\nb", "2,$m 0", "\r\nb\r\na", (1, 0)),
+    ("a\r\n\r\nb", "1t $", "a\r\n\r\nb\r\na", (3, 0)),
+    ("a\r\n\r\nb", "$t 0", "b\r\na\r\n\r\nb", (0, 0)),
+    ("a\r\n\r\nb", "2t $", "a\r\n\r\nb\r\n", (3, 0)),
+    ("a\r\n\r\nb", "$t $", "a\r\n\r\nb\r\nb", (3, 0)),
+    ("a\r\n\r\nb", "1t 0", "a\r\na\r\n\r\nb", (0, 0)),
+    ("a\r\n\r\nb", "1,2t $", "a\r\n\r\nb\r\na\r\n", (4, 0)),
+    ("a\r\n\r\nb\r\n", "1d", "\r\nb\r\n", (0, 0)),
+    ("a\r\n\r\nb\r\n", "$d", "a\r\n\r\n", (1, 0)),
+    ("a\r\n\r\nb\r\n", "1,2d", "b\r\n", (0, 0)),
+    ("a\r\n\r\nb\r\n", "2,$d", "a\r\n", (0, 0)),
+    ("a\r\n\r\nb\r\n", "1m $", "\r\nb\r\na\r\n", (2, 0)),
+    ("a\r\n\r\nb\r\n", "$m 0", "b\r\na\r\n\r\n", (0, 0)),
+    ("a\r\n\r\nb\r\n", "2m $", "a\r\nb\r\n\r\n", (2, 0)),
+    ("a\r\n\r\nb\r\n", "2m 0", "\r\na\r\nb\r\n", (0, 0)),
+    ("a\r\n\r\nb\r\n", "1,2m $", "b\r\na\r\n\r\n", (2, 0)),
+    ("a\r\n\r\nb\r\n", "2,$m 0", "\r\nb\r\na\r\n", (1, 0)),
+    ("a\r\n\r\nb\r\n", "1t $", "a\r\n\r\nb\r\na\r\n", (3, 0)),
+    ("a\r\n\r\nb\r\n", "$t 0", "b\r\na\r\n\r\nb\r\n", (0, 0)),
+    ("a\r\n\r\nb\r\n", "2t $", "a\r\n\r\nb\r\n\r\n", (3, 0)),
+    ("a\r\n\r\nb\r\n", "$t $", "a\r\n\r\nb\r\nb\r\n", (3, 0)),
+    ("a\r\n\r\nb\r\n", "1t 0", "a\r\na\r\n\r\nb\r\n", (0, 0)),
+    ("a\r\n\r\nb\r\n", "1,2t $", "a\r\n\r\nb\r\na\r\n\r\n", (4, 0)),
+    ("\r\na\r\nb", "1d", "a\r\nb", (0, 0)),
+    ("\r\na\r\nb", "$d", "\r\na", (1, 0)),
+    ("\r\na\r\nb", "1,2d", "b", (0, 0)),
+    ("\r\na\r\nb", "2,$d", "", (0, 0)),
+    ("\r\na\r\nb", "%d", "", (0, 0)),
+    ("\r\na\r\nb", "1m $", "a\r\nb\r\n", (2, 0)),
+    ("\r\na\r\nb", "$m 0", "b\r\n\r\na", (0, 0)),
+    ("\r\na\r\nb", "2m $", "\r\nb\r\na", (2, 0)),
+    ("\r\na\r\nb", "2m 0", "a\r\n\r\nb", (0, 0)),
+    ("\r\na\r\nb", "1,2m $", "b\r\n\r\na", (2, 0)),
+    ("\r\na\r\nb", "2,$m 0", "a\r\nb\r\n", (1, 0)),
+    ("\r\na\r\nb", "1t $", "\r\na\r\nb\r\n", (3, 0)),
+    ("\r\na\r\nb", "$t 0", "b\r\n\r\na\r\nb", (0, 0)),
+    ("\r\na\r\nb", "2t $", "\r\na\r\nb\r\na", (3, 0)),
+    ("\r\na\r\nb", "$t $", "\r\na\r\nb\r\nb", (3, 0)),
+    ("\r\na\r\nb", "1t 0", "\r\n\r\na\r\nb", (0, 0)),
+    ("\r\na\r\nb", "1,2t $", "\r\na\r\nb\r\n\r\na", (4, 0)),
+    ("\r\na\r\nb\r\n", "1d", "a\r\nb\r\n", (0, 0)),
+    ("\r\na\r\nb\r\n", "$d", "\r\na\r\n", (1, 0)),
+    ("\r\na\r\nb\r\n", "1,2d", "b\r\n", (0, 0)),
+    ("\r\na\r\nb\r\n", "2,$d", "\r\n", (0, 0)),
+    ("\r\na\r\nb\r\n", "1m $", "a\r\nb\r\n\r\n", (2, 0)),
+    ("\r\na\r\nb\r\n", "$m 0", "b\r\n\r\na\r\n", (0, 0)),
+    ("\r\na\r\nb\r\n", "2m $", "\r\nb\r\na\r\n", (2, 0)),
+    ("\r\na\r\nb\r\n", "2m 0", "a\r\n\r\nb\r\n", (0, 0)),
+    ("\r\na\r\nb\r\n", "1,2m $", "b\r\n\r\na\r\n", (2, 0)),
+    ("\r\na\r\nb\r\n", "2,$m 0", "a\r\nb\r\n\r\n", (1, 0)),
+    ("\r\na\r\nb\r\n", "1t $", "\r\na\r\nb\r\n\r\n", (3, 0)),
+    ("\r\na\r\nb\r\n", "$t 0", "b\r\n\r\na\r\nb\r\n", (0, 0)),
+    ("\r\na\r\nb\r\n", "2t $", "\r\na\r\nb\r\na\r\n", (3, 0)),
+    ("\r\na\r\nb\r\n", "$t $", "\r\na\r\nb\r\nb\r\n", (3, 0)),
+    ("\r\na\r\nb\r\n", "1t 0", "\r\n\r\na\r\nb\r\n", (0, 0)),
+    ("\r\na\r\nb\r\n", "1,2t $", "\r\na\r\nb\r\n\r\na\r\n", (4, 0)),
+    ("a\r\nb\r\n\r\n", "1d", "b\r\n\r\n", (0, 0)),
+    ("a\r\nb\r\n\r\n", "$d", "a\r\nb\r\n", (1, 0)),
+    ("a\r\nb\r\n\r\n", "1,2d", "\r\n", (0, 0)),
+    ("a\r\nb\r\n\r\n", "2,$d", "a\r\n", (0, 0)),
+    ("a\r\nb\r\n\r\n", "1m $", "b\r\n\r\na\r\n", (2, 0)),
+    ("a\r\nb\r\n\r\n", "$m 0", "\r\na\r\nb\r\n", (0, 0)),
+    ("a\r\nb\r\n\r\n", "2m $", "a\r\n\r\nb\r\n", (2, 0)),
+    ("a\r\nb\r\n\r\n", "2m 0", "b\r\na\r\n\r\n", (0, 0)),
+    ("a\r\nb\r\n\r\n", "1,2m $", "\r\na\r\nb\r\n", (2, 0)),
+    ("a\r\nb\r\n\r\n", "2,$m 0", "b\r\n\r\na\r\n", (1, 0)),
+    ("a\r\nb\r\n\r\n", "1t $", "a\r\nb\r\n\r\na\r\n", (3, 0)),
+    ("a\r\nb\r\n\r\n", "$t 0", "\r\na\r\nb\r\n\r\n", (0, 0)),
+    ("a\r\nb\r\n\r\n", "2t $", "a\r\nb\r\n\r\nb\r\n", (3, 0)),
+    ("a\r\nb\r\n\r\n", "$t $", "a\r\nb\r\n\r\n\r\n", (3, 0)),
+    ("a\r\nb\r\n\r\n", "1t 0", "a\r\na\r\nb\r\n\r\n", (0, 0)),
+    ("a\r\nb\r\n\r\n", "1,2t $", "a\r\nb\r\n\r\na\r\nb\r\n", (4, 0)),
+    ("a\r\n\r\n\r\nb", "1d", "\r\n\r\nb", (0, 0)),
+    ("a\r\n\r\n\r\nb", "$d", "a\r\n\r\n", (2, 0)),
+    ("a\r\n\r\n\r\nb", "1,2d", "\r\nb", (0, 0)),
+    ("a\r\n\r\n\r\nb", "2,$d", "a", (0, 0)),
+    ("a\r\n\r\n\r\nb", "%d", "", (0, 0)),
+    ("a\r\n\r\n\r\nb", "1m $", "\r\n\r\nb\r\na", (3, 0)),
+    ("a\r\n\r\n\r\nb", "$m 0", "b\r\na\r\n\r\n", (0, 0)),
+    ("a\r\n\r\n\r\nb", "2m $", "a\r\n\r\nb\r\n", (3, 0)),
+    ("a\r\n\r\n\r\nb", "2m 0", "\r\na\r\n\r\nb", (0, 0)),
+    ("a\r\n\r\n\r\nb", "1,2m $", "\r\nb\r\na\r\n", (3, 0)),
+    ("a\r\n\r\n\r\nb", "2,$m 0", "\r\n\r\nb\r\na", (2, 0)),
+    ("a\r\n\r\n\r\nb", "1t $", "a\r\n\r\n\r\nb\r\na", (4, 0)),
+    ("a\r\n\r\n\r\nb", "$t 0", "b\r\na\r\n\r\n\r\nb", (0, 0)),
+    ("a\r\n\r\n\r\nb", "2t $", "a\r\n\r\n\r\nb\r\n", (4, 0)),
+    ("a\r\n\r\n\r\nb", "$t $", "a\r\n\r\n\r\nb\r\nb", (4, 0)),
+    ("a\r\n\r\n\r\nb", "1t 0", "a\r\na\r\n\r\n\r\nb", (0, 0)),
+    ("a\r\n\r\n\r\nb", "1,2t $", "a\r\n\r\n\r\nb\r\na\r\n", (5, 0)),
+    ("a\r\nb", "1d", "b", (0, 0)),
+    ("a\r\nb", "$d", "a", (0, 0)),
+    ("a\r\nb", "1,2d", "", (0, 0)),
+    ("a\r\nb", "2,$d", "a", (0, 0)),
+    ("a\r\nb", "%d", "", (0, 0)),
+    ("a\r\nb", "1m $", "b\r\na", (1, 0)),
+    ("a\r\nb", "$m 0", "b\r\na", (0, 0)),
+    ("a\r\nb", "2m $", "a\r\nb", (1, 0)),
+    ("a\r\nb", "2m 0", "b\r\na", (0, 0)),
+    ("a\r\nb", "1,2m $", "a\r\nb", (1, 0)),
+    ("a\r\nb", "2,$m 0", "b\r\na", (0, 0)),
+    ("a\r\nb", "1t $", "a\r\nb\r\na", (2, 0)),
+    ("a\r\nb", "$t 0", "b\r\na\r\nb", (0, 0)),
+    ("a\r\nb", "2t $", "a\r\nb\r\nb", (2, 0)),
+    ("a\r\nb", "$t $", "a\r\nb\r\nb", (2, 0)),
+    ("a\r\nb", "1t 0", "a\r\na\r\nb", (0, 0)),
+    ("a\r\nb", "1,2t $", "a\r\nb\r\na\r\nb", (3, 0)),
+    ("a\r\nb\r\n", "1d", "b\r\n", (0, 0)),
+    ("a\r\nb\r\n", "$d", "a\r\n", (0, 0)),
+    ("a\r\nb\r\n", "2,$d", "a\r\n", (0, 0)),
+    ("a\r\nb\r\n", "1m $", "b\r\na\r\n", (1, 0)),
+    ("a\r\nb\r\n", "$m 0", "b\r\na\r\n", (0, 0)),
+    ("a\r\nb\r\n", "2m $", "a\r\nb\r\n", (1, 0)),
+    ("a\r\nb\r\n", "2m 0", "b\r\na\r\n", (0, 0)),
+    ("a\r\nb\r\n", "1,2m $", "a\r\nb\r\n", (1, 0)),
+    ("a\r\nb\r\n", "2,$m 0", "b\r\na\r\n", (0, 0)),
+    ("a\r\nb\r\n", "1t $", "a\r\nb\r\na\r\n", (2, 0)),
+    ("a\r\nb\r\n", "$t 0", "b\r\na\r\nb\r\n", (0, 0)),
+    ("a\r\nb\r\n", "2t $", "a\r\nb\r\nb\r\n", (2, 0)),
+    ("a\r\nb\r\n", "$t $", "a\r\nb\r\nb\r\n", (2, 0)),
+    ("a\r\nb\r\n", "1t 0", "a\r\na\r\nb\r\n", (0, 0)),
+    ("a\r\nb\r\n", "1,2t $", "a\r\nb\r\na\r\nb\r\n", (3, 0)),
+    ("\r\n\r\na", "1d", "\r\na", (0, 0)),
+    ("\r\n\r\na", "$d", "\r\n", (1, 0)),
+    ("\r\n\r\na", "1,2d", "a", (0, 0)),
+    ("\r\n\r\na", "2,$d", "", (0, 0)),
+    ("\r\n\r\na", "%d", "", (0, 0)),
+    ("\r\n\r\na", "1m $", "\r\na\r\n", (2, 0)),
+    ("\r\n\r\na", "$m 0", "a\r\n\r\n", (0, 0)),
+    ("\r\n\r\na", "2m $", "\r\na\r\n", (2, 0)),
+    ("\r\n\r\na", "2m 0", "\r\n\r\na", (0, 0)),
+    ("\r\n\r\na", "1,2m $", "a\r\n\r\n", (2, 0)),
+    ("\r\n\r\na", "2,$m 0", "\r\na\r\n", (1, 0)),
+    ("\r\n\r\na", "1t $", "\r\n\r\na\r\n", (3, 0)),
+    ("\r\n\r\na", "$t 0", "a\r\n\r\n\r\na", (0, 0)),
+    ("\r\n\r\na", "2t $", "\r\n\r\na\r\n", (3, 0)),
+    ("\r\n\r\na", "$t $", "\r\n\r\na\r\na", (3, 0)),
+    ("\r\n\r\na", "1t 0", "\r\n\r\n\r\na", (0, 0)),
+    ("\r\n\r\na", "1,2t $", "\r\n\r\na\r\n\r\n", (4, 0)),
+    ("a\r\n\r\n", "1d", "\r\n", (0, 0)),
+    ("a\r\n\r\n", "$d", "a\r\n", (0, 0)),
+    ("a\r\n\r\n", "2,$d", "a\r\n", (0, 0)),
+    ("a\r\n\r\n", "1m $", "\r\na\r\n", (1, 0)),
+    ("a\r\n\r\n", "$m 0", "\r\na\r\n", (0, 0)),
+    ("a\r\n\r\n", "2m $", "a\r\n\r\n", (1, 0)),
+    ("a\r\n\r\n", "2m 0", "\r\na\r\n", (0, 0)),
+    ("a\r\n\r\n", "1,2m $", "a\r\n\r\n", (1, 0)),
+    ("a\r\n\r\n", "2,$m 0", "\r\na\r\n", (0, 0)),
+    ("a\r\n\r\n", "1t $", "a\r\n\r\na\r\n", (2, 0)),
+    ("a\r\n\r\n", "$t 0", "\r\na\r\n\r\n", (0, 0)),
+    ("a\r\n\r\n", "2t $", "a\r\n\r\n\r\n", (2, 0)),
+    ("a\r\n\r\n", "$t $", "a\r\n\r\n\r\n", (2, 0)),
+    ("a\r\n\r\n", "1t 0", "a\r\na\r\n\r\n", (0, 0)),
+    ("a\r\n\r\n", "1,2t $", "a\r\n\r\na\r\n\r\n", (3, 0)),
+];
+
+#[test]
+fn line_commands_at_either_end_of_a_file_as_neovim() {
+    let dir = std::env::temp_dir().join(format!("shoin-range-eof-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut misses = Vec::new();
+    for (i, &(before, cmd, want, cursor)) in EOF_CASES.iter().enumerate() {
+        let path = dir.join(format!("{i}.md"));
+        std::fs::write(&path, before).unwrap();
+        let mut app = App::new(Default::default(), Some(path.clone()), None).unwrap();
+        let loaded = text(&app);
+        ex(&mut app, cmd);
+        let after = at(&app);
+        let changed = text(&app);
+        feed(&mut app, "u");
+        if text(&app) != loaded {
+            misses.push(format!("{before:?} :{cmd} u: got {:?}, want {loaded:?}", text(&app)));
+        }
+        step(&mut app, "<C-r>");
+        if text(&app) != changed {
+            misses.push(format!("{before:?} :{cmd} u <C-r>: got {:?}, want {changed:?}", text(&app)));
+        }
+        ex(&mut app, "w");
+        let got = std::fs::read_to_string(&path).unwrap();
+        if got != want || after != cursor {
+            misses.push(format!("{before:?} :{cmd}: got {got:?} {after:?}, want {want:?} {cursor:?} ({})", flash(&app)));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(misses.is_empty(), "{} misses:\n{}", misses.len(), misses.join("\n"));
+}
+
+/// A count after a range over a closed fold: the range is widened to the
+/// fold first, then exactly `count` lines are taken from its end, not
+/// widened again, as Neovim (with lines 2-4 folded by `2,4fold`).
+#[test]
+fn a_count_starts_after_the_fold_the_range_ends_in() {
+    /// Text, command, then Neovim's text, cursor and unnamed register.
+    type FoldCase = (&'static str, &'static str, &'static str, (usize, usize), &'static str);
+    let t = "a\n# b\nc\nd\n# e\nf\n";
+    let u = "  a\n  # b\n  c\n  d\n  # e\n  f\n";
+    let cases: &[FoldCase] = &[
+        (t, "2d 2", "a\n# b\nc\nf\n", (3, 0), "d\n# e\n"),
+        (t, "1d 2", "c\nd\n# e\nf\n", (0, 0), "a\n# b\n"),
+        (t, "3d 2", "a\n# b\nc\nf\n", (3, 0), "d\n# e\n"),
+        (t, "1,3d 2", "a\n# b\nc\nf\n", (3, 0), "d\n# e\n"),
+        (t, "2y 2", t, (0, 0), "d\n# e\n"),
+        (t, "1y 2", t, (0, 0), "a\n# b\n"),
+        (t, "1,2y", t, (0, 0), "a\n# b\nc\nd\n"),
+        (t, "2> 2", "a\n# b\nc\n    d\n    # e\nf\n", (4, 4), ""),
+        (t, "1> 2", "    a\n    # b\nc\nd\n# e\nf\n", (1, 4), ""),
+        (u, "2< 2", "  a\n  # b\n  c\nd\n# e\n  f\n", (4, 0), ""),
+        (u, "1< 2", "a\n# b\n  c\n  d\n  # e\n  f\n", (1, 0), ""),
+    ];
+    let mut misses = Vec::new();
+    for &(before, cmd, want, cursor, reg) in cases {
+        let mut app = app_with(before);
+        app.term_size = (60, 16);
+        feed(&mut app, "jzcgg");
+        ex(&mut app, cmd);
+        let got_reg = app.registers.get(&'"').map(|r| r.text.clone()).unwrap_or_default();
+        if text(&app) != want || at(&app) != cursor || (!reg.is_empty() && got_reg != reg) {
+            misses.push(format!(":{cmd}: got {:?} {:?} {got_reg:?}, want {want:?} {cursor:?} {reg:?}", text(&app), at(&app)));
+        }
+    }
+    assert!(misses.is_empty(), "{} misses:\n{}", misses.len(), misses.join("\n"));
+}
+
+/// `:{range}w! path` never writes the buffer's own file, whatever names it:
+/// a hard link (which a save writes in place) or a symlink.
+#[cfg(unix)]
+#[test]
+fn w_with_a_range_refuses_the_own_file_by_any_link() {
+    let dir = std::env::temp_dir().join(format!("shoin-range-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let own = dir.join("notes.md");
+    std::fs::write(&own, "a\nb\nc\n").unwrap();
+    std::fs::hard_link(&own, dir.join("alias.md")).unwrap();
+    std::os::unix::fs::symlink(&own, dir.join("sym.md")).unwrap();
+    let mut app = App::new(Default::default(), Some(own.clone()), None).unwrap();
+    for name in ["alias.md", "sym.md"] {
+        let p = dir.join(name);
+        ex(&mut app, &format!("1w! {}", p.display()));
+        assert!(matches!(app.flash.as_ref().map(|f| &f.kind), Some(FlashKind::Error)), "{name}: {}", flash(&app));
+        assert_eq!(std::fs::read_to_string(&own).unwrap(), "a\nb\nc\n", "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `'<` or `'>` with no selection is an error at either end of a range.
+#[test]
+fn a_visual_mark_without_a_selection_is_an_error_at_either_end() {
+    for cmd in ["'<,3", "3,'<", "'>,3", "3,'>"] {
+        let mut app = app_with("a\nb\nc\nd\n");
+        ex(&mut app, cmd);
+        assert_eq!(at(&app), (0, 0), ":{cmd}");
+        assert!(matches!(app.flash.as_ref().map(|f| &f.kind), Some(FlashKind::Error)), ":{cmd}: {}", flash(&app));
+    }
+}

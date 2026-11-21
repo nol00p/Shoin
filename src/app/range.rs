@@ -339,6 +339,10 @@ impl App {
     /// the motion `NG` runs. `:42` stays `42G` exactly, and `:$` is `G`.
     pub(super) fn jump_to_range(&mut self, range: Range) {
         let at = self.range_lines();
+        // Both ends must name a line, though only one is jumped to.
+        if let Err(e) = at.span(Some(range)) {
+            return self.notify(e, FlashKind::Error);
+        }
         let last = match range {
             Range::Whole => Address { base: Base::Last, offset: 0 },
             Range::One(a) => a,
@@ -373,7 +377,9 @@ impl App {
     }
 
     /// The lines a range names, a closed fold at either end taken whole as
-    /// vim takes it, and `count` lines from its last line when one is given.
+    /// vim takes it. With a `count`, that many lines from the widened
+    /// range's last line, not widened again: Neovim's `:2d 2` with lines
+    /// 2-4 folded deletes lines 4 and 5.
     pub(super) fn range_span(&mut self, range: Option<Range>, count: Option<usize>) -> Option<(usize, usize)> {
         let at = self.range_lines();
         let (a, b) = match at.span(range) {
@@ -383,12 +389,12 @@ impl App {
                 return None;
             }
         };
-        let (a, b) = match count {
+        let (a, b) = self.fold_hidden().widen(a, b);
+        let b = b.min(at.last);
+        Some(match count {
             Some(n) => (b, b.saturating_add(n - 1).min(at.last)),
             None => (a, b),
-        };
-        let (a, b) = self.fold_hidden().widen(a, b);
-        Some((a, b.min(at.last)))
+        })
     }
 
     /// Run a line command over `range`. Every one is a single undo step and
@@ -440,14 +446,16 @@ impl App {
 
     /// Delete lines `a..=b`, the file's last line without a newline
     /// included: the newline before it goes instead, so the text still ends
-    /// as it did.
+    /// as it did. Unless the line left last is blank: without its newline
+    /// it would stop being a line (`a\n\nb` less `b` is `a\n\n`, as
+    /// Neovim keeps it, not `a\n`).
     fn delete_lines(&mut self, a: usize, b: usize) {
         let rope = &self.buffer.rope;
         let len = rope.len_chars();
         let start = rope.line_to_char(a);
         let (from, to) = if b + 1 < rope.len_lines() {
             (start, rope.line_to_char(b + 1))
-        } else if a > 0 && rope.char(len - 1) != '\n' {
+        } else if a > 0 && rope.char(len - 1) != '\n' && !(start == 1 || rope.char(start - 2) == '\n') {
             (start - 1, len)
         } else {
             (start, len)
@@ -457,7 +465,10 @@ impl App {
 
     /// Put `text` (whole lines, each ending in a newline) in above line `at`,
     /// or after the last line when `at` is past it. After a last line with
-    /// no newline, the newline goes before the new lines instead.
+    /// no newline, the newline goes before the new lines instead, and the
+    /// text keeps its own last one only when its last line is blank, which
+    /// would otherwise not be a line (`:2t $` on `a\n\nb` adds a fourth,
+    /// blank line, as Neovim).
     fn insert_lines(&mut self, at: usize, text: &str) {
         let last = self.buffer.last_line();
         if at <= last {
@@ -467,9 +478,13 @@ impl App {
         let len = self.buffer.rope.len_chars();
         let ends = len == 0 || self.buffer.rope.char(len - 1) == '\n';
         let end = self.idx_to_cursor(len);
+        let body = match text.strip_suffix('\n') {
+            Some(b) if !b.is_empty() && !b.ends_with('\n') => b,
+            _ => text,
+        };
         match ends {
             true => self.buffer.insert_str(end, text),
-            false => self.buffer.insert_str(end, &format!("\n{}", text.strip_suffix('\n').unwrap_or(text))),
+            false => self.buffer.insert_str(end, &format!("\n{body}")),
         };
     }
 
@@ -611,7 +626,7 @@ impl App {
             return self.notify("a range writes part of the buffer to another file: give its path", FlashKind::Error);
         }
         let p = self.typed_path(typed);
-        if self.buffer.is_own_file(&p) {
+        if self.buffer.writes_own_file(&p) {
             return self.notify(
                 format!("{} is this buffer's own file: a range writes to another one", self.shown(&p)),
                 FlashKind::Error,
