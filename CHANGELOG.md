@@ -11,15 +11,41 @@
   went to column 0 or to the first non-blank. Undo and redo put the cursor
   back where Neovim does, a column remembered on a tab is the tab's last
   cell, and the cursor never lands on a combining accent (#176).
+- Line addresses and ranges on the `:` line, as Neovim: `:+3`, `:.-2`,
+  `:$-1`, `:3,7`, `%`, and `'<,'>`, which `:` types for you from Visual.
+  They work with `:d`, `:y`, `:>`, `:<`, `:m`, `:t` / `:co`, `:fixlist`
+  and `:w path` (only those lines); without a range each works on the
+  cursor's line (#182).
+- A linewise yank or case change leaves the cursor where its range
+  starts, as Neovim: `yk`, `ygg` and `Vky` keep the column, `guu` and
+  `gUU` land on the first non-blank, `Vgu` and `VU` at the line's start.
+  Undo and redo of a case change come back to the same place, and `2gUU`
+  on the last line does nothing (#180).
+- `gu` and `gU` work in Visual mode (#180).
 
 **Math**
 
+- `\mathbb`, `\mathcal`, `\mathscr` and `\mathfrak` draw Unicode letters
+  (ℝ, 𝒪, 𝔤) in inline and display math. An argument with no Unicode form
+  stays as typed (#179).
 - HTML export shows math as MathML, drawn by the browser with no script,
   when `pandoc` is installed. Without it, formulas stay TeX and the export
   says `math left as TeX: no pandoc`; a formula pandoc can't read keeps
   its TeX on its own (#173).
 - Display math draws an unknown command with its braced arguments as
   written: `\mathcal{F}` shows `\mathcal{F}`, not `\mathcalF` (#172).
+
+**Display**
+
+- A tab reaches the next tab stop, every `tab_width` cells from the start
+  of the line, as Neovim's `tabstop`, instead of being a fixed
+  `tab_width` cells wide. The cursor, `j` / `k`, clicks and wrapping count
+  it the same way; list nesting is unchanged (#181).
+- The cursor on the first character of a wrapped line's second row is
+  drawn on that row, not at the end of the row above (#181).
+- An embed no longer drops letters or shows `**` and `[` where bold text
+  or a link wraps across rows, and `:embed full` uses the whole measure
+  (#181).
 
 **Reading**
 
