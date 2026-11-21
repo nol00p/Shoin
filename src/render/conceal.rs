@@ -353,6 +353,7 @@ impl ConcealMap {
     /// run: it ends at the first inline op or the first visible character.
     /// Math, emphasis or a link at the start of a line conceals as part of
     /// the text, so revealing it moves nothing: a display formula used to
+    /// shift by the whole width its TeX gains, out of the text column.
     ///
     /// Both forms are walked to the body's first character, through the
     /// blanks after the run: a tab there reaches a stop counted in each
@@ -452,28 +453,6 @@ impl ConcealMap {
             }
         }
         text
-    }
-
-    /// For each char of [`display_text`](Self::display_text), the source
-    /// index just past what it was drawn from: the char itself, or the
-    /// whole range a replacement stands for. So a row of the display text
-    /// that starts at char `d` starts in the source at the entry for `d - 1`
-    /// (0 for the first), and the markers hidden before its first char, an
-    /// opening `**` or `[`, go with it, not with the row above.
-    pub fn source_after(&self, source: &str) -> Vec<usize> {
-        let len = source.chars().count();
-        let mut out = Vec::with_capacity(len);
-        let mut i = 0usize;
-        for op in &self.ops {
-            let r = op.range();
-            out.extend(i + 1..=r.start);
-            if let Conceal::Replace { text, .. } = op {
-                out.extend(std::iter::repeat_n(r.end, text.chars().count()));
-            }
-            i = r.end;
-        }
-        out.extend(i + 1..=len);
-        out
     }
 }
 
@@ -1622,24 +1601,6 @@ mod tests {
         assert!(elapsed < std::time::Duration::from_millis(500), "{elapsed:?}");
         // At tab_width 2 each tab is the guide and one space.
         assert!(shown.starts_with(&"\u{2502} ".repeat(10_000)), "{:?}", &shown[..40]);
-    }
-
-    /// Each drawn char maps past its source: a replacement past its whole
-    /// range, so the markers hidden before a char go with the row it starts.
-    #[test]
-    fn source_after_maps_each_drawn_char_past_its_source() {
-        let after = |line: &str| map(line).source_after(line);
-        // `x ` `b` `o` `l` `d` ` y`: `b` is drawn from 4, after the `**`.
-        assert_eq!(after("x **bold** y"), [1, 2, 5, 6, 7, 8, 11, 12]);
-        assert_eq!(after("[a](url)\tb"), [2, 9, 10]);
-        // A heading's `# ` is hidden: `h` is drawn from 2.
-        assert_eq!(after("# h"), [3]);
-        // `> ` is the bar and its space, both past the marker's two chars.
-        assert_eq!(after("> q"), [2, 2, 3]);
-        assert_eq!(after("plain"), [1, 2, 3, 4, 5]);
-        for line in ["x **bold** y", "[a](url)\tb", "- a", "> > q", "# h"] {
-            assert_eq!(after(line).len(), map(line).display_text(line).chars().count(), "{line:?}");
-        }
     }
 
     /// The concealed bars' spaces are break points the compact source lacks.

@@ -687,35 +687,9 @@ fn render_embed_row(
             dim,
         )],
         Row::Error(msg) => screen_spans(msg, ThemeStyle::fg(theme.error).to_ratatui()),
-        Row::Body(text, block, at) => {
-            // Styled AND CONCEALED with the document's own rules. An embedded
-            // line is never the active line — it is not in this rope at all —
-            // so, like any line the cursor is not on, it always shows its
-            // finished form, and an embedded `# Heading` must read as a
-            // heading rather than as its source.
-            let md = &app.config.markdown;
-            let inline = crate::render::markdown::inline::scan_styled(text, md);
-            let styled = crate::render::markdown::style_line_with(
-                text,
-                block.clone(),
-                crate::text::buffer::Syntax::Markdown,
-                theme,
-                md,
-                &inline,
-                app.config.editor.tab_width,
-            );
-            let ctx = crate::render::conceal::ConcealCtx {
-                glyphs: &app.config.glyphs,
-                theme,
-                measure: width as u16,
-                tab_width: app.config.editor.tab_width,
-            };
-            let (shown, spans) = if app.config.layout.conceal {
-                crate::render::conceal::ConcealMap::build(text, block, &inline, &ctx)
-                    .render(text, &styled)
-            } else {
-                (text.clone(), styled)
-            };
+        // Already styled and concealed, and cut from the line as it was
+        // wrapped (`preview::drawn`): drawn as it is.
+        Row::Body(shown, styles, at) => {
             let bordered = app.config.transclude.border && app.embed_mode.framed();
             let mut out = if bordered {
                 vec![Span::styled("\u{2502} ".to_string(), dim)]
@@ -725,13 +699,13 @@ fn render_embed_row(
             let chars: Vec<char> = shown.chars().collect();
             let tab = app.config.editor.tab_width;
             // The row's tabs reach the stops of the whole embedded line.
-            out.extend(tabs_as_spaces(window_spans(&chars, &spans, 0, chars.len()), &chars, *at, tab));
+            out.extend(tabs_as_spaces(window_spans(&chars, styles, 0, chars.len()), &chars, *at, tab));
             // Pad to the closing bar so the box has a straight right edge. The
             // content was wrapped to fit between the bars, so this only ever
             // adds space — but it is measured in display cells, not chars, so a
             // CJK line does not push the edge out.
             if bordered {
-                let used = 2 + text_width_from(&shown, *at, tab) as usize;
+                let used = 2 + text_width_from(shown, *at, tab) as usize;
                 out.push(Span::styled(
                     " ".repeat(width.saturating_sub(used + 2)) + " \u{2502}",
                     dim,
@@ -2908,6 +2882,54 @@ mod tests {
         assert!((0..24).any(|y| row_text(&buf, y).contains("f tail")), "the URL takes no room");
 
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// An embedded line is drawn from the same concealed text it was wrapped
+    /// on: a row is a slice of the whole line's drawn text, so a span cut
+    /// across two rows shows no markers on either, and no row is wider than
+    /// the box. `**abcdefgh** z` at 8 cells used to draw `**abcdef` and drop
+    /// `gh`, re-concealing the source `**abcdefgh` on its own.
+    #[test]
+    fn an_embedded_row_draws_the_concealed_text_it_was_wrapped_on() {
+        let frag = "**abcdefgh** z\n\n**ijklmnop\tq**\n\nsee [link text](url) end\n";
+        for border in [false, true] {
+            let (d, mut app) = composition("top\n![[frag]]\n", frag);
+            app.config.transclude.border = border;
+            // The box's inner width is 8 either way.
+            app.config.layout.measure = if border { 12 } else { 8 };
+            let buf = render_to(&app, 40, 24);
+            let rows: Vec<String> = (0..24).map(|y| row_text(&buf, y)).collect();
+            let screen = rows.join("\n");
+            assert!(screen.contains("abcdefgh") && screen.contains('z'), "border {border}:\n{screen}");
+            assert!(screen.contains("ijklmnop"), "border {border}:\n{screen}");
+            assert!(screen.contains("link") && screen.contains("text") && screen.contains("end"), "{screen}");
+            for raw in ["*", "[", "]", "(", "url"] {
+                assert!(!screen.contains(raw), "border {border}: {raw:?} drawn:\n{screen}");
+            }
+            // `q` is on a continuation row that starts at line cell 8: its
+            // tab reaches 12, 4 cells past the row's first.
+            let first = rows.iter().position(|r| r.contains("ijklmnop")).unwrap() as u16;
+            let q = rows.iter().position(|r| r.contains('q')).unwrap() as u16;
+            assert_eq!(q, first + 1, "border {border}:\n{screen}");
+            assert_eq!(cell_of(&buf, q, "q") - cell_of(&buf, first, "i"), 4, "border {border}:\n{screen}");
+            // Each row wears its slice of the line's styles: the bold span
+            // runs on through the row the wrap cut it onto, and stops.
+            let bold = |y: u16, sym: &str| buf[(cell_of(&buf, y, sym), y)].modifier.contains(Modifier::BOLD);
+            let abc = rows.iter().position(|r| r.contains("abcdefgh")).unwrap() as u16;
+            let z = rows.iter().position(|r| r.contains('z')).unwrap() as u16;
+            assert!(bold(abc, "h") && bold(first, "p") && bold(q, "q"), "border {border}");
+            assert!(!bold(z, "z"), "border {border}");
+            // Every body row is padded to one straight right edge.
+            if border {
+                let edges: Vec<usize> = rows
+                    .iter()
+                    .filter(|r| r.contains('\u{2502}'))
+                    .map(|r| r.trim_end().chars().count())
+                    .collect();
+                assert!(edges.len() >= 5 && edges.windows(2).all(|w| w[0] == w[1]), "{screen}");
+            }
+            std::fs::remove_dir_all(&d).ok();
+        }
     }
 
     /// Turning preview off puts the source back, and the row count with it.

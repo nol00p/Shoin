@@ -908,20 +908,9 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
                 app.embed_mode,
                 app.config.markdown.math,
                 app.config.editor.tab_width,
-                // Each embedded line wraps on the text the frame draws for
-                // it, concealed with the same rules.
-                &|text, kind| {
-                    cfg.layout.conceal.then(|| {
-                        let inline = markdown::inline::scan_styled(text, &cfg.markdown);
-                        let ctx = ConcealCtx {
-                            glyphs: &cfg.glyphs,
-                            theme: &app.theme,
-                            measure,
-                            tab_width: cfg.editor.tab_width,
-                        };
-                        ConcealMap::build(text, kind, &inline, &ctx)
-                    })
-                },
+                // Each embedded line is wrapped on, and drawn from, its text
+                // as the document's own rules draw it.
+                &|text, kind, inner| crate::transclude::preview::drawn(text, kind, &app.theme, cfg, inner),
             )
         })
     } else {
