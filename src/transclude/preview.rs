@@ -131,8 +131,9 @@ pub fn expand(
     // embed closes inside it and cannot leak into the composition.
     let mut carry = Carry::default();
     // A closed box costs four columns — `\u{2502} ` on the left and ` \u{2502}` on the
-    // right — and a wrapped row has to fit between them.
-    let inner = measure.saturating_sub(if cfg.border { 4 } else { 0 }).max(8);
+    // right — and a wrapped row has to fit between them. Without a box (no
+    // border, or `full`, which never draws one) a row has the whole measure.
+    let inner = measure.saturating_sub(if framed { 4 } else { 0 }).max(8);
     for (i, line) in body.lines().enumerate() {
         let (kind, next) = classify(line, &carry, i == 0, math, COMMONMARK_TAB);
         carry = next;
@@ -511,6 +512,65 @@ mod tests {
             matches!(kinds[3], BlockKind::Paragraph),
             "the fence closed inside the embed"
         );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The box's four columns are reserved only when a box is drawn: `full`
+    /// never draws one, whatever `transclude.border` says, so its fence rules
+    /// and its text run the whole measure.
+    #[test]
+    fn only_a_framed_embed_gives_its_border_four_columns() {
+        use crate::render::layout::text_width;
+        let d = vault("framed");
+        let word = "abcdefghijklmnopqrst";
+        std::fs::write(d.join("frag.md"), format!("```\ncode\n```\n{word}\n")).unwrap();
+        let link = Link::parse("frag").unwrap();
+        let theme = Theme::default();
+        let mut cfg = Config::default();
+        cfg.layout.conceal = true;
+        let draw = &|text: &str, kind: &BlockKind, w: u16| drawn(text, kind, &theme, &cfg, w);
+        for mode in [Mode::Short, Mode::Rec, Mode::Full] {
+            for border in [false, true] {
+                let tc = TranscludeConfig { border, ..Default::default() };
+                let e = super::expand(&link, &d.join("note.md"), &tc, 20, mode, true, 4, draw);
+                let rows = body_text(&e);
+                let inner = if border && mode.framed() { 16 } else { 20 };
+                let what = format!("{} border {border}: {rows:?}", mode.name());
+                assert_eq!(text_width(&rows[0], 4), inner, "{what}");
+                assert_eq!(text_width(&rows[2], 4), inner, "{what}");
+                let text: Vec<&String> = rows[3..].iter().collect();
+                if inner == 20 {
+                    assert_eq!(text, [word], "{what}");
+                } else {
+                    assert_eq!(text, [&word[..16], &word[16..]], "{what}");
+                }
+            }
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A rule glyph with a tab in it is sized by the cells the wrapper counts
+    /// (the tab to its stop), so a concealed fence delimiter stays one row.
+    #[test]
+    fn a_rule_glyph_with_a_tab_keeps_a_fence_delimiter_on_one_row() {
+        use crate::render::layout::text_width;
+        let d = vault("tabrule");
+        std::fs::write(d.join("frag.md"), "```\ncode\n```\n").unwrap();
+        let link = Link::parse("frag").unwrap();
+        let theme = Theme::default();
+        let mut cfg = Config::default();
+        cfg.layout.conceal = true;
+        cfg.editor.tab_width = 4;
+        cfg.glyphs.rule = "\u{2500}\t".into();
+        let draw = &|text: &str, kind: &BlockKind, w: u16| drawn(text, kind, &theme, &cfg, w);
+        for (border, measure) in [(true, 12), (false, 8)] {
+            let tc = TranscludeConfig { border, ..Default::default() };
+            let e = super::expand(&link, &d.join("note.md"), &tc, measure, Mode::Short, true, 4, draw);
+            let rows = body_text(&e);
+            assert_eq!(rows.len(), 3, "border {border}: {rows:?}");
+            assert_eq!(text_width(&rows[0], 4), 8, "border {border}: {rows:?}");
+            assert_eq!(text_width(&rows[2], 4), 8, "border {border}: {rows:?}");
+        }
         std::fs::remove_dir_all(&d).ok();
     }
 

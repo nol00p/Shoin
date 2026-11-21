@@ -1029,7 +1029,7 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, from: usize, o
             };
             ops.push(Conceal::Replace {
                 range: 0..len,
-                text: rule(&glyphs.rule, ctx.measure),
+                text: rule(&glyphs.rule, ctx.measure, ctx.tab_width),
                 style: Some(Style::fg(color)),
             });
         }
@@ -1165,10 +1165,26 @@ fn math_block_ops(chars: &[char], ops: &mut Vec<Conceal>) {
 }
 
 /// A horizontal rule `width` cells wide, drawn from `glyph` (which may itself
-/// be more than one cell).
-fn rule(glyph: &str, width: u16) -> String {
-    let unit = display_width(glyph).max(1) as usize;
-    glyph.repeat((width as usize / unit).max(1))
+/// be more than one cell): as many copies as fit, and at least one. Measured
+/// as the wrapper measures it ([`cells_from`]), a tab in the glyph reaching
+/// its stop, so the rule is never wider than the row it has to fit on.
+fn rule(glyph: &str, width: u16, tab: usize) -> String {
+    let glyph: Vec<char> = glyph.chars().collect();
+    let mut out: String = glyph.iter().collect();
+    let mut used = cells_from(&glyph, 0, tab);
+    // A glyph of no width would never fill the rule. Past the first copy a
+    // copy is never 0 wide: only a tab's width changes with where it starts.
+    if used == 0 {
+        return out;
+    }
+    loop {
+        let next = used + cells_from(&glyph, used, tab);
+        if next > width as usize {
+            return out;
+        }
+        out.extend(&glyph);
+        used = next;
+    }
 }
 
 #[cfg(test)]
@@ -1463,6 +1479,18 @@ mod tests {
             &Carry::from(Open::InFence { fence: "```".into(), lang: None, cont: Default::default() }),
         );
         assert_eq!(display_width(&close), MEASURE);
+    }
+
+    /// A rule is sized by the cells the wrapper counts: a tab in the glyph
+    /// reaches its stop, so `─\t` at tab width 4 is 4 cells a copy.
+    #[test]
+    fn a_rule_counts_a_tab_in_its_glyph_to_the_stop() {
+        assert_eq!(rule("\u{2500}\t", 8, 4), "\u{2500}\t\u{2500}\t");
+        assert_eq!(rule("\u{2500}\t", 9, 4), "\u{2500}\t\u{2500}\t");
+        assert_eq!(rule("\u{2500}", 5, 4), "\u{2500}".repeat(5));
+        // At least one copy, however narrow; none to repeat when empty.
+        assert_eq!(rule("\u{2500}\t", 2, 4), "\u{2500}\t");
+        assert_eq!(rule("", 8, 4), "");
     }
 
     /// The bar and the box wear their own theme colors, not the dim marker
