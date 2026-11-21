@@ -1,5 +1,5 @@
 use super::boxes::{grid, Align, Grid, MathBox};
-use super::symbols::{accent_command, big_operator, env_delims, math_escape, symbol, text_of, OPERATORS};
+use super::symbols::{accent_command, big_operator, env_delims, math_escape, symbol, text_of, MathAlphabet, OPERATORS};
 use crate::render::conceal::render_latex;
 
 // Limit recursive groups and commands before they exhaust the caller's stack.
@@ -260,6 +260,9 @@ impl<'a> Parser<'a> {
     }
 
     fn command(&mut self, name: &str, depth: usize, script: bool) -> Option<Atom> {
+        if let Some(alphabet) = MathAlphabet::from_command(name) {
+            return self.alphabet(name, alphabet);
+        }
         let boxed = match name {
             "frac" | "dfrac" | "tfrac" => MathBox::fraction(
                 self.argument(depth, script)?.box_, self.argument(depth, script)?.box_,
@@ -317,17 +320,40 @@ impl<'a> Parser<'a> {
                 }
                 let replacement = symbol(name);
                 if replacement.is_empty() {
-                    let arguments = self.rest;
-                    while self.peek() == Token::Char('{') {
-                        self.raw_group()?;
-                    }
-                    let arguments = &arguments[..arguments.len() - self.rest.len()];
-                    return Some(Atom::text(&one_line(&format!("\\{name}{arguments}"))));
+                    return self.literal_command(name, self.rest);
                 }
                 return Some(Atom::text(replacement));
             }
         };
         (boxed.width <= self.width).then_some(Atom::boxed(boxed))
+    }
+
+    fn alphabet(&mut self, name: &str, alphabet: MathAlphabet) -> Option<Atom> {
+        let start = self.rest;
+        let mapped = match self.peek() {
+            Token::Char('{') => alphabet.render(self.raw_group()?),
+            Token::Char(c) if !matches!(c, '}' | '^' | '_' | '&') => {
+                self.next();
+                alphabet.render(c.encode_utf8(&mut [0; 4]))
+            }
+            Token::Command(command) if !matches!(command, "end" | "right" | "\\") => {
+                self.next();
+                None
+            }
+            _ => None,
+        };
+        match mapped {
+            Some(text) => Some(Atom::text(&text)),
+            None => self.literal_command(name, start),
+        }
+    }
+
+    fn literal_command(&mut self, name: &str, start: &str) -> Option<Atom> {
+        while self.peek() == Token::Char('{') {
+            self.raw_group()?;
+        }
+        let source = &start[..start.len() - self.rest.len()];
+        Some(Atom::text(&one_line(&format!("\\{name}{source}"))))
     }
 
     fn delimiter(&mut self) -> Option<&'static str> {

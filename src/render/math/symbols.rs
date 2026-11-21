@@ -1,5 +1,70 @@
 //! Unicode spellings shared by inline and display math.
 
+#[derive(Clone, Copy)]
+pub(in crate::render) enum MathAlphabet {
+    DoubleStruck,
+    Script,
+    Fraktur,
+}
+
+impl MathAlphabet {
+    pub(in crate::render) fn from_command(name: &str) -> Option<Self> {
+        match name {
+            "mathbb" => Some(Self::DoubleStruck),
+            "mathcal" | "mathscr" => Some(Self::Script),
+            "mathfrak" => Some(Self::Fraktur),
+            _ => None,
+        }
+    }
+
+    pub(in crate::render) fn render(self, argument: &str) -> Option<String> {
+        let letters: String = argument.chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .map(|c| self.letter(c))
+            .collect::<Option<_>>()?;
+        (!letters.is_empty()).then_some(letters)
+    }
+
+    fn letter(self, c: char) -> Option<char> {
+        use MathAlphabet::*;
+        // The Letterlike Symbols fill the holes in the alphanumeric ranges.
+        let glyph = match (self, c) {
+            (DoubleStruck, 'C') => 'ℂ',
+            (DoubleStruck, 'H') => 'ℍ',
+            (DoubleStruck, 'N') => 'ℕ',
+            (DoubleStruck, 'P') => 'ℙ',
+            (DoubleStruck, 'Q') => 'ℚ',
+            (DoubleStruck, 'R') => 'ℝ',
+            (DoubleStruck, 'Z') => 'ℤ',
+            (Script, 'B') => 'ℬ',
+            (Script, 'E') => 'ℰ',
+            (Script, 'F') => 'ℱ',
+            (Script, 'H') => 'ℋ',
+            (Script, 'I') => 'ℐ',
+            (Script, 'L') => 'ℒ',
+            (Script, 'M') => 'ℳ',
+            (Script, 'R') => 'ℛ',
+            (Script, 'e') => 'ℯ',
+            (Script, 'g') => 'ℊ',
+            (Script, 'o') => 'ℴ',
+            (Fraktur, 'C') => 'ℭ',
+            (Fraktur, 'H') => 'ℌ',
+            (Fraktur, 'I') => 'ℑ',
+            (Fraktur, 'R') => 'ℜ',
+            (Fraktur, 'Z') => 'ℨ',
+            (DoubleStruck, 'A'..='Z') => return char::from_u32(0x1D538 + (c as u32 - 'A' as u32)),
+            (DoubleStruck, 'a'..='z') => return char::from_u32(0x1D552 + (c as u32 - 'a' as u32)),
+            (DoubleStruck, '0'..='9') => return char::from_u32(0x1D7D8 + (c as u32 - '0' as u32)),
+            (Script, 'A'..='Z') => return char::from_u32(0x1D49C + (c as u32 - 'A' as u32)),
+            (Script, 'a'..='z') => return char::from_u32(0x1D4B6 + (c as u32 - 'a' as u32)),
+            (Fraktur, 'A'..='Z') => return char::from_u32(0x1D504 + (c as u32 - 'A' as u32)),
+            (Fraktur, 'a'..='z') => return char::from_u32(0x1D51E + (c as u32 - 'a' as u32)),
+            _ => return None,
+        };
+        Some(glyph)
+    }
+}
+
 pub(in crate::render) fn symbol(name: &str) -> &'static str {
     match name {
         "nabla" => "∇",
