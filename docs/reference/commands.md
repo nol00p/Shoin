@@ -30,14 +30,31 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 |---|---|
 | `:undo` `:u` `:un` `:und` | undo, like `u` |
 | `:redo` `:red` | redo, like `Ctrl-r` |
-| `:fixlist` | re-indent the list under the cursor, or every list a Visual selection touches, so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
+| `:fixlist` | re-indent the list under the cursor, or every list a Visual selection or a range touches, so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
 
 ## Lines
+
+A line address is a number, `.` for the cursor's line or `$` for the last,
+then any offsets: `+3`, `-2`, a bare `+` or `-` for one. `:+3` counts from
+the cursor's line. A range is two addresses with a comma, `:3,7` or
+`:.,+4`, or `%` for every line. `:` from Visual starts the line with
+`'<,'>`, the selected lines.
 
 | Command | Does |
 |---|---|
 | `:42` | go to line 42, keeping the column, like `42G`. `:0` is the first line, and a number past the end is the last |
 | `:$` | go to the last line, like `G` |
+| `:+3` `:-2` `:.+3` `:$-1` | go to the line that address names. A range goes to its last line |
+| `:delete [x] [count]` `:d` `:de` `:del` | delete the lines into the register, as `dd`. The cursor goes to the first non-blank of the line after them |
+| `:yank [x] [count]` `:y` `:ya` `:yan` | yank the lines, as `yy`. The cursor stays where it is |
+| `:>` `:<` | indent or outdent the lines one level, as `>>` and `<<`. `:>>` goes two levels |
+| `:move {line}` `:m` `:mo` `:mov` | move the lines below `{line}`. `:m 0` moves them to the top, `:m $` to the end |
+| `:copy {line}` `:co` `:cop` `:t` | copy the lines below `{line}` |
+| `:{range}w <path>` | write only those lines to `path`. Add `!` to overwrite an existing file |
+
+Each command takes a range before its name, as in `:3,7d`, `:%y` or
+`:'<,'>m 0`, and works on the cursor's line without one. `:fixlist` takes a
+range too.
 
 ## Buffers and panes
 
@@ -133,8 +150,30 @@ Brackets mark the current match.
 - The force forms are `:write!` / `:w!`, `:saveas!` / `:sav!`, `:wq!` / `:x!`, `:qall!` / `:qa!` / `:Q!`, `:bdelete!` / `:bd!`,
   `:q!` and `:revert!`. `:e!` reloads the config.
 
-- `:42` and `:$` take no range or offset: `:1,5`, `:+1` and `:3x` are not
-  commands. Like `42G`, they open a fold they land in.
+- A line address, alone, opens a fold it lands in, as `42G` does.
+- A number after a space adds to the address before it, as in vim: `:3 2`
+  is line 5.
+- An address past the end is the last line, and one before the start is
+  the first, where Neovim refuses some of them. A range given backwards,
+  `:7,3`, is turned round without asking.
+- `[x]` is a register, as `"x` names one before `dd`: `:d a` deletes into
+  `a`, and `:y A` appends to it. A count counts lines from the range's last
+  line: `:d 3` deletes the cursor's line and the two below, and `:5,6d 2`
+  deletes lines 6 and 7. `:>` and `:<` take a count too.
+- A closed fold at either end of a range is taken whole, as `dd` takes it.
+- `:m` can't put lines below one of themselves: `:2,4m 3` is refused and
+  changes nothing.
+- `'<,'>` names the lines of the selection `:` was typed from, a
+  character or line selection alike. Visual ends when the command runs.
+  Without one, `'<` and `'>` are an error: they are not marks.
+- `.` does not repeat a `:` command: after `:d` it repeats the change made
+  before it, as in vim.
+- In read-only mode `:d`, `:>`, `:<`, `:m`, `:t` and `:fixlist` are refused
+  like any edit. Line addresses, `:y` and a ranged `:w` work.
+- `:w` with a range and no path is an error, and so is a range written to
+  this buffer's own file. Lines written before the last end in a newline.
+- Each line command is one undo step. `u` and `Ctrl-r` put the cursor where
+  Neovim's do.
 - Names, paths and topics are in alphabetical order, ignoring case. Folders
   and files are mixed, and a folder ends in `/`.
 - Values are in the order the command lists them, `off` before `on`.

@@ -91,7 +91,8 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         "sp", "vs", "close", "only", "focus", "focus sentence", "typewriter", "number", "number relative", "align",
         "align justified", "embed", "embed full", "embed rec", "embed short", "view", "zen", "fixlist", "u", "red", "bn",
         "bp", "set conceal off", "set conceal on", "set measure 20", "set measure 200", "set tab_width 8", "set math off",
-        "set math on", "diff", "revert", "ls", "help", "set hints off", "b 1",
+        "set math on", "diff", "revert", "ls", "help", "set hints off", "b 1", "3", "+2", "d", "2,4d", "y 3",
+        ".,+2>", "<", "%<", "m 0", "m $", "1,3m $", "t 0", "$-1,$t 0", "'<,'>d", "'<,'>m 0", "%fixlist",
     ];
     let mut term = Terminal::new(TestBackend::new(w.max(1), h.max(1))).unwrap();
     for step in 0..steps {

@@ -8919,11 +8919,12 @@ fn screen_paging_and_linewise_operators_keep_the_column_as_neovim() {
     assert!(misses.is_empty(), "{misses:#?}");
 }
 
-/// Anything else that starts with a digit or a sign is still not a
-/// command: no ranges, no offsets.
+/// A line number with something after it that is no command, or a command
+/// that takes no range, is not a command. Offsets and ranges are
+/// (`range_tests`).
 #[test]
 fn colon_number_with_more_after_it_is_not_a_command() {
-    for typed in ["3x", "-2", "+1", "1,5", "$x", "3 4"] {
+    for typed in ["3x", "$x", "1,5q", "3 4 e"] {
         let mut app = app_with(&numbered_lines());
         feed(&mut app, "5G");
         cmd(&mut app, &format!(":{typed}"));

@@ -58,7 +58,8 @@ impl Completion {
 /// and every match for it, sorted. Paths are looked up from `base`; `:b`
 /// offers the names in `buffers`.
 pub(crate) fn candidates(line: &str, base: &Path, buffers: &[String]) -> (usize, Vec<String>, bool) {
-    let lead = line.len() - line.trim_start().len();
+    // After a range (`:'<,'>w `, `:%`), the command's name is the first word.
+    let lead = super::range::prefix_len(line).max(line.len() - line.trim_start().len());
     let rest = &line[lead..];
     let Some(name_end) = rest.find(char::is_whitespace) else {
         // Still typing the command's name.

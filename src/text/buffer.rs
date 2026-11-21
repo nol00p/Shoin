@@ -378,6 +378,25 @@ impl Buffer {
         Ok(())
     }
 
+    /// `:{range}w other.md`: lines `first..=last` written to `path` as a copy,
+    /// as `write_copy` writes the whole text. Each line ends in a newline,
+    /// except that a range ending on the last line follows the final-newline
+    /// rule a whole save would.
+    pub fn write_lines_copy(&self, path: &Path, first: usize, last: usize, policy: SavePolicy, force: bool) -> Result<()> {
+        if !force {
+            refuse_taken(path)?;
+        }
+        let start = self.rope.line_to_char(first);
+        let end = self.rope.line_to_char((last + 1).min(self.rope.len_lines()));
+        let part = ropey::Rope::from(self.rope.slice(start..end));
+        let mut opts = SaveOptions { keep_line: None, ..self.save_options(path, policy) };
+        if last < self.last_line() {
+            opts.final_newline = true;
+        }
+        save::write_atomic(path, &part, &opts)?;
+        Ok(())
+    }
+
     /// Whether `path` is this buffer's own file, by any spelling.
     pub fn is_own_file(&self, path: &Path) -> bool {
         self.path.as_deref().is_some_and(|ours| same_path(ours, path))
