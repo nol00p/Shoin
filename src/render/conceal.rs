@@ -21,7 +21,7 @@ use super::quote;
 use super::layout::{cell_width, display_width, text_width};
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
-use super::math::symbols::{accent_command, env_delims, math_escape, subscript_char, superscript_char, symbol, text_of, OPERATORS};
+use super::math::symbols::{accent_command, env_delims, math_escape, subscript_char, superscript_char, symbol, text_of, MathAlphabet, OPERATORS};
 use super::theme::{Attrs, Color, Style, Theme};
 use super::StyledSpan;
 
@@ -510,6 +510,18 @@ fn render_latex_with_spaces(input: &str, mut math_spaces: Option<&mut Vec<usize>
                     continue;
                 }
             }
+            if let Some(alphabet) = MathAlphabet::from_command(&name) {
+                let (value, end) = alphabet_argument(&chars, i);
+                if let Some(mapped) = value.and_then(|value| alphabet.render(&value)) {
+                    out.push_str(&mapped);
+                } else {
+                    out.push('\\');
+                    out.push_str(&name);
+                    out.extend(&chars[i..end]);
+                }
+                i = end;
+                continue;
+            }
             if matches!(name.as_str(), "vec" | "mathbf" | "bm" | "boldsymbol") {
                 if let Some((value, end)) = argument(&chars, i) {
                     out.push_str(&if name == "vec" { accent_command("vec", &value) } else { value });
@@ -655,7 +667,11 @@ fn command_span(chars: &[char], start: usize) -> usize {
     if end == start + 1 {
         return (start + 2).min(chars.len());
     }
-    let arity = match chars[start + 1..end].iter().collect::<String>().as_str() {
+    let name: String = chars[start + 1..end].iter().collect();
+    if MathAlphabet::from_command(&name).is_some() {
+        return alphabet_argument(chars, end).1;
+    }
+    let arity = match name.as_str() {
         "frac" | "dfrac" => 2,
         "text" | "mathrm" | "operatorname" | "sqrt" | "vec" | "hat" | "mathbf" | "bm"
         | "boldsymbol" => 1,
@@ -668,6 +684,29 @@ fn command_span(chars: &[char], start: usize) -> usize {
         }
     }
     end
+}
+
+/// The source argument and its end, including rejected forms that stay literal.
+fn alphabet_argument(chars: &[char], start: usize) -> (Option<String>, usize) {
+    let at = skip_math_spaces(chars, start);
+    match chars.get(at) {
+        Some('{') => braced_raw(chars, at).map_or((None, chars.len()), |(raw, end)| (Some(raw), end)),
+        Some('\\') if chars.get(at + 1) != Some(&'\\') => {
+            let mut end = name_end(chars, at + 1).max((at + 2).min(chars.len()));
+            loop {
+                let group = skip_math_spaces(chars, end);
+                let Some((_, next)) = braced_raw(chars, group) else { break };
+                end = next;
+            }
+            (None, end)
+        }
+        Some(c) if !matches!(c, '}' | '^' | '_' | '&' | '\\') => (Some(c.to_string()), at + 1),
+        _ => (None, start),
+    }
+}
+
+fn skip_math_spaces(chars: &[char], start: usize) -> usize {
+    start + chars[start..].iter().take_while(|c| c.is_whitespace()).count()
 }
 
 /// A command's one argument, rendered: a `{…}` group, a command, or a single
@@ -1256,6 +1295,30 @@ mod tests {
         assert_eq!(shown(r"$\hat\theta$"), "θ\u{0302}");
         assert_eq!(shown(r"$\vec v$"), "v\u{20D7}");
         assert_eq!(shown(r"$\mathbf\Omega$"), "Ω");
+    }
+
+    #[test]
+    fn math_alphabets_conceal_letters_and_keep_invalid_arguments() {
+        for (tex, expected) in [
+            (r"\mathbb{R}^n", "ℝⁿ"),
+            (r"\mathbb{RN}", "ℝℕ"),
+            (r"\mathbb {R N}", "ℝℕ"),
+            (r"\mathbb RN", "ℝN"),
+            (r"\mathcal{O}(n)", "𝒪(n)"),
+            (r"\mathscr{F}", "ℱ"),
+            (r"\mathfrak{g}_1", "𝔤₁"),
+            (r"\mathbb{a09}", "𝕒𝟘𝟡"),
+            (r"x^\mathbb R", "x^ℝ"),
+            (r"x_\mathfrak{g}", "x_𝔤"),
+        ] {
+            assert_eq!(shown(&format!("${tex}$")), expected, "{tex}");
+        }
+        for tex in [r"\mathbb{α}", r"\mathcal{1}", r"\mathbb{}", r"\mathbb{\alpha}",
+            r"\mathbb{Rα}", r"\mathbb{ }", r"\mathbb{{R}}", r"\mathbb{R \hat{x}}",
+            r"\mathbb α", r"\mathbb\alpha", r"\mathbb \hat{R}", r"\mathcal -",
+        ] {
+            assert_eq!(shown(&format!("${tex}$")), tex);
+        }
     }
 
     #[test]

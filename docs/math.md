@@ -184,6 +184,9 @@ With `export_follows_settings = true` and `math = false`, `txt`, `html` and
   `\sup` `\inf` take a limit below. `\operatorname{…}` for your own.
 - **Text and accents:** `\text` `\mathrm`, `\hat` `\vec`; `\mathbf` `\bm`
   `\boldsymbol` show their argument plain.
+- **Letter styles:** `\mathbb` draws double-struck letters and digits,
+  `\mathcal` and `\mathscr` draw script letters, and `\mathfrak` draws
+  Fraktur letters. These commands work in inline and display math.
 - **Symbols:** Greek letters, lowercase and uppercase with the `var`
   forms; arrows (`\to` `\rightarrow` `\Rightarrow` `\iff` …); relations
   (`\le` `\ge` `\ne` `\approx` `\equiv` `\sim` `\propto`); operators
@@ -196,8 +199,11 @@ With `export_follows_settings = true` and `math = false`, `txt`, `html` and
 
 ## Details
 
-- An unknown command and its braced arguments are drawn as literal text:
-  `\mathcal{F}` shows as `\mathcal{F}`, nested braces kept.
+- An unknown command like `\foo{{x}}` shows as typed, including its braces.
+- Letter styles take one bare character, as in `\mathbb R`, or a braced
+  group, as in `\mathbb{R N}`. Spaces inside the braces are dropped.
+  An empty or unsupported argument keeps the whole command as typed, as
+  in `\mathcal{1}` or `\mathbb{\alpha}`.
 - A blank line inside a block ends it there, unclosed. Keep a block's
   lines together.
 - `$$x$$ and more text` on one line is a paragraph that holds display math;

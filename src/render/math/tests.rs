@@ -183,7 +183,7 @@ fn equations() {
 
 #[test]
 fn unknown_command_arguments_stay_literal() {
-    check(r"\foo{x} + \mathcal{F}", &[r"\foo{x} + \mathcal{F}"]);
+    check(r"\foo{x} + \unknown{F}", &[r"\foo{x} + \unknown{F}"]);
     check(r"\foo{a}{b}", &[r"\foo{a}{b}"]);
     check(r"\foo{{x} \frac{a}{b} & y^2 \}}", &[r"\foo{{x} \frac{a}{b} & y^2 \}}"]);
     check(r"\foo {a}  {b}", &[r"\foo {a}  {b}"]);
@@ -283,4 +283,55 @@ fn display_math_examples() {
         }
         println!();
     }
+}
+
+#[test]
+fn math_alphabet_tables() {
+    for (name, upper, lower) in [
+        ("mathbb", "𝔸𝔹ℂ𝔻𝔼𝔽𝔾ℍ𝕀𝕁𝕂𝕃𝕄ℕ𝕆ℙℚℝ𝕊𝕋𝕌𝕍𝕎𝕏𝕐ℤ",
+            "𝕒𝕓𝕔𝕕𝕖𝕗𝕘𝕙𝕚𝕛𝕜𝕝𝕞𝕟𝕠𝕡𝕢𝕣𝕤𝕥𝕦𝕧𝕨𝕩𝕪𝕫"),
+        ("mathcal", "𝒜ℬ𝒞𝒟ℰℱ𝒢ℋℐ𝒥𝒦ℒℳ𝒩𝒪𝒫𝒬ℛ𝒮𝒯𝒰𝒱𝒲𝒳𝒴𝒵",
+            "𝒶𝒷𝒸𝒹ℯ𝒻ℊ𝒽𝒾𝒿𝓀𝓁𝓂𝓃ℴ𝓅𝓆𝓇𝓈𝓉𝓊𝓋𝓌𝓍𝓎𝓏"),
+        ("mathfrak", "𝔄𝔅ℭ𝔇𝔈𝔉𝔊ℌℑ𝔍𝔎𝔏𝔐𝔑𝔒𝔓𝔔ℜ𝔖𝔗𝔘𝔙𝔚𝔛𝔜ℨ",
+            "𝔞𝔟𝔠𝔡𝔢𝔣𝔤𝔥𝔦𝔧𝔨𝔩𝔪𝔫𝔬𝔭𝔮𝔯𝔰𝔱𝔲𝔳𝔴𝔵𝔶𝔷"),
+    ] {
+        for (source, expected) in [("ABCDEFGHIJKLMNOPQRSTUVWXYZ", upper), ("abcdefghijklmnopqrstuvwxyz", lower)] {
+            check_math_alphabet(name, source, expected);
+            if name == "mathcal" {
+                check_math_alphabet("mathscr", source, expected);
+            }
+        }
+    }
+    check_math_alphabet("mathbb", "0123456789", "𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡");
+}
+
+fn check_math_alphabet(name: &str, source: &str, expected: &str) {
+    let tex = format!(r"\{name}{{{source}}}");
+    check(&tex, &[expected]);
+    assert_eq!(crate::render::conceal::render_latex(&tex), expected, "{tex}");
+}
+
+#[test]
+fn math_alphabet_layout() {
+    for (tex, expected) in [
+        (r"\mathbb{R}^n", "ℝⁿ"),
+        (r"\mathbb{RN}", "ℝℕ"),
+        (r"\mathbb {R N}", "ℝℕ"),
+        (r"\mathbb RN", "ℝN"),
+        (r"\mathcal{O}(n)", "𝒪(n)"),
+        (r"\mathscr{F}", "ℱ"),
+        (r"\mathfrak{g}_1", "𝔤₁"),
+    ] {
+        check(tex, &[expected]);
+    }
+    for tex in [r"\mathbb{α}", r"\mathcal{1}", r"\mathbb{}", r"\mathbb{\alpha}",
+        r"\mathbb{Rα}", r"\mathbb{ }", r"\mathbb{{R}}", r"\mathbb{R \hat{x}}",
+        r"\mathbb α", r"\mathbb\alpha", r"\mathbb \hat{R}", r"\mathcal -",
+    ] {
+        check(tex, &[tex]);
+    }
+    assert_eq!(crate::render::layout::cell_width('ℝ', 1), 1);
+    assert_eq!(crate::render::layout::cell_width('𝔤', 1), 1);
+    check(r"\begin{pmatrix}\mathbb{R}&1\\abc&2\end{pmatrix}",
+        &["⎛ ℝ   1⎞", "⎝abc  2⎠"]);
 }
