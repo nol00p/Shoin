@@ -9136,3 +9136,377 @@ fn clamping_never_lands_on_a_combining_mark() {
     }
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
+
+/// Keys, where they leave the cursor, and where a `j` after them goes.
+type Landing<'a> = (&'a str, (usize, usize), (usize, usize));
+
+/// Run each `(keys, (line, col), then after one more j)` case on a fresh
+/// app and list every one that lands elsewhere: where the keys leave the
+/// cursor, and where a `j` after them goes, which shows the goal they left.
+fn landing_misses(text: &str, cases: &[Landing]) -> Vec<String> {
+    let mut misses = Vec::new();
+    for &(keys, want, then) in cases {
+        let mut app = sticky_keys(text, keys);
+        let got = (app.buffer.cursor.line, app.buffer.cursor.col);
+        feed(&mut app, "j");
+        let next = (app.buffer.cursor.line, app.buffer.cursor.col);
+        if (got, next) != (want, then) {
+            misses.push(format!("{keys:?}: got {got:?} then j {next:?}, Neovim {want:?} then {then:?}"));
+        }
+    }
+    misses
+}
+
+/// Lines with a first non-blank past column 0, a short one, a line of
+/// blanks, an empty one, a leading tab and wide characters.
+const CASE_LINES: &str = "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n";
+
+/// A linewise yank leaves the cursor where its range starts, as Neovim's
+/// does: where `k` or `gg` put it, at column 0 for `yip` or a Visual
+/// selection made downwards, where it was for `yy` `yj` `yG`; and the goal
+/// is that column now, so a `j` after `yy` on `ab` forgets the longer
+/// line's 15. Every case is Neovim's answer for the same keys.
+#[test]
+fn linewise_yank_lands_where_its_range_starts_as_neovim() {
+    let mut misses = landing_misses(
+        &sticky_long(),
+        &[
+            ("05j15ljyk", (5, 15), (6, 1)),
+            ("05j15ljy2k", (4, 15), (5, 15)),
+            ("05j15ljygg", (0, 15), (1, 15)),
+            ("05j15ljVky", (5, 15), (6, 1)),
+            ("05j15ljV2ky", (4, 15), (5, 15)),
+            ("05j15ljvkY", (5, 15), (6, 1)),
+            ("05j15ljvjY", (6, 0), (7, 0)),
+            ("05j15ljVjy", (6, 0), (7, 0)),
+            ("05j15ljyj", (6, 1), (7, 1)),
+            ("05j15ljyy", (6, 1), (7, 1)),
+            ("05j15ljyG", (6, 1), (7, 1)),
+            ("05j15lj3yy", (6, 1), (7, 1)),
+            ("05j15ljY", (6, 1), (7, 1)),
+            ("015l7jyk", (6, 1), (7, 1)),
+            ("015l6jyk", (5, 15), (6, 1)),
+            ("015l9jyk", (8, 15), (9, 0)),
+            ("015ljyk", (0, 15), (1, 15)),
+            ("015lyk", (0, 15), (1, 15)),
+            ("015lygg", (0, 15), (1, 15)),
+            ("015lVy", (0, 0), (1, 0)),
+            ("04j15l$yk", (3, 28), (4, 28)),
+            ("05j15ljyip", (0, 0), (1, 0)),
+        ],
+    );
+    misses.extend(landing_misses(
+        CASE_LINES,
+        &[
+            ("6j5lyk", (5, 8), (6, 5)),
+            ("6j5lykk", (4, 0), (5, 8)),
+            ("G5lyk", (7, 3), (8, 5)),
+            ("G5lykk", (6, 2), (7, 3)),
+            ("6jyk", (5, 0), (6, 0)),
+            ("7j3lyk", (6, 2), (7, 3)),
+            ("7j3lykk", (5, 5), (6, 2)),
+            ("6j5lyy", (6, 5), (7, 6)),
+            ("ggyk", (0, 0), (1, 0)),
+            ("3j5lyk", (2, 1), (3, 1)),
+            ("4j5lyk", (3, 0), (4, 0)),
+        ],
+    ));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `guu` `gUU` and their `gugu` `gUgU` spellings land on the line's first
+/// non-blank (its last blank on a line of nothing else) unless the cursor
+/// was before it, `3guu` and `gUj` where the cursor was, `gUk` and `gUgg`
+/// where the motion put it, `Vgu` `VU` `V~` at column 0 unless the cursor
+/// is above the anchor: wherever the range starts, as Neovim's.
+#[test]
+fn linewise_case_changes_land_where_their_range_starts_as_neovim() {
+    let mut misses = landing_misses(
+        CASE_LINES,
+        &[
+            ("j20lguu", (1, 3), (2, 1)),
+            ("j20lgUU", (1, 3), (2, 1)),
+            ("j20lgugu", (1, 3), (2, 1)),
+            ("j20lgUgU", (1, 3), (2, 1)),
+            ("j20l3guu", (1, 20), (2, 1)),
+            ("j20l2guu", (1, 20), (2, 1)),
+            ("jj1l2guu", (2, 1), (3, 1)),
+            ("jjjgUU", (3, 0), (4, 0)),
+            ("jjj1lgUU", (3, 1), (4, 0)),
+            ("jjj2lgUU", (3, 2), (4, 0)),
+            ("jjjjgUU", (4, 0), (5, 0)),
+            ("jjjjj5lgUU", (5, 0), (6, 0)),
+            ("6j5lgUU", (6, 1), (7, 2)),
+            ("7j5lgUU", (7, 0), (8, 0)),
+            ("7j5lguu", (7, 0), (8, 0)),
+            ("ggguu", (0, 0), (1, 0)),
+            ("gg5lguu", (0, 0), (1, 0)),
+            ("G5lgUk", (7, 3), (8, 5)),
+            ("j20lgUk", (0, 6), (1, 6)),
+            ("jj1lgUk", (1, 1), (2, 1)),
+            ("j20lgUj", (1, 20), (2, 1)),
+            ("j20lgUG", (1, 20), (2, 1)),
+            ("j20lgUgg", (0, 6), (1, 6)),
+            ("j20lgUip", (0, 0), (1, 0)),
+            ("j20lVgu", (1, 0), (2, 0)),
+            ("j20lVU", (1, 0), (2, 0)),
+            ("j20lVjU", (1, 0), (2, 0)),
+            ("j20lVju", (1, 0), (2, 0)),
+            ("j20lV~", (1, 0), (2, 0)),
+            ("jj1lVkU", (1, 1), (2, 1)),
+            ("G5lVkU", (7, 3), (8, 5)),
+            ("G5lVku", (7, 3), (8, 5)),
+            ("G5lVk~", (7, 3), (8, 5)),
+        ],
+    );
+    misses.extend(landing_misses(
+        &sticky_long(),
+        &[
+            ("05j15ljguu", (6, 0), (7, 0)),
+            ("05j15lj3guu", (6, 1), (7, 1)),
+            ("05j15ljgUk", (5, 15), (6, 1)),
+            ("05j15lj2gUk", (4, 15), (5, 15)),
+            ("05j15ljgUj", (6, 1), (7, 1)),
+            ("05j15ljVku", (5, 15), (6, 1)),
+            ("05j15ljVk~", (5, 15), (6, 1)),
+        ],
+    ));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    // The lines did change case.
+    let app = sticky_keys(CASE_LINES, "j20lgUU");
+    assert_eq!(app.buffer.line_text(1), "   INDENTED LINE HERE WITH WORDS");
+    let app = sticky_keys(CASE_LINES, "G5lVk~");
+    assert_eq!(app.buffer.line_text(7), "日本 wIDE lINE hERE");
+}
+
+/// Undo and redo of a linewise case change both put the cursor where the
+/// change left it, as Neovim's, from wherever it went since.
+#[test]
+fn undo_and_redo_of_a_linewise_case_change_land_as_neovim() {
+    let cases: Vec<(String, (usize, usize))> = [
+        ("j20lguu", (1, 3)),
+        ("j20lgUUG", (1, 3)),
+        ("j20l3gUU", (1, 20)),
+        ("j20lgUk", (0, 6)),
+        ("G5lgUk", (7, 3)),
+        ("j20lVjU", (1, 0)),
+        ("G5lVkU", (7, 3)),
+        ("G5lVk~", (7, 3)),
+        ("j20lV~", (1, 0)),
+        ("7j5lguu", (7, 0)),
+    ]
+    .iter()
+    .flat_map(|&(k, w)| [(format!("{k}u"), w), (format!("{k}u\u{12}"), w)])
+    .collect();
+    let cases: Vec<_> = cases.iter().map(|(k, w)| (k.as_str(), "", *w)).collect();
+    let misses = sticky_misses(CASE_LINES, &cases);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `2gUU` on the last line has no second line to take, so Neovim beeps and
+/// changes nothing: the cursor stays where it was. A count that runs past
+/// the end from higher up takes the lines there are and stays put, as
+/// `3guu` does; undo and redo come back to it.
+#[test]
+fn a_counted_case_change_past_the_end_as_neovim() {
+    let text = "first line here\n  second line\n   last words\n";
+    let mut misses = landing_misses(
+        text,
+        &[
+            ("G05l2gUU", (2, 5), (2, 5)),
+            ("G05l5gUU", (2, 5), (2, 5)),
+            ("G05l2gugu", (2, 5), (2, 5)),
+            ("G05lgUU", (2, 3), (2, 3)),
+            ("j05l3guu", (1, 5), (2, 5)),
+            ("j05l3gUU", (1, 5), (2, 5)),
+            ("gg05l9gUU", (0, 5), (1, 5)),
+        ],
+    );
+    misses.extend(sticky_misses(
+        text,
+        &[
+            // `2gUU` made no step: `u` undoes the `gUU` before it.
+            ("gg5lgUUG05l2gUUgg$u", "", (0, 0)),
+            ("j05l3gUUG$u", "", (1, 5)),
+            ("j05l3gUUG$uG$\u{12}", "", (1, 5)),
+            ("gg05l9gUUG$u", "", (0, 5)),
+            ("gg05l9gUUG$uG$\u{12}", "", (0, 5)),
+        ],
+    ));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    assert_eq!(sticky_keys(text, "G05l2gUU").buffer.line_text(2), "   last words");
+    let app = sticky_keys(text, "gg5lgUUG05l2gUUgg$u");
+    assert_eq!((app.buffer.line_text(0), app.buffer.line_text(2)), ("first line here".into(), "   last words".into()));
+    assert_eq!(sticky_keys(text, "j05l3gUU").buffer.line_text(2), "   LAST WORDS");
+}
+
+/// A case change that changes a line's length (`İ` lowercases to `i` and a
+/// combining dot here, `ß` uppercases to `SS`, `ﬁ` to `FI`) lands on the
+/// character Neovim's does. Neovim maps `İ` to `i` and `ß` to `ẞ` and
+/// keeps the byte column, so `0lguj` on `İİİabc` ends on the third `i`:
+/// here the start of that `i`, never its dot. Undo goes back to where the
+/// range started in the old text, redo to the landing in the new.
+#[test]
+fn a_case_change_that_changes_the_length_lands_as_neovim() {
+    let text = "İİİabc\nxyz\nİİİabcdef\n";
+    let mut misses = landing_misses(
+        text,
+        &[
+            ("0lguj", (0, 4), (1, 2)),
+            ("03lguj", (0, 8), (1, 2)),
+            ("05lguj", (0, 8), (1, 2)),
+            ("j3lguk", (0, 7), (1, 2)),
+            ("j2lguk", (0, 7), (1, 2)),
+            ("j3lVku", (0, 7), (1, 2)),
+            ("j3lVk~", (0, 7), (1, 2)),
+            ("0lVjgu", (0, 0), (1, 0)),
+        ],
+    );
+    let text2 = "aßbcde\nxyz\naẞbcde\naﬁbcde\nlast\n";
+    misses.extend(landing_misses(
+        text2,
+        &[
+            ("03lgUj", (0, 3), (1, 2)),
+            ("05lgUj", (0, 5), (1, 2)),
+            ("j3lgUk", (0, 1), (1, 1)),
+            ("j4lgUk", (0, 1), (1, 1)),
+            ("jj3lguj", (2, 4), (3, 4)),
+            ("jj4lguk", (1, 2), (2, 2)),
+            ("jjj3lgUj", (3, 4), (4, 3)),
+            ("jjj4lgUj", (3, 5), (4, 3)),
+            ("jjj3lguj", (3, 3), (4, 3)),
+            ("G3lgUk", (3, 4), (4, 3)),
+            ("G3lVkU", (3, 4), (4, 3)),
+            ("G3lVk~", (3, 4), (4, 3)),
+            ("4lVjU", (0, 0), (1, 0)),
+        ],
+    ));
+    let i = "İabc\nxyz\n";
+    misses.extend(sticky_misses(
+        i,
+        &[
+            ("0lguj", "", (0, 3)),
+            ("0lgujG$u", "", (0, 1)),
+            ("0lgujG$uG$\u{12}", "", (0, 3)),
+            ("j3lgukG$u", "", (0, 2)),
+            ("j3lgukG$uG$\u{12}", "", (0, 4)),
+        ],
+    ));
+    misses.extend(sticky_misses(
+        "aßbc\nxyz\n",
+        &[
+            ("03lgUjG$u", "", (0, 3)),
+            ("03lgUjG$uG$\u{12}", "", (0, 3)),
+            ("j3lgUkG$u", "", (0, 2)),
+            ("j3lgUkG$uG$\u{12}", "", (0, 1)),
+        ],
+    ));
+    misses.extend(sticky_misses(
+        "İİİabc\nxyz\n",
+        &[("03lgujG$u", "", (0, 3)), ("03lgujG$uG$\u{12}", "", (0, 8))],
+    ));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    // The text is Shoin's full case mapping, as before; `x` takes a letter.
+    let app = sticky_keys(i, "0lgujx");
+    assert_eq!(app.buffer.line_text(0), "i\u{307}ac");
+    assert_eq!(sticky_keys(text2, "03lgUj").buffer.line_text(0), "ASSBCDE");
+    assert_eq!(sticky_keys(text2, "G3lgUk").buffer.line_text(3), "AFIBCDE");
+}
+
+/// `guu`'s first non-blank skips only spaces and tabs, as Neovim's: a
+/// no-break space or an ideographic space is not blank there, though `^`
+/// and the indent commands still skip it.
+#[test]
+fn a_doubled_case_change_skips_only_spaces_and_tabs() {
+    let text = "\u{a0}ABC\nxyz long\n  \u{a0} ABC\nxyz long\n  \u{a0}\nxyz long\n\u{3000}ABC\nxyz\n";
+    let misses = landing_misses(
+        text,
+        &[
+            ("02lguu", (0, 0), (1, 0)),
+            ("02lgUU", (0, 0), (1, 0)),
+            ("02lgugu", (0, 0), (1, 0)),
+            ("2j05lguu", (2, 2), (3, 2)),
+            ("2j0lguu", (2, 1), (3, 1)),
+            ("2j03lgUU", (2, 2), (3, 2)),
+            ("4j02lguu", (4, 2), (5, 2)),
+            ("4j0lguu", (4, 1), (5, 1)),
+            ("6j02lguu", (6, 0), (7, 0)),
+        ],
+    );
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    assert_eq!(sticky_keys(text, "02lguu").buffer.line_text(0), "\u{a0}abc");
+}
+
+/// A linewise yank or case change whose range starts on a closed fold
+/// lands on the fold's line at column 0, as Neovim's (`zf2j` there, `zc`
+/// here); a Visual one does not.
+#[test]
+fn a_linewise_yank_from_a_closed_fold_lands_at_its_start() {
+    let text = "# Top line here with words\nlong line number one here ok\n## Folded heading here\nbody line one is here\nbody line two is here\n## Next heading line here\nlong line after the fold ok\nlast line here\n";
+    let p = "jjzcGk015l";
+    let cases = [
+        ("", (6, 15), (7, 13)),
+        ("k", (5, 15), (6, 15)),
+        ("kk", (2, 15), (5, 15)),
+        ("kyk", (2, 0), (5, 0)),
+        ("kgUk", (2, 0), (5, 0)),
+        ("kkyy", (2, 0), (5, 0)),
+        ("kkyj", (2, 0), (5, 0)),
+        ("kkgUU", (2, 0), (5, 0)),
+        ("kkY", (2, 0), (5, 0)),
+        ("kk2yy", (2, 0), (5, 0)),
+        ("kkVy", (2, 0), (5, 0)),
+        ("kVky", (2, 15), (5, 15)),
+        ("kkVjy", (2, 0), (5, 0)),
+        ("kkkyj", (1, 15), (2, 15)),
+        ("kkkgUj", (1, 15), (2, 15)),
+        ("y2k", (2, 0), (5, 0)),
+    ];
+    let keys: Vec<String> = cases.iter().map(|(k, _, _)| format!("{p}{k}")).collect();
+    let cases: Vec<_> = cases.iter().zip(&keys).map(|(&(_, w, t), k)| (k.as_str(), w, t)).collect();
+    let misses = landing_misses(text, &cases);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// Concealed markup counts by its source: `yk` onto a line with `**` and a
+/// link keeps the source column, as Neovim's (which conceals nothing).
+#[test]
+fn a_linewise_yank_onto_concealed_markup_keeps_the_source_column() {
+    let text = "Some **bold** and *italic* words in this line\nanother long line of plain text here\nshort [link](http://x.y/z) here\n";
+    let misses = landing_misses(
+        text,
+        &[
+            ("j20lyk", (0, 20), (1, 20)),
+            ("j20lgUk", (0, 20), (1, 20)),
+            ("G20lyk", (1, 20), (2, 20)),
+            ("020lyj", (0, 20), (1, 20)),
+        ],
+    );
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+/// Read-only yanks too: `yk` takes the line above with the cursor's and
+/// lands on it, `yj` stays, both at the column read-only keeps (0).
+#[test]
+fn read_only_linewise_yank_lands_where_its_range_starts() {
+    let text = sticky_long();
+    let mut app = app_with(&text);
+    reader(&mut app);
+    feed(&mut app, "jjjjj");
+    screen_of(&mut app, READ_W, READ_H);
+    let line = app.buffer.cursor.line;
+    assert!(line > 1, "moved down");
+    let lines = |a: usize, b: usize| (a..=b).map(|l| format!("{}\n", app_line(&text, l))).collect::<String>();
+    feed(&mut app, "yk");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.registers.get(&'"').map(|r| (r.text.clone(), r.linewise)), Some((lines(line - 1, line), true)));
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (line - 1, 0));
+    feed(&mut app, "yj");
+    screen_of(&mut app, READ_W, READ_H);
+    assert_eq!(app.registers.get(&'"').map(|r| r.text.clone()), Some(lines(line - 1, line)));
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (line - 1, 0));
+    assert!(app.view, "still read-only");
+}
+
+fn app_line(text: &str, l: usize) -> &str {
+    text.lines().nth(l).unwrap()
+}

@@ -147,6 +147,7 @@ Enter Insert with `i`, `a`, `I`, `A`, `o` or `O` from
 | `o` | swap ends |
 | `Esc` | leave Visual |
 | `>` `<` `u` `U` | indent / outdent / lowercase / uppercase |
+| `gu` `gU` | lowercase / uppercase, as `u` `U` |
 | `i` `a` | select a text object with the next key (`viw`, `vap`) |
 | `p` `P` | replace the selection with the register; `p` puts what it replaced in the register, `P` keeps the register |
 | `~` `r` | toggle the case / replace every selected character with the next character you type |
@@ -335,8 +336,8 @@ gives `ss`, `siw` and `2s3w`.
 | `operator_yank` | `yank` | `y` | copy over a motion or object |
 | `operator_indent` | `indent` | `>` | indent over a motion or object |
 | `operator_outdent` | `outdent` | `<` | outdent over a motion or object |
-| `operator_lowercase` | `lowercase` | `gu` (`u` in Visual) | lowercase over a motion or object |
-| `operator_uppercase` | `uppercase` | `gU` (`U` in Visual) | uppercase over a motion or object |
+| `operator_lowercase` | `lowercase` | `gu` (`u` or `gu` in Visual) | lowercase over a motion or object |
+| `operator_uppercase` | `uppercase` | `gU` (`U` or `gU` in Visual) | uppercase over a motion or object |
 | `inner_object` | | `i` | the inside of a text object (`diw`) |
 | `around_object` | | `a` | a text object with its surroundings (`daw`) |
 | `register` | | `"` | name the register for the next command |

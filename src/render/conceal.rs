@@ -21,7 +21,7 @@ use super::quote;
 use super::layout::{cell_width_at, cells_from, display_width, tab_stop, text_width_from};
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
-use super::math::symbols::{accent_command, env_delims, math_escape, subscript_char, superscript_char, symbol, text_of, OPERATORS};
+use super::math::symbols::{accent_command, env_delims, math_escape, subscript_char, superscript_char, symbol, text_of, MathAlphabet, OPERATORS};
 use super::theme::{Attrs, Color, Style, Theme};
 use super::StyledSpan;
 
@@ -543,6 +543,18 @@ fn render_latex_with_spaces(input: &str, mut math_spaces: Option<&mut Vec<usize>
                     continue;
                 }
             }
+            if let Some(alphabet) = MathAlphabet::from_command(&name) {
+                let (mapped, end) = render_alphabet(alphabet, &chars, i);
+                if let Some(mapped) = mapped {
+                    out.push_str(&mapped);
+                } else {
+                    out.push('\\');
+                    out.push_str(&name);
+                    out.extend(&chars[i..end]);
+                }
+                i = end;
+                continue;
+            }
             if matches!(name.as_str(), "vec" | "mathbf" | "bm" | "boldsymbol") {
                 if let Some((value, end)) = argument(&chars, i) {
                     out.push_str(&if name == "vec" { accent_command("vec", &value) } else { value });
@@ -688,7 +700,11 @@ fn command_span(chars: &[char], start: usize) -> usize {
     if end == start + 1 {
         return (start + 2).min(chars.len());
     }
-    let arity = match chars[start + 1..end].iter().collect::<String>().as_str() {
+    let name: String = chars[start + 1..end].iter().collect();
+    if let Some(alphabet) = MathAlphabet::from_command(&name) {
+        return render_alphabet(alphabet, chars, end).1;
+    }
+    let arity = match name.as_str() {
         "frac" | "dfrac" => 2,
         "text" | "mathrm" | "operatorname" | "sqrt" | "vec" | "hat" | "mathbf" | "bm"
         | "boldsymbol" => 1,
@@ -701,6 +717,40 @@ fn command_span(chars: &[char], start: usize) -> usize {
         }
     }
     end
+}
+
+/// Render one letter-style argument. On rejection, include following groups
+/// in the literal command span, including the rest of an unclosed group.
+fn render_alphabet(alphabet: MathAlphabet, chars: &[char], start: usize) -> (Option<String>, usize) {
+    let at = skip_math_spaces(chars, start);
+    let (mapped, mut end) = match chars.get(at) {
+        Some('{') => match braced_raw(chars, at) {
+            Some((raw, end)) => (alphabet.render(&raw), end),
+            None => return (None, chars.len()),
+        },
+        Some('\\') if chars.get(at + 1) != Some(&'\\') => {
+            (None, name_end(chars, at + 1).max((at + 2).min(chars.len())))
+        }
+        Some(&c) if !matches!(c, '}' | '^' | '_' | '&' | '\\') => {
+            (alphabet.render(c.encode_utf8(&mut [0; 4])), at + 1)
+        }
+        _ => return (None, start),
+    };
+    if mapped.is_none() {
+        loop {
+            let group = skip_math_spaces(chars, end);
+            if chars.get(group) != Some(&'{') {
+                break;
+            }
+            let Some((_, next)) = braced_raw(chars, group) else { return (None, chars.len()) };
+            end = next;
+        }
+    }
+    (mapped, end)
+}
+
+fn skip_math_spaces(chars: &[char], start: usize) -> usize {
+    start + chars[start..].iter().take_while(|c| c.is_whitespace()).count()
 }
 
 /// A command's one argument, rendered: a `{…}` group, a command, or a single
@@ -1326,6 +1376,48 @@ mod tests {
         assert_eq!(shown(r"$\hat\theta$"), "θ\u{0302}");
         assert_eq!(shown(r"$\vec v$"), "v\u{20D7}");
         assert_eq!(shown(r"$\mathbf\Omega$"), "Ω");
+    }
+
+    #[test]
+    fn math_alphabets_conceal_letters_and_keep_invalid_arguments() {
+        for (tex, expected) in [
+            (r"\mathbb{R}^n", "ℝⁿ"),
+            (r"\mathbb{RN}", "ℝℕ"),
+            (r"\mathbb {R N}", "ℝℕ"),
+            (r"\mathbb RN", "ℝN"),
+            (r"\mathcal{O}(n)", "𝒪(n)"),
+            (r"\mathscr{F}", "ℱ"),
+            (r"\mathfrak{g}_1", "𝔤₁"),
+            (r"\mathbb{a09}", "𝕒𝟘𝟡"),
+            (r"x^\mathbb R", "x^ℝ"),
+            (r"x_\mathfrak{g}", "x_𝔤"),
+        ] {
+            assert_eq!(shown(&format!("${tex}$")), expected, "{tex}");
+        }
+        for tex in [r"\mathbb{α}", r"\mathcal{1}", r"\mathbb{}", r"\mathbb{\alpha}",
+            r"\mathbb{Rα}", r"\mathbb{ }", r"\mathbb{{R}}", r"\mathbb{R \hat{x}}",
+            r"\mathbb α", r"\mathbb\alpha", r"\mathbb \hat{R}", r"\mathcal -",
+        ] {
+            assert_eq!(shown(&format!("${tex}$")), tex);
+        }
+    }
+
+    #[test]
+    fn rejected_alphabet_keeps_following_groups() {
+        for tex in [r"\mathcal{1}{\alpha}", r"\mathcal{1}  {{\alpha}} {\beta}",
+            r"\mathcal 1{\alpha}", r"\mathcal{1}{\alpha",
+        ] {
+            assert_eq!(shown(&format!("${tex}$")), tex);
+        }
+        assert_eq!(shown(r"$\mathcal{O}{\alpha}$"), "𝒪{α}");
+    }
+
+    #[test]
+    fn rejected_alphabet_keeps_unclosed_bare_command_group() {
+        for tex in [r"\mathbb\hat{\alpha", r"\mathbb \hat{R}  {{\alpha"] {
+            assert_eq!(shown(&format!("${tex}$")), tex);
+        }
+        assert_eq!(shown(r"$x^\mathbb\hat{\alpha$"), r"x^\mathbb\hat{\alpha");
     }
 
     #[test]

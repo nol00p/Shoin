@@ -561,7 +561,7 @@ fn builtin_bindings() -> BTreeSet<(String, String)> {
                         let key = Key { code: next, ctrl: false, alt: false, shift: false };
                         // after_prefix passes every Ctrl-w suffix through to
                         // window_command; only that handler assigns bindings.
-                        if after_prefix(prefix, key, mode == "visual").is_some_and(|v| {
+                        if after_prefix(prefix, key).is_some_and(|v| {
                             !matches!(v, Verb::Act(Action::Window(c)) if !window_keys.contains(&c))
                         }) {
                             let separator = if ctrl { " " } else { "" };
