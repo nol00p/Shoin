@@ -746,7 +746,7 @@ fn embed_rows_of(app: &App, doc: usize, line: usize) -> Vec<String> {
     x.rows
         .iter()
         .filter_map(|r| match r {
-            Row::Body(s, _) => Some(s.clone()),
+            Row::Body(s, _, _) => Some(s.clone()),
             Row::Error(s) => Some(s.clone()),
             _ => None,
         })
@@ -2523,15 +2523,15 @@ fn set_tab_width_redraws_tabbed_lines() {
         let a = at("\u{2022}"); // `a`'s bullet, at the item's left edge
         (at("b") - a, at("x") - a, at("y") - at("x"))
     };
-    assert_eq!(draw(&app), (6, 4, 5), "at 4: `b` 4 + 2 in, `x` a tab in, `y` a tab past it");
+    assert_eq!(draw(&app), (6, 4, 4), "at 4: `b` 4 + 2 in, `x` a tab in, `y` at the next stop");
     cmd(&mut app, ":set tab_width 2");
     app.refresh_blocks(); // as the event loop does before every frame
     assert_eq!(app.config.editor.tab_width, 2);
     assert!(matches!(app.blocks.kinds[2], BlockKind::ListItem { depth: 2, .. }), "reclassified");
-    assert_eq!(draw(&app), (4, 2, 3), "at 2");
+    assert_eq!(draw(&app), (4, 2, 2), "at 2");
     cmd(&mut app, ":set tab_width=8");
     app.refresh_blocks();
-    assert_eq!(draw(&app), (10, 8, 9), "at 8");
+    assert_eq!(draw(&app), (10, 8, 8), "at 8");
 }
 
 /// `:number [relative|absolute]` — an explicit mode sets it directly, and
@@ -8830,8 +8830,7 @@ fn sticky_misses(text: &str, cases: &[(&str, &str, (usize, usize))]) -> Vec<Stri
 /// `G` `gg` `NG` `:N` `:$` `:0` keep the column `j` and `k` keep, as
 /// Neovim's default 'nostartofline' does: clamped to a short line, the goal
 /// from a longer one coming back, a screen cell across tabs and wide
-/// characters. Every expected place is what Neovim gave for the same keys,
-/// but for one after a tab that does not start its line.
+/// characters. Every expected place is what Neovim gave for the same keys.
 #[test]
 fn line_jumps_keep_the_column_as_neovim() {
     let misses = sticky_misses(
@@ -8844,10 +8843,8 @@ fn line_jumps_keep_the_column_as_neovim() {
             ("06l4G", "", (3, 2)),
             ("010l4G", "", (3, 4)),
             ("010l5G", "", (4, 5)),
-            // Neovim says (0, 8): its second tab ends at the stop, cell 8,
-            // while Shoin draws every tab 4 cells wide, so `y` is at cell 9
-            // here and `k` lands on the same column (`cell_width`).
-            ("4G03l1G", "", (0, 9)),
+            // The second tab ends at the stop, cell 8, as in Neovim.
+            ("4G03l1G", "", (0, 8)),
             ("4G03l5G", "", (4, 4)),
             ("5G02l1G", "", (0, 4)),
             ("5G02l4G", "", (3, 1)),
@@ -8863,6 +8860,36 @@ fn line_jumps_keep_the_column_as_neovim() {
         ],
     );
     assert!(misses.is_empty(), "{misses:#?}");
+}
+
+/// `j`, `k`, `G` and `gg` across a tab in the middle of a line, at tab
+/// widths 2, 4 and 8: the tab reaches its stop, so the goal is the cell
+/// Neovim draws the char on (`set ts=N`, the same keys). `0f<Tab>` puts
+/// the goal on the tab's last cell.
+#[test]
+fn vertical_motions_count_a_mid_line_tab_to_its_stop_as_neovim() {
+    let text = "ab\tcd\nabcdefghij\nx\ty\tz\n";
+    let mut misses = Vec::new();
+    for (tw, cases) in [
+        (2, [("0fcj", (1, 4)), ("0f\tj", (1, 3)), ("j0fhk", (0, 4)), ("j0fhG", (2, 4)), ("G0fzgg", (0, 3))]),
+        (4, [("0fcj", (1, 4)), ("0f\tj", (1, 3)), ("j0fhk", (0, 4)), ("j0fhG", (2, 3)), ("G0fzgg", (0, 4))]),
+        (8, [("0fcj", (1, 8)), ("0f\tj", (1, 7)), ("j0fhk", (0, 2)), ("j0fhG", (2, 1)), ("G0fzgg", (0, 4))]),
+    ] {
+        for (keys, want) in cases {
+            let mut app = app_with(text);
+            app.config.editor.tab_width = tw;
+            app.refresh_blocks();
+            for c in keys.chars() {
+                app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                app.sync_after_input();
+            }
+            let got = (app.buffer.cursor.line, app.buffer.cursor.col);
+            if got != want {
+                misses.push(format!("{keys:?} at {tw}: got {got:?}, Neovim {want:?}"));
+            }
+        }
+    }
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
 
 /// `H` `M` `L` and the paging keys keep the column too, and so does a
@@ -9039,9 +9066,8 @@ fn undo_and_redo_of_linewise_edits_land_as_neovim() {
 /// A goal set with the cursor on a tab is the tab's LAST cell, where
 /// Neovim draws the Normal-mode cursor: after `dd` lands on one, after `0`
 /// or `h` moves onto one. (`l0`, because a `0` already at column 0 moves
-/// nothing in Shoin and keeps the old goal.) Every case is Neovim's answer but the mid-line
-/// tab's: Shoin draws a tab as a fixed four cells, so `ab\tx`'s tab ends at
-/// cell 5 here and at cell 3 in Neovim (the round-2 difference).
+/// nothing in Shoin and keeps the old goal.) Every case is Neovim's answer,
+/// the mid-line tab's too: `ab\tx`'s tab ends at its stop, cell 3.
 #[test]
 fn a_goal_set_on_a_tab_is_its_last_cell_as_neovim() {
     let leading = "abcdefghijk\n\tx\nabcdefghijk\n";
@@ -9066,10 +9092,10 @@ fn a_goal_set_on_a_tab_is_its_last_cell_as_neovim() {
         (
             mid,
             &[
-                ("02lddj", (1, 5)), // Neovim (1, 3)
+                ("02lddj", (1, 3)),
                 ("02lddk", (0, 2)),
-                ("jfxhj", (2, 5)), // Neovim (2, 3)
-                ("jfxhgg", (0, 5)), // Neovim (0, 3)
+                ("jfxhj", (2, 3)),
+                ("jfxhgg", (0, 3)),
                 ("jfxhjk", (1, 2)),
                 ("j0j", (2, 0)),
             ][..],

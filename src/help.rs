@@ -767,7 +767,7 @@ const VIEW: &str = "
 :set measure :set width :: 8–65535. Default 72. Text width in columns
 :set mouse :: on / off. Default on. Capture mouse clicks, drags and scrolling
 :set numbers :set number :set nu :: {number}. Default off. Bare toggles off and back
-:set tab_width :set ts :: 1–16. Default 4. Cells per tab for display and indentation. Changes reclassify open documents
+:set tab_width :set ts :: 1–16. Default 4. A tab stop every N cells on screen; the columns a tab counts in an indent. Changes reclassify open documents
 :set typewriter :set tw :: on / off. Default off. Keep the cursor line at a fixed height
 
 > Use a space or = before a value. With no value, a numeric option reports its current value.

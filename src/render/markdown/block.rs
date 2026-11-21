@@ -631,9 +631,10 @@ pub const COMMONMARK_TAB: usize = 4;
 
 /// Leading whitespace in columns, a tab counting as `tab_width` columns
 /// wherever it falls. This is the one measure of indent: the classifier
-/// (item nesting, `ListItem::depth`, the 4-column code threshold), `Lists`,
-/// the indent guides and the hanging indent all count with it, so they agree
-/// on which item a line is in.
+/// (item nesting, `ListItem::depth`, the 4-column code threshold), `Lists`
+/// and the indent guides all count with it, so they agree on which item a
+/// line is in. Drawing does not: on screen a tab reaches its stop
+/// (`layout::cell_width_at`), which is the same for a tab-only indent.
 ///
 /// A fixed width, not the next tab stop as CommonMark counts: `>` puts its
 /// spaces in front of the indent already there, and with tab stops spaces in
