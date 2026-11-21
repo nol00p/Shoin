@@ -41,7 +41,7 @@ use crate::render::conceal::{ActiveSet, ConcealCtx, ConcealMap};
 use crate::render::indent::{self, guides_for};
 use crate::render::hidden::{self, Hidden};
 use crate::render::layout::{
-    content_column, no_wrap, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow, MIN_WRAP_WIDTH,
+    content_column, no_wrap, tab_stop, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow, MIN_WRAP_WIDTH,
 };
 use crate::render::markdown::{self, block::BlockKind};
 use crate::render::theme::Theme;
@@ -162,6 +162,8 @@ struct StyleKey {
     /// layout setting does.
     hanging_indent: bool,
     stable_gutter: bool,
+    /// An embed's rows are wrapped on its lines as drawn, concealed or not.
+    conceal: bool,
     /// Reaches an embed's expansion: the search root, the depth cap, the
     /// heading offset and the border are all read while the line is parsed.
     transclude: crate::config::schema::TranscludeConfig,
@@ -179,6 +181,7 @@ impl StyleKey {
             && self.embed_mode == app.embed_mode
             && self.hanging_indent == app.config.layout.hanging_indent
             && self.stable_gutter == (app.config.layout.stable_gutter && app.config.layout.conceal)
+            && self.conceal == app.config.layout.conceal
             && self.transclude == app.config.transclude
     }
 
@@ -192,6 +195,7 @@ impl StyleKey {
             embed_mode: app.embed_mode,
             hanging_indent: app.config.layout.hanging_indent,
             stable_gutter: app.config.layout.stable_gutter && app.config.layout.conceal,
+            conceal: app.config.layout.conceal,
             transclude: app.config.transclude.clone(),
         }
     }
@@ -741,8 +745,12 @@ impl RenderCache {
             return (base, 0);
         }
         let wrap = entry.wrap(self.is_concealed(line));
+        // A row's end is the next row's first char: that row holds it. Only
+        // the last row holds its end, the end of the line, where Insert and
+        // append put the cursor.
+        let last = wrap.len().saturating_sub(1);
         for (i, (start, end)) in wrap.iter().enumerate() {
-            if col >= *start && col <= *end {
+            if col >= *start && (col < *end || (i == last && col == *end)) {
                 return (base + i, col - start);
             }
         }
@@ -870,7 +878,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         (0, 0)
     } else if matches!(block, BlockKind::ListItem { .. }) {
         let tw = cfg.editor.tab_width as u16;
-        (content_column(&source, tw, ""), content_column(&concealed, tw, &cfg.glyphs.indent_guide))
+        (content_column(&source, 0, tw, ""), content_column(&concealed, 0, tw, &cfg.glyphs.indent_guide))
     } else if let BlockKind::Quote(depth) = block {
         quote_hang(&source, &concealed, depth, cfg)
     } else {
@@ -900,6 +908,9 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
                 app.embed_mode,
                 app.config.markdown.math,
                 app.config.editor.tab_width,
+                // Each embedded line is wrapped on, and drawn from, its text
+                // as the document's own rules draw it.
+                &|text, kind, inner| crate::transclude::preview::drawn(text, kind, &app.theme, cfg, inner),
             )
         })
     } else {
@@ -964,11 +975,24 @@ fn quote_hang(source: &str, concealed: &str, depth: u8, cfg: &crate::config::Con
     };
     let hang = |lead: u16, content: u16| if content == 0 { 0 } else { lead + content };
     let markers: String = source.chars().take(inner.cut.keep).collect();
-    let lead_raw = text_width(&markers, tw) + inner.cut.skip as u16;
-    let raw = hang(lead_raw, content_column(&inner.cut.view, tw as u16, ""));
+    let cut = &inner.cut;
+    // A tab after the last marker reaches its stop in the source; the view
+    // writes it as the marker's space and `pad` spaces, which the stop
+    // stands in for.
+    let lead_raw = if cut.pad > 0 {
+        let at = usize::from(text_width(&markers, tw));
+        (at + tab_stop(at, tw)) as u16
+    } else {
+        text_width(&markers, tw) + cut.skip as u16
+    };
+    let view: String = cut.view.chars().skip(cut.pad).collect();
+    let raw = hang(lead_raw, content_column(&view, lead_raw, tw as u16, ""));
     let bars = crate::render::quote::bars(&cfg.glyphs.quote_bar, depth);
     let shown = match concealed.strip_prefix(bars.as_str()) {
-        Some(rest) => hang(text_width(&bars, tw), content_column(rest, tw as u16, &cfg.glyphs.indent_guide)),
+        Some(rest) => {
+            let lead = text_width(&bars, tw);
+            hang(lead, content_column(rest, lead, tw as u16, &cfg.glyphs.indent_guide))
+        }
         None => 0,
     };
     (raw, shown)

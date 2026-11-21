@@ -6,7 +6,7 @@
 //! Pure text math, no ratatui: callers turn `justify_gaps`'s output into
 //! styled spans, and `align_offset`/`justify_offset` into screen columns.
 
-use crate::render::layout::text_width;
+use crate::render::layout::text_width_from;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextAlign {
@@ -62,12 +62,13 @@ impl TextAlign {
 /// Trailing whitespace is ignored on both ends of the measurement: the word
 /// wrapper (`layout::wrap_line`) leaves a row's own trailing space attached to
 /// it, and stretching space that is already invisible would waste a column.
-/// A tab is measured as its `tab` cells but is not a gap: it is stretched no
-/// more than a word is.
-pub fn justify_gaps(text: &str, measure: u16, tab: usize) -> Vec<(usize, u16)> {
+/// A tab is measured as the cells to its stop, the row starting at line cell
+/// `at` (`layout::cell_width_at`), but is not a gap: it is stretched no more
+/// than a word is.
+pub fn justify_gaps(text: &str, at: usize, measure: u16, tab: usize) -> Vec<(usize, u16)> {
     let trimmed = text.trim_end();
     let chars: Vec<char> = trimmed.chars().collect();
-    let content_width = text_width(trimmed, tab);
+    let content_width = text_width_from(trimmed, at, tab);
     if content_width >= measure {
         return Vec::new();
     }
@@ -126,12 +127,12 @@ pub fn justify_offset(gaps: &[(usize, u16)], before: usize) -> u16 {
 /// an already-stretched row back to the cell it had before the stretch, so a
 /// click still lands on the character under the pointer rather than drifting
 /// into the padding a later gap opened up. `row` is the row's chars, measured
-/// as `justify_gaps` measured them (a tab is `tab` cells).
-pub fn unstretch_col(gaps: &[(usize, u16)], col: u16, row: &[char], tab: usize) -> u16 {
+/// as `justify_gaps` measured them, from line cell `at`.
+pub fn unstretch_col(gaps: &[(usize, u16)], col: u16, row: &[char], at: usize, tab: usize) -> u16 {
     let mut consumed = 0u16;
     for &(pos, extra) in gaps {
         // The cell just past the gap's space, before any stretch.
-        let after = text_width(&row[..(pos + 1).min(row.len())].iter().collect::<String>(), tab);
+        let after = text_width_from(&row[..(pos + 1).min(row.len())].iter().collect::<String>(), at, tab);
         let insertion_at = after + consumed;
         if col < insertion_at {
             return col - consumed;
@@ -172,7 +173,7 @@ mod tests {
     #[test]
     fn justify_gaps_distributes_the_shortfall_across_interior_spaces() {
         // "aaaa bbbb cccc" is 14 columns wide, three words, two gaps.
-        let gaps = justify_gaps("aaaa bbbb cccc", 20, 4);
+        let gaps = justify_gaps("aaaa bbbb cccc", 0, 20, 4);
         assert_eq!(gaps.len(), 2, "two interior gaps: {gaps:?}");
         let total: u16 = gaps.iter().map(|&(_, n)| n).sum();
         assert_eq!(total, 6, "20 - 14 columns short");
@@ -180,15 +181,15 @@ mod tests {
 
     #[test]
     fn justify_gaps_ignores_a_trailing_space_the_wrapper_left_attached() {
-        let gaps = justify_gaps("aaaa bbbb ", 12, 4);
+        let gaps = justify_gaps("aaaa bbbb ", 0, 12, 4);
         // Trimmed content is "aaaa bbbb" (9 cols), one interior gap, 3 short.
         assert_eq!(gaps, vec![(4, 3)]);
     }
 
     #[test]
     fn justify_gaps_is_empty_when_theres_nothing_to_stretch() {
-        assert!(justify_gaps("aaaa", 12, 4).is_empty(), "single word, no gap");
-        assert!(justify_gaps("aaaa bbbb", 9, 4).is_empty(), "already full");
+        assert!(justify_gaps("aaaa", 0, 12, 4).is_empty(), "single word, no gap");
+        assert!(justify_gaps("aaaa bbbb", 0, 9, 4).is_empty(), "already full");
     }
 
     #[test]
@@ -212,7 +213,7 @@ mod tests {
     fn unstretch_col_inverts_the_stretch() {
         let gaps = vec![(4, 2), (9, 1)];
         let row: Vec<char> = "aaaa bbbb cccc".chars().collect();
-        let un = |col| unstretch_col(&gaps, col, &row, 4);
+        let un = |col| unstretch_col(&gaps, col, &row, 0, 4);
         // Rendered row: "aaaa   bbbb  cccc" — 2 extra after col 4, 1 after col 9+2=11.
         assert_eq!(un(0), 0);
         assert_eq!(un(4), 4, "right at the word boundary");
@@ -221,15 +222,20 @@ mod tests {
         assert_eq!(un(13), 10, "past both stretches, three columns back");
     }
 
-    /// A tab before a gap is its `tab` cells wide, in the measure and in the
-    /// inverse: `a\tb c` at tab 4 is 8 cells, `c` at cell 7.
+    /// A tab before a gap is the cells to its stop, in the measure and in
+    /// the inverse: `a\tb c` at tab 4 is 7 cells, `c` at cell 6. A row that
+    /// starts at line cell 2 has its tab reach the stop sooner.
     #[test]
-    fn justify_measures_a_tab_as_its_cells() {
-        let gaps = justify_gaps("a\tb c", 10, 4);
-        assert_eq!(gaps, vec![(3, 2)], "8 cells, 2 short, one gap");
+    fn justify_measures_a_tab_to_its_stop() {
+        let gaps = justify_gaps("a\tb c", 0, 10, 4);
+        assert_eq!(gaps, vec![(3, 3)], "7 cells, 3 short, one gap");
         let row: Vec<char> = "a\tb c".chars().collect();
-        assert_eq!(unstretch_col(&gaps, 2, &row, 4), 2, "inside the tab");
-        assert_eq!(unstretch_col(&gaps, 8, &row, 4), 7, "inside the stretch: the cell after the space");
-        assert_eq!(unstretch_col(&gaps, 9, &row, 4), 7, "`c`, drawn two cells further on");
+        assert_eq!(unstretch_col(&gaps, 2, &row, 0, 4), 2, "inside the tab");
+        assert_eq!(unstretch_col(&gaps, 7, &row, 0, 4), 6, "inside the stretch: the cell after the space");
+        assert_eq!(unstretch_col(&gaps, 9, &row, 0, 4), 6, "`c`, drawn three cells further on");
+        // From cell 2: `a` at 2, the tab to 4, `b` at 4 of the line: 5 cells.
+        assert_eq!(justify_gaps("a\tb c", 2, 10, 4), vec![(3, 5)]);
+        assert_eq!(unstretch_col(&[(3, 5)], 1, &row, 2, 4), 1, "the tab's one cell");
+        assert_eq!(unstretch_col(&[(3, 5)], 2, &row, 2, 4), 2, "`b`");
     }
 }

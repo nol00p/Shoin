@@ -273,14 +273,24 @@ middle or the bottom of the pane. The cursor stays where it is.
   bullets, the indent guides and which item a line or code block belongs
   to all count it the same way, and change together when `tab_width` does
   (`:set tab_width=N`, 1 to 16, or `:set ts=N`).
-- On screen a tab is `tab_width` blank cells, wherever it is in a line,
-  code blocks included. It is a fixed width, not the way to the next tab
-  stop: `a\tb` and `abc\tb` both put 4 blank cells before the `b` at the
-  default.
-  Wrapping, the caret, a click, a selection and `j` `k` all count it so. The
-  caret on a tab sits on its first cell, and a click on any of its cells
-  lands on it. A tab-indented item gets its indent guides on the tab's
-  cells, as a space-indented one does.
+- On screen a tab reaches the next tab stop, every `tab_width` cells from
+  the start of the line, as Neovim's `tabstop`: `a\tb` and `abc\tb` both
+  put the `b` at cell 4 at the default, and `abcd\tb` at cell 8. Code blocks
+  count the same way. Wrapping, the caret, a click, a selection, `j` `k`
+  and the line jumps all count it so. The caret on a tab sits on its first
+  cell, and a click on any of its cells lands on it. A tab-indented item
+  draws as deep as it nests, with its indent guides on the tab's cells, as
+  a space-indented one does. A mixed indent nests by the count above but
+  draws to the stop: ` \t- b` is 5 columns in for the list commands, and
+  its bullet is drawn at cell 4.
+- A tab is never split across rows. One that ends on a row's last cell ends
+  the row; one that would run past it goes to the next row with the word
+  before it. On a wrapped line the stops keep counting from the line's
+  start, not the row's.
+- A line drawn with its markers hidden counts its stops from the cells it
+  draws: `**a**\tb` puts `b` at cell 4, and at cell 8 once the cursor is on
+  the line and `**` shows. Neovim, with `conceallevel` set, keeps the
+  source's stops instead.
   HTML and PDF export, like GitHub, always count a tab as 4 columns: with
   another `tab_width`, a tab-indented list can nest differently there, and
   `:fixlist` rewrites such tabs as spaces. At 4 they agree, except where

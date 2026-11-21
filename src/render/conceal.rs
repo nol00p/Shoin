@@ -18,7 +18,7 @@ use crate::text::cursor::Cursor;
 
 use super::indent;
 use super::quote;
-use super::layout::{cell_width, display_width, text_width};
+use super::layout::{cell_width_at, cells_from, display_width, tab_stop, text_width_from};
 use super::markdown::block::{BlockKind, Marker};
 use super::markdown::inline::InlineSpan;
 use super::math::symbols::{accent_command, env_delims, math_escape, subscript_char, superscript_char, symbol, text_of, MathAlphabet, OPERATORS};
@@ -152,7 +152,7 @@ impl ConcealMap {
         if *block == BlockKind::MathBlock {
             math_block_ops(&chars, &mut inline);
         } else {
-            block_ops(&chars, block, ctx, &mut marks);
+            block_ops(&chars, block, ctx, 0, &mut marks);
         }
 
         // Inline: the markers are exactly `outer - inner`, already computed by
@@ -223,11 +223,11 @@ impl ConcealMap {
     ///
     /// Takes the source line so visible characters are measured at their true
     /// width: a click past a CJK glyph or an emoji lands where it looks like it
-    /// should, not one column per char, and one on any cell of a tab (`tab`
-    /// cells) lands on the tab.
+    /// should, not one column per char, and one on any cell of a tab (drawn
+    /// to its stop in the concealed text) lands on the tab.
     pub fn source_col(&self, source: &str, display_col: u16, tab: usize) -> usize {
         let chars: Vec<char> = source.chars().collect();
-        let cell = |c: char| cell_width(c, tab) as u16;
+        let cell = |c: char, at: u16| cell_width_at(c, at.into(), tab) as u16;
 
         let mut disp: u16 = 0;
         let mut src = 0usize;
@@ -235,7 +235,7 @@ impl ConcealMap {
         for op in &self.ops {
             let r = op.range();
             while src < r.start {
-                let w = cell(*chars.get(src).unwrap_or(&' '));
+                let w = cell(*chars.get(src).unwrap_or(&' '), disp);
                 if display_col < disp + w.max(1) {
                     return src;
                 }
@@ -245,7 +245,7 @@ impl ConcealMap {
             match op {
                 Conceal::Hide(rr) => src = rr.end,
                 Conceal::Replace { range, text, .. } => {
-                    let w = text_width(text, tab);
+                    let w = text_width_from(text, disp.into(), tab);
                     if display_col < disp + w {
                         return range.start;
                     }
@@ -255,7 +255,7 @@ impl ConcealMap {
             }
         }
         while src < chars.len() {
-            let w = cell(chars[src]);
+            let w = cell(chars[src], disp);
             if display_col < disp + w.max(1) {
                 return src;
             }
@@ -354,27 +354,40 @@ impl ConcealMap {
     /// Math, emphasis or a link at the start of a line conceals as part of
     /// the text, so revealing it moves nothing: a display formula used to
     /// shift by the whole width its TeX gains, out of the text column.
+    ///
+    /// Both forms are walked to the body's first character, through the
+    /// blanks after the run: a tab there reaches a stop counted in each
+    /// form's own cells, so `- [ ]\tx` and its box put `x` on different
+    /// stops.
     pub fn leading_shift(&self, source: &str, tab: usize) -> i32 {
         if self.ops.is_empty() {
             return 0;
         }
         let chars: Vec<char> = source.chars().collect();
-        let width_of = |c: &char| cell_width(*c, tab);
 
-        let mut shift = 0;
+        // Cells each form has drawn so far.
+        let (mut raw, mut shown) = (0usize, 0usize);
         let mut src = 0usize;
         for op in self.leading_run(&chars) {
             let r = op.range();
-            let hidden: usize = chars[r.clone()].iter().map(width_of).sum();
-            let shown = match op {
-                Conceal::Hide(_) => 0,
-                Conceal::Replace { text, .. } => text_width(text, tab) as usize,
-            };
-            shift += hidden as i32 - shown as i32;
+            for &c in &chars[src..r.start] {
+                raw += cell_width_at(c, raw, tab);
+                shown += cell_width_at(c, shown, tab);
+            }
+            raw += cells_from(&chars[r.clone()], raw, tab);
+            if let Conceal::Replace { text, .. } = op {
+                shown += usize::from(text_width_from(text, shown, tab));
+            }
             src = r.end;
         }
+        let body = chars[src..].iter().position(|c| !c.is_whitespace()).map_or(chars.len(), |n| src + n);
+        for &c in &chars[src..body] {
+            raw += cell_width_at(c, raw, tab);
+            shown += cell_width_at(c, shown, tab);
+        }
+        let shift = raw as i32 - shown as i32;
         // A full-line replacement (such as a rule) has no body to align.
-        if chars[src..].iter().all(|c| c.is_whitespace()) {
+        if body == chars.len() {
             shift.max(0)
         } else {
             shift
@@ -441,7 +454,6 @@ impl ConcealMap {
         }
         text
     }
-
 }
 
 pub(super) fn render_latex(input: &str) -> String {
@@ -864,7 +876,9 @@ fn bullet_for(depth: u8, ctx: &ConcealCtx) -> String {
 /// its first space for the guide glyph. One char for one char, so the conceal
 /// map costs nothing in width and every column downstream stays put. A level
 /// that starts on a tab trades the tab for the glyph padded with spaces to the
-/// tab's `tab_width` cells, so the cells stay put there too.
+/// tab's stop, so the cells stay put there too. `from` is the cell `chars`
+/// start at in the source line: 0 for a whole line, past the markers for a
+/// quoted item.
 ///
 /// The glyph carries NO style of its own — `indent::apply` has already colored
 /// those columns by depth in the styled spans, and a `plain` replacement
@@ -873,20 +887,30 @@ fn bullet_for(depth: u8, ctx: &ConcealCtx) -> String {
 ///
 /// Only concealed lines get the guides, like every other conceal op: the line
 /// under the cursor shows its source, spaces and all.
-fn indent_guide_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<Conceal>) {
+fn indent_guide_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, from: usize, ops: &mut Vec<Conceal>) {
     if ctx.glyphs.indent_guide.is_empty() {
         return;
     }
     let line: String = chars.iter().collect();
     let glyph = &ctx.glyphs.indent_guide;
+    // The cell char `pos` is drawn at, carried from guide to guide: the
+    // marks come in order, so the indent is measured once.
+    let (mut pos, mut at) = (0usize, from);
     for (col, _depth) in indent::guides_for(&line, block, ctx.tab_width).marks {
+        let col_end = col.min(chars.len());
+        if col_end > pos {
+            at += cells_from(&chars[pos..col_end], at, ctx.tab_width);
+            pos = col_end;
+        }
         match chars.get(col) {
             Some(' ') => ops.push(Conceal::plain(col..col + 1, glyph.clone())),
             // The glyph alone would take a tab's cells back and move every
-            // column after it; padded, it fills them. A glyph wider than the
-            // tab leaves the tab be.
+            // column after it; padded, it fills them to the tab's stop. A
+            // glyph wider than the tab leaves the tab be. The guides before
+            // it are as wide as what they replace, so its stop is the
+            // source's.
             Some('\t') => {
-                let pad = ctx.tab_width.max(1).checked_sub(display_width(glyph) as usize);
+                let pad = tab_stop(at, ctx.tab_width).checked_sub(display_width(glyph) as usize);
                 if let Some(pad) = pad {
                     ops.push(Conceal::plain(col..col + 1, format!("{glyph}{}", " ".repeat(pad))));
                 }
@@ -898,7 +922,11 @@ fn indent_guide_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &m
 
 /// Block-level marker concealment, at the start of the line only — except for
 /// the fence delimiters, which take the whole line.
-fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<Conceal>) {
+///
+/// `from` is the cell `chars` start at in the source line, for the stops of
+/// a tab in a list item's indent: 0 for a whole line, past the markers for a
+/// quoted item.
+fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, from: usize, ops: &mut Vec<Conceal>) {
     let len = chars.len();
     let glyphs = ctx.glyphs;
     match block {
@@ -927,7 +955,7 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
         // its indent guides on the way past.
         BlockKind::ListItem { marker, checked, depth } => {
             let indent = chars.iter().take_while(|c| **c == ' ' || **c == '\t').count();
-            indent_guide_ops(chars, block, ctx, ops);
+            indent_guide_ops(chars, block, ctx, from, ops);
 
             // End of the marker itself: `-`, or `12.`.
             let mut p = indent;
@@ -1001,7 +1029,7 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
             };
             ops.push(Conceal::Replace {
                 range: 0..len,
-                text: rule(&glyphs.rule, ctx.measure),
+                text: rule(&glyphs.rule, ctx.measure, ctx.tab_width),
                 style: Some(Style::fg(color)),
             });
         }
@@ -1017,8 +1045,9 @@ fn block_ops(chars: &[char], block: &BlockKind, ctx: &ConcealCtx, ops: &mut Vec<
 ///
 /// A tab after the last marker is the marker's space plus `pad` columns of
 /// the rest. The bars then leave off their last space and the tab draws it,
-/// with the `pad` columns after it, so the tab still takes `tab_width` cells
-/// and an indent guide that falls in those columns is drawn inside it.
+/// with the `pad` columns after it, cut or filled with spaces so the text
+/// after the tab starts at the cell it does in the source (the tab's stop);
+/// an indent guide that falls in those columns is drawn inside it.
 fn quote_ops(chars: &[char], depth: u8, ctx: &ConcealCtx, ops: &mut Vec<Conceal>) {
     let bars = quote::bars(&ctx.glyphs.quote_bar, depth);
     let bar_style = Some(Style::fg(ctx.theme.quote_bar));
@@ -1031,16 +1060,13 @@ fn quote_ops(chars: &[char], depth: u8, ctx: &ConcealCtx, ops: &mut Vec<Conceal>
         return;
     };
     let cut = &inner.cut;
-    let mut rest = Vec::new();
-    if inner.is_item() {
-        let view: Vec<char> = cut.view.chars().collect();
-        block_ops(&view, &inner.block, ctx, &mut rest);
-    }
     let mut pad: Vec<String> = vec![" ".to_string(); cut.pad];
     // Give each bar its own source range so a click can distinguish the
     // markers with or without intervening spaces.
     let end = if cut.pad == 0 { cut.keep + cut.skip } else { cut.keep };
     let mut start = 0;
+    // Cells the bars take, where the tab's replacement starts.
+    let mut shown = 0usize;
     let markers = chars[..cut.keep].iter().enumerate().filter_map(|(i, &c)| (c == '>').then_some(i));
     for next in markers.skip(1).chain(std::iter::once(end)) {
         let text = if next == end && cut.pad > 0 {
@@ -1048,8 +1074,29 @@ fn quote_ops(chars: &[char], depth: u8, ctx: &ConcealCtx, ops: &mut Vec<Conceal>
         } else {
             quote::bars(&ctx.glyphs.quote_bar, 1)
         };
+        shown += usize::from(display_width(&text));
         ops.push(Conceal::Replace { range: start..next, text, style: bar_style });
         start = next;
+    }
+    // A tab after the last marker reaches its stop in the source, and the
+    // text after it starts there.
+    let stop = (cut.pad > 0).then(|| {
+        let at = cells_from(&chars[..cut.keep], 0, ctx.tab_width);
+        at + tab_stop(at, ctx.tab_width)
+    });
+    let mut rest = Vec::new();
+    if inner.is_item() {
+        // The cell the view starts at in the source: past the markers and
+        // their space, or, past a tab, `pad` spaces before that tab's stop.
+        // A guide on a tab in its indent is as wide as that tab is in the
+        // source, so the item's text is where the source puts it, give or
+        // take what the bars add over the markers, as for a space indent.
+        let from = match stop {
+            Some(stop) => stop.saturating_sub(cut.pad),
+            None => cells_from(&chars[..cut.doc_col(0)], 0, ctx.tab_width),
+        };
+        let view: Vec<char> = cut.view.chars().collect();
+        block_ops(&view, &inner.block, ctx, from, &mut rest);
     }
     let mut moved = Vec::with_capacity(rest.len());
     for op in rest {
@@ -1070,8 +1117,10 @@ fn quote_ops(chars: &[char], depth: u8, ctx: &ConcealCtx, ops: &mut Vec<Conceal>
             Conceal::Replace { text, style, .. } => Conceal::Replace { range, text, style },
         });
     }
-    if cut.pad > 0 {
-        ops.push(Conceal::plain(cut.keep..cut.keep + 1, format!(" {}", pad.concat())));
+    if let Some(stop) = stop {
+        let fill = stop.saturating_sub(shown).saturating_sub(1);
+        pad.resize(fill.max(cut.pad), " ".to_string());
+        ops.push(Conceal::plain(cut.keep..cut.keep + 1, format!(" {}", pad[..fill].concat())));
     }
     ops.extend(moved);
 }
@@ -1116,10 +1165,26 @@ fn math_block_ops(chars: &[char], ops: &mut Vec<Conceal>) {
 }
 
 /// A horizontal rule `width` cells wide, drawn from `glyph` (which may itself
-/// be more than one cell).
-fn rule(glyph: &str, width: u16) -> String {
-    let unit = display_width(glyph).max(1) as usize;
-    glyph.repeat((width as usize / unit).max(1))
+/// be more than one cell): as many copies as fit, and at least one. Measured
+/// as the wrapper measures it ([`cells_from`]), a tab in the glyph reaching
+/// its stop, so the rule is never wider than the row it has to fit on.
+fn rule(glyph: &str, width: u16, tab: usize) -> String {
+    let glyph: Vec<char> = glyph.chars().collect();
+    let mut out: String = glyph.iter().collect();
+    let mut used = cells_from(&glyph, 0, tab);
+    // A glyph of no width would never fill the rule. Past the first copy a
+    // copy is never 0 wide: only a tab's width changes with where it starts.
+    if used == 0 {
+        return out;
+    }
+    loop {
+        let next = used + cells_from(&glyph, used, tab);
+        if next > width as usize {
+            return out;
+        }
+        out.extend(&glyph);
+        used = next;
+    }
 }
 
 #[cfg(test)]
@@ -1416,6 +1481,18 @@ mod tests {
         assert_eq!(display_width(&close), MEASURE);
     }
 
+    /// A rule is sized by the cells the wrapper counts: a tab in the glyph
+    /// reaches its stop, so `─\t` at tab width 4 is 4 cells a copy.
+    #[test]
+    fn a_rule_counts_a_tab_in_its_glyph_to_the_stop() {
+        assert_eq!(rule("\u{2500}\t", 8, 4), "\u{2500}\t\u{2500}\t");
+        assert_eq!(rule("\u{2500}\t", 9, 4), "\u{2500}\t\u{2500}\t");
+        assert_eq!(rule("\u{2500}", 5, 4), "\u{2500}".repeat(5));
+        // At least one copy, however narrow; none to repeat when empty.
+        assert_eq!(rule("\u{2500}\t", 2, 4), "\u{2500}\t");
+        assert_eq!(rule("", 8, 4), "");
+    }
+
     /// The bar and the box wear their own theme colors, not the dim marker
     /// style of the source characters they stand in for.
     #[test]
@@ -1513,8 +1590,8 @@ mod tests {
         }
     }
 
-    /// A tab is one char but `tab_width` cells; its guide is the glyph padded
-    /// to those cells, so a tab-indented item shows the guides a
+    /// A tab is one char but the cells to its stop; its guide is the glyph
+    /// padded to those cells, so a tab-indented item shows the guides a
     /// space-indented one does, in the same cells.
     #[test]
     fn indent_guides_fill_a_tab() {
@@ -1538,6 +1615,20 @@ mod tests {
         assert_eq!(shown("* [ ] starred"), "☐ starred");
         // An ordered task keeps its number in front of the box.
         assert_eq!(shown("1. [ ] first"), "1. ☐ first");
+    }
+
+    /// Each guide on a tab is sized from the width the guides before it
+    /// reached, not by measuring the indent again: ten thousand leading tabs
+    /// build their map in linear time.
+    #[test]
+    fn a_deep_tab_indent_builds_its_guides_in_linear_time() {
+        let line = format!("{}- x", "\t".repeat(10_000));
+        let t = std::time::Instant::now();
+        let shown = shown(&line);
+        let elapsed = t.elapsed();
+        assert!(elapsed < std::time::Duration::from_millis(500), "{elapsed:?}");
+        // At tab_width 2 each tab is the guide and one space.
+        assert!(shown.starts_with(&"\u{2502} ".repeat(10_000)), "{:?}", &shown[..40]);
     }
 
     /// The concealed bars' spaces are break points the compact source lacks.

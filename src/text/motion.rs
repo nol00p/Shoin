@@ -5,7 +5,7 @@
 
 use super::buffer::Buffer;
 use super::cursor::Cursor;
-use crate::render::layout::cell_width;
+use crate::render::layout::{cell_width, cell_width_at, tab_stop};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Motion {
@@ -87,9 +87,9 @@ pub fn char_class(c: char) -> u8 {
 /// never rest: `l` and `}` the line end past the last character, and `w`'s
 /// last step stops at the end of its line instead of crossing it.
 ///
-/// `tab` is the cells a tab takes on screen (`tab_width`): the vertical
-/// motions keep the goal as a screen cell, as Vim does, so `j` from the `x` of
-/// `\tx` lands on the char drawn above or below it, not on the second char.
+/// `tab` is the tab stop width (`tab_width`): the vertical motions keep the
+/// goal as a screen cell, as Vim does, so `j` from the `x` of `a\tx` lands on
+/// the char drawn above or below it, not on the third char.
 pub fn resolve(
     buffer: &Buffer,
     motion: Motion,
@@ -335,7 +335,7 @@ pub fn goal_cells(buffer: &Buffer, cur: Cursor, tab: usize) -> usize {
         let line = cur.line.min(buffer.last_line());
         let on_tab = cur.goal_col < buffer.line_len(line) && buffer.rope.line(line).char(cur.goal_col) == '\t';
         if on_tab {
-            start + cell_width('\t', tab).saturating_sub(1)
+            start + tab_stop(start, tab).saturating_sub(1)
         } else {
             start
         }
@@ -343,13 +343,13 @@ pub fn goal_cells(buffer: &Buffer, cur: Cursor, tab: usize) -> usize {
 }
 
 /// The first screen cell of the character at `cur`'s goal column, on
-/// `cur`'s line: the cells drawn before it.
+/// `cur`'s line: the cells drawn before it, each tab reaching its stop.
 pub fn goal_start_cells(buffer: &Buffer, cur: Cursor, tab: usize) -> usize {
     let len = buffer.line_len(cur.line);
     let upto = cur.goal_col.min(len);
     let past = cur.goal_col - upto; // a goal past the line's end
     let line = buffer.rope.line(cur.line.min(buffer.last_line()));
-    line.chars().take(upto).map(|c| cell_width(c, tab)).sum::<usize>().saturating_add(past)
+    line.chars().take(upto).fold(0, |at, c| at + cell_width_at(c, at, tab)).saturating_add(past)
 }
 
 /// The column on `line` drawn at screen cell `cells`, a tab or a wide
@@ -368,7 +368,7 @@ pub fn col_at_cells(buffer: &Buffer, line: usize, cells: usize, tab: usize) -> u
         .chars()
         .take(len)
         .position(|c| {
-            at += cell_width(c, tab);
+            at += cell_width_at(c, at, tab);
             cells < at
         })
         .unwrap_or(len);
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(go(&b, Motion::BufferStart, 1), Some((0, 2)));
     }
 
-    /// `j` and `k` keep the screen cell, a tab counting its `tab` cells:
+    /// `j` and `k` keep the screen cell, a tab counting the cells to its stop:
     /// from the `x` of `\tx` they land on the char drawn above or below it,
     /// and any cell of a tab lands on the tab.
     #[test]

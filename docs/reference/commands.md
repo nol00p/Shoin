@@ -90,7 +90,7 @@ Settings changed with `:set` apply to the current session.
 |---|---|---|---|---|
 | `measure` | `width` | 8–65535 | 72 | text width in columns |
 | `line_spacing` | `spacing` | 0–4 | 0 | blank rows between lines. Higher values clamp to 4 |
-| `tab_width` | `ts` | 1–16 | 4 | cells per tab for display and indentation. Changes reclassify open documents |
+| `tab_width` | `ts` | 1–16 | 4 | a tab stop every N cells on screen; the columns a tab counts in an indent. Changes reclassify open documents |
 | `autosave` |  | on / off | off | write modified named buffers on a timer |
 | `autosave_interval` | `autosave_min` | 1–5 | 3 | minutes between autosaves |
 | `autoreload` |  | on / off | on | take outside changes when nothing is unsaved |

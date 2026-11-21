@@ -18,8 +18,12 @@ use std::path::Path;
 use super::link::Link;
 use super::Mode;
 use crate::config::schema::TranscludeConfig;
-use crate::render::layout::{char_window, wrap_chars};
+use crate::config::schema::Config;
+use crate::render::conceal::{ConcealCtx, ConcealMap};
+use crate::render::layout::{char_window, phase, wrap_chars};
 use crate::render::markdown::block::{classify, BlockKind, Carry, COMMONMARK_TAB};
+use crate::render::theme::Theme;
+use crate::render::StyledSpan;
 
 /// A picture an embed reserved room for. The bytes ride along already
 /// base64-encoded, because the terminal wants them that way on every frame it
@@ -39,8 +43,12 @@ pub struct Picture {
 pub enum Row {
     /// `╭ label ─────` — only when `transclude.border`.
     Top(String),
-    /// A line of the target, with the block kind it was classified under.
-    Body(String, BlockKind),
+    /// A row of a line of the target, as drawn: its slice of the line's
+    /// drawn text (concealed when the document's lines are) and the styles
+    /// on it, counted from the row's first char. Then the line cell the row
+    /// starts at, as far as its tabs' stops care (a [`phase`]; 0 for a row
+    /// without a tab). Drawn alone, the row has lost the cells before it.
+    Body(String, Vec<StyledSpan>, usize),
     /// `╰───────────`.
     Bottom,
     /// The target could not be resolved or read. Show an error in its place.
@@ -56,6 +64,9 @@ pub enum Row {
     /// `photo.png · 800×600` under the picture, in the dim ink.
     Caption(String),
 }
+
+/// What a line of an embed draws: its text and the styles on it ([`drawn`]).
+pub type Drawn = (String, Vec<StyledSpan>);
 
 /// An expanded embed: what the `![[…]]` line draws instead of itself.
 pub struct Expansion {
@@ -74,6 +85,13 @@ impl Expansion {
 /// as its own text on screen. Preview is for reading what you are composing,
 /// and recursing on every keystroke would put an unbounded file walk in the
 /// render path. `:export` is the recursive one.
+///
+/// `draw` gives what a line of the target draws, styled and concealed (see
+/// [`drawn`]), for a box that many cells wide. Its rows are cut from that
+/// text, so they are drawn from the cells they were wrapped on, and its
+/// tabs reach the stops counted from them, as a concealed line of the
+/// document's own does.
+#[allow(clippy::too_many_arguments)]
 pub fn expand(
     link: &Link,
     from: &Path,
@@ -82,6 +100,7 @@ pub fn expand(
     mode: Mode,
     math: bool,
     tab: usize,
+    draw: &dyn Fn(&str, &BlockKind, u16) -> Drawn,
 ) -> Expansion {
     let label = link.label();
 
@@ -112,29 +131,82 @@ pub fn expand(
     // embed closes inside it and cannot leak into the composition.
     let mut carry = Carry::default();
     // A closed box costs four columns — `\u{2502} ` on the left and ` \u{2502}` on the
-    // right — and a wrapped row has to fit between them.
-    let inner = measure.saturating_sub(if cfg.border { 4 } else { 0 }).max(8);
+    // right — and a wrapped row has to fit between them. Without a box (no
+    // border, or `full`, which never draws one) a row has the whole measure.
+    let inner = measure.saturating_sub(if framed { 4 } else { 0 }).max(8);
     for (i, line) in body.lines().enumerate() {
         let (kind, next) = classify(line, &carry, i == 0, math, COMMONMARK_TAB);
         carry = next;
         // Wrapped here rather than at draw time: each wrapped row has to be a
         // row the cache can count, or the scroll arithmetic goes wrong.
+        //
+        // Wrapped on the line as drawn, concealed, and each row is a slice
+        // of that same text and its styles: a row re-concealed from its
+        // source alone would show the markers of a span the wrap cut (`**`
+        // on both rows) and run past the box. A tab takes the cells to its
+        // stop in it, the screen's rule, though the kind above counts it as
+        // CommonMark's 4.
+        let (shown, styles) = draw(line, &kind, inner);
         // Sliced from one char vector: skipping to each row's start from the
         // line's beginning walked a long line once per row it wraps to.
-        let chars: Vec<char> = line.chars().collect();
-        // A tab is wrapped as the `tab` cells the frame draws it as, the
-        // screen's rule, though the kind above counts it as CommonMark's 4.
-        for (a, b) in wrap_chars(&chars, inner, tab) {
-            rows.push(Row::Body(char_window(&chars, a, b), kind.clone()));
+        let shown: Vec<char> = shown.chars().collect();
+        let mut next = 0;
+        for (a, b) in wrap_chars(&shown, inner, tab) {
+            // The stops' phase only matters to a row with a tab; finding it
+            // for every row walked a long line once per row.
+            let at = if shown[a..b].contains(&'\t') { phase(&shown, a, tab) } else { 0 };
+            let styles = row_styles(&styles, &mut next, a, b);
+            rows.push(Row::Body(char_window(&shown, a, b), styles, at));
         }
     }
     if rows.is_empty() || matches!(rows.last(), Some(Row::Top(_))) {
-        rows.push(Row::Body(String::new(), BlockKind::Blank));
+        rows.push(Row::Body(String::new(), Vec::new(), 0));
     }
     if framed {
         rows.push(Row::Bottom);
     }
     Expansion { rows }
+}
+
+/// What a line of an embed draws: its text and styles, with the document's
+/// own rules, concealed when `layout.conceal` is on (a fence's rule
+/// `measure` cells wide). An embedded line is never the active line (it is
+/// not in this rope at all), so, like any line the cursor is not on, it
+/// shows its finished form: an embedded `# Heading` reads as a heading.
+pub fn drawn(text: &str, kind: &BlockKind, theme: &Theme, cfg: &Config, measure: u16) -> Drawn {
+    let md = &cfg.markdown;
+    let tab = cfg.editor.tab_width;
+    let inline = crate::render::markdown::inline::scan_styled(text, md);
+    let styled = crate::render::markdown::style_line_with(
+        text,
+        kind.clone(),
+        crate::text::buffer::Syntax::Markdown,
+        theme,
+        md,
+        &inline,
+        tab,
+    );
+    if !cfg.layout.conceal {
+        return (text.to_string(), styled);
+    }
+    let ctx = ConcealCtx { glyphs: &cfg.glyphs, theme, measure, tab_width: tab };
+    ConcealMap::build(text, kind, &inline, &ctx).render(text, &styled)
+}
+
+/// The styles on chars `a..b` of a line, counted from `a`. The spans are
+/// sorted and disjoint, and the rows come in order, so `next` (the first
+/// span not yet left behind) only moves forward: the line's spans are
+/// walked once, however many rows it wraps to.
+fn row_styles(spans: &[StyledSpan], next: &mut usize, a: usize, b: usize) -> Vec<StyledSpan> {
+    while spans.get(*next).is_some_and(|sp| sp.range.end <= a) {
+        *next += 1;
+    }
+    spans[*next..]
+        .iter()
+        .take_while(|sp| sp.range.start < b)
+        .filter(|sp| sp.range.start.max(a) < sp.range.end.min(b))
+        .map(|sp| StyledSpan { range: sp.range.start.max(a) - a..sp.range.end.min(b) - a, style: sp.style })
+        .collect()
 }
 
 /// A picture is never taller than this, however tall its pixels are. A
@@ -197,6 +269,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// [`super::expand`] drawing every line raw.
+    fn expand(
+        link: &Link,
+        from: &Path,
+        cfg: &TranscludeConfig,
+        measure: u16,
+        mode: Mode,
+        math: bool,
+        tab: usize,
+    ) -> Expansion {
+        super::expand(link, from, cfg, measure, mode, math, tab, &|text, _, _| (text.to_string(), Vec::new()))
+    }
+
     fn vault(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
@@ -214,10 +299,35 @@ mod tests {
         e.rows
             .iter()
             .filter_map(|r| match r {
-                Row::Body(t, _) => Some(t.clone()),
+                Row::Body(t, _, _) => Some(t.clone()),
                 _ => None,
             })
             .collect()
+    }
+
+    /// A long embedded line is walked once, not once per row it wraps to:
+    /// a row without a tab does not look back for its stops' phase.
+    #[test]
+    fn a_long_embedded_line_without_tabs_expands_in_linear_time() {
+        let d = vault("long");
+        let long = "word ".repeat(20_000);
+        std::fs::write(d.join("frag.md"), format!("{long}\n")).unwrap();
+        let link = Link::parse("frag").unwrap();
+        let theme = Theme::default();
+        let mut raw = Config::default();
+        raw.layout.conceal = false;
+        let mut concealed = Config::default();
+        concealed.layout.conceal = true;
+        for cfg in [raw, concealed] {
+            let draw = &|text: &str, kind: &BlockKind, w: u16| drawn(text, kind, &theme, &cfg, w);
+            let t = std::time::Instant::now();
+            let e = super::expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true, 4, draw);
+            let elapsed = t.elapsed();
+            assert_eq!(body_text(&e).concat(), long);
+            assert!(elapsed < std::time::Duration::from_millis(500), "{elapsed:?}");
+            assert!(e.rows.iter().all(|r| !matches!(r, Row::Body(_, _, at) if *at != 0)));
+        }
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
@@ -234,7 +344,7 @@ mod tests {
         // …and without one when the setting says so.
         let cfg = TranscludeConfig { border: false, ..Default::default() };
         let e = expand(&link, &d.join("note.md"), &cfg, 72, Mode::Short, true, 4);
-        assert!(matches!(e.rows.first(), Some(Row::Body(_, _))));
+        assert!(matches!(e.rows.first(), Some(Row::Body(..))));
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -385,16 +495,16 @@ mod tests {
         let d = vault("fence");
         std::fs::write(d.join("frag.md"), "```rust\nlet x = 1;\n```\nafter\n").unwrap();
         let link = Link::parse("frag").unwrap();
-        let e = expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true, 4);
+        // Each line is drawn under the kind it was classified as.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let draw = |text: &str, kind: &BlockKind, _: u16| {
+            seen.borrow_mut().push(kind.clone());
+            (text.to_string(), Vec::new())
+        };
+        super::expand(&link, &d.join("note.md"), &TranscludeConfig::default(), 72, Mode::Short, true, 4, &draw);
 
-        let kinds: Vec<&BlockKind> = e
-            .rows
-            .iter()
-            .filter_map(|r| match r {
-                Row::Body(_, k) => Some(k),
-                _ => None,
-            })
-            .collect();
+        let kinds = seen.into_inner();
+        let kinds: Vec<&BlockKind> = kinds.iter().collect();
         assert!(matches!(kinds[0], BlockKind::FenceOpen(_)));
         assert!(matches!(kinds[1], BlockKind::FenceBody { .. }));
         assert!(matches!(kinds[2], BlockKind::FenceClose));
@@ -402,6 +512,65 @@ mod tests {
             matches!(kinds[3], BlockKind::Paragraph),
             "the fence closed inside the embed"
         );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The box's four columns are reserved only when a box is drawn: `full`
+    /// never draws one, whatever `transclude.border` says, so its fence rules
+    /// and its text run the whole measure.
+    #[test]
+    fn only_a_framed_embed_gives_its_border_four_columns() {
+        use crate::render::layout::text_width;
+        let d = vault("framed");
+        let word = "abcdefghijklmnopqrst";
+        std::fs::write(d.join("frag.md"), format!("```\ncode\n```\n{word}\n")).unwrap();
+        let link = Link::parse("frag").unwrap();
+        let theme = Theme::default();
+        let mut cfg = Config::default();
+        cfg.layout.conceal = true;
+        let draw = &|text: &str, kind: &BlockKind, w: u16| drawn(text, kind, &theme, &cfg, w);
+        for mode in [Mode::Short, Mode::Rec, Mode::Full] {
+            for border in [false, true] {
+                let tc = TranscludeConfig { border, ..Default::default() };
+                let e = super::expand(&link, &d.join("note.md"), &tc, 20, mode, true, 4, draw);
+                let rows = body_text(&e);
+                let inner = if border && mode.framed() { 16 } else { 20 };
+                let what = format!("{} border {border}: {rows:?}", mode.name());
+                assert_eq!(text_width(&rows[0], 4), inner, "{what}");
+                assert_eq!(text_width(&rows[2], 4), inner, "{what}");
+                let text: Vec<&String> = rows[3..].iter().collect();
+                if inner == 20 {
+                    assert_eq!(text, [word], "{what}");
+                } else {
+                    assert_eq!(text, [&word[..16], &word[16..]], "{what}");
+                }
+            }
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A rule glyph with a tab in it is sized by the cells the wrapper counts
+    /// (the tab to its stop), so a concealed fence delimiter stays one row.
+    #[test]
+    fn a_rule_glyph_with_a_tab_keeps_a_fence_delimiter_on_one_row() {
+        use crate::render::layout::text_width;
+        let d = vault("tabrule");
+        std::fs::write(d.join("frag.md"), "```\ncode\n```\n").unwrap();
+        let link = Link::parse("frag").unwrap();
+        let theme = Theme::default();
+        let mut cfg = Config::default();
+        cfg.layout.conceal = true;
+        cfg.editor.tab_width = 4;
+        cfg.glyphs.rule = "\u{2500}\t".into();
+        let draw = &|text: &str, kind: &BlockKind, w: u16| drawn(text, kind, &theme, &cfg, w);
+        for (border, measure) in [(true, 12), (false, 8)] {
+            let tc = TranscludeConfig { border, ..Default::default() };
+            let e = super::expand(&link, &d.join("note.md"), &tc, measure, Mode::Short, true, 4, draw);
+            let rows = body_text(&e);
+            assert_eq!(rows.len(), 3, "border {border}: {rows:?}");
+            assert_eq!(text_width(&rows[0], 4), 8, "border {border}: {rows:?}");
+            assert_eq!(text_width(&rows[2], 4), 8, "border {border}: {rows:?}");
+        }
         std::fs::remove_dir_all(&d).ok();
     }
 
