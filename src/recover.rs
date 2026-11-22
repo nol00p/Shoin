@@ -1799,26 +1799,28 @@ mod tests {
         static REG: Mutex<Vec<Snapshot>> = Mutex::new(Vec::new());
         static FLAG: AtomicBool = AtomicBool::new(false);
         let tick = std::time::Duration::from_millis(1);
-        for writing in [true, false] {
-            let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
-            let holder = std::thread::spawn(move || {
-                let _reg = REG.lock().unwrap();
-                // A safety copy writing, or the loop's tick stuck in a panic.
-                let _w = writing.then(|| Writing::start(&FLAG));
-                held.0.send(()).unwrap();
-                let _ = release.1.recv();
-            });
-            held.1.recv().unwrap();
-            // Released long after the 50 ticks anything else gets.
-            let releaser = std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                release.0.send(()).unwrap();
-            });
-            let got = lock_for_dump(&REG, &FLAG, tick).is_some();
-            assert_eq!(got, writing, "waited for the other dump only");
-            releaser.join().unwrap();
-            holder.join().unwrap();
+        // A non-writer must keep holding the registry until the retry budget
+        // is exhausted, even if the runner delays the thread between ticks.
+        {
+            let _reg = REG.lock().unwrap();
+            assert!(lock_for_dump(&REG, &FLAG, tick).is_none());
         }
+
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let holder = std::thread::spawn(move || {
+            let _reg = REG.lock().unwrap();
+            let _writing = Writing::start(&FLAG);
+            held.0.send(()).unwrap();
+            let _ = release.1.recv();
+        });
+        held.1.recv().unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            release.0.send(()).unwrap();
+        });
+        assert!(lock_for_dump(&REG, &FLAG, tick).is_some());
+        releaser.join().unwrap();
+        holder.join().unwrap();
     }
 
     #[test]
