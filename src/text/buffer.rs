@@ -350,9 +350,8 @@ impl Buffer {
         let typing = policy.insert_mode && self.cursor.col >= body;
         SaveOptions {
             line_ending: self.line_ending,
-            // `preserve` answers with what the file arrived with; the other two
-            // overrule it. This is the only place that distinction is made.
-            final_newline: policy.final_newline.resolve(self.final_newline),
+            // An empty buffer has no line to terminate, even under `always`.
+            final_newline: self.rope.len_chars() != 0 && policy.final_newline.resolve(self.final_newline),
             trim_trailing_whitespace: policy.trim_trailing_whitespace,
             // The destination decides, not the buffer's old name: `:saveas
             // notes.md` from a `.txt` gets Markdown's rules. Only `.md` and
