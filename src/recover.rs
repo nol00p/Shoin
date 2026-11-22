@@ -581,7 +581,9 @@ pub fn dump() {
 static DUMPING: AtomicU32 = AtomicU32::new(0);
 
 fn dump_registry() {
-    let Some(reg) = lock_for_dump(&REGISTRY, &WRITING, std::time::Duration::from_millis(10)) else { return };
+    let Some(reg) = lock_for_dump(&REGISTRY, &WRITING, || {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }) else { return };
     let _writing = Writing::start(&WRITING);
     dump_to(&reg, &state_dir(), &mut |p| WRITTEN.lock().unwrap_or_else(|e| e.into_inner()).push(p.to_path_buf()));
 }
@@ -615,7 +617,7 @@ impl Drop for Writing<'_> {
 fn lock_for_dump<'a>(
     reg: &'a Mutex<Vec<Snapshot>>,
     writing: &AtomicBool,
-    tick: std::time::Duration,
+    mut wait_tick: impl FnMut(),
 ) -> Option<MutexGuard<'a, Vec<Snapshot>>> {
     let mut idle = 0;
     for _ in 0..12_000 {
@@ -626,7 +628,7 @@ fn lock_for_dump<'a>(
             Err(TryLockError::WouldBlock) if idle < 50 => idle += 1,
             Err(TryLockError::WouldBlock) => return None,
         }
-        std::thread::sleep(tick);
+        wait_tick();
     }
     None
 }
@@ -921,7 +923,7 @@ impl Gate {
         true
     }
 
-    fn settle(&self) {
+    fn settle(&self, mut wait_tick: impl FnMut()) {
         // This thread's own frame cannot finish while it waits for it.
         if DEPTH.with(|d| d.get()) > 0 {
             return;
@@ -934,7 +936,7 @@ impl Gate {
             }
             match self.frame.try_lock() {
                 Ok(_) | Err(TryLockError::Poisoned(_)) => return,
-                Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(TryLockError::WouldBlock) => wait_tick(),
             }
         }
     }
@@ -1005,7 +1007,7 @@ pub fn signal_status() -> i32 {
 /// After the dump: wait (up to two seconds) for the frame being written to
 /// finish, so the terminal can be restored. Not for a frame this thread holds.
 pub fn settle() {
-    GATE.settle()
+    GATE.settle(|| std::thread::sleep(std::time::Duration::from_millis(10)));
 }
 
 /// For the signal thread when another ending got there first: wait while it
@@ -1511,9 +1513,7 @@ mod tests {
         assert!(gate.frame().is_none(), "no frame lands under the restore");
         let gate = Gate::new();
         let frame = gate.frame().unwrap();
-        let start = std::time::Instant::now();
-        gate.settle();
-        assert!(start.elapsed() < std::time::Duration::from_millis(500), "not for the frame this thread holds");
+        gate.settle(|| panic!("settle waited for this thread's frame"));
         drop(frame);
     }
 
@@ -1798,7 +1798,6 @@ mod tests {
     fn a_dump_waits_for_another_dump_holding_the_registry() {
         static REG: Mutex<Vec<Snapshot>> = Mutex::new(Vec::new());
         static FLAG: AtomicBool = AtomicBool::new(false);
-        let tick = std::time::Duration::from_millis(1);
         for writing in [true, false] {
             let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
             let holder = std::thread::spawn(move || {
@@ -1809,15 +1808,23 @@ mod tests {
                 let _ = release.1.recv();
             });
             held.1.recv().unwrap();
-            // Released long after the 50 ticks anything else gets.
-            let releaser = std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                release.0.send(()).unwrap();
-            });
-            let got = lock_for_dump(&REG, &FLAG, tick).is_some();
+            let mut release_holder = Some((release.0, holder));
+            let mut ticks = 0;
+            let got = lock_for_dump(&REG, &FLAG, || {
+                ticks += 1;
+                // A writing holder stays locked for one more tick than an idle one gets.
+                if writing && ticks == 51 {
+                    let (release, holder) = release_holder.take().unwrap();
+                    release.send(()).unwrap();
+                    holder.join().unwrap();
+                }
+            }).is_some();
+            if let Some((release, holder)) = release_holder {
+                release.send(()).unwrap();
+                holder.join().unwrap();
+            }
             assert_eq!(got, writing, "waited for the other dump only");
-            releaser.join().unwrap();
-            holder.join().unwrap();
+            assert_eq!(ticks, if writing { 51 } else { 50 });
         }
     }
 
@@ -1832,17 +1839,23 @@ mod tests {
     fn a_signal_waits_for_the_frame_being_written() {
         static GATE: Gate = Gate::new();
         let frame = GATE.frame().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (waiting, observed) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
         let stopper = std::thread::spawn(move || {
             assert!(GATE.stop(), "claiming does not wait for the frame: the dump comes first");
-            GATE.settle();
-            tx.send(()).unwrap();
+            GATE.settle(|| {
+                waiting.send(()).unwrap();
+                released.recv().unwrap();
+            });
         });
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(rx.try_recv().is_err(), "settle returned while a frame was still being written");
+        let waited = observed.recv().is_ok();
         drop(frame);
-        rx.recv_timeout(std::time::Duration::from_secs(5)).expect("settle returns once the frame is done");
+        if waited {
+            release.send(()).unwrap();
+        }
+        drop(release);
         stopper.join().unwrap();
+        assert!(waited, "settle returned while a frame was still being written");
         assert!(GATE.frame().is_none());
     }
 
@@ -1859,9 +1872,7 @@ mod tests {
         });
         held.1.recv().unwrap();
         assert!(GATE.stop());
-        let start = std::time::Instant::now();
-        GATE.settle();
-        assert!(start.elapsed() < std::time::Duration::from_millis(500), "{:?}", start.elapsed());
+        GATE.settle(|| panic!("settle waited for an abandoned frame"));
         release.0.send(()).unwrap();
         holder.join().unwrap();
     }
