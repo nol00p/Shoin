@@ -9511,3 +9511,52 @@ fn read_only_linewise_yank_lands_where_its_range_starts() {
 fn app_line(text: &str, l: usize) -> &str {
     text.lines().nth(l).unwrap()
 }
+
+#[cfg(unix)]
+#[test]
+fn writing_through_own_file_aliases_is_a_save() {
+    let mut app = app_with("one\n");
+    let dir = two_files();
+    let notes = dir.join("notes.md");
+    app.run_command(&format!("w {}", notes.display()));
+    let alias = dir.join("alias.md");
+    let sym = dir.join("sym.md");
+    std::fs::hard_link(&notes, &alias).unwrap();
+    std::os::unix::fs::symlink("notes.md", &sym).unwrap();
+
+    for (command, destination, text) in [
+        ("w", &alias, "two"),
+        ("w", &sym, "three"),
+        ("saveas", &alias, "four"),
+        ("saveas", &sym, "five"),
+    ] {
+        feed(&mut app, &format!("cc{text}"));
+        esc(&mut app);
+        app.run_command(&format!("{command} {}", destination.display()));
+        assert!(!app.buffer.modified, "{}", flash_text(&app));
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), format!("{text}\n"));
+        app.run_command("w");
+        assert!(flash_text(&app).contains("written"), "{}", flash_text(&app));
+    }
+    assert!(sym.is_symlink());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn saveas_refuses_a_hard_link_to_another_open_file() {
+    let dir = two_files();
+    let a = dir.join("one.md");
+    let b = dir.join("two.md");
+    let alias = dir.join("alias.md");
+    std::fs::hard_link(&b, &alias).unwrap();
+    let mut app = app_with("");
+    assert!(app.open_file(b.clone()));
+    assert!(app.open_file(a.clone()));
+    let before = std::fs::read(&b).unwrap();
+    app.run_command(&format!("saveas! {}", alias.display()));
+    assert_eq!(app.buffer.path.as_deref(), Some(a.as_path()));
+    assert!(flash_text(&app).contains("another buffer"));
+    assert_eq!(std::fs::read(&b).unwrap(), before);
+    std::fs::remove_dir_all(dir).unwrap();
+}

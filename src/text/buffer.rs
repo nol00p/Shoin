@@ -245,7 +245,7 @@ impl Buffer {
         // Only meaningful when this IS the file we read: `:w other.md` records
         // an mtime for a different path, and comparing the two would refuse a
         // perfectly ordinary write.
-        let same_file = self.path.as_deref().is_some_and(|ours| same_path(ours, path));
+        let same_file = self.writes_own_file(path);
         if !force && same_file && save::changed_externally(path, self.disk_mtime) {
             anyhow::bail!("{} changed on disk — :w! to overwrite", name_of(path));
         }
@@ -395,11 +395,6 @@ impl Buffer {
         }
         save::write_atomic(path, &part, &opts)?;
         Ok(())
-    }
-
-    /// Whether `path` is this buffer's own file, by any spelling.
-    pub fn is_own_file(&self, path: &Path) -> bool {
-        self.path.as_deref().is_some_and(|ours| same_path(ours, path))
     }
 
     /// Whether writing to `path` would write this buffer's own file: by any

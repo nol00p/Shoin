@@ -561,7 +561,7 @@ impl App {
                 return self.save_as(typed, force);
             }
             let p = self.typed_path(typed);
-            if !self.buffer.is_own_file(&p) {
+            if !self.buffer.writes_own_file(&p) {
                 return self.write_copy(&p, force);
             }
         }
@@ -577,7 +577,7 @@ impl App {
         // A file is edited in ONE buffer (`open_file` holds to that); taking
         // over another buffer's file would leave two copies racing to save.
         let current = self.current();
-        if self.docs.iter().enumerate().any(|(i, d)| i != current && d.buffer.is_own_file(&p)) {
+        if self.docs.iter().enumerate().any(|(i, d)| i != current && d.buffer.writes_own_file(&p)) {
             self.notify(format!("{} is open in another buffer", self.shown(&p)), FlashKind::Error);
             return false;
         }
