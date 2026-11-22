@@ -438,6 +438,23 @@ fn render_pane(
             line = line.alignment(a);
         }
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(row_bg)), r);
+        // A selected line break is one selected cell after the line's last
+        // character, as Neovim draws it. Not over a closed fold's label, and
+        // not past the pane when the row fills it.
+        let folded_after = folded.run(row.line() + 1).is_some();
+        if is_last_row && focused && !folded_after && selects_line_break(app, row.line()) {
+            let tw = cfg.editor.tab_width;
+            let width = text_width_from(&char_window(chars, row.start_col, row.end_col), at, tw);
+            let shift = match align {
+                TextAlign::Center | TextAlign::Right => align::align_offset(align, width, r.width),
+                TextAlign::Left | TextAlign::Justified => 0,
+            };
+            let x = usize::from(r.x) + usize::from(shift) + usize::from(width);
+            if x < usize::from(rect.right()) {
+                let cell = Rect { x: x as u16, y: r.y, width: 1, height: 1 };
+                frame.render_widget(Paragraph::new(" ").style(Style::default().bg(app.theme.selection.to_ratatui())), cell);
+            }
+        }
         if fenced {
             render_fence_bar(frame, app, r);
         }
@@ -499,10 +516,35 @@ fn render_pane(
             align::justify_offset(&gaps, cursor_offset)
         }
     };
-    // On a tab, the caret is on its first cell.
-    let x = (rect.x + left + text_width_from(&prefix, at, cfg.editor.tab_width) + hang + extra)
-        .min(rect.right().saturating_sub(1));
+    let tw = cfg.editor.tab_width;
+    // `text_width_from`'s cells, counted wide: past a huge tab they need not
+    // fit a terminal column.
+    let before = prefix.chars().fold(0usize, |w, c| w + crate::render::layout::cell_width_at(c, at + w, tw));
+    let on_tab = line_text.get(row_start + cursor_offset) == Some(&'\t');
+    let tab_end = if on_tab && tab_caret_at_end(app, cursor) {
+        let start = at + before;
+        crate::render::layout::tab_stop(start, tw).saturating_sub(1)
+    } else {
+        0
+    };
+    // Summed wide and clamped before it is a terminal column: a tab can be
+    // as wide as `tab_width`, which may be past any screen.
+    let x = [rect.x, left, hang, extra].iter().map(|&n| usize::from(n)).sum::<usize>() + before + tab_end;
+    let x = x.min(usize::from(rect.right().saturating_sub(1))) as u16;
     Some(Position::new(x, text_area.y + screen_row as u16))
+}
+
+/// Whether the caret on a tab is drawn on its last cell rather than its
+/// first, as Neovim's `getvcol` decides: in Normal mode, an operator's
+/// pending motion included, yes; in Insert, where typing goes before the
+/// tab, no; in Visual only when the cursor is past the anchor ('selection'
+/// inclusive).
+fn tab_caret_at_end(app: &App, cursor: Cursor) -> bool {
+    match app.mode {
+        Mode::Normal => true,
+        Mode::Visual | Mode::VisualLine => app.anchor.is_some_and(|a| (a.line, a.col) < (cursor.line, cursor.col)),
+        _ => false,
+    }
 }
 
 /// Which row of a picture's box one row is, for drawing its outline.
@@ -1370,6 +1412,27 @@ pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Curs
     // The first row of a line keeps the column, as `j` does; a later row of a
     // wrapped one starts where that row does.
     let first = cache.locate(line, 0).0 == row;
+    if first && line != cursor.line {
+        // Onto the goal, which it keeps, as `j` does and Neovim's scroll:
+        // after `$`, the end of the line it is carried to.
+        // Insert's caret stands before a tab, so a goal not yet measured
+        // is the tab's first cell there, as Insert's Up and Down have it.
+        let tw = cfg.editor.tab_width;
+        let cells = match cursor.goal_cells {
+            None if app.mode.allows_past_end() => crate::text::motion::goal_start_cells(&app.buffer, cursor, tw),
+            _ => crate::text::motion::goal_cells(&app.buffer, cursor, tw),
+        };
+        let mut col = crate::text::motion::col_at_cells(&app.buffer, line, cells, tw);
+        // The goal stays, but the cursor stays on the rows the scroll shows:
+        // a goal on a row of the line past them (`$` on a paragraph taller
+        // than the pane) takes the last column of the last row shown, or the
+        // renderer would scroll on to the cursor.
+        let next = cache.row(hi + 1).filter(|r| r.line() == line && r.editable && !r.is_spacer());
+        if let Some(next) = next {
+            col = col.min(source_col(&cache, line, next.start_col, tw).saturating_sub(1));
+        }
+        return Some((new_top, Cursor { line, col, goal_col: cursor.goal_col, goal_cells: Some(cells) }));
+    }
     let col = if first { cursor.col } else { target.start_col };
     Some((new_top, Cursor::new(line, col.min(len))))
 }
@@ -2044,6 +2107,29 @@ fn selection_cols(app: &App, line: usize, len: usize) -> Option<(usize, usize)> 
     let start = if line == lo.line { lo.col } else { 0 };
     let end = if line == hi.line { hi.col + 1 } else { len };
     Some((start.min(len), end.min(len)))
+}
+
+/// Whether a Visual selection takes `line`'s line break, drawn as one
+/// selected cell after the line's text: every line of a `V` selection, and
+/// in `v` every line but the last one it covers, that one too when an end
+/// stands on its break (`v$`). Never the file's last line break in `v`,
+/// which no charwise selection takes.
+fn selects_line_break(app: &App, line: usize) -> bool {
+    let Some(anchor) = app.anchor else { return false };
+    let cursor = app.buffer.cursor;
+    let (lo, hi) = if (anchor.line, anchor.col) <= (cursor.line, cursor.col) {
+        (anchor, cursor)
+    } else {
+        (cursor, anchor)
+    };
+    if line < lo.line || line > hi.line {
+        return false;
+    }
+    match app.mode {
+        Mode::VisualLine => true,
+        Mode::Visual => line < app.buffer.last_line() && (line < hi.line || hi.col >= app.buffer.line_len(line)),
+        _ => false,
+    }
 }
 
 /// Repaint the background of `range` (char columns) across the line's spans,
@@ -4734,8 +4820,9 @@ mod tests {
     /// A tab draws as the blank cells to its next stop, a multiple of
     /// `tab_width` from the line's start, as Neovim's `tabstop`: on the raw
     /// cursor line and on a concealed one alike, and the caret on each char
-    /// sits on the cell drawn for it: on a tab, its first cell. The cells
-    /// are Neovim's (`virtcol`) for each width.
+    /// sits on the cell drawn for it: on a tab, in Normal mode, its last
+    /// cell, the one before the next char. The cells are Neovim's
+    /// (`virtcol`, `wincol()`) for each width.
     #[test]
     fn a_tab_draws_to_its_stop() {
         // tab_width, then the cells of `b` and `c` in `a\tb\tc`.
@@ -4743,7 +4830,8 @@ mod tests {
             let mut app = app_with("a\tb\tc\na\tb\tc\n");
             app.config.editor.tab_width = tw as usize;
             app.refresh_blocks();
-            for (col, sym, extra) in [(0, "a", 0), (1, "a", 1), (2, "b", 0), (3, "b", 1), (4, "c", 0)] {
+            // The char whose cell the caret is on, less `back` cells.
+            for (col, sym, back) in [(0, "a", 0), (1, "b", 1), (2, "b", 0), (3, "c", 1), (4, "c", 0)] {
                 app.buffer.cursor = Cursor::new(0, col);
                 let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();
                 t.draw(|f| render(f, &app)).unwrap();
@@ -4758,7 +4846,7 @@ mod tests {
                         assert_eq!(buf[(x, y)].symbol(), " ", "tab_width {tw}: the tab's cells are blank");
                     }
                 }
-                assert_eq!(caret.x, cell_of(&buf, caret.y, sym) + extra, "tab_width {tw}, col {col}");
+                assert_eq!(caret.x, cell_of(&buf, caret.y, sym) - back, "tab_width {tw}, col {col}");
             }
         }
     }

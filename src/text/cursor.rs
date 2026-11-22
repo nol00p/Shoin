@@ -11,6 +11,7 @@ pub struct Cursor {
 
     /// Remembered column for vertical motion, so `j` over a short line and back
     /// returns to the original column. Reset by any horizontal motion or edit.
+    /// [`Cursor::LINE_END`] after `$`: the end of every line.
     pub goal_col: usize,
 
     /// The same goal as a SCREEN cell, once a vertical motion has measured it:
@@ -22,6 +23,13 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    /// The goal `$` leaves, Neovim's `curswant` of MAXCOL: `j`, `k`, `G`
+    /// and the other motions that keep the goal land on the last character
+    /// of each line, however long, until a horizontal motion sets a column.
+    /// As a screen cell it is past every line's end, so the clamp to the
+    /// last character is all it takes.
+    pub const LINE_END: usize = usize::MAX;
+
     pub fn new(line: usize, col: usize) -> Self {
         Cursor {
             line,

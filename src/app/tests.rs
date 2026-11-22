@@ -3425,10 +3425,11 @@ fn visual_p_takes_a_named_register_and_mixes_lines_and_text() {
     feed(&mut app, "yyjVjp");
     assert_eq!(text(&app), "keep\nkeep");
 
-    // `vp` on an empty line fills it; the next line stays its own.
+    // `vp` on an empty line replaces its line break too, as Neovim's: the
+    // next line joins on.
     let mut app = app_with("word\n\nnext\n");
     feed(&mut app, "yiwjvp");
-    assert_eq!(text(&app), "word\nword\nnext\n");
+    assert_eq!(text(&app), "word\nwordnext\n");
 
     // Text spanning lines leaves the cursor at its start, as Normal `p`.
     let mut app = app_with("ab\ncd\nxy zz\n");
@@ -3823,19 +3824,20 @@ fn tab_on_a_first_item_is_refused() {
     assert_eq!(app.mode, Mode::Insert);
 }
 
-/// Off a list item's own line, or with `list_tab` off, Tab is a tab.
+/// Off a list item's own line, or with `list_tab` off, Tab is a tab: with
+/// `expand_tab`, spaces to the next stop, as Neovim's.
 #[test]
 fn tab_elsewhere_inserts_a_tab_unit() {
     let mut app = app_with("prose\n");
     feed(&mut app, "A");
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(text(&app), "prose    \n");
+    assert_eq!(text(&app), "prose   \n");
     let mut app = app_with("- a\n- b\n");
     app.config.editor.list_tab = false;
     app.buffer.cursor = Cursor::new(1, 0);
     feed(&mut app, "A");
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(text(&app), "- a\n- b    \n");
+    assert_eq!(text(&app), "- a\n- b \n");
 }
 
 /// Terminals send Shift-Tab as a key of its own; it must be the key a
@@ -5080,7 +5082,7 @@ fn ctrl_e_scrolls_the_page_under_the_cursor() {
 }
 
 /// A cursor about to leave the screen is carried along, `scroll_off` in
-/// from the edge, keeping its column.
+/// from the edge, keeping its column and its goal.
 #[test]
 fn scrolling_carries_a_cursor_at_the_edge() {
     let mut app = scroll_app();
@@ -5089,13 +5091,14 @@ fn scrolling_carries_a_cursor_at_the_edge() {
     feed(&mut app, "20");
     ctrl(&mut app, 'e');
     assert_eq!(app.scroll_hint(), 20);
-    assert_eq!(app.buffer.cursor, Cursor::new(20 + pad, 3));
+    let at = |app: &App| (app.buffer.cursor.line, app.buffer.cursor.col, app.buffer.cursor.goal_col);
+    assert_eq!(at(&app), (20 + pad, 3, 3));
 
     feed(&mut app, "20");
     ctrl(&mut app, 'y');
     assert_eq!(app.scroll_hint(), 0);
     let bottom = app.viewport_height() - 1 - pad;
-    assert_eq!(app.buffer.cursor, Cursor::new(bottom, 3));
+    assert_eq!(at(&app), (bottom, 3, 3));
     ctrl(&mut app, 'y');
     assert_eq!(app.scroll_hint(), 0, "nothing above the first line");
 }

@@ -7,7 +7,9 @@ impl App {
         // A selection dragged out of a counted insert ends the count: what
         // follows is no longer the text the count was for.
         self.insert_repeat = None;
-        self.anchor = Some(self.buffer.cursor);
+        // Without the goal: `o` sets one afresh where it lands, as Neovim's,
+        // rather than bring back `$`'s line end.
+        self.anchor = Some(Cursor::new(self.buffer.cursor.line, self.buffer.cursor.col));
         self.mode = mode;
         self.visual_owner = Some((self.focus_pane, self.current()));
         // A keyboard `v` always returns to Normal. Only the mouse sets this,
@@ -244,14 +246,11 @@ impl App {
             self.leave_visual();
             return self.notify("paste: too large", FlashKind::Error);
         }
-        let (start, mut end, lo, linewise) = self.visual_span();
+        // A charwise selection that takes a line break (`vp` on an empty
+        // line, `v$p`) replaces the break too, joining the next line on, and
+        // `p` keeps it in the register, as Neovim's.
+        let (start, end, lo, linewise) = self.visual_span();
         self.end_visual();
-        // A charwise selection that ends on a line break (`vp` on an empty
-        // line, `v$p`) replaces the text, not the break: the next line stays
-        // where it is.
-        if !linewise && end > start && self.buffer.rope.char(end - 1) == '\n' {
-            end -= 1;
-        }
         let ends_at_eof = end == self.buffer.rope.len_chars();
         let replaced = self.buffer.rope.slice(start..end).to_string();
 
