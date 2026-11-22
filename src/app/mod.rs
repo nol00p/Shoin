@@ -1625,12 +1625,9 @@ impl App {
             Action::DeleteCharBack => self.delete_chars_before(count),
             Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete),
             Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change),
-            Action::YankLine => {
-                let cursor = self.buffer.cursor;
-                let (line, last) = (cursor.line, self.buffer.last_line());
-                let start = self.linewise_start(cursor, cursor);
-                self.operate_linewise(Operator::Yank, line, line.saturating_add(count.saturating_sub(1)).min(last), start);
-            }
+            // `Y` is `yy`, its count and closed folds counted the same, and
+            // `2Y` on the last line yanks nothing, as `2yy`.
+            Action::YankLine => self.operate(Operator::Yank, Target::Line, count),
             // `3rx` replaces three characters, so this needs the count and
             // belongs here rather than in `apply_action`.
             Action::ReplaceChar(c) => self.replace_chars(c, count),
@@ -1757,11 +1754,11 @@ impl App {
                 let from = self.buffer.cursor;
                 let l1 = from.line;
                 let step = self.shown_step(l1, true, count.saturating_sub(1));
-                let case = matches!(op, Operator::Lowercase | Operator::Uppercase);
-                // `2gUU` on the last line has no line to move to, so Neovim
-                // beeps and changes nothing (`3guu` with two lines left
-                // takes them both).
-                if case && count > 1 && step.is_none() {
+                let case = matches!(op, Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase);
+                // `2dd` (`2yy`, `2>>`, `2gUU`, …) on the last line has no
+                // line to move to, so Neovim beeps and changes nothing
+                // (`3dd` with two lines left takes them both).
+                if count > 1 && step.is_none() {
                     return;
                 }
                 let l2 = step.unwrap_or(l1);
