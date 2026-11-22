@@ -499,10 +499,30 @@ fn render_pane(
             align::justify_offset(&gaps, cursor_offset)
         }
     };
-    // On a tab, the caret is on its first cell.
-    let x = (rect.x + left + text_width_from(&prefix, at, cfg.editor.tab_width) + hang + extra)
-        .min(rect.right().saturating_sub(1));
+    let tw = cfg.editor.tab_width;
+    let before = text_width_from(&prefix, at, tw);
+    let on_tab = line_text.get(row_start + cursor_offset) == Some(&'\t');
+    let tab_end = if on_tab && tab_caret_at_end(app, cursor) {
+        let start = at + before as usize;
+        crate::render::layout::tab_stop(start, tw).saturating_sub(1) as u16
+    } else {
+        0
+    };
+    let x = (rect.x + left + before + tab_end + hang + extra).min(rect.right().saturating_sub(1));
     Some(Position::new(x, text_area.y + screen_row as u16))
+}
+
+/// Whether the caret on a tab is drawn on its last cell rather than its
+/// first, as Neovim's `getvcol` decides: in Normal mode, an operator's
+/// pending motion included, yes; in Insert, where typing goes before the
+/// tab, no; in Visual only when the cursor is past the anchor ('selection'
+/// inclusive).
+fn tab_caret_at_end(app: &App, cursor: Cursor) -> bool {
+    match app.mode {
+        Mode::Normal => true,
+        Mode::Visual | Mode::VisualLine => app.anchor.is_some_and(|a| (a.line, a.col) < (cursor.line, cursor.col)),
+        _ => false,
+    }
 }
 
 /// Which row of a picture's box one row is, for drawing its outline.
@@ -4734,8 +4754,9 @@ mod tests {
     /// A tab draws as the blank cells to its next stop, a multiple of
     /// `tab_width` from the line's start, as Neovim's `tabstop`: on the raw
     /// cursor line and on a concealed one alike, and the caret on each char
-    /// sits on the cell drawn for it: on a tab, its first cell. The cells
-    /// are Neovim's (`virtcol`) for each width.
+    /// sits on the cell drawn for it: on a tab, in Normal mode, its last
+    /// cell, the one before the next char. The cells are Neovim's
+    /// (`virtcol`, `wincol()`) for each width.
     #[test]
     fn a_tab_draws_to_its_stop() {
         // tab_width, then the cells of `b` and `c` in `a\tb\tc`.
@@ -4743,7 +4764,8 @@ mod tests {
             let mut app = app_with("a\tb\tc\na\tb\tc\n");
             app.config.editor.tab_width = tw as usize;
             app.refresh_blocks();
-            for (col, sym, extra) in [(0, "a", 0), (1, "a", 1), (2, "b", 0), (3, "b", 1), (4, "c", 0)] {
+            // The char whose cell the caret is on, less `back` cells.
+            for (col, sym, back) in [(0, "a", 0), (1, "b", 1), (2, "b", 0), (3, "c", 1), (4, "c", 0)] {
                 app.buffer.cursor = Cursor::new(0, col);
                 let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();
                 t.draw(|f| render(f, &app)).unwrap();
@@ -4758,7 +4780,7 @@ mod tests {
                         assert_eq!(buf[(x, y)].symbol(), " ", "tab_width {tw}: the tab's cells are blank");
                     }
                 }
-                assert_eq!(caret.x, cell_of(&buf, caret.y, sym) + extra, "tab_width {tw}, col {col}");
+                assert_eq!(caret.x, cell_of(&buf, caret.y, sym) - back, "tab_width {tw}, col {col}");
             }
         }
     }

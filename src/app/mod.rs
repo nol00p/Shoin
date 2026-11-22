@@ -1433,7 +1433,15 @@ impl App {
             self.buffer.cursor.line = last;
         }
         let len = self.buffer.line_len(self.buffer.cursor.line);
+        let col = self.buffer.cursor.col;
         self.buffer.cursor.clamp(len, past_end);
+        // A key that left the cursor past the end (`x` on the last
+        // character, a redo) leaves it on the column it is clamped to, and
+        // that is the goal now, as Neovim's.
+        let clamped = self.buffer.cursor.col;
+        if clamped != col {
+            self.buffer.cursor.set_col(clamped);
+        }
         let clamped = std::mem::take(&mut self.reading_clamped);
         if self.view && !clamped {
             self.clamp_reading_cursor();
@@ -1982,10 +1990,14 @@ impl App {
             // Anchor undo to the cursor at a command BOUNDARY only. A Visual
             // selection and an operator-pending motion are continuations of the
             // command that started them, and have already moved the cursor.
-            let anchor = self.is_clean().then_some(self.buffer.cursor);
+            // Without its goal: an undo that puts the cursor back there
+            // takes the goal afresh, as Neovim's does, and `$`'s line end
+            // is not brought back by `u`.
+            let anchor = self.is_clean().then(|| Cursor::new(self.buffer.cursor.line, self.buffer.cursor.col));
             self.buffer.history.begin_group(anchor);
         }
 
+        let line_end = self.line_end_goal(&mode);
         match mode {
             Mode::Normal => self.on_key_normal(key),
             Mode::Insert => self.on_key_insert(key),
@@ -1993,6 +2005,10 @@ impl App {
             Mode::Command(buf) => self.on_key_command(key, buf),
             Mode::Search { query, reverse } => self.on_key_search(key, query, reverse),
             Mode::Prompt(p) => self.on_key_prompt(key, p),
+        }
+
+        if let Some(before) = line_end {
+            self.forget_line_end(before);
         }
 
         // A key that took focus away from a selection (`<C-w>q`, `<C-w>v`,
@@ -2015,6 +2031,55 @@ impl App {
         }
     }
 
+}
+
+/// What a Normal or Visual key started from while the goal was `$`'s line
+/// end ([`Cursor::LINE_END`]), for [`App::forget_line_end`] to tell after
+/// the key whether it still is.
+#[derive(Clone, Copy)]
+struct LineEndGoal {
+    revision: u64,
+    operator: bool,
+    visual: bool,
+}
+
+impl App {
+    /// The state before a Normal or Visual key when the goal is the line
+    /// end; `None` otherwise, when there is nothing to forget.
+    fn line_end_goal(&self, mode: &Mode) -> Option<LineEndGoal> {
+        let visual = matches!(mode, Mode::Visual | Mode::VisualLine);
+        let watched = visual || *mode == Mode::Normal;
+        (watched && self.buffer.cursor.goal_col == Cursor::LINE_END).then(|| LineEndGoal {
+            revision: self.buffer.revision,
+            operator: self.pending.operator.is_some(),
+            visual,
+        })
+    }
+
+    /// After a key, the line-end goal gives way to the column the cursor is
+    /// on when the key edited the text (`x`, `p`, `u`), ran an operator
+    /// (`yl`, `vy`), left Visual (`v` `Esc`) or started Insert (`i`), as
+    /// Neovim's `curswant` is
+    /// then set afresh. A motion sets its own goal (`motion::resolve`); a
+    /// motion that cannot move (`l` at the end), a scroll and the line
+    /// commands keep it.
+    fn forget_line_end(&mut self, before: LineEndGoal) {
+        let cur = self.buffer.cursor;
+        if cur.goal_col != Cursor::LINE_END {
+            return;
+        }
+        let edited = self.buffer.revision != before.revision;
+        let operated = before.operator && self.pending.operator.is_none();
+        let left_visual = before.visual && !matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        let inserting = self.mode == Mode::Insert;
+        if edited || operated || left_visual || inserting {
+            // The column the clamp after the key leaves: `x` at the end
+            // leaves it one past the shorter line.
+            let len = self.buffer.line_len(cur.line);
+            let col = if self.mode.allows_past_end() { cur.col.min(len) } else { cur.col.min(len.saturating_sub(1)) };
+            self.buffer.cursor.set_col(col);
+        }
+    }
 }
 
 /// Window, buffer and panel actions: each ends the command under way, whether

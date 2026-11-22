@@ -3746,19 +3746,20 @@ fn tab_on_a_first_item_is_refused() {
     assert_eq!(app.mode, Mode::Insert);
 }
 
-/// Off a list item's own line, or with `list_tab` off, Tab is a tab.
+/// Off a list item's own line, or with `list_tab` off, Tab is a tab: with
+/// `expand_tab`, spaces to the next stop, as Neovim's.
 #[test]
 fn tab_elsewhere_inserts_a_tab_unit() {
     let mut app = app_with("prose\n");
     feed(&mut app, "A");
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(text(&app), "prose    \n");
+    assert_eq!(text(&app), "prose   \n");
     let mut app = app_with("- a\n- b\n");
     app.config.editor.list_tab = false;
     app.buffer.cursor = Cursor::new(1, 0);
     feed(&mut app, "A");
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(text(&app), "- a\n- b    \n");
+    assert_eq!(text(&app), "- a\n- b \n");
 }
 
 /// Terminals send Shift-Tab as a key of its own; it must be the key a

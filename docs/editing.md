@@ -120,8 +120,10 @@ too. The [command reference](reference/commands.md#lines) has the rest.
 `Enter` continues a list marker or a quote prefix, and ends the list when the
 item is empty. On a list item's line, `Tab` nests the item under the one above
 and `Shift-Tab` brings it back out, sub-items included, the same as `>al` and
-`<al`; anywhere else `Tab` types a tab. `list_tab = false` in `[editor]` makes
-`Tab` a tab on list items too. A terminal paste goes in exactly as copied: no
+`<al`; anywhere else `Tab` types spaces to the next tab stop, or a tab with
+`expand_tab = false`. `list_tab = false` in `[editor]` makes `Tab` a tab on
+list items too. `Backspace` with only spaces or tabs before the cursor goes
+back to the tab stop before it. A terminal paste goes in exactly as copied: no
 auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 
 ## Folding
@@ -341,5 +343,17 @@ middle or the bottom of the pane. The cursor stays where it is.
   mode does nothing. A change made on a dragged selection repeats over as
   much text from the cursor: as many characters, or as many lines down to
   the same column.
+- After `$`, `j`, `k`, `G`, `gg`, `:42` and the paging keys go to the end
+  of each line they land on, long or short, as in Vim, and so does a
+  selection started there. A move along the line, an edit, a yank or
+  leaving Visual mode ends that.
+- In Normal mode the cursor on a tab is drawn on the tab's last cell, as in
+  Vim; in Insert mode it is drawn on the first, where typing goes. In Visual
+  mode it is on the last cell when the cursor is after where the selection
+  started, and on the first otherwise.
+- `Tab` with `expand_tab` types as many spaces as reach the next multiple of
+  `tab_width`: after `abc` at the default 4, one space. `Backspace` in the
+  indent takes it back to the multiple before; anywhere else it deletes one
+  character.
 - Every key can be remapped, including whole verbs — see
   [Configuration](configuration.md#key-bindings).

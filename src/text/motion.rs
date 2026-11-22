@@ -297,13 +297,19 @@ pub fn resolve(
     let mut target = target;
     // Vertical motions keep the goal column, and so do the line jumps, as
     // Neovim's 'nostartofline' (its default) has them: `G`, `gg`, `42G`, and
-    // through them `:42` and `H` `M` `L`. Everything else resets it.
+    // through them `:42` and `H` `M` `L`. `$` makes it the line end
+    // ([`Cursor::LINE_END`]). Everything else resets it.
     match motion {
         Up | Down | HalfPageDown | HalfPageUp | PageDown | PageUp | BufferStart | BufferEnd | GotoLine(_) => {
             let cells = goal_cells(buffer, cur, tab);
             target.col = col_at_cells(buffer, target.line, cells, tab);
             target.goal_col = cur.goal_col;
             target.goal_cells = Some(cells);
+        }
+        // `$` goes on to the end of each line `j` or `k` lands on.
+        LineEnd => {
+            target.goal_col = Cursor::LINE_END;
+            target.goal_cells = Some(Cursor::LINE_END);
         }
         _ => {
             target.goal_col = target.col;
