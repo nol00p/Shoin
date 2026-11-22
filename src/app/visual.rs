@@ -81,31 +81,13 @@ impl App {
         match action {
             Action::PasteAfter => self.visual_paste(true, count),
             Action::PasteBefore => self.visual_paste(false, count),
-            Action::ToggleCase => {
-                // `V~` lands as `VU` does, and undo and redo with it.
-                // The landing is in the new text, as `VU`'s
-                // ([`App::recased_landing`]); undo goes to the old.
-                let toggle = |c: char, out: &mut String| {
-                    if c.is_uppercase() {
-                        out.extend(c.to_lowercase());
-                    } else if c.is_lowercase() {
-                        out.extend(c.to_uppercase());
-                    } else {
-                        out.push(c);
-                    }
-                };
-                let lines = matches!(self.mode, Mode::VisualLine).then(|| {
-                    let before = self.land_on(self.visual_line_start());
-                    (before, self.recased_landing(before, toggle))
-                });
-                let revision = self.buffer.revision;
-                self.visual_map_chars(toggle);
-                if let Some((before, after)) = lines {
-                    self.buffer.cursor = after;
-                    self.land_for_undo(revision, before);
-                    self.land_for_redo(revision);
-                }
-            }
+            // `~` is `g~` on the selection, as Neovim's: it lands as `U`
+            // does, and undo and redo with it.
+            Action::ToggleCase => self.visual_operate(Operator::ToggleCase),
+            // `r` then Enter puts a carriage return in every selected place
+            // in Neovim, which Shoin's text would read as line breaks: it
+            // does nothing here, and the selection stays.
+            Action::ReplaceChar('\n') => {}
             Action::ReplaceChar(r) => {
                 let r = *r;
                 self.visual_map_chars(move |_, out| out.push(r));

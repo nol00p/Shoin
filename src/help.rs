@@ -650,14 +650,14 @@ PageUp PageDown :: move half a page up · down
 d c y :: delete · change · yank
 dd cc yy :: the whole line
 > < :: indent · outdent. >> and << take whole lines
-gu gU :: lowercase · uppercase. guu and gUU take whole lines
+gu gU g~ :: lowercase · uppercase · toggle case. guu gUU g~~ take whole lines
 2d3w :: counts multiply — this deletes six words
 
 ## Quick edits
 x X :: delete the character under · before the cursor
 D C :: delete · change to the end of the line
 Y :: yank whole lines, like yy
-r{c} :: replace the character under the cursor
+r{c} :: replace the character under the cursor. r Enter splits the line
 ~ J :: toggle case · join the next line on
 p P :: paste after · before
 u Ctrl-r :: undo · redo in Normal

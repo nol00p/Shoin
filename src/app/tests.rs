@@ -190,9 +190,9 @@ fn a_picture_with_alt_text_is_captioned_with_it() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// A whole kitty picture is put whole: no source rectangle.
+/// The preview, frame and terminal all use the same picture dimensions.
 #[test]
-fn a_whole_kitty_picture_is_put_without_a_crop() {
+fn picture_placement_and_protocol_follow_the_embed_measure() {
     let d = std::env::temp_dir().join(format!("shoin-paint-whole-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     let mut png = vec![
@@ -200,23 +200,57 @@ fn a_whole_kitty_picture_is_put_without_a_crop() {
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
         0x15, 0xC4, 0x89,
     ];
-    png[16..20].copy_from_slice(&800u32.to_be_bytes());
+    png[16..20].copy_from_slice(&400u32.to_be_bytes());
     png[20..24].copy_from_slice(&200u32.to_be_bytes());
     std::fs::write(d.join("photo.png"), &png).unwrap();
     std::fs::write(d.join("note.md"), "top\n![[photo.png]]\nafter\n").unwrap();
-    let mut app = App::new(Config::default(), Some(d.join("note.md")), None).unwrap();
-    app.embed_mode = crate::transclude::Mode::Short;
-    app.image_protocol = crate::image::Protocol::Kitty;
-    app.term_size = (80, 24);
-    app.refresh_blocks();
-    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-    t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
-    let places = app.visible_pictures();
-    let p = places[0];
-    assert!(p.whole(), "{p:?}");
-    let out = app.picture_bytes(&places).unwrap();
+    use crate::image::Protocol;
+    use crate::transclude::Mode;
     let id = crate::image::kitty_id(&png);
-    assert!(out.contains(&format!("\x1b_Ga=p,i={id},q=2,C=1,c={},r={}\x1b\\", p.cols, p.rows)), "{out:?}");
+    for mode in [Mode::Off, Mode::Short, Mode::Rec, Mode::Full] {
+        for border in [false, true] {
+            for protocol in [Protocol::Kitty, Protocol::Iterm2] {
+                let mut cfg = Config::default();
+                cfg.transclude.border = border;
+                cfg.layout.padding_top = 0;
+                cfg.layout.padding_bottom = 0;
+                let mut app = App::new(cfg, Some(d.join("note.md")), None).unwrap();
+                app.embed_mode = mode;
+                app.image_protocol = protocol;
+                app.term_size = (80, 24);
+                app.refresh_blocks();
+                let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+                t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+                let places = app.visible_pictures();
+                let case = (mode, border, protocol);
+                if mode == Mode::Off {
+                    assert!(places.is_empty(), "{case:?}: {places:?}");
+                    continue;
+                }
+                let [p] = places.as_slice() else {
+                    panic!("{case:?}: {places:?}");
+                };
+                let (cols, rows) = match (mode, border) {
+                    (Mode::Short | Mode::Rec, true) => (68, 16),
+                    _ => (72, 17),
+                };
+                assert_eq!((p.x, p.y, p.cols, p.rows, p.shown), (4, 1, cols, rows, rows), "{case:?}");
+                assert!(p.whole(), "{case:?}: {p:?}");
+                let frame = t.backend().buffer();
+                assert_eq!(frame[(p.x, p.y + rows)].symbol(), "p", "{case:?}: caption");
+                assert_eq!(frame[(p.x, p.y + rows + 1)].symbol(), "a", "{case:?}: following line");
+
+                let out = app.picture_bytes(&places).unwrap();
+                let image = match protocol {
+                    Protocol::Kitty => format!("\x1b_Ga=p,i={id},q=2,C=1,c={cols},r={rows}\x1b\\"),
+                    Protocol::Iterm2 => format!("\x1b]1337;File=inline=1;width={cols};height={rows};"),
+                    Protocol::None => unreachable!(),
+                };
+                let placed = format!("\x1b[{};{}H{image}", p.y + 1, p.x + 1);
+                assert!(out.contains(&placed), "{case:?}: {out:?}");
+            }
+        }
+    }
     std::fs::remove_dir_all(&d).ok();
 }
 
@@ -1989,6 +2023,48 @@ fn autosave_writes_a_modified_buffer_and_rearms() {
     let _ = std::fs::remove_file(path);
 }
 
+/// Bytes from Neovim --clean --headless with nofixeol, fixeol eol, or
+/// nofixeol noeol, respectively. The same writer handles :w and autosave.
+#[test]
+fn saving_after_deletion_matches_neovim_at_eof() {
+    let cases = [
+        ("a\nb\n", [""; 3], true),
+        ("a\r\nb\r\n", [""; 3], true),
+        ("a\nb", [""; 3], true),
+        ("a\n\nb", ["a\n", "a\n\n", "a\n"], false),
+        ("a\r\n\r\nb", ["a\r\n", "a\r\n\r\n", "a\r\n"], false),
+        ("a\n\n\nb", ["a\n\n", "a\n\n\n", "a\n\n"], false),
+        ("\nb", ["", "\n", ""], false),
+    ];
+    let path = saved_file(&mut app_with("draft\n"), "delete-eof");
+    for (before, expected, empty) in cases {
+        for (policy, want) in ["preserve", "always", "never"].into_iter().zip(expected) {
+            for autosave in [false, true] {
+                std::fs::write(&path, before).unwrap();
+                let mut cfg = Config::default();
+                cfg.editor.final_newline = policy.into();
+                let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+                match (empty, autosave) {
+                    (true, true) => feed(&mut app, "ggdG"),
+                    (true, false) => ex(&mut app, "%d"),
+                    (false, _) => ex(&mut app, "$d"),
+                }
+                if autosave {
+                    autosave_due(&mut app);
+                    assert!(app.autosave_tick());
+                } else {
+                    ex(&mut app, "w");
+                }
+                let case = (before, policy, autosave);
+                assert_eq!(std::fs::read(&path).unwrap(), want.as_bytes(), "{case:?}");
+                assert_eq!(text(&app), want.replace("\r\n", "\n"), "{case:?}");
+                assert!(!app.buffer.modified, "{case:?}");
+            }
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
 /// THE one that matters: autosave never forces. A file something else has
 /// written since we read it is left exactly as that writer left it, and the
 /// refusal is reported instead of being swallowed by a background timer.
@@ -2392,14 +2468,15 @@ fn replace_char_replaces_under_the_cursor() {
     assert_eq!(text(&app), "Zbcd\n");
     assert_eq!(app.buffer.cursor.col, 0);
 
-    // A count replaces that many, and stops at the end of the line.
+    // A count replaces that many.
     feed(&mut app, "3rx");
     assert_eq!(text(&app), "xxxd\n");
     assert_eq!(app.buffer.cursor.col, 2, "cursor lands on the last one");
 
+    // More than the line has left replaces nothing, as Neovim beeps.
     let mut app = app_with("ab\n");
     feed(&mut app, "9rz");
-    assert_eq!(text(&app), "zz\n", "never runs past the line");
+    assert_eq!(text(&app), "ab\n", "never runs past the line");
 }
 
 /// `<C-w>` + an ARROW moves focus like `<C-w>hjkl`. It used to do nothing:
@@ -9512,4 +9589,563 @@ fn read_only_linewise_yank_lands_where_its_range_starts() {
 
 fn app_line(text: &str, l: usize) -> &str {
     text.lines().nth(l).unwrap()
+}
+
+// ------------------------------------------------- Neovim normal-mode parity
+//
+// Every expected value below is Neovim's (`nvim --clean --headless`, with
+// `tabstop=4 shiftwidth=4 expandtab` as Shoin's defaults and `Y` unmapped
+// to its Vim meaning, `yy`): the text, the cursor, where a `j` then goes
+// (`None` where the cursor sits on a tab), and the unnamed register.
+
+/// One case: keys, the whole text after them, the cursor, the cursor after
+/// one more `j`, and the unnamed register (text, linewise) if anything was
+/// stored.
+type NvCase = (&'static str, &'static str, (usize, usize), Option<(usize, usize)>, Option<(&'static str, bool)>);
+
+/// A fresh app on `text` with a 30-row window, after `keys`: plain
+/// characters, but `\t` is the Tab key, `\r` Enter, `\u{1b}` Esc, `\u{8}`
+/// Backspace and `\u{12}` Ctrl-r.
+fn nv_keys(cfg: Config, text: &str, keys: &str) -> App {
+    let mut app = app_with_config(text, cfg);
+    app.buffer.history = Default::default();
+    app.term_size = (80, 30);
+    for c in keys.chars() {
+        let code = match c {
+            '\t' => KeyCode::Tab,
+            '\r' => KeyCode::Enter,
+            '\u{1b}' => KeyCode::Esc,
+            '\u{8}' => KeyCode::Backspace,
+            '\u{12}' => {
+                ctrl(&mut app, 'r');
+                continue;
+            }
+            c => KeyCode::Char(c),
+        };
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+        app.sync_after_input();
+    }
+    app
+}
+
+/// Run each case on a fresh app and list every one that differs from
+/// Neovim, so one run shows them all.
+fn nv_misses(cfg: impl Fn() -> Config, text: &str, cases: &[NvCase]) -> Vec<String> {
+    let mut misses = Vec::new();
+    for &(keys, want_text, want, then, reg) in cases {
+        let mut app = nv_keys(cfg(), text, keys);
+        let got_text = app.buffer.rope.to_string();
+        let got = (app.buffer.cursor.line, app.buffer.cursor.col);
+        let got_reg = app.registers.get(&'"').map(|r| (r.text.clone(), r.linewise));
+        feed(&mut app, "j");
+        let next = (app.buffer.cursor.line, app.buffer.cursor.col);
+        let mut wrong = Vec::new();
+        if got_text != want_text {
+            wrong.push(format!("text {got_text:?}, Neovim {want_text:?}"));
+        }
+        if got != want {
+            wrong.push(format!("cursor {got:?}, Neovim {want:?}"));
+        }
+        if then.is_some_and(|t| t != next) {
+            wrong.push(format!("then j {next:?}, Neovim {:?}", then.unwrap()));
+        }
+        if got_reg.as_ref().map(|(t, l)| (t.as_str(), *l)) != reg {
+            wrong.push(format!("register {got_reg:?}, Neovim {reg:?}"));
+        }
+        if !wrong.is_empty() {
+            misses.push(format!("{keys:?}: {}", wrong.join("; ")));
+        }
+    }
+    misses
+}
+
+/// `g~` toggles case over a motion or object, `g~~` and `g~g~` over lines,
+/// and Visual `g~` over the selection, landing where Neovim's does (as
+/// `gu` and `gU`): undo and redo too, and `.` repeats it.
+#[test]
+fn g_tilde_toggles_case_as_neovim() {
+    let misses = nv_misses(Config::default, CASE_LINES, &[
+        ("j20lg~~", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 3), Some((2, 1)), None),
+        ("j20lg~g~", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 3), Some((2, 1)), None),
+        ("j20l3g~~", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nAB\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 20), Some((2, 1)), None),
+        ("j20l2g~~", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nAB\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 20), Some((2, 1)), None),
+        ("jjjg~~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (3, 0), Some((4, 0)), None),
+        ("jjjjg~~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (4, 0), Some((5, 0)), None),
+        ("6j5lg~~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\ttABBED lINE hERE\n日本 Wide Line Here\nlast Line here\n", (6, 1), Some((7, 2)), None),
+        ("7j5lg~~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 wIDE lINE hERE\nlast Line here\n", (7, 0), Some((8, 0)), None),
+        ("G5lg~k", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 wIDE lINE hERE\nLAST lINE HERE\n", (7, 3), Some((8, 5)), None),
+        ("j20lg~k", "aBC dEF\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 6), Some((1, 6)), None),
+        ("j20lg~j", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nAB\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 20), Some((2, 1)), None),
+        ("j20lg~G", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nAB\n   \n\nxyz LONG LINE HERE WITH SOME WORDS\n\ttABBED lINE hERE\n日本 wIDE lINE hERE\nLAST lINE HERE\n", (1, 20), Some((2, 1)), None),
+        ("j20lg~gg", "aBC dEF\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 6), Some((1, 6)), None),
+        ("j20lg~ip", "aBC dEF\n   iNDENTED lINE hERE wITH wORDS\nAB\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 0), Some((1, 0)), None),
+        ("g~w", "aBC Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 0), Some((1, 0)), None),
+        ("g~2w", "aBC dEF\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 0), Some((1, 0)), None),
+        ("2g~w", "aBC dEF\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 0), Some((1, 0)), None),
+        ("g~iw", "aBC Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 0), Some((1, 0)), None),
+        ("4lg~$", "Abc dEF\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 4), Some((1, 4)), None),
+        ("4lg~e", "Abc dEF\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 4), Some((1, 4)), None),
+        ("j20lVg~", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 0), Some((2, 0)), None),
+        ("j20lvjg~", "Abc Def\n   Indented Line HerE wITH wORDS\nAB\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 20), Some((2, 1)), None),
+        ("j20lvg~", "Abc Def\n   Indented Line HerE With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 20), Some((2, 1)), None),
+        ("G5lVkg~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 wIDE lINE hERE\nLAST lINE HERE\n", (7, 3), Some((8, 5)), None),
+        ("g~wj.", "aBC Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 0), Some((2, 0)), None),
+        ("g~~j.", "aBC dEF\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 0), Some((2, 0)), None),
+        ("4lg~ej.", "Abc dEF\n   INDENTED Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 4), Some((2, 1)), None),
+        ("g~~j3.", "aBC dEF\n   iNDENTED lINE hERE wITH wORDS\nAB\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 0), Some((2, 0)), None),
+        ("G2g~~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (8, 0), Some((8, 0)), None),
+        ("G05l2g~g~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (8, 5), Some((8, 5)), None),
+        ("jg~~G.", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nLAST lINE HERE\n", (8, 0), Some((8, 0)), None),
+        ("j20lg~~G$u", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 3), Some((2, 1)), None),
+        ("j20lg~~G$uG$\u{12}", "Abc Def\n   iNDENTED lINE hERE wITH wORDS\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 3), Some((2, 1)), None),
+        ("j20l3g~~G$u", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 20), Some((2, 1)), None),
+        ("G5lg~kgg$u", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (7, 3), Some((8, 5)), None),
+        ("G5lg~kgg$ugg$\u{12}", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 wIDE lINE hERE\nLAST lINE HERE\n", (7, 3), Some((8, 5)), None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// Undo and redo of a charwise case change (`g~b`, `gUb`, Visual `g~`)
+/// both come back to where its range starts, as Neovim's.
+#[test]
+fn undo_and_redo_of_a_charwise_case_change_land_as_neovim() {
+    let misses = nv_misses(Config::default, "Abc Def ghi\nxyz long line\n", &[
+        ("8lg~bG$u", "Abc Def ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lg~bG$u\u{12}", "Abc dEF ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lgUbG$u", "Abc Def ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lgUbG$u\u{12}", "Abc DEF ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lgubG$u\u{12}", "Abc def ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("2lgU3lG$u\u{12}", "AbC Def ghi\nxyz long line\n", (0, 2), Some((1, 2)), None),
+        ("2lgu3lG$u\u{12}", "Abc def ghi\nxyz long line\n", (0, 2), Some((1, 2)), None),
+        ("2lg~3lG$u\u{12}", "AbC def ghi\nxyz long line\n", (0, 2), Some((1, 2)), None),
+        ("8lvbg~G$u", "Abc Def ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lvbg~G$u\u{12}", "Abc dEF Ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lvbUG$u\u{12}", "Abc DEF Ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lvb~G$u\u{12}", "Abc dEF Ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lvb~G$u", "Abc Def ghi\nxyz long line\n", (0, 4), Some((1, 4)), None),
+        ("8lg~iwG$u", "Abc Def ghi\nxyz long line\n", (0, 8), Some((1, 8)), None),
+        ("8lg~iwG$u\u{12}", "Abc Def GHI\nxyz long line\n", (0, 8), Some((1, 8)), None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `~` with a count toggles that many characters, or up to the line's end,
+/// and goes to the one after them; undo and redo land as Neovim's.
+#[test]
+fn tilde_with_a_count_as_neovim() {
+    let misses = nv_misses(Config::default, CASE_LINES, &[
+        ("~", "abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 1), Some((1, 1)), None),
+        ("3~", "aBC Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 3), Some((1, 3)), None),
+        ("10~", "aBC dEF\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 6), Some((1, 6)), None),
+        ("6l~", "Abc DeF\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 6), Some((1, 6)), None),
+        ("6l3~", "Abc DeF\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 6), Some((1, 6)), None),
+        ("jjj~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (3, 1), Some((4, 0)), None),
+        ("jjjj~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (4, 0), Some((5, 0)), None),
+        ("G5l~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast line here\n", (8, 6), Some((8, 6)), None),
+        ("~G$u", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 0), Some((1, 0)), None),
+        ("3~G$u", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 0), Some((1, 0)), None),
+        ("4l2~G$u", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 4), Some((1, 4)), None),
+        ("4l2~G$uG$\u{12}", "Abc dEf\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (0, 4), Some((1, 4)), None),
+        ("~j.", "abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 2), Some((2, 1)), None),
+        ("3~j.", "aBC Def\n   iNDented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 6), Some((2, 1)), None),
+        ("3~j2.", "aBC Def\n   iNdented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (1, 5), Some((2, 1)), None),
+        ("7j~~", "Abc Def\n   Indented Line Here With Words\nab\n   \n\nXYZ long line here with some words\n\tTabbed Line Here\n日本 Wide Line Here\nlast Line here\n", (7, 2), Some((8, 4)), None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `g~` and `~` over a character whose case change has another length land
+/// where Neovim's do, as `gu` and `gU`: Neovim maps `İ` to `i` and `ß` to
+/// `ẞ` and leaves `ﬁ`, so its column is translated to Shoin's full mapping
+/// (`İ` to `i` and a dot, `ß` to `SS`, `ﬁ` to `FI`). `~` goes to the
+/// character after what it changed.
+#[test]
+fn a_toggle_that_changes_the_length_lands_as_neovim() {
+    let mut misses = landing_misses(
+        "İİİabc\nxyz\nİİİabcdef\n",
+        &[
+            ("0lg~j", (0, 4), (1, 2)),
+            ("03lg~j", (0, 8), (1, 2)),
+            ("j3lg~k", (0, 7), (1, 2)),
+            ("j3lVkg~", (0, 7), (1, 2)),
+            ("03lg~~", (0, 0), (1, 0)),
+            ("3~", (0, 6), (1, 2)),
+            ("l3~", (0, 6), (1, 2)),
+        ],
+    );
+    let text2 = "aßbcde\nxyz\naẞbcde\naﬁbcde\nlast\n";
+    misses.extend(landing_misses(
+        text2,
+        &[
+            ("03lg~j", (0, 3), (1, 2)),
+            ("j3lg~k", (0, 1), (1, 1)),
+            ("jjj3lg~j", (3, 4), (4, 3)),
+            ("G3lg~k", (3, 4), (4, 3)),
+            ("l~", (0, 3), (1, 2)),
+            ("l3~", (0, 5), (1, 2)),
+        ],
+    ));
+    misses.extend(sticky_misses(
+        text2,
+        &[("jjjl~", "", (3, 3)), ("jjjl2~", "", (3, 4)), ("03lg~jG$u", "", (0, 3)), ("03lg~jG$uG$\u{12}", "", (0, 3))],
+    ));
+    misses.extend(sticky_misses(
+        "İİİabc\nxyz\nİİİabcdef\n",
+        &[("0lg~jG$u", "", (0, 1)), ("0lg~jG$uG$\u{12}", "", (0, 4))],
+    ));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+    assert_eq!(sticky_keys(text2, "03lg~j").buffer.line_text(0), "ASSBCDE");
+    assert_eq!(sticky_keys(text2, "jjjl~").buffer.line_text(3), "aFIbcde");
+    assert_eq!(sticky_keys("İİİabc\n", "l3~").buffer.line_text(0), "İi\u{307}i\u{307}Abc");
+}
+
+/// A doubled linewise operator with a count (`2dd`, `2yy`, `2cc`, `2>>`,
+/// `2guu`, `2g~~`, `2Y`, `3J`) on the last line has no line to move to, so
+/// Neovim beeps and changes nothing; from higher up, a count larger than
+/// the lines left takes them all.
+#[test]
+fn counted_linewise_operators_past_the_end_as_neovim() {
+    let misses = nv_misses(Config::default, "one\n  two\nthree\nfour\n", &[
+        ("G2dd", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("G5dd", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5dd", "one\n  two\n", (1, 0), Some((1, 0)), Some(("three\nfour\n", true))),
+        ("jj2dd", "one\n  two\n", (1, 0), Some((1, 0)), Some(("three\nfour\n", true))),
+        ("j9dd", "one\n", (0, 0), Some((0, 0)), Some(("  two\nthree\nfour\n", true))),
+        ("G2yy", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5yy", "one\n  two\nthree\nfour\n", (2, 0), Some((3, 0)), Some(("three\nfour\n", true))),
+        ("G2Y", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5Y", "one\n  two\nthree\nfour\n", (2, 0), Some((3, 0)), Some(("three\nfour\n", true))),
+        ("G2cc", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("G2ccX\u{1b}", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5ccX\u{1b}", "one\n  two\nX\n", (2, 0), Some((2, 0)), Some(("three\nfour\n", true))),
+        ("G2>>", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5>>", "one\n  two\n    three\n    four\n", (2, 0), Some((3, 0)), None),
+        ("G2<<", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("j5<<", "one\ntwo\nthree\nfour\n", (1, 0), Some((2, 0)), None),
+        ("G3J", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("GJ", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("G2J", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj3J", "one\n  two\nthree four\n", (2, 5), Some((2, 5)), None),
+        ("jj9J", "one\n  two\nthree four\n", (2, 5), Some((2, 5)), None),
+        ("G2guu", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5guu", "one\n  two\nthree\nfour\n", (2, 0), Some((3, 0)), None),
+        ("G2gUU", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5gUU", "one\n  two\nTHREE\nFOUR\n", (2, 0), Some((3, 0)), None),
+        ("G2g~~", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("jj5g~~", "one\n  two\nTHREE\nFOUR\n", (2, 0), Some((3, 0)), None),
+        ("G2gugu", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("G2g~g~", "one\n  two\nthree\nfour\n", (3, 0), Some((3, 0)), None),
+        ("ddG2dd.", "  two\nthree\n", (1, 0), Some((1, 0)), Some(("four\n", true))),
+        ("jj5ddu", "one\n  two\nthree\nfour\n", (2, 0), Some((3, 0)), Some(("three\nfour\n", true))),
+        ("jj5dduG\u{12}", "one\n  two\n", (1, 0), Some((1, 0)), Some(("three\nfour\n", true))),
+        ("G05l2dd", "one\n  two\nthree\nfour\n", (3, 3), Some((3, 3)), None),
+        ("G05l2>>", "one\n  two\nthree\nfour\n", (3, 3), Some((3, 3)), None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `f` `F` `t` `T` followed by the Tab key find a tab, and `;` `,` repeat
+/// it; Enter, Esc or Backspace after them cancel the command, as Neovim's.
+#[test]
+fn find_takes_the_tab_key_as_neovim() {
+    let misses = nv_misses(Config::default, "a\tb\tc d\te\nx\ty\tz\n  indented line\n", &[
+        ("f\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 1), None, None),
+        ("2f\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 3), None, None),
+        ("f\t;", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 3), None, None),
+        ("f\t;;", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 7), None, None),
+        ("f\t;,", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 1), None, None),
+        ("$F\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 7), None, None),
+        ("$T\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 8), Some((1, 4)), None),
+        ("t\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), None),
+        ("t\t;", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 2), Some((1, 2)), None),
+        ("$T\t,", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 8), Some((1, 4)), None),
+        ("df\t", "b\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), Some(("a\t", false))),
+        ("dt\t", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("d2f\t", "c d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), Some(("a\tb\t", false))),
+        ("cf\tX\u{1b}", "Xb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), Some(("a\t", false))),
+        ("yt\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), Some(("a", false))),
+        ("f\td;", "ac d\te\nx\ty\tz\n  indented line\n", (0, 1), Some((1, 1)), Some(("\tb\t", false))),
+        ("$dF\t", "a\tb\tc de\nx\ty\tz\n  indented line\n", (0, 7), Some((1, 4)), Some(("\t", false))),
+        ("f\r", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), None),
+        ("f\rx", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("f\u{1b}x", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("t\u{1b}x", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("df\rx", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("f\u{8}x", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("5f\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `r<Tab>` with `expand_tab` replaces each character with spaces up to the
+/// next tab stop, as Neovim's (it types the Tab in Replace mode); Visual
+/// `r<Tab>` writes tabs. A count larger than the characters left changes
+/// nothing.
+#[test]
+fn replace_with_the_tab_key_expands_as_neovim() {
+    let mut misses = nv_misses(Config::default, "a\tb\tc d\te\nx\ty\tz\n  indented line\n", &[
+        ("r\t", "    \tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 3), Some((1, 1)), None),
+        ("3r\t", "            \tc d\te\nx\ty\tz\n  indented line\n", (0, 11), Some((1, 4)), None),
+        ("r\tj.", "    \tb\tc d\te\nx   y\tz\n  indented line\n", (1, 3), Some((2, 3)), None),
+        ("vlr\t", "\t\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, None),
+        ("vjr\t", "\t\t\t\t\t\t\t\t\t\n\t\ty\tz\n  indented line\n", (0, 0), None, None),
+        ("Vr\t", "\t\t\t\t\t\t\t\t\t\nx\ty\tz\n  indented line\n", (0, 0), None, None),
+        ("r\tu", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), None),
+        ("r\u{1b}x", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("r\u{8}x", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("9r\t", "                                    \nx\ty\tz\n  indented line\n", (0, 35), Some((1, 4)), None),
+        ("10r\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), None),
+        ("8lr\t", "a\tb\tc d\t    \nx\ty\tz\n  indented line\n", (0, 11), Some((1, 4)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, "    abc  def\nxyz\n", &[
+        ("r\t", "       abc  def\nxyz\n", (0, 3), Some((1, 2)), None),
+        ("3lr\t", "    abc  def\nxyz\n", (0, 3), Some((1, 2)), None),
+        ("6lr\t", "    ab    def\nxyz\n", (0, 7), Some((1, 2)), None),
+        ("6l2r\t", "    ab       def\nxyz\n", (0, 11), Some((1, 2)), None),
+        ("6l2r\tu", "    abc  def\nxyz\n", (0, 6), Some((1, 2)), None),
+        ("6l2r\tu\u{12}", "    ab       def\nxyz\n", (0, 6), Some((1, 2)), None),
+        ("r\tu\u{12}", "       abc  def\nxyz\n", (0, 0), Some((1, 0)), None),
+        ("6lr\tj.", "    ab    def\nxy  \n", (1, 3), Some((1, 3)), None),
+        ("9l3r\t", "    abc             \nxyz\n", (0, 19), Some((1, 2)), None),
+        ("9l4r\t", "    abc  def\nxyz\n", (0, 9), Some((1, 2)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "ab\n日本語x\n", &[
+        ("jr\t", "ab\n    本語x\n", (1, 3), Some((1, 3)), None),
+        ("jlr\t", "ab\n日  語x\n", (1, 2), Some((1, 2)), None),
+        ("j2r\t", "ab\n        語x\n", (1, 7), Some((1, 7)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// Without `expand_tab`, `r<Tab>` replaces with tabs, as any character.
+#[test]
+fn replace_with_the_tab_key_without_expand_tab_as_neovim() {
+    let noet = || {
+        let mut cfg = Config::default();
+        cfg.editor.expand_tab = false;
+        cfg
+    };
+    let misses = nv_misses(noet, "a\tb\tc d\te\nx\ty\tz\n  indented line\n", &[
+        ("r\t", "\t\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, None),
+        ("3r\t", "\t\t\t\tc d\te\nx\ty\tz\n  indented line\n", (0, 2), None, None),
+        ("r\tj.", "\t\tb\tc d\te\nx\ty\tz\n  indented line\n", (1, 1), None, None),
+        ("vlr\t", "\t\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, None),
+        ("vjr\t", "\t\t\t\t\t\t\t\t\t\n\t\ty\tz\n  indented line\n", (0, 0), None, None),
+        ("Vr\t", "\t\t\t\t\t\t\t\t\t\nx\ty\tz\n  indented line\n", (0, 0), None, None),
+        ("r\tu", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), None),
+        ("r\u{1b}x", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("r\u{8}x", "\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), None, Some(("a", false))),
+        ("9r\t", "\t\t\t\t\t\t\t\t\t\nx\ty\tz\n  indented line\n", (0, 8), None, None),
+        ("10r\t", "a\tb\tc d\te\nx\ty\tz\n  indented line\n", (0, 0), Some((1, 0)), None),
+        ("8lr\t", "a\tb\tc d\t\t\nx\ty\tz\n  indented line\n", (0, 8), None, None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `r<CR>` replaces the characters with a line break, as Neovim's: with
+/// `auto_indent` the new line takes the indent before the cursor (in
+/// spaces with `expand_tab`) and drops the blanks it starts with, and the
+/// cursor ends on the last blank of that indent. A count replaces that
+/// many characters with one break.
+#[test]
+fn replace_with_enter_splits_the_line_as_neovim() {
+    let mut misses = nv_misses(Config::default, "    abc  def\nxyz\n", &[
+        ("r\r", "\nabc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("lr\r", " \n abc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("2lr\r", "  \n  abc  def\nxyz\n", (1, 1), Some((2, 1)), None),
+        ("3lr\r", "   \n   abc  def\nxyz\n", (1, 2), Some((2, 2)), None),
+        ("4lr\r", "    \n    bc  def\nxyz\n", (1, 3), Some((2, 2)), None),
+        ("5lr\r", "    a\n    c  def\nxyz\n", (1, 3), Some((2, 2)), None),
+        ("6lr\r", "    ab\n    def\nxyz\n", (1, 3), Some((2, 2)), None),
+        ("7lr\r", "    abc\n    def\nxyz\n", (1, 3), Some((2, 2)), None),
+        ("8lr\r", "    abc \n    def\nxyz\n", (1, 3), Some((2, 2)), None),
+        ("l2r\r", " \n abc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("2l3r\r", "  \n  bc  def\nxyz\n", (1, 1), Some((2, 1)), None),
+        ("7l2r\r", "    abc\n    def\nxyz\n", (1, 3), Some((2, 2)), None),
+        ("6l3r\r", "    ab\n    def\nxyz\n", (1, 3), Some((2, 2)), None),
+        ("9l3r\r", "    abc  \n\nxyz\n", (1, 0), Some((2, 2)), None),
+        ("9l4r\r", "    abc  def\nxyz\n", (0, 9), Some((1, 2)), None),
+        ("3r\r", "\nabc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("$r\r", "    abc  de\n\nxyz\n", (1, 0), Some((2, 2)), None),
+        ("j3r\r", "    abc  def\n\n\n", (2, 0), Some((2, 0)), None),
+        ("j4r\r", "    abc  def\nxyz\n", (1, 0), Some((1, 0)), None),
+        ("jr\r", "    abc  def\n\nyz\n", (2, 0), Some((2, 0)), None),
+        ("jlr\r", "    abc  def\nx\nz\n", (2, 0), Some((2, 0)), None),
+        ("r\r.", "\n\nbc  def\nxyz\n", (2, 0), Some((3, 0)), None),
+        ("4lr\ru", "    abc  def\nxyz\n", (0, 4), Some((1, 2)), None),
+        ("4lr\ru\u{12}", "    \n    bc  def\nxyz\n", (0, 3), Some((1, 3)), None),
+        ("9l4rx", "    abc  def\nxyz\n", (0, 9), Some((1, 2)), None),
+        ("9l3rx", "    abc  xxx\nxyz\n", (0, 11), Some((1, 2)), None),
+        ("10rx", "xxxxxxxxxxef\nxyz\n", (0, 9), Some((1, 2)), None),
+        ("6lr\ru\u{12}", "    ab\n    def\nxyz\n", (0, 5), Some((1, 5)), None),
+        ("9l3r\ru\u{12}", "    abc  \n\nxyz\n", (0, 8), Some((1, 0)), None),
+        ("r\ru\u{12}", "\nabc  def\nxyz\n", (0, 0), Some((1, 0)), None),
+        ("lr\ru\u{12}", " \n abc  def\nxyz\n", (0, 0), Some((1, 0)), None),
+        ("4lr\ruG$\u{12}", "    \n    bc  def\nxyz\n", (0, 3), Some((1, 3)), None),
+        ("jlr\ru\u{12}", "    abc  def\nx\nz\n", (1, 0), Some((2, 0)), None),
+        ("6l2r\ru\u{12}", "    ab\n    def\nxyz\n", (0, 5), Some((1, 5)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, "- item one\n\t\tabc\n", &[
+        ("4lr\r", "- it\nm one\n\t\tabc\n", (1, 0), Some((2, 0)), None),
+        ("2lr\r", "- \ntem one\n\t\tabc\n", (1, 0), Some((2, 0)), None),
+        ("r\r", "\nitem one\n\t\tabc\n", (1, 0), Some((2, 0)), None),
+        ("jlr\r", "- item one\n\t\n    abc\n", (2, 3), Some((2, 3)), None),
+        ("j2lr\r", "- item one\n\t\t\n        bc\n", (2, 7), Some((2, 7)), None),
+        ("j3lr\r", "- item one\n\t\ta\n        c\n", (2, 7), Some((2, 7)), None),
+    ]));
+    let noet = || {
+        let mut cfg = Config::default();
+        cfg.editor.expand_tab = false;
+        cfg
+    };
+    misses.extend(nv_misses(noet, "    abc  def\nxyz\n", &[
+        ("r\r", "\nabc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("lr\r", " \n abc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("2lr\r", "  \n  abc  def\nxyz\n", (1, 1), Some((2, 1)), None),
+        ("3lr\r", "   \n   abc  def\nxyz\n", (1, 2), Some((2, 2)), None),
+        ("4lr\r", "    \n\tbc  def\nxyz\n", (1, 0), None, None),
+        ("5lr\r", "    a\n\tc  def\nxyz\n", (1, 0), None, None),
+        ("6lr\r", "    ab\n\tdef\nxyz\n", (1, 0), None, None),
+        ("7lr\r", "    abc\n\tdef\nxyz\n", (1, 0), None, None),
+        ("8lr\r", "    abc \n\tdef\nxyz\n", (1, 0), None, None),
+        ("l2r\r", " \n abc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("2l3r\r", "  \n  bc  def\nxyz\n", (1, 1), Some((2, 1)), None),
+        ("7l2r\r", "    abc\n\tdef\nxyz\n", (1, 0), None, None),
+        ("6l3r\r", "    ab\n\tdef\nxyz\n", (1, 0), None, None),
+        ("9l3r\r", "    abc  \n\nxyz\n", (1, 0), Some((2, 2)), None),
+        ("9l4r\r", "    abc  def\nxyz\n", (0, 9), Some((1, 2)), None),
+        ("3r\r", "\nabc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("$r\r", "    abc  de\n\nxyz\n", (1, 0), Some((2, 2)), None),
+        ("j3r\r", "    abc  def\n\n\n", (2, 0), Some((2, 0)), None),
+        ("j4r\r", "    abc  def\nxyz\n", (1, 0), Some((1, 0)), None),
+        ("jr\r", "    abc  def\n\nyz\n", (2, 0), Some((2, 0)), None),
+        ("jlr\r", "    abc  def\nx\nz\n", (2, 0), Some((2, 0)), None),
+        ("r\r.", "\n\nbc  def\nxyz\n", (2, 0), Some((3, 0)), None),
+        ("4lr\ru", "    abc  def\nxyz\n", (0, 4), Some((1, 2)), None),
+        ("4lr\ru\u{12}", "    \n\tbc  def\nxyz\n", (0, 3), Some((1, 0)), None),
+        ("9l4rx", "    abc  def\nxyz\n", (0, 9), Some((1, 2)), None),
+        ("9l3rx", "    abc  xxx\nxyz\n", (0, 11), Some((1, 2)), None),
+        ("10rx", "xxxxxxxxxxef\nxyz\n", (0, 9), Some((1, 2)), None),
+        ("6lr\ru\u{12}", "    ab\n\tdef\nxyz\n", (0, 5), Some((1, 2)), None),
+        ("9l3r\ru\u{12}", "    abc  \n\nxyz\n", (0, 8), Some((1, 0)), None),
+        ("r\ru\u{12}", "\nabc  def\nxyz\n", (0, 0), Some((1, 0)), None),
+        ("lr\ru\u{12}", " \n abc  def\nxyz\n", (0, 0), Some((1, 0)), None),
+        ("4lr\ruG$\u{12}", "    \n\tbc  def\nxyz\n", (0, 3), Some((1, 0)), None),
+        ("jlr\ru\u{12}", "    abc  def\nx\nz\n", (1, 0), Some((2, 0)), None),
+        ("6l2r\ru\u{12}", "    ab\n\tdef\nxyz\n", (0, 5), Some((1, 2)), None),
+    ]));
+    misses.extend(nv_misses(noet, "- item one\n\t\tabc\n", &[
+        ("4lr\r", "- it\nm one\n\t\tabc\n", (1, 0), Some((2, 0)), None),
+        ("2lr\r", "- \ntem one\n\t\tabc\n", (1, 0), Some((2, 0)), None),
+        ("r\r", "\nitem one\n\t\tabc\n", (1, 0), Some((2, 0)), None),
+        ("jlr\r", "- item one\n\t\n\tabc\n", (2, 0), None, None),
+        ("j2lr\r", "- item one\n\t\t\n\t\tbc\n", (2, 1), None, None),
+        ("j3lr\r", "- item one\n\t\ta\n\t\tc\n", (2, 1), None, None),
+    ]));
+    // Visual `r` then Enter: Neovim writes carriage returns, which Shoin
+    // would read as line breaks; it changes nothing (and keeps Visual).
+    let mut app = nv_keys(Config::default(), "    abc  def\nxyz\n", "4lvlr\r");
+    assert_eq!(app.buffer.rope.to_string(), "    abc  def\nxyz\n");
+    assert_eq!(app.mode, Mode::Visual);
+    feed(&mut app, "d");
+    assert_eq!(app.buffer.rope.to_string(), "    c  def\nxyz\n", "the selection still works");
+    let noai = || {
+        let mut cfg = Config::default();
+        cfg.editor.auto_indent = false;
+        cfg
+    };
+    misses.extend(nv_misses(noai, "    abc  def\nxyz\n", &[
+        ("4lr\r", "    \nbc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("8lr\r", "    abc \ndef\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("$r\r", "    abc  de\n\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("lr\r", " \n  abc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("r\r", "\n   abc  def\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("4lr\ru\u{12}", "    \nbc  def\nxyz\n", (0, 3), Some((1, 3)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `r<CR>` at the end of a file with no final newline opens a real line:
+/// the cursor stays on the new empty line, as Neovim's, so `x` there
+/// deletes nothing.
+#[test]
+fn replace_with_enter_at_an_unterminated_end_as_neovim() {
+    let mut misses = nv_misses(Config::default, "abc", &[
+        ("$r\r", "ab\n\n", (1, 0), Some((1, 0)), None),
+        ("$r\rx", "ab\n\n", (1, 0), Some((1, 0)), None),
+        ("l2r\r", "a\n\n", (1, 0), Some((1, 0)), None),
+        ("$2r\r", "abc", (0, 2), Some((0, 2)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, "  abc", &[
+        ("$r\r", "  ab\n\n", (1, 0), Some((1, 0)), None),
+        ("$r\rx", "  ab\n\n", (1, 0), Some((1, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "abc\n", &[
+        ("$r\r", "ab\n\n", (1, 0), Some((1, 0)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `r` counts a base character and the combining marks on it as one, as
+/// Neovim's: for the count check and for what it replaces, with a plain
+/// character, a tab or a line break.
+#[test]
+fn replace_takes_a_character_with_its_combining_marks_as_neovim() {
+    let mut misses = nv_misses(Config::default, "a\u{301}bc\n", &[
+        ("0r\r", "\nbc\n", (1, 0), Some((1, 0)), None),
+        ("0r\t", "    bc\n", (0, 3), Some((0, 3)), None),
+        ("0rx", "xbc\n", (0, 0), Some((0, 0)), None),
+        ("2rx", "xxc\n", (0, 1), Some((0, 1)), None),
+        ("3rx", "xxx\n", (0, 2), Some((0, 2)), None),
+        ("4rx", "a\u{301}bc\n", (0, 0), Some((0, 0)), None),
+        ("3r\r", "\n\n", (1, 0), Some((1, 0)), None),
+        ("4r\r", "a\u{301}bc\n", (0, 0), Some((0, 0)), None),
+        ("3r\t", "            \n", (0, 11), Some((0, 11)), None),
+        ("4r\t", "a\u{301}bc\n", (0, 0), Some((0, 0)), None),
+        ("$hrx", "a\u{301}xc\n", (0, 2), Some((0, 2)), None),
+        ("$h2rx", "a\u{301}xx\n", (0, 3), Some((0, 3)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, "ab\u{301}c\n", &[
+        ("lrx", "axc\n", (0, 1), Some((0, 1)), None),
+        ("l2r\r", "a\n\n", (1, 0), Some((1, 0)), None),
+        ("l3rx", "ab\u{301}c\n", (0, 1), Some((0, 1)), None),
+        ("2rx", "xxc\n", (0, 1), Some((0, 1)), None),
+        ("3rx", "xxx\n", (0, 2), Some((0, 2)), None),
+        ("l2r\t", "a       \n", (0, 7), Some((0, 7)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A counted `r<Tab>` checks its count, but `.` repeats it as Neovim
+/// records it, a Replace-mode `{count}R<Tab>`: on a shorter line the
+/// tabs go on past its end. Neovim's default `smarttab` sends the tab
+/// down that path without `expand_tab` too.
+#[test]
+fn repeating_a_counted_replace_with_tab_as_neovim() {
+    let text = "abcde\n\nxyz\nab\n";
+    let mut misses = nv_misses(Config::default, "abcde\nx\n", &[
+        ("2r\tj0.", "        cde\n        \n", (1, 7), Some((1, 7)), None),
+        ("r\tj0.", "    bcde\n    \n", (1, 3), Some((1, 3)), None),
+        ("3r\tjj.", "            de\n            \n", (1, 11), Some((1, 11)), None),
+        ("2r\tj03.", "        cde\n            \n", (1, 11), Some((1, 11)), None),
+        ("2r\rj.", "\ncde\nx\n", (2, 0), Some((2, 0)), None),
+        ("2rxj0.", "xxcde\nx\n", (1, 0), Some((1, 0)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, text, &[
+        ("2r\tj.", "        cde\n        \nxyz\nab\n", (1, 7), Some((2, 2)), None),
+        ("2r\tjj.", "        cde\n\nxy      \nab\n", (2, 7), Some((3, 1)), None),
+        ("2r\tjj.u", "        cde\n\nxyz\nab\n", (2, 2), Some((3, 1)), None),
+        ("2r\tjj.u\u{12}", "        cde\n\nxy      \nab\n", (2, 2), Some((3, 1)), None),
+        ("2r\t3jl.", "        cde\n\nxyz\na       \n", (3, 7), Some((3, 7)), None),
+    ]));
+    let noet = || {
+        let mut cfg = Config::default();
+        cfg.editor.expand_tab = false;
+        cfg
+    };
+    misses.extend(nv_misses(noet, "abcde\nx\n", &[
+        ("2r\tj0.", "\t\tcde\n\t\t\n", (1, 1), Some((1, 1)), None),
+        ("2r\tj03.", "\t\tcde\n\t\t\t\n", (1, 2), Some((1, 2)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
