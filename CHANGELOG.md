@@ -22,6 +22,30 @@
   Undo and redo of a case change come back to the same place, and `2gUU`
   on the last line does nothing (#180).
 - `gu` and `gU` work in Visual mode (#180).
+- `/` and `?` search with Vim patterns, as Neovim: `\<word\>`, `\(a\|b\)`,
+  `\{n,m}`, `\v`, `\c`, `\zs`/`\ze`, `\n` across lines (#185).
+  Back-references inside a pattern and look-arounds give an error.
+- `:s/pattern/replacement/flags` with ranges (`:%s`, `:'<,'>s`), the
+  flags `g c i I n e &`, `&`, `\1`, `~`, `\u \U \l \L`, `\r` in the
+  replacement, and the repeats `:s`, `:&&`, `&` and `g&`, as Neovim. One
+  `u` undoes it (#185).
+- `g~` toggles case over a motion or object, `g~~` over lines, and in
+  Visual as `~`; `.` repeats it (#186).
+- `2dd`, `2yy`, `2cc`, `2>>`, `2<<`, `2guu`, `2g~~` and `2Y` on the last
+  line change nothing, as Neovim (#186).
+- `f`, `t`, `F`, `T` find a tab with `Tab`. `r` then `Tab` replaces with a
+  tab (spaces to the next stop with `expand_tab`), `r` then `Enter` splits
+  the line. `r` counts a letter and its combining accents as one
+  character (#186).
+- After `$`, `j`, `k`, `G`, `gg`, `:N`, the paging keys and scrolling stay
+  at the end of each line, as Neovim (#187).
+- In Visual mode `$`, `l`, and `j`/`k` onto a shorter line reach the line
+  break, as Neovim, so `v$d` and `v$p` take it too, and a selected line
+  break is drawn (#187).
+- `d$`, `y$` and `c$` on a line's last character act on it (#187).
+- Insert `Tab` with `expand_tab` types spaces to the next tab stop, and
+  `Backspace` in a line's indent goes back to the stop before, as
+  Neovim's default `smarttab` (#187).
 
 **Math**
 
@@ -46,6 +70,10 @@
 - An embed no longer drops letters or shows `**` and `[` where bold text
   or a link wraps across rows, and `:embed full` uses the whole measure
   (#181).
+- In Normal mode the cursor on a tab is drawn on its last cell, as
+  Neovim; Insert keeps it on the first (#187).
+- Image embeds in `:embed full` use the whole measure when
+  `transclude.border` is on (#184).
 
 **Reading**
 
@@ -59,6 +87,13 @@
 - A Math page: inline and display math, editing a block, when a block is
   not laid out, export, and the supported commands, with a recording
   (#170).
+
+**Fixes**
+
+- Saving a buffer emptied by deletion writes an empty file, as Neovim
+  (#184).
+- `:w` and `:saveas` to a hard link or symlink of the file being edited
+  treat it as that file (#185).
 
 ## 0.2.5
 
