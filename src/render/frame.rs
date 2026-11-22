@@ -438,6 +438,23 @@ fn render_pane(
             line = line.alignment(a);
         }
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(row_bg)), r);
+        // A selected line break is one selected cell after the line's last
+        // character, as Neovim draws it. Not over a closed fold's label, and
+        // not past the pane when the row fills it.
+        let folded_after = folded.run(row.line() + 1).is_some();
+        if is_last_row && focused && !folded_after && selects_line_break(app, row.line()) {
+            let tw = cfg.editor.tab_width;
+            let width = text_width_from(&char_window(chars, row.start_col, row.end_col), at, tw);
+            let shift = match align {
+                TextAlign::Center | TextAlign::Right => align::align_offset(align, width, r.width),
+                TextAlign::Left | TextAlign::Justified => 0,
+            };
+            let x = usize::from(r.x) + usize::from(shift) + usize::from(width);
+            if x < usize::from(rect.right()) {
+                let cell = Rect { x: x as u16, y: r.y, width: 1, height: 1 };
+                frame.render_widget(Paragraph::new(" ").style(Style::default().bg(app.theme.selection.to_ratatui())), cell);
+            }
+        }
         if fenced {
             render_fence_bar(frame, app, r);
         }
@@ -1398,9 +1415,22 @@ pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Curs
     if first && line != cursor.line {
         // Onto the goal, which it keeps, as `j` does and Neovim's scroll:
         // after `$`, the end of the line it is carried to.
+        // Insert's caret stands before a tab, so a goal not yet measured
+        // is the tab's first cell there, as Insert's Up and Down have it.
         let tw = cfg.editor.tab_width;
-        let cells = crate::text::motion::goal_cells(&app.buffer, cursor, tw);
-        let col = crate::text::motion::col_at_cells(&app.buffer, line, cells, tw);
+        let cells = match cursor.goal_cells {
+            None if app.mode.allows_past_end() => crate::text::motion::goal_start_cells(&app.buffer, cursor, tw),
+            _ => crate::text::motion::goal_cells(&app.buffer, cursor, tw),
+        };
+        let mut col = crate::text::motion::col_at_cells(&app.buffer, line, cells, tw);
+        // The goal stays, but the cursor stays on the rows the scroll shows:
+        // a goal on a row of the line past them (`$` on a paragraph taller
+        // than the pane) takes the last column of the last row shown, or the
+        // renderer would scroll on to the cursor.
+        let next = cache.row(hi + 1).filter(|r| r.line() == line && r.editable && !r.is_spacer());
+        if let Some(next) = next {
+            col = col.min(source_col(&cache, line, next.start_col, tw).saturating_sub(1));
+        }
         return Some((new_top, Cursor { line, col, goal_col: cursor.goal_col, goal_cells: Some(cells) }));
     }
     let col = if first { cursor.col } else { target.start_col };
@@ -2077,6 +2107,29 @@ fn selection_cols(app: &App, line: usize, len: usize) -> Option<(usize, usize)> 
     let start = if line == lo.line { lo.col } else { 0 };
     let end = if line == hi.line { hi.col + 1 } else { len };
     Some((start.min(len), end.min(len)))
+}
+
+/// Whether a Visual selection takes `line`'s line break, drawn as one
+/// selected cell after the line's text: every line of a `V` selection, and
+/// in `v` every line but the last one it covers, that one too when an end
+/// stands on its break (`v$`). Never the file's last line break in `v`,
+/// which no charwise selection takes.
+fn selects_line_break(app: &App, line: usize) -> bool {
+    let Some(anchor) = app.anchor else { return false };
+    let cursor = app.buffer.cursor;
+    let (lo, hi) = if (anchor.line, anchor.col) <= (cursor.line, cursor.col) {
+        (anchor, cursor)
+    } else {
+        (cursor, anchor)
+    };
+    if line < lo.line || line > hi.line {
+        return false;
+    }
+    match app.mode {
+        Mode::VisualLine => true,
+        Mode::Visual => line < app.buffer.last_line() && (line < hi.line || hi.col >= app.buffer.line_len(line)),
+        _ => false,
+    }
 }
 
 /// Repaint the background of `range` (char columns) across the line's spans,

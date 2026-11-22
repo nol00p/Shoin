@@ -3425,10 +3425,11 @@ fn visual_p_takes_a_named_register_and_mixes_lines_and_text() {
     feed(&mut app, "yyjVjp");
     assert_eq!(text(&app), "keep\nkeep");
 
-    // `vp` on an empty line fills it; the next line stays its own.
+    // `vp` on an empty line replaces its line break too, as Neovim's: the
+    // next line joins on.
     let mut app = app_with("word\n\nnext\n");
     feed(&mut app, "yiwjvp");
-    assert_eq!(text(&app), "word\nword\nnext\n");
+    assert_eq!(text(&app), "word\nwordnext\n");
 
     // Text spanning lines leaves the cursor at its start, as Normal `p`.
     let mut app = app_with("ab\ncd\nxy zz\n");

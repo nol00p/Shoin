@@ -1512,8 +1512,13 @@ impl App {
         }
         let Some(count) = self.fold_count(m, count) else { return };
         let page = self.viewport_height();
-        if let Some(res) = motion::resolve(&self.buffer, m, count, page, false, self.config.editor.tab_width) {
+        // Visual's `l` goes on to the line break after the last character,
+        // as Neovim's, where an operator's range ends (`v4ld` takes it).
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        let to_break = visual && matches!(m, Motion::Right);
+        if let Some(res) = motion::resolve(&self.buffer, m, count, page, to_break, self.config.editor.tab_width) {
             self.buffer.cursor = res.target;
+            self.visual_goal_on_break();
             self.visual_onto_line_break();
             // Read-only shows a line jump's line from its first row: the
             // kept column is edit mode's, and here it would be the column
@@ -1624,9 +1629,14 @@ impl App {
                 self.operate(op, target, count)
             }
             Action::SelectObject { key, around } => self.select_object(key, around),
+            // Both ends lose their goal, and the cursor sets one afresh where
+            // it lands, as Neovim's: `v$ooj` goes under the first line's
+            // break, not to the end of the next.
             Action::SwapSelectionEnds => {
-                if let Some(anchor) = self.anchor.replace(self.buffer.cursor) {
-                    self.buffer.cursor = anchor;
+                let cur = self.buffer.cursor;
+                if let Some(anchor) = self.anchor.replace(Cursor::new(cur.line, cur.col)) {
+                    self.buffer.cursor = Cursor::new(anchor.line, anchor.col);
+                    self.visual_goal_on_break();
                 }
             }
             Action::ScrollView { down } => {
@@ -2086,6 +2096,18 @@ impl App {
             let len = self.buffer.line_len(cur.line);
             let col = if self.mode.allows_past_end() { cur.col.min(len) } else { cur.col.min(len.saturating_sub(1)) };
             self.buffer.cursor.set_col(col);
+        }
+    }
+
+    /// In Visual, a cursor put on a line break with a fresh goal (`v4l`,
+    /// `o`) has that goal measured, so the clamp after the key leaves it
+    /// there (`sync_after_input`) and `j` keeps its cell.
+    fn visual_goal_on_break(&mut self) {
+        let cur = self.buffer.cursor;
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        if visual && cur.goal_cells.is_none() && cur.col > 0 && cur.col >= self.buffer.line_len(cur.line) {
+            let tw = self.config.editor.tab_width;
+            self.buffer.cursor.goal_cells = Some(motion::goal_start_cells(&self.buffer, cur, tw));
         }
     }
 

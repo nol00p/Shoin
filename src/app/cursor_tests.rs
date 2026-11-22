@@ -576,3 +576,247 @@ fn an_operator_to_the_end_takes_the_last_character_as_neovim() {
     }
     assert!(out.is_empty(), "{}", out.join("\n"));
 }
+
+/// `abcd`, `x`: the selected line break of the first line, and the file's
+/// last line, whose break a selection never takes.
+const SHORT_LAST: &str = "abcd\nx\n";
+
+/// A text, keys, the text after, where the cursor is and the unnamed
+/// register (its text, and whether it is linewise).
+type PutCase = (&'static str, &'static str, &'static str, (usize, usize), (&'static str, bool));
+
+/// Visual `p` and `P` over a selection that takes a line break replace the
+/// break too, and `p` puts it in the register, as Neovim's: `ylv$p` on
+/// `abcd`, `x` leaves `ax` and `abcd\n` in the register. Each case is the
+/// text, the keys, the text after, where the cursor is, and the unnamed
+/// register (its text, linewise).
+#[test]
+fn visual_put_replaces_a_selected_line_break_as_neovim() {
+    #[rustfmt::skip]
+    let cases: &[PutCase] = &[
+        (SHORT_LAST, "ylv$p", "ax\n", (0, 0), ("abcd\n", false)),
+        (SHORT_LAST, "ylv$P", "ax\n", (0, 0), ("a", false)),
+        (SHORT_LAST, "yyv$p", "\nabcd\nx\n", (1, 0), ("abcd\n", false)),
+        (SHORT_LAST, "yyv$P", "\nabcd\nx\n", (1, 0), ("abcd\n", true)),
+        (SHORT_LAST, "ylv$jp", "a\n", (0, 0), ("abcd\nx", false)),
+        (SHORT_LAST, "jylv$p", SHORT_LAST, (1, 0), ("x", false)),
+        (SHORT_LAST, "ylv$hp", "a\nx\n", (0, 0), ("abcd", false)),
+        (SHORT_LAST, "lylv$p", "abx\n", (0, 1), ("bcd\n", false)),
+        (SHORT_LAST, "ylv$2p", "aax\n", (0, 1), ("abcd\n", false)),
+        (SHORT_LAST, "yl$v$p", "abcax\n", (0, 3), ("d\n", false)),
+        ("abcd\n\nx\n", "yljvp", "abcd\nax\n", (1, 0), ("\n", false)),
+        ("abcd\n\nx\n", "yljvP", "abcd\nax\n", (1, 0), ("a", false)),
+    ];
+    let mut out = Vec::new();
+    for &(text, keys, after, at, reg) in cases {
+        let mut app = fresh(text, 4);
+        feed(&mut app, keys);
+        let c = app.buffer.cursor;
+        let r = app.registers.get(&'"').map(|r| (r.text.clone(), r.linewise));
+        let got = (app.buffer.rope.to_string(), (c.line, c.col), r);
+        let want = (after.to_string(), at, Some((reg.0.to_string(), reg.1)));
+        if got != want {
+            out.push(format!("{text:?} {keys:?}: got {got:?}, Neovim {want:?}"));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// `l` (and the right arrow) in Visual goes on to the line break after the
+/// last character, as Neovim's, so `v4ld` on `abcd`, `x` takes the break;
+/// Normal's `l` still stops on the last character. `e` and `f` never pass
+/// the last character. Each case is the text, the keys, the text after,
+/// where the cursor is, and Visual's anchor while it is on.
+#[test]
+fn visual_right_reaches_the_line_break_as_neovim() {
+    #[rustfmt::skip]
+    let cases: &[VisualCase] = &[
+        (SHORT_LAST, "v4ld", "x\n", (0, 0), None),
+        (SHORT_LAST, "v4l", SHORT_LAST, (0, 4), Some((0, 0))),
+        (SHORT_LAST, "v9l", SHORT_LAST, (0, 4), Some((0, 0))),
+        (SHORT_LAST, "v9ld", "x\n", (0, 0), None),
+        (SHORT_LAST, "v3lld", "x\n", (0, 0), None),
+        (SHORT_LAST, "4l", SHORT_LAST, (0, 3), None),
+        (SHORT_LAST, "4lv", SHORT_LAST, (0, 3), Some((0, 3))),
+        (SHORT_LAST, "v4lh", SHORT_LAST, (0, 3), Some((0, 0))),
+        (SHORT_LAST, "v$hl", SHORT_LAST, (0, 4), Some((0, 0))),
+        (SHORT_LAST, "v4lj", SHORT_LAST, (1, 1), Some((0, 0))),
+        (SHORT_LAST, "v4lo", SHORT_LAST, (0, 0), Some((0, 4))),
+        (SHORT_LAST, "V4l", SHORT_LAST, (0, 4), Some((0, 0))),
+        (SHORT_LAST, "jv4l", SHORT_LAST, (1, 1), Some((1, 0))),
+        (SHORT_LAST, "jv4ld", "abcd\n\n", (1, 0), None),
+        ("ab cd\nx\n", "ve", "ab cd\nx\n", (0, 1), Some((0, 0))),
+        ("ab cd\nx\n", "vee", "ab cd\nx\n", (0, 4), Some((0, 0))),
+        ("ab cd\nx\n", "v2e", "ab cd\nx\n", (0, 4), Some((0, 0))),
+        ("ab cd\nx\n", "vfdl", "ab cd\nx\n", (0, 5), Some((0, 0))),
+        ("ab cd\nx\n", "v4lw", "ab cd\nx\n", (1, 0), Some((0, 0))),
+    ];
+    let mut out = Vec::new();
+    for &(text, keys, after, at, anchor) in cases {
+        let mut app = fresh(text, 4);
+        feed(&mut app, keys);
+        let c = app.buffer.cursor;
+        let got = (app.buffer.rope.to_string(), (c.line, c.col), app.visual_anchor().map(|a| (a.line, a.col)));
+        if got != (after.to_string(), at, anchor) {
+            out.push(format!("{text:?} {keys:?}: got {got:?}, Neovim {:?}", (after, at, anchor)));
+        }
+    }
+    let mut app = fresh(SHORT_LAST, 4);
+    feed(&mut app, "v");
+    key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    feed(&mut app, "4");
+    key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    if app.buffer.cursor.col != 4 {
+        out.push(format!("v<Right>4<Right>: col {}, Neovim 4", app.buffer.cursor.col));
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// Visual `o` sets the goal afresh at the end it lands on, both ways, as
+/// Neovim's: `v$ooj` on `abcd`, `abcdefghij` goes to column 4, under the
+/// first line's break, not to the second line's end.
+#[test]
+fn visual_other_end_takes_a_fresh_goal_as_neovim() {
+    const AB: &str = "abcd\nabcdefghij\n";
+    #[rustfmt::skip]
+    let cases: &[VisualCase] = &[
+        (AB, "v$ooj", AB, (1, 4), Some((0, 0))),
+        (AB, "v$oj", AB, (1, 0), Some((0, 4))),
+        (AB, "v$oojd", "fghij\n", (0, 0), None),
+        (AB, "v$oo", AB, (0, 4), Some((0, 0))),
+        (AB, "v$ok", AB, (0, 0), Some((0, 4))),
+        (AB, "jv$ook", AB, (0, 4), Some((1, 0))),
+        (AB, "v4looj", AB, (1, 4), Some((0, 0))),
+    ];
+    let mut out = Vec::new();
+    for &(text, keys, after, at, anchor) in cases {
+        let mut app = fresh(text, 4);
+        feed(&mut app, keys);
+        let c = app.buffer.cursor;
+        let got = (app.buffer.rope.to_string(), (c.line, c.col), app.visual_anchor().map(|a| (a.line, a.col)));
+        if got != (after.to_string(), at, anchor) {
+            out.push(format!("{keys:?}: got {got:?}, Neovim {:?}", (after, at, anchor)));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// The rows of `app` drawn on a `w` by `h` terminal, and the caret's row.
+fn screen(app: &App, w: u16, h: u16) -> (Vec<String>, u16) {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let rows = (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect();
+    (rows, t.get_cursor_position().unwrap().y)
+}
+
+/// A scroll that carries the cursor onto a wrapped line keeps it on a row
+/// the scroll shows, even when its goal is on a row further down (`$` on a
+/// paragraph taller than the pane): `Ctrl-e` scrolls one row, no more, and
+/// the cursor takes the nearest column it can, the last on the bottom row.
+#[test]
+fn a_scroll_keeps_a_carried_cursor_in_the_rows_it_shows() {
+    let words: Vec<String> = (0..80).map(|i| format!("w{i:02}")).collect();
+    let text = format!("x\n{}\n", words.join(" "));
+    let (w, h) = (40, 8);
+    let mut app = fresh(&text, 4);
+    app.term_size = (w, h);
+    app.config.editor.scroll_off = 0;
+    screen(&app, w, h);
+    feed(&mut app, "$\u{5}");
+    let (rows, caret) = screen(&app, w, h);
+    let all = rows.join("\n");
+    let is_word = |t: &str| t.len() == 3 && t.starts_with('w') && t[1..].bytes().all(|b| b.is_ascii_digit());
+    let text_rows: Vec<usize> = (0..rows.len()).filter(|&y| rows[y].split_whitespace().any(is_word)).collect();
+    assert!(rows[text_rows[0]].contains("w00"), "the paragraph's first row is on top:\n{all}");
+    assert_eq!(app.buffer.cursor.line, 1);
+    let bottom = *text_rows.last().unwrap();
+    assert_eq!(caret as usize, bottom, "on the bottom row:\n{all}");
+    // On the last column of that row, the blank before the next row's
+    // first word.
+    let last: usize = rows[bottom].split_whitespace().last().unwrap()[1..].parse().unwrap();
+    let next_row = text.lines().nth(1).unwrap().find(&format!("w{:02}", last + 1)).unwrap();
+    assert_eq!(app.buffer.cursor.col, next_row - 1, "\n{all}");
+    // And the goal stays: `j` past the paragraph goes to the line's end.
+    assert_eq!(app.buffer.cursor.goal_col, Cursor::LINE_END);
+}
+
+/// The wheel in Insert carries the cursor by the Insert caret's goal: the
+/// first cell of a tab it stands before, as Insert's Up and Down, not the
+/// tab's last cell Normal mode draws it on.
+#[test]
+fn the_wheel_in_insert_keeps_the_insert_caret_goal() {
+    use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+    let mut app = fresh("\tx\na\nb\nabcdef\nc\nd\n", 4);
+    app.term_size = (40, 8);
+    app.config.editor.scroll_off = 0;
+    screen(&app, 40, 8);
+    feed(&mut app, "i");
+    app.on_mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 10, row: 2, modifiers: KeyModifiers::NONE });
+    app.sync_after_input();
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (3, 0));
+}
+
+/// Whether the cell just after the last `needle` drawn on screen (on the
+/// last row that shows it) has the selection's background.
+fn selected_after(app: &App, needle: &str) -> bool {
+    let (w, h) = (40u16, 12u16);
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let sel = app.theme.selection.to_ratatui();
+    let row = |y: u16| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+    let y = (0..h).rev().find(|&y| row(y).contains(needle)).unwrap_or_else(|| panic!("{needle:?} not drawn"));
+    let text = row(y);
+    let x = text[..text.rfind(needle).unwrap()].chars().count() + needle.chars().count();
+    buf[(x as u16, y)].bg == sel
+}
+
+/// A selected line break is drawn as one selected cell after the line's
+/// last character, on its last row, as Neovim draws it: in `v` where the
+/// selection takes it, on every line in `V`. The file's last line break,
+/// which a selection never takes, is not.
+#[test]
+fn a_selected_line_break_is_drawn_as_neovim() {
+    let long = format!("{} end", ["word"; 12].join(" "));
+    let wrapped = format!("{long}\nx\n");
+    #[rustfmt::skip]
+    let cases: &[(&str, &str, &str, bool)] = &[
+        (SHORT_LAST, "v$", "abcd", true),
+        (SHORT_LAST, "v4l", "abcd", true),
+        (SHORT_LAST, "v3l", "abcd", false),
+        (SHORT_LAST, "vj", "abcd", true),
+        (SHORT_LAST, "vj", "x", false),
+        (SHORT_LAST, "jv$", "x", false),
+        (SHORT_LAST, "V", "abcd", true),
+        (SHORT_LAST, "Vj", "x", true),
+        (SHORT_LAST, "jVk", "abcd", true),
+        ("abcd\n\nx\n", "vjj", "abcd", true),
+        ("# Head\n**ab**\nx\ny\n", "jv$", "**ab**", true),
+        ("# Head\n**ab**\nx\ny\n", "jv$h", "**ab**", false),
+        (&wrapped, "v$", "end", true),
+        (&wrapped, "v$h", "end", false),
+    ];
+    let mut out = Vec::new();
+    for &(text, keys, needle, want) in cases {
+        let mut app = fresh(text, 4);
+        feed(&mut app, keys);
+        if selected_after(&app, needle) != want {
+            out.push(format!("{text:?} {keys:?}: the cell after {needle:?} selected: {}, Neovim {want}", !want));
+        }
+    }
+    // An empty line in the selection is one selected cell.
+    let mut app = fresh("abcd\n\nx\n", 4);
+    feed(&mut app, "vjj");
+    let sel = app.theme.selection.to_ratatui();
+    let mut t = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let row = |y: u16| (0..40).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+    let y = (0..12).find(|&y| row(y).contains("abcd")).unwrap();
+    let x = row(y).find("abcd").unwrap() as u16;
+    if buf[(x, y + 1)].bg != sel {
+        out.push("the empty line's break is not drawn selected".into());
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}

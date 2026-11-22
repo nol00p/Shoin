@@ -246,14 +246,11 @@ impl App {
             self.leave_visual();
             return self.notify("paste: too large", FlashKind::Error);
         }
-        let (start, mut end, lo, linewise) = self.visual_span();
+        // A charwise selection that takes a line break (`vp` on an empty
+        // line, `v$p`) replaces the break too, joining the next line on, and
+        // `p` keeps it in the register, as Neovim's.
+        let (start, end, lo, linewise) = self.visual_span();
         self.end_visual();
-        // A charwise selection that ends on a line break (`vp` on an empty
-        // line, `v$p`) replaces the text, not the break: the next line stays
-        // where it is.
-        if !linewise && end > start && self.buffer.rope.char(end - 1) == '\n' {
-            end -= 1;
-        }
         let ends_at_eof = end == self.buffer.rope.len_chars();
         let replaced = self.buffer.rope.slice(start..end).to_string();
 
