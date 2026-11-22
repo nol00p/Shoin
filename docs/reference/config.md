@@ -164,5 +164,9 @@ dim_markers    = true
 - Leave `theme.name` unset for the built-in Tokyo Night theme. Set it to
   load a theme from `$XDG_CONFIG_HOME/shoin/themes/<name>.toml`. If
   `XDG_CONFIG_HOME` is unset, Shoin uses `~/.config/shoin/themes/<name>.toml`.
+- On 16- and 256-color terminals, Shoin maps theme colors to the terminal
+  palette. If text or a highlight would blend into its background, Shoin
+  uses a distinct palette color. Truecolor terminals use the configured
+  colors.
 - The [shipped configuration files](../../shoin/) explain each setting
   alongside its default.

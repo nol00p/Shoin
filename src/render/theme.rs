@@ -468,6 +468,48 @@ impl Theme {
         for c in self.indent_colors.iter_mut() {
             *c = c.downgrade(depth);
         }
+
+        let page = self.background;
+        self.text = self.text.with_indexed_contrast(&[page], [15, 0]);
+        self.text_dim = self.text_dim.with_indexed_contrast(&[page], [8, 7]);
+        let prose = [page, self.text, self.text_dim];
+
+        // Neovim's default Visual uses a white background in cterm,
+        // and Search and CurSearch use a bright yellow background
+        // under black text. Shoin keeps the text color on these overlays, so
+        // the background fallback also has to avoid that foreground.
+        self.selection = self.selection.with_indexed_contrast(&prose, [15, 7]);
+        self.search_match = self.search_match.with_indexed_contrast(&prose, [11, 3]);
+        // Default CursorLine has no ctermbg. Use an ANSI grey for a configured
+        // cursor line, following the grey used by Neovim's GUI highlight.
+        self.cursor_line = self.cursor_line.with_indexed_contrast(&prose, [8, 7]);
+        self.highlight_bg = self.highlight_bg.with_indexed_contrast(&[page, self.text], [11, 3]);
+        self.code_bg = self.code_bg.with_indexed_contrast(&[page, self.text, self.code], [8, 7]);
+        self.tag_bg = self.tag_bg.with_indexed_contrast(&[page, self.tag], [8, 7]);
+        self.status_bg = self.status_bg.with_indexed_contrast(&[page, self.status_fg], [8, 7]);
+
+        let effective_bg = |bg| if bg == Color::None { page } else { bg };
+        self.tag = self.tag.with_indexed_contrast(&[effective_bg(self.tag_bg)], [15, 0]);
+        self.code = self.code.with_indexed_contrast(&[effective_bg(self.code_bg)], [15, 0]);
+        self.status_fg = self.status_fg.with_indexed_contrast(&[effective_bg(self.status_bg)], [15, 0]);
+
+        let slab = effective_bg(self.code_bg);
+        for color in [
+            &mut self.syntax_keyword, &mut self.syntax_type, &mut self.syntax_string,
+            &mut self.syntax_literal, &mut self.syntax_comment, &mut self.syntax_function,
+            &mut self.syntax_punct,
+        ] {
+            *color = color.with_indexed_contrast(&[slab], [15, 0]);
+        }
+        for color in [
+            &mut self.cursor, &mut self.bold, &mut self.italic, &mut self.strikethrough,
+            &mut self.fence_bar, &mut self.diff_add, &mut self.diff_remove, &mut self.diff_change,
+            &mut self.link, &mut self.wiki_link, &mut self.quote, &mut self.quote_bar,
+            &mut self.list_bullet, &mut self.task_done, &mut self.rule, &mut self.table_border,
+            &mut self.error,
+        ].into_iter().chain(&mut self.headings).chain(&mut self.indent_colors) {
+            *color = color.with_indexed_contrast(&[page], [15, 0]);
+        }
     }
 }
 
@@ -476,8 +518,26 @@ impl Color {
         match (self, depth) {
             (Color::Rgb(r, g, b), ColorDepth::Indexed256) => Color::Indexed(rgb_to_256(r, g, b)),
             (Color::Rgb(r, g, b), ColorDepth::Basic16) => Color::Indexed(rgb_to_16(r, g, b)),
+            (Color::Indexed(i @ 16..), ColorDepth::Basic16) => {
+                let (r, g, b) = xterm_rgb(i);
+                Color::Indexed(rgb_to_16(r, g, b))
+            }
             _ => self,
         }
+    }
+
+    fn with_indexed_contrast(self, against: &[Color], preferred: [u8; 2]) -> Color {
+        let Color::Indexed(index) = self else { return self };
+        // Some colors have two xterm indices, such as black at 0 and 16.
+        let distinct = |index| !against.iter().any(|color| {
+            matches!(*color, Color::Indexed(other) if xterm_rgb(index) == xterm_rgb(other))
+        });
+        if distinct(index) {
+            return self;
+        }
+        preferred.into_iter().chain([8, 7, 15, 0]).chain(0..16)
+            .find(|&index| distinct(index))
+            .map_or(self, Color::Indexed)
     }
 }
 
@@ -504,6 +564,7 @@ pub fn detect_depth() -> ColorDepth {
         }
     }
     match std::env::var("TERM") {
+        Ok(term) if term.ends_with("-16color") => ColorDepth::Basic16,
         Ok(term) if term.contains("256") || term.contains("direct") => ColorDepth::Indexed256,
         Ok(term) if !term.is_empty() && term != "dumb" => ColorDepth::Indexed256,
         _ => ColorDepth::Basic16,
@@ -694,8 +755,73 @@ mod tests {
     }
 
     #[test]
+    fn built_in_theme_has_distinct_indexed_colors() {
+        // Tokyo Night (Night) is the sole built-in theme. theme.conf mirrors it.
+        for depth in [ColorDepth::Basic16, ColorDepth::Indexed256] {
+            let mut t = Theme::default();
+            t.adapt(depth);
+            for (name, color) in [
+                ("selection", t.selection), ("search_match", t.search_match),
+                ("cursor_line", t.cursor_line), ("highlight_bg", t.highlight_bg),
+                ("code_bg", t.code_bg), ("tag_bg", t.tag_bg), ("status_bg", t.status_bg),
+                ("text", t.text), ("text_dim", t.text_dim),
+            ] {
+                if color != Color::None {
+                    assert_ne!(color, t.background, "Tokyo Night {depth:?} {name}");
+                }
+            }
+            for (fg, bg) in [
+                (t.text, t.selection), (t.text, t.search_match), (t.text, t.highlight_bg),
+                (t.text, t.code_bg), (t.code, t.code_bg), (t.tag, t.tag_bg),
+                (t.status_fg, t.status_bg),
+            ] {
+                assert_ne!(fg, bg, "Tokyo Night {depth:?} foreground on {bg:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn custom_theme_repairs_collisions_and_keeps_distinct_colors() {
+        let cfg = crate::config::parse(r##"
+            [theme]
+            background = "#010101"
+            text = "#020202"
+            text_dim = "black"
+            selection = "#030303"
+            search_match = "bright_cyan"
+            cursor_line = "#040404"
+        "##).unwrap().theme;
+        let authored = Theme::authored(&cfg).unwrap();
+        let mut truecolor = authored.clone();
+        truecolor.adapt(ColorDepth::TrueColor);
+        assert!(truecolor == authored);
+
+        for depth in [ColorDepth::Basic16, ColorDepth::Indexed256] {
+            let mut t = authored.clone();
+            t.adapt(depth);
+            assert_eq!(t.text, Color::Indexed(15));
+            assert_eq!(t.text_dim, Color::Indexed(8));
+            assert_eq!(t.selection, Color::Indexed(7));
+            assert_eq!(t.search_match, Color::Indexed(14));
+            assert_eq!(t.cursor_line, Color::Indexed(7));
+        }
+    }
+
+    #[test]
+    fn basic16_adapts_extended_palette_indices() {
+        let mut t = Theme { selection: Color::Indexed(16), ..Default::default() };
+        t.adapt(ColorDepth::Basic16);
+        assert_eq!(t.selection, Color::Indexed(7));
+        assert_eq!(t.cursor_line, Color::None);
+    }
+
+    #[test]
     fn adapt_downgrades_rgb() {
-        let mut t = Theme { text: Color::Rgb(0, 0, 0), ..Default::default() };
+        let mut t = Theme {
+            background: Color::Indexed(15),
+            text: Color::Rgb(0, 0, 0),
+            ..Default::default()
+        };
         t.adapt(ColorDepth::Basic16);
         assert_eq!(t.text, Color::Indexed(0)); // black
         let mut t = Theme { link: Color::Rgb(0, 0, 255), ..Default::default() };

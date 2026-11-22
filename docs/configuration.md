@@ -109,6 +109,9 @@ The first of these that exists wins:
 
 ## Details
 
+- On 16- and 256-color terminals, Shoin substitutes palette colors when
+  theme colors would make text or a highlight blend into its background.
+  This applies to custom themes too.
 - A parse error keeps the running config instead of dropping you into a broken
   one. A malformed binding is skipped with a warning, never fatal.
 - Bindings match exactly, so one that is also the start of a longer binding
