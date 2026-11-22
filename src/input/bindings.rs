@@ -175,10 +175,11 @@ pub fn after_prefix(prefix: char, key: Key) -> Option<Verb> {
     };
     Some(match (prefix, c) {
         ('g', 'g') => Verb::Goto(Motion::BufferStart),
-        // `gu`/`gU` take a motion like any operator; in Visual the selection is
-        // already the range, as for the bare `u`/`U` there.
+        // `gu`/`gU`/`g~` take a motion like any operator; in Visual the
+        // selection is already the range, as for the bare `u`/`U`/`~` there.
         ('g', 'u') => Verb::Operator(Operator::Lowercase),
         ('g', 'U') => Verb::Operator(Operator::Uppercase),
+        ('g', '~') => Verb::Operator(Operator::ToggleCase),
         ('g', 'b') => Verb::Act(Action::ToggleBold),
         ('g', 'i') => Verb::Act(Action::ToggleItalic),
         ('g', 'h') => Verb::Act(Action::ToggleHighlight),
@@ -253,6 +254,7 @@ impl Verb {
             "outdent" | "operator_outdent" => Verb::Operator(Operator::Outdent),
             "lowercase" | "operator_lowercase" => Verb::Operator(Operator::Lowercase),
             "uppercase" | "operator_uppercase" => Verb::Operator(Operator::Uppercase),
+            "operator_toggle_case" => Verb::Operator(Operator::ToggleCase),
             "inner_object" => Verb::Object { around: false },
             "around_object" => Verb::Object { around: true },
             "register" => Verb::Register,

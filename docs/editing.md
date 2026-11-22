@@ -316,6 +316,14 @@ middle or the bottom of the pane. The cursor stays where it is.
   edge cases such as `dw` on a line's last word, `cw` on a word's last
   character and `d}` stopping at a blank line. The [Changelog](../CHANGELOG.md)
   lists each one.
+- `f`, `t`, `F` and `T` take `Tab` and find a tab. `r` then `Tab` replaces
+  with a tab, or with `expand_tab` on, with spaces up to the next tab stop,
+  as Vim does. `r` then `Enter` splits the line, the new line taking the
+  indent before the cursor when `auto_indent` is on.
+- A count larger than what is left changes nothing, as in Vim: `5rx` with
+  fewer than five characters to the line's end, or `2dd`, `2yy`, `2>>`,
+  `2g~~` or `3J` on the last line. Higher up, `5dd` with two lines left
+  deletes them both.
 - The escape alias is `input.escape_alias` (default `jk`); set it to `""` to
   turn it off.
 - With the mouse on, a drag selects text the way `mouse=a` does in Vim, and
