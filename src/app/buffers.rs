@@ -96,7 +96,11 @@ impl App {
             return;
         }
         let gone = self.current();
-        self.docs.remove(gone);
+        let closed = self.docs.remove(gone);
+        // A search kept active must not keep what it found there.
+        if let Some(search) = &self.search {
+            search.forget(closed.id);
+        }
         // Panes on the documents after it now show other indices.
         self.reading.clear();
         // Every pane showing a document after the removed one shifts down; the

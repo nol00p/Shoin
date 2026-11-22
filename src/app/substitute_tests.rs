@@ -193,6 +193,67 @@ const CASES: &[Case] = &[
     ("caret_after_zs", "a ^a\n", &[
         (":s/\\zs^a/X/", "a X\n", (0, 0), Some("")),
     ]),
+    // `\zs` puts the first edit on the next line, whose own search then
+    // finds edits before it: applied in source order.
+    ("zs_next_line_then_caret", "a\nbX\n", &[
+        (":%s/a\\nb\\zsX\\|^/Y/", "a\nYbY\n", (1, 0), Some("")),
+    ]),
+    ("zs_next_line_global", "a\nbX\n", &[
+        (":%s/a\\nb\\zsX\\|^/Y/g", "a\nbY\n", (1, 0), Some("")),
+    ]),
+    ("zs_next_line_overlap", "a\nbX\n", &[
+        (":%s/a\\n\\zsbX\\|X/Z/", "a\nZ\n", (1, 0), Some("")),
+    ]),
+    ("zs_next_line_before", "a\nbX\n", &[
+        (":%s/a\\nb\\zsX\\|b/Z/", "a\nZZ\n", (1, 0), Some("")),
+    ]),
+    ("zs_two_lines_on", "a\n\nbX\n", &[
+        (":%s/a\\n\\n\\zsbX\\|^/Z/", "a\nZ\nZZ\n", (2, 0), None),
+    ]),
+    // A line whose match `\zs` put on the next line still has its own
+    // search there: `n` and `N` stop as Neovim's `searchit`.
+    ("search_zs_line_keeps_own", "\nAcc\naA \n\n", &[
+        ("/\\n\\zs[^a]\\+\\|.\r", "\nAcc\naA \n\n", (1, 0), None),
+        ("n", "\nAcc\naA \n\n", (1, 1), None),
+        ("n", "\nAcc\naA \n\n", (1, 2), None),
+        ("N", "\nAcc\naA \n\n", (1, 1), None),
+    ]),
+    ("search_zs_first_line", "  \ncb c \nc\n", &[
+        ("/\\n\\w\\{,2}\\zs\\a\\|^\r", "  \ncb c \nc\n", (1, 1), None),
+        ("n", "  \ncb c \nc\n", (2, 0), None),
+        ("n", "  \ncb c \nc\n", (0, 0), None),
+        ("N", "  \ncb c \nc\n", (2, 0), None),
+    ]),
+    ("search_zs_backward", "cc \ncc b \n", &[
+        ("/ \\=[a\\n]\\zs\\|[ab]\\(b*\\)b\r", "cc \ncc b \n", (1, 0), None),
+        ("n", "cc \ncc b \n", (1, 4), None),
+        ("n", "cc \ncc b \n", (1, 0), None),
+        ("N", "cc \ncc b \n", (1, 4), None),
+    ]),
+    ("search_zs_backward_wrap", "\naba\nAbA\n", &[
+        ("/\\c\\n[a\\n]\\{-1,2}\\zs\\(b*\\)\\|b\r", "\naba\nAbA\n", (1, 1), None),
+        ("n", "\naba\nAbA\n", (2, 1), None),
+        ("n", "\naba\nAbA\n", (1, 1), None),
+        ("N", "\naba\nAbA\n", (2, 1), None),
+    ]),
+    ("search_zs_two_lines", "   bc\n\nbAA  \n \n", &[
+        ("/\\n\\n\\zs[ab]\\|x.\\| \r", "   bc\n\nbAA  \n \n", (0, 1), None),
+        ("n", "   bc\n\nbAA  \n \n", (0, 2), None),
+        ("n", "   bc\n\nbAA  \n \n", (2, 0), None),
+        ("N", "   bc\n\nbAA  \n \n", (0, 2), None),
+    ]),
+    // A match at a line's end lands on its last character, and `j` keeps
+    // that column, not the one past the end.
+    ("search_line_end_goal", "abc\n0123456789\n", &[
+        ("/$\r", "abc\n0123456789\n", (0, 2), None),
+        ("j", "abc\n0123456789\n", (1, 2), None),
+    ]),
+    ("search_line_break_goal", "abc\n0123456789\n", &[
+        ("/c\\n/e\r", "abc\n0123456789\n", (0, 2), None),
+        ("j", "abc\n0123456789\n", (1, 2), None),
+        ("gg/c\\n\r", "abc\n0123456789\n", (0, 2), None),
+        ("j", "abc\n0123456789\n", (1, 2), None),
+    ]),
     ("search_continues_at_end", "aaca\n abAc\n", &[
         ("/a\\w\r", "aaca\n abAc\n", (1, 1), None),
         ("n", "aaca\n abAc\n", (0, 0), None),
@@ -267,6 +328,24 @@ fn confirm_updates_text_and_keeps_one_undo_step() {
     key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     assert_eq!(app.buffer.rope.to_string(), original);
     assert_eq!(app.mode, Mode::Normal);
+}
+
+/// `a` at the first question applies what a plain `:s` would, even when
+/// `\zs` put the first match after later ones (Neovim, `c` then `a`).
+#[test]
+fn confirm_all_applies_edits_in_source_order() {
+    for (text, command, expected) in [
+        ("a\nbX\n", r"%s/a\nb\zsX\|^/Y/c", "a\nYbY\n"),
+        ("a\nbX\n", r"%s/a\n\zsbX\|X/Z/c", "a\nZ\n"),
+        ("a\n\nbX\n", r"%s/a\n\n\zsbX\|^/Z/c", "a\nZ\nZZ\n"),
+    ] {
+        let mut app = app_with(text);
+        ex(&mut app, command);
+        key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.buffer.rope.to_string(), expected, "{command}");
+        feed(&mut app, "u");
+        assert_eq!(app.buffer.rope.to_string(), text, "{command}");
+    }
 }
 
 #[test]
@@ -496,6 +575,112 @@ fn a_pathological_visible_line_does_not_stall_highlighting() {
     assert!(elapsed < Duration::from_secs(2), "searching the line took {elapsed:?}");
 }
 
+/// One match per character on a 10 MB line (1 MiB in a debug build, whose
+/// regex is about ten times slower): the stops are found in one pass,
+/// without looking for the line's end again per match.
+#[test]
+fn stops_on_a_long_line_take_bounded_time() {
+    let len = if cfg!(debug_assertions) { 1 << 20 } else { 10_000_000 };
+    let text = format!("{}\nb\n", "a".repeat(len));
+    // Multi-line: the index of stops is built once, linearly.
+    let mut app = app_with(&text);
+    let start = Instant::now();
+    feed(&mut app, "/\\n\\|.\r");
+    assert_eq!(at(&app), (0, 1));
+    feed(&mut app, "n");
+    assert_eq!(at(&app), (0, 2));
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_secs(10), "multi-line stops took {elapsed:?}");
+    // Line-local: `$` then `N` tries the line's matches up to the cursor once.
+    let mut app = app_with(&text);
+    feed(&mut app, "/.\r");
+    let start = Instant::now();
+    feed(&mut app, "$N");
+    let elapsed = start.elapsed();
+    assert_eq!(at(&app), (0, len - 2));
+    assert!(elapsed < Duration::from_secs(10), "N on the line took {elapsed:?}");
+}
+
+/// The first scan of a large document runs out of its redraw budget; a
+/// viewport past what it found still gets its highlights, from its own scan.
+#[test]
+fn multiline_highlights_reach_past_a_cut_scan() {
+    let pairs = 200_000;
+    let mut app = app_with(&"foo\nbar\n".repeat(pairs));
+    assert!(app.set_search(r"foo\nbar".into(), false));
+    let doc: &BufferState = &app;
+    assert_eq!(app.search_highlights(doc, 0, "foo"), vec![0..3]);
+    assert_eq!(app.search_highlights(doc, 1, "bar"), vec![0..3]);
+    let last = 2 * pairs - 1;
+    let start = Instant::now();
+    assert_eq!(app.search_highlights(doc, last - 1, "foo"), vec![0..3]);
+    assert_eq!(app.search_highlights(doc, last, "bar"), vec![0..3]);
+    // The lines around it come from the same scan.
+    for line in last - 40..last {
+        assert_eq!(app.search_highlights(doc, line, "foo"), vec![0..3], "line {line}");
+    }
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_secs(1), "the viewport's highlights took {elapsed:?}");
+    // And the middle, after the end was scanned.
+    assert_eq!(app.search_highlights(doc, pairs, "foo"), vec![0..3]);
+
+    // A line too long to scan in time is served by its own scan, kept.
+    let mut app = app_with(&format!("{}\nz\n", "a".repeat(1 << 20)));
+    assert!(app.set_search(r"\n\|.".into(), false));
+    let doc: &BufferState = &app;
+    let text = app.buffer.line_text(0);
+    let first = app.search_highlights(doc, 0, &text);
+    assert_eq!(first.first(), Some(&(0..1)));
+    let start = Instant::now();
+    for _ in 0..100 {
+        assert_eq!(app.search_highlights(doc, 0, &text).len(), first.len());
+    }
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_millis(500), "cached highlights took {elapsed:?}");
+}
+
+/// `[` then many `[:` with no `:]`: each opener looks at its own name only.
+#[test]
+fn a_pasted_pattern_of_class_openers_is_read_in_linear_time() {
+    let pattern = format!("[{}x]]", "[:".repeat(200_000));
+    let input = format!("{pattern}/y/");
+    let start = Instant::now();
+    let (field, rest) = search::pattern_field(&input, '/', false);
+    let elapsed = start.elapsed();
+    assert_eq!(field, pattern);
+    assert_eq!(rest, Some("y/"));
+    assert!(elapsed < Duration::from_secs(1), "reading the pattern took {elapsed:?}");
+    // Class names are still read through: a `/` inside one does not end it.
+    assert_eq!(search::pattern_field("[[:alpha:]/]x/y", '/', false), ("[[:alpha:]/]x".into(), Some("y")));
+    assert_eq!(search::pattern_field("[[:al/pha:]]/y", '/', false), ("[[:al/pha:]]".into(), Some("y")));
+}
+
+/// A search stays active while files are opened, drawn and closed: what
+/// it kept for a closed buffer (highlights, `n`'s stops) goes with it.
+#[test]
+fn closing_a_buffer_drops_its_search_matches() {
+    let dir = std::env::temp_dir().join(format!("shoin-search-cache-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = app_with("x\n");
+    for pattern in ["/x\r", "/x\\n\r"] {
+        feed(&mut app, pattern);
+        for i in 0..20 {
+            let path = dir.join(format!("{i}.md"));
+            std::fs::write(&path, "x\nx\n").unwrap();
+            app.open_file(path);
+            let doc: &BufferState = &app;
+            assert_eq!(app.search_highlights(doc, 0, "x"), vec![0..1]);
+            feed(&mut app, "n");
+            ex(&mut app, "bd");
+        }
+        assert_eq!(app.docs.len(), 1);
+        let doc: &BufferState = &app;
+        app.search_highlights(doc, 0, "x");
+        assert_eq!(app.search.as_ref().unwrap().cached_docs(), 1, "{pattern}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_final_line_break_matches_without_a_final_newline() {
     let mut app = app_with("a\nb\nz");
@@ -507,8 +692,9 @@ fn the_final_line_break_matches_without_a_final_newline() {
 
 /// Replays cases that `target/nvim-random.py` ran in Neovim: the path in
 /// `SHOIN_ORACLE` holds one case per line (name, text, then commands, tab
-/// separated, `\` escapes), and the results go to `<path>.shoin` for it to
-/// compare. Nothing to do without the variable.
+/// separated, `\` escapes; a command starting `!` is a `:s` with `c`
+/// answered `a`), and the results go to `<path>.shoin` for it to compare.
+/// Nothing to do without the variable.
 #[test]
 #[ignore]
 fn replay_neovim_oracle_cases() {
@@ -539,6 +725,12 @@ fn replay_neovim_oracle_cases() {
             app.flash = None;
             if let Some(command) = command.strip_prefix(':') {
                 ex(&mut app, command);
+            } else if let Some(command) = command.strip_prefix('!') {
+                // Confirm, then `a` at the first question.
+                ex(&mut app, command);
+                if app.mode == Mode::SubstituteConfirm {
+                    feed(&mut app, "a");
+                }
             } else {
                 feed(&mut app, &command);
             }

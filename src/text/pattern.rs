@@ -250,9 +250,10 @@ impl Pattern {
     }
 
     /// The first match at or after byte `at`.
+    #[cfg(test)]
     pub fn find_at(&self, text: &str, at: usize) -> Option<Found> {
         let mut matches = self.matches(text, false);
-        matches.at = at;
+        matches.seek(at);
         matches.next()
     }
 
@@ -260,6 +261,12 @@ impl Pattern {
     /// found by then is returned, so a pathological line cannot stall a
     /// redraw (Vim's 'redrawtime' does the same).
     pub fn char_ranges(&self, text: &str, deadline: Option<Instant>) -> Vec<Range<usize>> {
+        self.char_ranges_until(text, deadline).0
+    }
+
+    /// [`Pattern::char_ranges`], and whether they are all of them: `false`
+    /// when `deadline` cut the search short.
+    pub fn char_ranges_until(&self, text: &str, deadline: Option<Instant>) -> (Vec<Range<usize>>, bool) {
         let mut ranges = Vec::new();
         let mut matches = self.matches(text, false);
         let (mut previous, mut columns) = (0, 0);
@@ -271,10 +278,10 @@ impl Pattern {
             previous = range.end;
             ranges.push(start..columns);
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                break;
+                return (ranges, false);
             }
         }
-        ranges
+        (ranges, true)
     }
 }
 
@@ -334,6 +341,12 @@ impl Matches<'_> {
             }
             return Some(Found { whole, span: start..end });
         }
+    }
+
+    /// Go on searching at byte `at`, as afresh: an empty match there counts.
+    pub fn seek(&mut self, at: usize) {
+        self.at = at;
+        self.previous_end = None;
     }
 
     /// Go on searching at the start of the line after the one byte `from` is in.
@@ -410,10 +423,20 @@ fn collection(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<Op
             '[' if chars.peek().is_some_and(|ch| matches!(ch, '.' | '=')) => {
                 return Err("pattern: collating and equivalence classes not supported".into());
             }
+            // `[:name:]`; any other `[` is literal, as Vim's `get_char_class`.
             '[' if chars.peek() == Some(&':') => {
-                out.push('[');
-                out.extend(chars.by_ref().take_while(|&c| c != ']'));
-                out.push(']');
+                let mut ahead = chars.clone();
+                ahead.next();
+                let mut name = String::new();
+                while let Some(ch) = ahead.next_if(char::is_ascii_lowercase) {
+                    name.push(ch);
+                }
+                if ahead.next_if_eq(&':').is_some() && ahead.next_if_eq(&']').is_some() {
+                    out.push_str(&format!("[:{name}:]"));
+                    *chars = ahead;
+                } else {
+                    out.push_str(r"\[");
+                }
             }
             '\\' => {
                 let next = chars.next().ok_or("pattern: trailing backslash")?;

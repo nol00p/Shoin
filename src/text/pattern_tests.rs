@@ -68,6 +68,27 @@ fn vim_atoms_match_neovim() {
     }
 }
 
+/// A `[` in a collection that does not start a `[:name:]` is literal, as
+/// Vim's `get_char_class`: `[[:x]]` is `[`, `:` or `x`, then `]`.
+#[test]
+fn a_bracket_without_a_class_name_is_literal_in_a_collection() {
+    // Neovim's `matchstrpos`.
+    for (syntax, text, expected) in [
+        ("[[:x]]", "q:]", Some(1..3)),
+        ("[[:x]]", "[x", None),
+        ("[[:al]", "q:]", Some(1..2)),
+        ("[[:al]", "[x", Some(0..1)),
+        ("[[:[:x]]", "q:]", Some(1..3)),
+        ("[[:alpha:]:]", "[x", Some(1..2)),
+        ("[[:alpha:]:]", "q:]", Some(0..1)),
+    ] {
+        let pattern = Pattern::compile(syntax, false, None).unwrap_or_else(|error| panic!("{syntax}: {error}"));
+        assert_eq!(pattern.find_at(text, 0).map(|found| found.span), expected, "{syntax} on {text}");
+    }
+    let long = format!("[{}x]]", "[:".repeat(200_000));
+    assert!(Pattern::compile(&long, false, None).is_ok());
+}
+
 #[test]
 fn tilde_is_literal_last_replacement() {
     let pattern = Pattern::compile("~", false, Some("a.b")).unwrap();

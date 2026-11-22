@@ -153,6 +153,8 @@ impl App {
         let last_line = self.buffer.last_line();
         let content_end = rope.line_to_char(last_line) + self.buffer.line_len(last_line);
         let mut edits = Vec::new();
+        // The edits after which the search went back to an earlier line.
+        let mut rewound = Vec::new();
         let (mut matches, mut lines) = (0, 0);
         let mut last_match_line = None;
         // Something matched, if only after the last line: no error then, as Vim.
@@ -168,6 +170,7 @@ impl App {
                 if at.char > limit {
                     break;
                 }
+                let whole_line = at.line;
                 at.advance(text, m.span.start);
                 got_match = true;
                 let (start, line) = (at.char, at.line);
@@ -194,6 +197,9 @@ impl App {
                     // began on: one that `\zs` moved into the next line leaves
                     // that line its own search.
                     found.next_line(if joins { m.span.end } else { m.whole.start });
+                    if !joins && whole_line < line && !flags.count {
+                        rewound.push(edits.len());
+                    }
                 }
                 if !flags.count {
                     // A match through the last line's break (which the file
@@ -215,6 +221,7 @@ impl App {
                 base += slice.len_chars();
             }
         }
+        in_source_order(&mut edits, &rewound);
         if matches == 0 {
             if !flags.quiet && !got_match {
                 return Err(format!("pattern not found: {pattern}"));
@@ -324,6 +331,7 @@ impl App {
     /// batch for `y` or `l`, then one batch for everything selected by `a`.
     fn apply_substitutions(&mut self, edits: &[Edit], change: &mut Changes) {
         let (Some(first), Some(last)) = (edits.first(), edits.last()) else { return };
+        debug_assert!(edits.windows(2).all(|pair| pair[0].range.end <= pair[1].range.start), "edits out of order");
         let begin = change.range(first).start;
         let end = change.range(last).end;
         let mut text = String::new();
@@ -388,6 +396,38 @@ impl App {
         self.end_recording();
         self.forget_reading();
     }
+}
+
+/// Put edits in source order, which the batch reads forward. They come out
+/// of order only after `\zs` put a match on a later line than it began
+/// (`rewound` holds those edits' indices): the next line then has its own
+/// search, which can find edits before it. Vim searches that line as
+/// already changed, so a later match that reaches into such an edit, or
+/// starts on text it inserted, would have read its replacement: the first
+/// found stays. An empty one at the same place goes before it, as there.
+fn in_source_order(edits: &mut Vec<Edit>, rewound: &[usize]) {
+    if rewound.is_empty() {
+        return;
+    }
+    let mut found: Vec<(usize, Edit)> = edits.drain(..).enumerate().collect();
+    found.sort_by_key(|(order, edit)| (edit.range.start, edit.range.end, std::cmp::Reverse(*order)));
+    let mut kept: Vec<(usize, Edit)> = Vec::with_capacity(found.len());
+    for (order, edit) in found {
+        match kept.last_mut() {
+            Some((last_order, last)) if edit.range.start < last.range.end => {
+                if order < *last_order {
+                    (*last_order, *last) = (order, edit);
+                }
+            }
+            Some((last_order, last))
+                if edit.range.start == last.range.start
+                    && last.range.is_empty()
+                    && !edit.range.is_empty()
+                    && rewound.binary_search(last_order).is_ok() => {}
+            _ => kept.push((order, edit)),
+        }
+    }
+    edits.extend(kept.into_iter().map(|(_, edit)| edit));
 }
 
 fn parse_flags(text: &str, previous: Flags) -> Result<(Flags, Option<usize>), String> {
