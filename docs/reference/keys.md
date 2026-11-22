@@ -17,7 +17,7 @@ In Normal and Visual mode. Motions take a count, such as `3w`.
 | `0` `^` `$` | line start / first non-blank / line end |
 | `{` `}` | previous / next paragraph |
 | `gg` `G` | first / last line (with a count, go to that line) |
-| `f` `t` `F` `T` | find / till the next character you type, forward / backward |
+| `f` `t` `F` `T` | find / till the next character you type, forward / backward (`Tab` finds a tab) |
 | `;` `,` | repeat / reverse the last `f` or `t` |
 | `*` `#` | search for the word under the cursor forward / backward |
 | `H` `M` `L` | top / middle / bottom of the visible screen |
@@ -37,11 +37,11 @@ acts on whole lines.
 | `>` `<` | indent / outdent. Use `>>` or `<<` for whole lines |
 | `>al` `<al` | indent / outdent the item with its sub-items |
 | `>aL` `<aL` | indent / outdent every item at that level |
-| `gu` `gU` | lowercase / uppercase (`guiw`, `guu`, `gUU`) |
+| `gu` `gU` `g~` | lowercase / uppercase / toggle case (`guiw`, `guu`, `gUU`, `g~~`) |
 | `D` `C` | delete / change to the end of the line |
 | `Y` | yank whole lines, like `yy` |
 | `x` `X` | delete the character under / before the cursor |
-| `r` | replace the character under the cursor with the next character you type |
+| `r` | replace the character under the cursor with the next character you type; `Tab` is a tab, `Enter` splits the line |
 | `~` | toggle case |
 | `J` | join with the next line |
 | `p` `P` | paste after / before |
@@ -148,7 +148,7 @@ Enter Insert with `i`, `a`, `I`, `A`, `o` or `O` from
 | `o` | swap ends |
 | `Esc` | leave Visual |
 | `>` `<` `u` `U` | indent / outdent / lowercase / uppercase |
-| `gu` `gU` | lowercase / uppercase, as `u` `U` |
+| `gu` `gU` `g~` | lowercase / uppercase / toggle case, as `u` `U` `~` |
 | `i` `a` | select a text object with the next key (`viw`, `vap`) |
 | `p` `P` | replace the selection with the register; `p` puts what it replaced in the register, `P` keeps the register |
 | `~` `r` | toggle the case / replace every selected character with the next character you type |
@@ -340,6 +340,7 @@ gives `ss`, `siw` and `2s3w`.
 | `operator_outdent` | `outdent` | `<` | outdent over a motion or object |
 | `operator_lowercase` | `lowercase` | `gu` (`u` or `gu` in Visual) | lowercase over a motion or object |
 | `operator_uppercase` | `uppercase` | `gU` (`U` or `gU` in Visual) | uppercase over a motion or object |
+| `operator_toggle_case` | | `g~` (`~` or `g~` in Visual) | toggle case over a motion or object |
 | `inner_object` | | `i` | the inside of a text object (`diw`) |
 | `around_object` | | `a` | a text object with its surroundings (`daw`) |
 | `register` | | `"` | name the register for the next command |

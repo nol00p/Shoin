@@ -614,8 +614,7 @@ fn tab_completes_after_a_range() {
 /// newline, LF and CRLF: the file `:w` then writes and the cursor, as
 /// Neovim's (`nofixeol`, as Shoin's `final_newline = "preserve"`); `u`
 /// gives the text back and `Ctrl-r` the change. A blank line left last, or
-/// copied there, stays a line. Left out: deleting every line of a file that ends in a newline, which Neovim writes as an empty
-/// file and Shoin's save as one newline (`ggdG` then `:w` the same).
+/// copied there, stays a line. Deleting every line writes an empty file.
 const EOF_CASES: &[(&str, &str, &str, (usize, usize))] = &[
     ("a\n\nb", "1d", "\nb", (0, 0)),
     ("a\n\nb", "$d", "a\n", (1, 0)),
@@ -638,6 +637,7 @@ const EOF_CASES: &[(&str, &str, &str, (usize, usize))] = &[
     ("a\n\nb\n", "$d", "a\n\n", (1, 0)),
     ("a\n\nb\n", "1,2d", "b\n", (0, 0)),
     ("a\n\nb\n", "2,$d", "a\n", (0, 0)),
+    ("a\n\nb\n", "%d", "", (0, 0)),
     ("a\n\nb\n", "1m $", "\nb\na\n", (2, 0)),
     ("a\n\nb\n", "$m 0", "b\na\n\n", (0, 0)),
     ("a\n\nb\n", "2m $", "a\nb\n\n", (2, 0)),

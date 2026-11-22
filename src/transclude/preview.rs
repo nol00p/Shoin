@@ -103,13 +103,16 @@ pub fn expand(
     draw: &dyn Fn(&str, &BlockKind, u16) -> Drawn,
 ) -> Expansion {
     let label = link.label();
+    let framed = cfg.border && mode.framed();
+    // Framed embeds reserve two columns on each side.
+    let inner = measure.saturating_sub(if framed { 4 } else { 0 }).max(8);
 
     // An image resolves like a note but expands into a PICTURE, so it forks
     // before the text path — `flatten_link` would read the bytes as prose.
     let root = super::compile::search_root(from, cfg);
     if let Ok(target) = super::link::resolve(link, from, &root) {
         if crate::image::looks_like_image(&target) {
-            return picture(&target, label, link.alt(), cfg, measure);
+            return picture(&target, label, link.alt(), measure, inner);
         }
     }
 
@@ -122,7 +125,6 @@ pub fn expand(
         Err(e) => return one_error(label, e.to_string(), measure),
     };
 
-    let framed = cfg.border && mode.framed();
     let mut rows = Vec::new();
     if framed {
         rows.push(Row::Top(label));
@@ -130,10 +132,6 @@ pub fn expand(
     // Classified as a document in its own right, so a fence opened inside the
     // embed closes inside it and cannot leak into the composition.
     let mut carry = Carry::default();
-    // A closed box costs four columns — `\u{2502} ` on the left and ` \u{2502}` on the
-    // right — and a wrapped row has to fit between them. Without a box (no
-    // border, or `full`, which never draws one) a row has the whole measure.
-    let inner = measure.saturating_sub(if framed { 4 } else { 0 }).max(8);
     for (i, line) in body.lines().enumerate() {
         let (kind, next) = classify(line, &carry, i == 0, math, COMMONMARK_TAB);
         carry = next;
@@ -221,7 +219,7 @@ const MAX_PICTURE_ROWS: u16 = 20;
 ///
 /// The caption is `alt · W×H` when the embed has alt text (`![[p.png|A barn]]`),
 /// and the file's name in its place otherwise.
-fn picture(path: &Path, label: String, alt: Option<&str>, cfg: &TranscludeConfig, measure: u16) -> Expansion {
+fn picture(path: &Path, label: String, alt: Option<&str>, measure: u16, inner: u16) -> Expansion {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => return one_error(label, e.to_string(), measure),
@@ -229,7 +227,6 @@ fn picture(path: &Path, label: String, alt: Option<&str>, cfg: &TranscludeConfig
     let Some(info) = crate::image::probe(&bytes) else {
         return one_error(label, "not an image this build can read".into(), measure);
     };
-    let inner = measure.saturating_sub(if cfg.border { 4 } else { 0 }).max(8);
     let (cols, rows) = crate::image::fit(info, inner, MAX_PICTURE_ROWS);
     let name = match alt {
         Some(alt) => alt.to_string(),

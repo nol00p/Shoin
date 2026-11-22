@@ -142,6 +142,28 @@ impl Key {
             _ => None,
         }
     }
+
+    /// The character this key stands for after `f` or `r`, as Neovim
+    /// reads it there: a plain character, or a tab for the Tab key (and
+    /// `Ctrl-i`, which a terminal sends as Tab). `Shift-Tab` is none.
+    fn literal(&self) -> Option<char> {
+        match self.code {
+            KeyCode::Tab if !self.ctrl && !self.alt && !self.shift => Some('\t'),
+            KeyCode::Char('i') if self.ctrl && !self.alt => Some('\t'),
+            _ => self.as_char(),
+        }
+    }
+
+    /// The character to replace with after `r`: [`Key::literal`], or a
+    /// line break for Enter (`Ctrl-m` and `Ctrl-j` too), which splits the
+    /// line as Neovim's `r<CR>` does.
+    fn replacement(&self) -> Option<char> {
+        match self.code {
+            KeyCode::Enter if !self.ctrl && !self.alt => Some('\n'),
+            KeyCode::Char('m' | 'j') if self.ctrl && !self.alt => Some('\n'),
+            _ => self.literal(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -387,7 +409,9 @@ impl Pending {
         table: Table,
     ) -> Resolution {
         match awaiting {
-            Awaiting::FindChar { forward, till } => match key.as_char() {
+            // Enter after `f` is no character to find: the command is
+            // dropped, as Neovim's beep.
+            Awaiting::FindChar { forward, till } => match key.literal() {
                 Some(target) => self.with_target(
                     Target::Motion(crate::text::motion::Motion::FindChar { target, forward, till }),
                     table,
@@ -397,7 +421,7 @@ impl Pending {
                     Resolution::Invalid
                 }
             },
-            Awaiting::ReplaceChar => match key.as_char() {
+            Awaiting::ReplaceChar => match key.replacement() {
                 Some(c) => self.emit(Action::ReplaceChar(c)),
                 None => {
                     self.reset();
@@ -579,6 +603,67 @@ mod tests {
                 target: Target::Object { key: 'w', around: false },
             }
         );
+    }
+
+    /// `g~` is an operator like `gu`: doubled (`g~~`, `g~g~`) it takes
+    /// lines, and it takes a motion with a count.
+    #[test]
+    fn g_tilde_is_the_toggle_case_operator() {
+        let line = Action::Operator { op: Operator::ToggleCase, target: Target::Line };
+        assert_eq!(one("g~~").action, line);
+        assert_eq!(one("g~g~").action, line);
+        assert_eq!(one("3g~~").count, 3);
+        let cmd = one("2g~3w");
+        assert_eq!(
+            cmd.action,
+            Action::Operator {
+                op: Operator::ToggleCase,
+                target: Target::Motion(Motion::WordForward { big: false }),
+            }
+        );
+        assert_eq!(cmd.count, 6);
+        let mut p = Pending::default();
+        assert_eq!(
+            run(&mut p, "g~", Table::Visual)[0].action,
+            Action::Operator { op: Operator::ToggleCase, target: Target::Selection }
+        );
+    }
+
+    /// After `f` `t` `F` `T` and `r`, the Tab key (or `Ctrl-i`) is a tab,
+    /// and after `r` Enter (or `Ctrl-m`, `Ctrl-j`) a line break; Enter
+    /// after `f` and `Shift-Tab` after either are no character, and drop
+    /// the command, as Neovim's beep.
+    #[test]
+    fn find_and_replace_take_tab_and_enter_as_neovim() {
+        let km = keymap();
+        let key = |code, ctrl, shift| Key { code, ctrl, alt: false, shift };
+        let feed = |first: char, k: Key| {
+            let mut p = Pending::default();
+            p.feed(Key::char(first), &km, Table::Normal);
+            let res = p.feed(k, &km, Table::Normal);
+            assert!(p.is_clean());
+            match res {
+                Resolution::Command(cmd) => Some(cmd.action),
+                _ => None,
+            }
+        };
+        let tab = key(KeyCode::Tab, false, false);
+        let ctrl_i = key(KeyCode::Char('i'), true, false);
+        let shift_tab = key(KeyCode::Tab, false, true);
+        let enter = key(KeyCode::Enter, false, false);
+        for (first, forward, till) in [('f', true, false), ('F', false, false), ('t', true, true), ('T', false, true)] {
+            let found = Some(Action::Move(Motion::FindChar { target: '\t', forward, till }));
+            assert_eq!(feed(first, tab), found, "{first}<Tab>");
+            assert_eq!(feed(first, ctrl_i), found, "{first}<C-i>");
+            assert_eq!(feed(first, shift_tab), None, "{first}<S-Tab>");
+            assert_eq!(feed(first, enter), None, "{first}<CR>");
+        }
+        assert_eq!(feed('r', tab), Some(Action::ReplaceChar('\t')));
+        assert_eq!(feed('r', ctrl_i), Some(Action::ReplaceChar('\t')));
+        assert_eq!(feed('r', shift_tab), None);
+        for k in [enter, key(KeyCode::Char('m'), true, false), key(KeyCode::Char('j'), true, false)] {
+            assert_eq!(feed('r', k), Some(Action::ReplaceChar('\n')), "r then {k:?}");
+        }
     }
 
     #[test]

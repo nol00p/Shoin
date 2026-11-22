@@ -1,4 +1,5 @@
 use super::*;
+use crate::render::layout::{cell_width_at, tab_stop};
 
 impl App {
     // ----------------------------------------------------------------- insert
@@ -148,6 +149,43 @@ impl App {
             self.buffer.cursor.goal_cells = Some(cells);
         }
         self.move_by(m, 1);
+    }
+
+    /// The cells the first `col` chars of `at`'s line take, each tab to its
+    /// stop: the screen cell of column `col`.
+    fn cells_before(&self, at: Cursor, col: usize) -> usize {
+        let tw = self.config.editor.tab_width;
+        let line = self.buffer.rope.line(at.line.min(self.buffer.line_count().saturating_sub(1)));
+        line.chars().take(col).fold(0, |cells, c| cells + cell_width_at(c, cells, tw))
+    }
+
+    /// Backspace with only blanks before the cursor goes back to the tab
+    /// stop before it, as Neovim's default 'smarttab': the blanks past that
+    /// stop go, and when a tab took the cursor further back than the stop,
+    /// spaces make up the difference. False, and nothing done, past the
+    /// indent, where Backspace takes one character.
+    fn backspace_in_indent(&mut self) -> bool {
+        let c = self.buffer.cursor;
+        let blanks = self.buffer.line_text(c.line).chars().take(c.col).all(|ch| ch == ' ' || ch == '\t');
+        if c.col == 0 || !blanks {
+            return false;
+        }
+        let tw = self.config.editor.tab_width.max(1);
+        let want = (self.cells_before(c, c.col) - 1) / tw * tw;
+        let mut col = c.col;
+        while col > 0 && self.cells_before(c, col) > want {
+            col -= 1;
+        }
+        let pad = want - self.cells_before(c, col);
+        let line = self.buffer.rope.line_to_char(c.line);
+        if self.buffer.delete_chars(line + col, line + c.col).is_none() {
+            return true;
+        }
+        if pad > 0 {
+            self.buffer.insert_str(Cursor::new(c.line, col), &" ".repeat(pad));
+        }
+        self.buffer.cursor.set_col(col + pad);
+        true
     }
 
     /// `input.escape_alias` (default `jk`).
@@ -408,6 +446,9 @@ impl App {
                     return;
                 }
                 let c = self.buffer.cursor;
+                if self.backspace_in_indent() {
+                    return;
+                }
                 if c.col > 0 {
                     let idx = self.buffer.char_index(c);
                     if self.buffer.delete_chars(idx - 1, idx).is_some() {
@@ -430,8 +471,11 @@ impl App {
             }
             KeyCode::Tab => {
                 let at = self.buffer.cursor;
+                // Spaces to the next tab stop, as Neovim's 'expandtab' with
+                // 'softtabstop' 0: `a` then Tab is three spaces at width 4.
                 let text = if self.config.editor.expand_tab {
-                    " ".repeat(self.config.editor.tab_width)
+                    let tw = self.config.editor.tab_width;
+                    " ".repeat(tab_stop(self.cells_before(at, at.col), tw))
                 } else {
                     "\t".to_string()
                 };
@@ -481,3 +525,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cursor_tests.rs"]
+mod cursor_tests;

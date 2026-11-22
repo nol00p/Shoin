@@ -226,6 +226,8 @@ pub enum Operator {
     Outdent,
     Lowercase,
     Uppercase,
+    /// `g~`: each letter to the other case.
+    ToggleCase,
 }
 
 impl Action {

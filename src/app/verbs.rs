@@ -187,6 +187,10 @@ impl App {
     /// `Ctrl-r` and friends. Mirror of `undo_or_warn`.
     pub(super) fn redo_or_warn(&mut self) {
         if !self.buffer.redo() {
+            // The goal is set afresh even so, as Neovim's: `$` then a
+            // `Ctrl-r` with nothing to redo forgets the line end.
+            let col = self.buffer.cursor.col;
+            self.buffer.cursor.set_col(col);
             self.notify("already at newest change", FlashKind::Info);
         }
     }
@@ -506,6 +510,10 @@ impl App {
         if op == Operator::Delete && self.delete_goes_linewise(start, end, inclusive) {
             return self.operate_linewise(op, start.line, end.line, start);
         }
+        // Without the goal, which the cursor's end carries: the operator
+        // leaves the cursor with a goal of its own, so `yl` at the end
+        // forgets `$`'s, as Neovim's does.
+        let (start, end) = (Cursor::new(start.line, start.col), Cursor::new(end.line, end.col));
         self.operate_charwise(op, start, end, inclusive)
     }
 

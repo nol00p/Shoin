@@ -1,4 +1,5 @@
 use super::*;
+use crate::render::layout::{cell_width, cell_width_at, tab_stop};
 
 impl App {
     // -------------------------------------------------------- writer verbs (g)
@@ -384,7 +385,10 @@ impl App {
         }
     }
 
-    /// `~`: flip the case of `count` characters and advance.
+    /// `~`: flip the case of `count` characters, or up to the line's end,
+    /// and go to the character after them, as Neovim's: after what they
+    /// became, when that is longer (`ß` to `SS`). Redo comes back to where
+    /// it started, as Neovim's.
     pub(super) fn toggle_case(&mut self, count: usize) {
         let cur = self.buffer.cursor;
         let chars: Vec<char> = self.buffer.line_text(cur.line).chars().collect();
@@ -394,20 +398,19 @@ impl App {
         }
         let mut out = String::new();
         for &c in &chars[cur.col..cur.col + n] {
-            if c.is_uppercase() {
-                out.extend(c.to_lowercase());
-            } else if c.is_lowercase() {
-                out.extend(c.to_uppercase());
-            } else {
-                out.push(c);
-            }
+            recase_char(Operator::ToggleCase, c, &mut out);
         }
+        let revision = self.buffer.revision;
         let a = self.buffer.char_index(cur);
         let b = self.buffer.char_index(Cursor::new(cur.line, cur.col + n));
         self.buffer.delete_chars(a, b);
         self.buffer.insert_str(cur, &out);
         let len = self.buffer.line_len(cur.line);
-        self.buffer.cursor = Cursor::new(cur.line, (cur.col + n).min(len.saturating_sub(1)));
+        let col = cur.col + out.chars().count();
+        self.buffer.cursor = Cursor::new(cur.line, col.min(len.saturating_sub(1)));
+        if self.buffer.revision != revision {
+            self.buffer.history.set_redo_cursor(Cursor::new(cur.line, cur.col));
+        }
     }
 
     /// `;` / `,`: repeat the last `f`/`t` (`,` reverses direction).
@@ -489,20 +492,109 @@ impl App {
         }
     }
 
-    /// `r`: overwrite `count` characters with `ch`.
+    /// `r`: overwrite `count` characters with `ch`, each a base character
+    /// with the combining marks on it, as Neovim's grapheme. With fewer than
+    /// `count` left on the line nothing changes, as Neovim beeps. A tab with
+    /// `expand_tab` and a line break (`r<CR>`) are Neovim's special cases:
+    /// [`App::replace_with_tab_spaces`] and [`App::replace_with_break`].
+    ///
+    /// `.` repeats `r<Tab>` as Neovim records it, a Replace-mode
+    /// `{count}R<Tab>` (its default `smarttab` takes that path without
+    /// `expandtab` too): no count check, the tabs going on past the end of
+    /// a shorter line.
     pub(super) fn replace_chars(&mut self, ch: char, count: usize) {
         let cur = self.buffer.cursor;
-        let len = self.buffer.line_len(cur.line);
-        let n = count.min(len.saturating_sub(cur.col));
-        if n == 0 {
+        let n = count;
+        let tw = self.config.editor.tab_width.max(1);
+        let chars: Vec<char> = self.buffer.line_text(cur.line).chars().collect();
+        let (end, taken) = graphemes_from(&chars, cur.col, n, tw);
+        let replace_mode = ch == '\t' && self.replaying;
+        if n == 0 || (taken < n && !replace_mode) {
             return;
         }
+        match ch {
+            '\n' => return self.replace_with_break(end),
+            '\t' if self.config.editor.expand_tab => return self.replace_with_tab_spaces(n, end),
+            _ => {}
+        }
         let start = self.buffer.char_index(cur);
-        let end = self.buffer.char_index(Cursor::new(cur.line, cur.col + n));
+        let end = self.buffer.char_index(Cursor::new(cur.line, end));
         self.buffer.delete_chars(start, end);
         let repl: String = std::iter::repeat_n(ch, n).collect();
         self.buffer.insert_str(cur, &repl);
         self.buffer.cursor = Cursor::new(cur.line, cur.col + n - 1);
+    }
+
+    /// `r<Tab>` with `expand_tab`, which Neovim runs as `{n}R<Tab><Esc>`:
+    /// each of the `n` characters from the cursor becomes the spaces from
+    /// where it starts to the next tab stop, so the first one may become
+    /// fewer than a tab's width and every later one a whole tab's. The
+    /// characters go up to column `end`, fewer than `n` when `.` repeats it
+    /// on a shorter line. The cursor ends on the last space; redo comes back
+    /// to where it started.
+    fn replace_with_tab_spaces(&mut self, n: usize, end: usize) {
+        let cur = self.buffer.cursor;
+        let tw = self.config.editor.tab_width.max(1);
+        let cells = motion::goal_start_cells(&self.buffer, Cursor::new(cur.line, cur.col), tw);
+        let spaces = tab_stop(cells, tw) + (n - 1) * tw;
+        let revision = self.buffer.revision;
+        let start = self.buffer.char_index(cur);
+        let end = self.buffer.char_index(Cursor::new(cur.line, end));
+        self.buffer.delete_chars(start, end);
+        self.buffer.insert_str(cur, &" ".repeat(spaces));
+        self.buffer.cursor = Cursor::new(cur.line, cur.col + spaces - 1);
+        if self.buffer.revision != revision {
+            self.buffer.history.set_redo_cursor(Cursor::new(cur.line, cur.col));
+        }
+    }
+
+    /// `r<CR>`: the characters from the cursor up to column `end` become
+    /// one line break, as Neovim's. With `auto_indent` the new line starts
+    /// with the indent of the text before the cursor, rebuilt to its width
+    /// as Neovim's is
+    /// (spaces with `expand_tab`, else tabs and then spaces), in place of
+    /// the blanks it would have started with; a new line with nothing
+    /// after that indent is left empty. The cursor goes to the indent's
+    /// last character, where Neovim's Esc leaves it, and redo to the
+    /// character before the break. A new line left empty at the end of a
+    /// file with no final newline gets one, so it is a line the cursor can
+    /// stand on, as in Neovim.
+    fn replace_with_break(&mut self, end: usize) {
+        let cur = self.buffer.cursor;
+        let tw = self.config.editor.tab_width.max(1);
+        let chars: Vec<char> = self.buffer.line_text(cur.line).chars().collect();
+        let blank = |c: &&char| matches!(c, ' ' | '\t');
+        let mut rest = &chars[end..];
+        let mut indent = String::new();
+        let width = chars[..cur.col].iter().take_while(blank).fold(0, |at, &c| at + cell_width_at(c, at, tw));
+        if self.config.editor.auto_indent {
+            rest = &rest[rest.iter().take_while(blank).count()..];
+            if !rest.is_empty() {
+                indent = if self.config.editor.expand_tab {
+                    " ".repeat(width)
+                } else {
+                    "\t".repeat(width / tw) + &" ".repeat(width % tw)
+                };
+            }
+        }
+        let revision = self.buffer.revision;
+        let start = self.buffer.char_index(cur);
+        let end = self.buffer.char_index(Cursor::new(cur.line, chars.len()));
+        let unterminated = end == self.buffer.rope.len_chars();
+        self.buffer.delete_chars(start, end);
+        let rest: String = rest.iter().collect();
+        let close = if unterminated && rest.is_empty() { "\n" } else { "" };
+        self.buffer.insert_str(cur, &format!("\n{indent}{rest}{close}"));
+        let mut landing = Cursor::new(cur.line + 1, indent.chars().count().saturating_sub(1));
+        // A new line left empty still had the indent when Neovim's Esc
+        // took the goal from it: `j` goes on from its last cell.
+        if self.config.editor.auto_indent && rest.is_empty() && width > 0 {
+            landing.goal_cells = Some(width - 1);
+        }
+        self.buffer.cursor = landing;
+        if self.buffer.revision != revision {
+            self.buffer.history.set_redo_cursor(Cursor::new(cur.line, cur.col.saturating_sub(1)));
+        }
     }
 
     /// Delete/change/yank/case a charwise range between two cursors.
@@ -549,9 +641,14 @@ impl App {
                 self.buffer.cursor = lo;
                 self.enter_insert();
             }
-            Operator::Lowercase | Operator::Uppercase => {
-                self.recase(start, end, op == Operator::Uppercase);
+            Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
+                // Undo and redo come back to where the range starts, as
+                // Neovim's: `g~b` undoes to the word's start.
+                let revision = self.buffer.revision;
+                self.recase(start, end, op);
                 self.buffer.cursor = lo;
+                self.land_for_undo(revision, lo);
+                self.land_for_redo(revision);
             }
             Operator::Indent | Operator::Outdent => unreachable!("handled above"),
         }
@@ -622,22 +719,15 @@ impl App {
                     self.cc_indent_line = Some(line);
                 }
             }
-            Operator::Lowercase | Operator::Uppercase => {
-                let upper = op == Operator::Uppercase;
+            Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
                 // Where the range starts, as a yank: `guu` on its line's
                 // first non-blank, `gUk` where `k` put it, `Vgu` at column 0;
                 // in the new text when the change made the line longer or
                 // shorter. Undo comes back to the start in the old text,
                 // redo to the landing, as Neovim's.
                 let before = self.land_on(start);
-                let after = self.recased_landing(before, |c, out| {
-                    if upper {
-                        out.extend(c.to_uppercase());
-                    } else {
-                        out.extend(c.to_lowercase());
-                    }
-                });
-                self.recase(start_idx, end, upper);
+                let after = self.recased_landing(before, |c, out| recase_char(op, c, out));
+                self.recase(start_idx, end, op);
                 self.buffer.cursor = after;
                 self.land_for_undo(revision, before);
                 self.land_for_redo(revision);
@@ -740,15 +830,18 @@ impl App {
         Cursor::new(line, col)
     }
 
-    /// Rewrite an absolute char range in one case. Delete + insert so it is a
-    /// single history step, and so a mapping that changes length (`ß` -> `SS`)
-    /// still lands correctly.
-    fn recase(&mut self, start: usize, end: usize, upper: bool) {
+    /// Rewrite an absolute char range by a case operator. Delete + insert so
+    /// it is a single history step, and so a mapping that changes length
+    /// (`ß` -> `SS`) still lands correctly.
+    fn recase(&mut self, start: usize, end: usize, op: Operator) {
         let text = self.buffer.rope.slice(start..end).to_string();
-        let mapped = if upper {
-            text.to_uppercase()
-        } else {
-            text.to_lowercase()
+        let mapped = match op {
+            Operator::Uppercase => text.to_uppercase(),
+            Operator::Lowercase => text.to_lowercase(),
+            _ => text.chars().fold(String::new(), |mut out, c| {
+                recase_char(op, c, &mut out);
+                out
+            }),
         };
         if mapped == text {
             return;
@@ -756,6 +849,19 @@ impl App {
         let at = self.idx_to_cursor(start);
         self.buffer.delete_chars(start, end);
         self.buffer.insert_str(at, &mapped);
+    }
+}
+
+/// What the case operator `op` makes of one character: `gu`, `gU`, or
+/// `g~` and `~`, which turn each letter to the other case and leave the
+/// rest.
+pub(super) fn recase_char(op: Operator, c: char, out: &mut String) {
+    match op {
+        Operator::Uppercase => out.extend(c.to_uppercase()),
+        Operator::Lowercase => out.extend(c.to_lowercase()),
+        Operator::ToggleCase if c.is_uppercase() => out.extend(c.to_lowercase()),
+        Operator::ToggleCase if c.is_lowercase() => out.extend(c.to_uppercase()),
+        _ => out.push(c),
     }
 }
 
@@ -773,4 +879,20 @@ fn vim_recased_len(c: char, mapped: &str) -> usize {
             _ => c.len_utf8(),
         },
     }
+}
+
+/// Where `n` characters from `col` on `chars` end, and how many there were
+/// (fewer than `n` at the line's end). A character takes the combining marks
+/// after it, drawn in no cells of their own, as Neovim's grapheme does.
+fn graphemes_from(chars: &[char], col: usize, n: usize, tab: usize) -> (usize, usize) {
+    let mut end = col.min(chars.len());
+    let mut taken = 0;
+    while taken < n && end < chars.len() {
+        end += 1;
+        while end < chars.len() && cell_width(chars[end], tab) == 0 && !chars[end].is_control() {
+            end += 1;
+        }
+        taken += 1;
+    }
+    (end, taken)
 }
