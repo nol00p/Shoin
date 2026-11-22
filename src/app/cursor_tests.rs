@@ -40,9 +40,14 @@ fn feed(app: &mut App, keys: &str) {
     }
 }
 
-/// A fresh app on `text`, with a 30-row window and tab width `tw`.
+/// A fresh app on `text`, with a 30-row window and tab width `tw`, and
+/// the theme as authored rather than downgraded for the terminal the tests
+/// run in: on a 16-color terminal (a CI runner, with no `COLORTERM` and no
+/// `TERM`) the selection and the background both fall on slot 0, and a
+/// test reading the selection's background would see it everywhere.
 fn fresh(text: &str, tw: usize) -> App {
     let mut app = app_with(text);
+    app.theme = crate::render::theme::Theme::authored(&app.config.theme).unwrap();
     app.term_size = (80, 30);
     app.config.editor.tab_width = tw;
     app.refresh_blocks();
@@ -765,6 +770,7 @@ fn selected_after(app: &App, needle: &str) -> bool {
     t.draw(|f| crate::render::frame::render(f, app)).unwrap();
     let buf = t.backend().buffer().clone();
     let sel = app.theme.selection.to_ratatui();
+    assert_ne!(sel, app.theme.background.to_ratatui(), "the selection is drawn in the background's color");
     let row = |y: u16| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
     let y = (0..h).rev().find(|&y| row(y).contains(needle)).unwrap_or_else(|| panic!("{needle:?} not drawn"));
     let text = row(y);
