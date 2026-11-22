@@ -18,6 +18,7 @@
 //!     ends in `.png`. The header is the authority.
 
 use std::path::Path;
+use std::sync::Arc;
 
 /// Extensions that get looked at as images. The header decides whether one
 /// really is; this list only decides what is worth opening.
@@ -226,6 +227,35 @@ pub fn fit(info: Info, max_cols: u16, max_rows: u16) -> (u16, u16) {
     (cols.min(max_cols), rows)
 }
 
+/// Fit renderer PNG bytes to a terminal box. Reject very large pixel buffers
+/// and scaling that would make labels too small to read.
+pub(crate) fn mermaid_picture(
+    bytes: Arc<[u8]>,
+    measure: u16,
+) -> Option<crate::transclude::preview::Picture> {
+    const MAX_ROWS: u16 = 20;
+    const MAX_DIMENSION: u32 = 4096;
+    const MAX_PIXELS: u64 = 8 * 1024 * 1024;
+    const PIXELS_PER_COL: u32 = 8;
+
+    let info = png(&bytes)?;
+    if bytes.len() < 33
+        || be32(&bytes[8..12]) != 13
+        || info.width > MAX_DIMENSION
+        || info.height > MAX_DIMENSION
+        || u64::from(info.width) * u64::from(info.height) > MAX_PIXELS
+    {
+        return None;
+    }
+    let natural_cols = info.width.div_ceil(PIXELS_PER_COL) as u16;
+    let (cols, rows) = fit(info, measure.min(natural_cols), MAX_ROWS);
+    if cols < 4 || cols < natural_cols.div_ceil(2) || rows == 0 {
+        return None;
+    }
+    let id = kitty_id(&bytes);
+    Some(crate::transclude::preview::Picture { cols, rows, payload: bytes, id })
+}
+
 // ------------------------------------------------------------------ base64
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -413,6 +443,19 @@ mod tests {
         wide[16..20].copy_from_slice(&800u32.to_be_bytes());
         wide[20..24].copy_from_slice(&600u32.to_be_bytes());
         assert_eq!(probe(&wide), Some(Info { width: 800, height: 600, sendable: true }));
+    }
+
+    #[test]
+    fn mermaid_picture_checks_payload_and_legibility() {
+        let mut bytes = PNG_1X1.to_vec();
+        bytes[16..20].copy_from_slice(&400u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&100u32.to_be_bytes());
+        let bytes: Arc<[u8]> = bytes.into();
+        let picture = mermaid_picture(bytes.clone(), 50).unwrap();
+        assert_eq!((picture.cols, picture.rows), (50, 6));
+        assert!(Arc::ptr_eq(&picture.payload, &bytes));
+        assert!(mermaid_picture(bytes, 20).is_none());
+        assert!(mermaid_picture(b"GIF89a\x20\x00\x10\x00".as_slice().into(), 50).is_none());
     }
 
     #[test]

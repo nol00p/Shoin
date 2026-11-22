@@ -132,24 +132,15 @@ impl App {
                 }
             }
         }
-        // The payloads stay in the cache and are only borrowed here — a frame
-        // with three photographs on it must not clone three photographs.
-        let cache = self.cache.borrow();
+        let payloads = self.image_payloads.borrow();
         for p in places {
-            let pic = match cache
-                .entry(p.line)
-                .and_then(|e| e.embed.as_ref())
-                .and_then(|x| x.rows.get(p.index))
-            {
-                Some(crate::transclude::preview::Row::Image(pic)) => pic,
-                _ => continue,
-            };
-            if pic.payload.is_empty() || p.shown == 0 {
+            let Some(payload) = payloads.get(&p.id) else { continue };
+            if p.shown == 0 {
                 continue;
             }
             let seq = if kitty {
                 if !sent.contains(&p.id) {
-                    let bytes = crate::image::kitty_send(p.id, &pic.payload);
+                    let bytes = crate::image::kitty_send(p.id, payload);
                     if bytes.is_empty() {
                         continue; // not a PNG: its box and caption stay
                     }
@@ -159,12 +150,12 @@ impl App {
                 // Cut off at the top or bottom: the rows that show, from the
                 // picture's own pixels, in a box as tall as those rows.
                 let crop = (!p.whole())
-                    .then(|| crate::image::probe(&pic.payload))
+                    .then(|| crate::image::probe(payload))
                     .flatten()
                     .map(|info| crate::image::crop(info.width, info.height, p.rows, p.skip, p.shown));
                 crate::image::kitty_put(p.id, p.cols, p.shown, crop)
             } else {
-                crate::image::draw(self.image_protocol, &pic.payload, p.cols, p.rows)
+                crate::image::draw(self.image_protocol, payload, p.cols, p.rows)
             };
             // `\x1b[{row};{col}H` is 1-based, and `Placement` is not.
             out.push_str(&format!("\x1b[{};{}H", p.y + 1, p.x + 1));

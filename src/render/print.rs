@@ -36,6 +36,7 @@ pub fn styled(app: &mut App, width: u16) -> String {
     // Park the active set past the last line, so nothing is revealed raw.
     app.active = ActiveSet::none();
     app.config.status.enabled = false;
+    app.config.hints.enabled = false;
     app.config.layout.scroll_hint = false;
     app.numbers = NumberMode::Off;
     app.embed_mode = crate::transclude::Mode::Full;
@@ -43,13 +44,31 @@ pub fn styled(app: &mut App, width: u16) -> String {
     // One draw to fill the render cache, which then knows how many rows the
     // document wraps into; the second draw is exactly that tall.
     draw(app, width, 1);
+    // Give the same worker a fixed total budget to preview fences on a page.
+    // Anything still pending stays as source. Measure again after polling.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let doc = &app.docs[app.current()];
+        let cache = doc.cache.borrow();
+        if !cache.request_mermaid(app, doc, 0..cache.total_rows(), crate::render::mermaid::MAX_CACHE_ENTRIES)
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        drop(cache);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        if app.poll_mermaid() {
+            draw(app, width, 1);
+        }
+    }
     let rows = app.docs[app.current()].cache.borrow().total_rows();
     let pad = app.config.layout.padding_top + app.config.layout.padding_bottom;
     let height = (rows + pad as usize).clamp(1, u16::MAX as usize) as u16;
     let buf = draw(app, width, height);
     let top = app.config.layout.padding_top.min(height / 4);
     let hidden = top..top.saturating_add(front_matter_rows(app));
-    ansi(&buf, app.theme.background.to_ratatui(), &pictures(app), hidden)
+    let (after_row, first_picture) = pictures(app);
+    ansi(&buf, app.theme.background.to_ratatui(), &after_row, first_picture, hidden)
 }
 
 /// How many rows the document's front matter takes, and the blank lines after
@@ -74,26 +93,22 @@ fn front_matter_rows(app: &App) -> u16 {
 /// stepping the cursor back up into it is a relative move that cannot be
 /// thrown off by a scroll. DECSC/DECRC put the cursor back after, whichever
 /// way the protocol leaves it.
-fn pictures(app: &App) -> HashMap<u16, String> {
+fn pictures(app: &App) -> (HashMap<u16, String>, Option<u16>) {
     let mut out: HashMap<u16, String> = HashMap::new();
+    let mut first = None::<u16>;
     let places = std::mem::take(&mut *app.images.borrow_mut());
     if app.image_protocol == crate::image::Protocol::None {
-        return out;
+        return (out, first);
     }
-    let cache = app.cache.borrow();
+    let payloads = app.image_payloads.borrow();
     for p in places {
-        let Some(crate::transclude::preview::Row::Image(pic)) = cache
-            .entry(p.line)
-            .and_then(|e| e.embed.as_ref())
-            .and_then(|x| x.rows.get(p.index))
-        else {
-            continue;
-        };
+        let Some(payload) = payloads.get(&p.id) else { continue };
         // The page is as tall as the document, so every box is whole on it;
         // a cut one is left from the one-row draw that measured the page.
-        if pic.payload.is_empty() || p.rows == 0 || !p.whole() {
+        if p.rows == 0 || !p.whole() {
             continue;
         }
+        first = Some(first.map_or(p.y, |row| row.min(p.y)));
         let up = p.rows - 1;
         let s = out.entry(p.y + up).or_default();
         s.push_str("\x1b7");
@@ -104,10 +119,10 @@ fn pictures(app: &App) -> HashMap<u16, String> {
         if p.x > 0 {
             let _ = write!(s, "\x1b[{}C", p.x);
         }
-        s.push_str(&crate::image::draw(app.image_protocol, &pic.payload, p.cols, p.rows));
+        s.push_str(&crate::image::draw(app.image_protocol, payload, p.cols, p.rows));
         s.push_str("\x1b8");
     }
-    out
+    (out, first)
 }
 
 /// Show `text` in `$PAGER`, or `less -R` when that is unset. False when no
@@ -155,6 +170,7 @@ fn ansi(
     buf: &Buffer,
     page_bg: Color,
     after_row: &HashMap<u16, String>,
+    first_picture: Option<u16>,
     hidden: std::ops::Range<u16>,
 ) -> String {
     let bg_of = |c: Color| if c == page_bg { Color::Reset } else { c };
@@ -192,7 +208,13 @@ fn ansi(
         }
         lines.push(out);
     }
-    let first = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+    let mut first = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+    // Pictures are painted at their last row, so the blank cells above their
+    // escape still need to be printed when a document starts with a picture.
+    if let Some(y) = first_picture {
+        let hidden_before = y.min(hidden.end).saturating_sub(hidden.start);
+        first = first.min(usize::from(y - hidden_before));
+    }
     let last = lines.iter().rposition(|l| !l.is_empty()).map_or(first, |i| i + 1);
     let mut text = lines[first..last].join("\n");
     text.push('\n');
@@ -295,6 +317,14 @@ mod tests {
         let plain = strip(&styled(&mut app, 60));
         assert!(plain.contains("line 0") && plain.contains("line 299"));
         assert!(!plain.starts_with('\n') && !plain.ends_with("\n\n"), "trimmed at both ends");
+    }
+
+    #[test]
+    fn printing_preserves_blank_rows_reserved_for_a_leading_picture() {
+        let bg = Color::Reset;
+        let buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 12, 10));
+        let after_row = HashMap::from([(7, "paint".to_string())]);
+        assert_eq!(ansi(&buf, bg, &after_row, Some(5), 0..2), "\n\npaint\n");
     }
 
     /// An embed prints its note in full, even with `transclude.embed` at

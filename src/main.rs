@@ -234,7 +234,7 @@ fn main() -> Result<()> {
             match format {
                 export::Format::Text => print_out(&export::plain::render(&flat, page.measure, page.justify, &page.md))?,
                 export::Format::Html => {
-                    let (html, note) = export::html::render_math(&flat, &title, &page);
+                    let (html, note) = export::html::render_with_mermaid(&flat, &title, &page);
                     if let Some(note) = note {
                         eprintln!("{note}");
                     }
@@ -248,7 +248,7 @@ fn main() -> Result<()> {
             .out
             .clone()
             .unwrap_or_else(|| export::default_path(src, format));
-        // The math note (`export::write`) goes to stderr with the path, so
+        // Export diagnostics go to stderr with the path, so
         // the export still composes in a script.
         let note = export::write(src, &dest, format, &config.transclude, &page)?;
         eprintln!("{}", dest.display());

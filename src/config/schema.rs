@@ -270,6 +270,10 @@ pub struct MarkdownConfig {
     pub plain_text_extensions: Vec<String>,
     /// Recognize inline `$…$` and display `$$…$$` LaTeX math.
     pub math: bool,
+    /// Local Merman executable for Mermaid previews. None disables them.
+    pub mermaid_renderer: Option<String>,
+    /// Prefer PNG previews on terminals that support images.
+    pub mermaid_graphics: bool,
     /// Make `:export` follow the settings above. Off (the default), export
     /// writes clean output whatever the editor shows: math as math, tables as
     /// tables, code highlighted. On, a syntax switched off here exports as the
@@ -284,7 +288,10 @@ impl MarkdownConfig {
         if self.export_follows_settings {
             self.clone()
         } else {
-            MarkdownConfig::default()
+            MarkdownConfig {
+                mermaid_renderer: self.mermaid_renderer.clone(),
+                ..MarkdownConfig::default()
+            }
         }
     }
 }
@@ -299,6 +306,8 @@ impl Default for MarkdownConfig {
             code_syntax: true,
             plain_text_extensions: vec![".txt".into()],
             math: true,
+            mermaid_renderer: None,
+            mermaid_graphics: false,
             export_follows_settings: false,
         }
     }

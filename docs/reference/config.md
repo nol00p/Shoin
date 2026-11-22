@@ -72,6 +72,8 @@ highlight  = true
 tables     = true
 math       = true
 code_syntax = true
+mermaid_renderer = ""
+mermaid_graphics = false     # prefer PNG on terminals with image support
 plain_text_extensions = [".txt"]
 export_follows_settings = false
 

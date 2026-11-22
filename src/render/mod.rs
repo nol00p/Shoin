@@ -11,6 +11,7 @@ pub mod hints;
 pub mod indent;
 pub mod layout;
 pub mod math;
+pub(crate) mod mermaid;
 pub mod numbers;
 pub mod pane;
 pub mod print;
@@ -39,9 +40,7 @@ pub struct StyledSpan {
 /// Where a picture goes on screen, recorded while the frame is built and read
 /// back afterwards by the painter.
 ///
-/// It carries a POSITION, not pixels: the bytes stay in the render cache, and
-/// the painter looks them up by `line`/`index`. A frame with three big photos
-/// on it would otherwise clone three photos.
+/// It carries a position, with the picture bytes registered once by ID.
 ///
 /// A box cut off by the top or bottom of the text area is recorded too, at
 /// its first VISIBLE row: `y` is that row, `skip` how many of the box's rows
@@ -56,8 +55,7 @@ pub struct Placement {
     /// Rows of the box above the screen, and rows of it on screen.
     pub skip: u16,
     pub shown: u16,
-    /// The rope line holding the `![[…]]`, and which row of its expansion
-    /// holds the picture (its `Row::Image`, whichever row is first on screen).
+    /// The source line and the first row of its preview holding the picture.
     pub line: usize,
     pub index: usize,
     /// The picture's `image::kitty_id`, so the painter knows which pictures a

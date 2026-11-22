@@ -50,11 +50,15 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   of their own to stretch, so they refuse it.
 - PDF export needs `pandoc` and a layout engine. If one is missing, the error
   names which.
-- HTML export needs no tool, but uses `pandoc` when it is on your `PATH` to
-  turn math into MathML, which browsers draw without a script. Without it
+- HTML export uses `pandoc` when it is on your `PATH` to turn math into
+  MathML, which browsers draw without a script. Without it
   the formulas stay TeX, between `\(` `\)` and `\[` `\]`, and the export
   adds `math left as TeX: no pandoc` to its message (on stderr from the
   shell). See [Math](math.md#printing-and-export).
+- With a configured Mermaid renderer, HTML and PDF export replace supported
+  Mermaid fences with static diagrams.
+  Missing or failed diagrams keep their source and report a diagnostic.
+  Markdown and plain text retain Mermaid source. See [Mermaid](mermaid.md#export-diagrams).
 - `--stdout` works for the text formats only.
 - Export is clean by default: math as math, tables as tables, code
   highlighted, whatever your `[markdown]` settings show in the editor. With

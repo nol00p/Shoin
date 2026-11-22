@@ -246,6 +246,8 @@ pub struct BlockCache {
     /// again: a cursor move looks a block up in this list rather than walking
     /// the kinds.
     pub(crate) closed_math: std::cell::OnceCell<Vec<std::ops::Range<usize>>>,
+    /// Closed Mermaid fences, discovered from the classified lines on demand.
+    pub(crate) closed_mermaid: std::cell::OnceCell<Vec<std::ops::Range<usize>>>,
     /// Which classification this is: a number no other build or rescan in
     /// the process has, taken by every [`BlockCache::build_from`] and
     /// [`BlockCache::invalidate_from`]. The revision cannot say that: a
@@ -297,6 +299,7 @@ impl BlockCache {
             tab_width,
             math_open_at_end: matches!(cur.open, Open::InMath),
             closed_math: Default::default(),
+            closed_mermaid: Default::default(),
             generation: next_generation(),
         }
     }
@@ -343,6 +346,7 @@ impl BlockCache {
         let start = edited.saturating_sub(1);
         // Whatever the scan changes, the closed blocks are found again.
         self.closed_math.take();
+        self.closed_mermaid.take();
         self.generation = next_generation();
 
         // No valid entering state to resume from — rebuild wholesale.

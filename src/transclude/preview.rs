@@ -13,33 +13,37 @@
 //! `Buffer::readonly_ranges` stays empty, and stays where it is: it costs one
 //! branch and it is the escape hatch if embeds ever become editable.
 
+use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::link::Link;
 use super::Mode;
 use crate::config::schema::TranscludeConfig;
 use crate::config::schema::Config;
 use crate::render::conceal::{ConcealCtx, ConcealMap};
-use crate::render::layout::{char_window, phase, wrap_chars};
+use crate::render::layout::{char_window, phase, text_width, wrap_chars};
 use crate::render::markdown::block::{classify, BlockKind, Carry, COMMONMARK_TAB};
 use crate::render::theme::Theme;
 use crate::render::StyledSpan;
+use crate::render::mermaid::{MermaidRenderer, PicturePreview, Preview, MAX_SOURCE_BYTES};
 
-/// A picture an embed reserved room for. The bytes ride along already
-/// base64-encoded, because the terminal wants them that way on every frame it
-/// paints and the encode is not worth repeating at 60 Hz.
+/// A picture an embed reserved room for. Shared bytes let different pane
+/// layouts reuse a diagram raster from the renderer cache.
+#[derive(Clone)]
 pub struct Picture {
     /// The box, in cells. The pixels are fitted into exactly this.
     pub cols: u16,
     pub rows: u16,
     /// Ready to hand to `image::draw`, or empty for a format no protocol takes.
-    pub payload: Vec<u8>,
+    pub payload: Arc<[u8]>,
     /// `image::kitty_id` of the payload, hashed once here rather than on
     /// every frame.
     pub id: u32,
 }
 
 /// One screen row of an expanded embed.
+#[derive(Clone)]
 pub enum Row {
     /// `╭ label ─────` — only when `transclude.border`.
     Top(String),
@@ -63,6 +67,10 @@ pub enum Row {
     Reserved,
     /// `photo.png · 800×600` under the picture, in the dim ink.
     Caption(String),
+    /// Literal text from a Mermaid preview.
+    Diagram(String),
+    /// Caption and fallback label for a generated image.
+    DiagramCaption,
 }
 
 /// What a line of an embed draws: its text and the styles on it ([`drawn`]).
@@ -77,6 +85,12 @@ impl Expansion {
     pub fn len(&self) -> usize {
         self.rows.len()
     }
+}
+
+/// A closed Mermaid fence and the rows occupied by its source expansion.
+pub struct Diagram {
+    rows: Range<usize>,
+    pub source: String,
 }
 
 /// Expand one link against the filesystem.
@@ -101,6 +115,38 @@ pub fn expand(
     math: bool,
     tab: usize,
     draw: &dyn Fn(&str, &BlockKind, u16) -> Drawn,
+) -> Expansion {
+    expand_inner(link, from, cfg, measure, mode, math, tab, draw, None)
+}
+
+/// Expand a link and remember its closed Mermaid fences for async rendering.
+#[allow(clippy::too_many_arguments)]
+pub fn expand_with_diagrams(
+    link: &Link,
+    from: &Path,
+    cfg: &TranscludeConfig,
+    measure: u16,
+    mode: Mode,
+    math: bool,
+    tab: usize,
+    draw: &dyn Fn(&str, &BlockKind, u16) -> Drawn,
+) -> (Expansion, Vec<Diagram>) {
+    let mut diagrams = Vec::new();
+    let expansion = expand_inner(link, from, cfg, measure, mode, math, tab, draw, Some(&mut diagrams));
+    (expansion, diagrams)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_inner(
+    link: &Link,
+    from: &Path,
+    cfg: &TranscludeConfig,
+    measure: u16,
+    mode: Mode,
+    math: bool,
+    tab: usize,
+    draw: &dyn Fn(&str, &BlockKind, u16) -> Drawn,
+    mut diagrams: Option<&mut Vec<Diagram>>,
 ) -> Expansion {
     let label = link.label();
     let framed = cfg.border && mode.framed();
@@ -132,9 +178,32 @@ pub fn expand(
     // Classified as a document in its own right, so a fence opened inside the
     // embed closes inside it and cannot leak into the composition.
     let mut carry = Carry::default();
+    let mut fence = None;
     for (i, line) in body.lines().enumerate() {
         let (kind, next) = classify(line, &carry, i == 0, math, COMMONMARK_TAB);
         carry = next;
+        if diagrams.is_some() {
+            match &kind {
+                BlockKind::FenceOpen(info) if info.split_whitespace().next() == Some("mermaid") => {
+                    let indent = line.bytes().take_while(|b| matches!(b, b' ' | b'\t')).count();
+                    fence = Some((rows.len(), indent, String::new()));
+                }
+                BlockKind::FenceBody { .. } => {
+                    if let Some((_, indent, source)) = &mut fence {
+                        let prefix = line.bytes().take(*indent).take_while(|b| matches!(b, b' ' | b'\t')).count();
+                        let body_line = &line[prefix..];
+                        if body_line.len() >= MAX_SOURCE_BYTES.saturating_sub(source.len()) {
+                            fence = None;
+                        } else {
+                            source.push_str(body_line);
+                            source.push('\n');
+                        }
+                    }
+                }
+                BlockKind::FenceClose => {}
+                _ => fence = None,
+            }
+        }
         // Wrapped here rather than at draw time: each wrapped row has to be a
         // row the cache can count, or the scroll arithmetic goes wrong.
         //
@@ -155,6 +224,11 @@ pub fn expand(
             let at = if shown[a..b].contains(&'\t') { phase(&shown, a, tab) } else { 0 };
             let styles = row_styles(&styles, &mut next, a, b);
             rows.push(Row::Body(char_window(&shown, a, b), styles, at));
+        }
+        if matches!(kind, BlockKind::FenceClose) {
+            if let (Some(diagrams), Some((start, _, source))) = (diagrams.as_deref_mut(), fence.take()) {
+                diagrams.push(Diagram { rows: start..rows.len(), source });
+            }
         }
     }
     if rows.is_empty() || matches!(rows.last(), Some(Row::Top(_))) {
@@ -207,6 +281,69 @@ fn row_styles(spans: &[StyledSpan], next: &mut usize, a: usize, b: usize) -> Vec
         .collect()
 }
 
+/// Reuse the wrapped source rows for pending/failed diagrams and replace
+/// completed fences that fit the embed's measure.
+#[allow(clippy::too_many_arguments)]
+pub fn mermaid_expansion(
+    base: &Expansion,
+    diagrams: &[Diagram],
+    renderer: &MermaidRenderer,
+    executable: &str,
+    measure: u16,
+    bordered: bool,
+    graphics: bool,
+    tab: usize,
+) -> Option<Expansion> {
+    let inner = measure.saturating_sub(if bordered { 4 } else { 0 });
+    let mut output = Vec::new();
+    let mut previous = 0;
+    for diagram in diagrams {
+        let mut replacement = Vec::new();
+        if graphics {
+            if let Some(PicturePreview::Ready(bytes)) = renderer.cached_png(executable, &diagram.source) {
+                if let Some(picture) = crate::image::mermaid_picture(bytes, inner) {
+                    let rows = picture.rows;
+                    replacement.push(Row::Image(picture));
+                    replacement.extend((1..rows).map(|_| Row::Reserved));
+                    replacement.push(Row::DiagramCaption);
+                }
+            }
+        }
+        if replacement.is_empty() {
+            match renderer.cached(executable, &diagram.source) {
+                Some(Preview::Ready(rows)) => {
+                    let width = rows.iter().map(|row| text_width(row, tab)).max().unwrap_or(0);
+                    if width > 0 && width <= inner {
+                        let pad = " ".repeat(usize::from((inner - width) / 2));
+                        replacement.extend(rows.iter().map(|row| Row::Diagram(format!("{pad}{row}"))));
+                    }
+                }
+                Some(Preview::Failed(error)) => {
+                    // Keep the source readable when the renderer is missing
+                    // or rejects a diagram and show the reason at the fence.
+                    output.extend_from_slice(&base.rows[previous..diagram.rows.start]);
+                    let chars: Vec<char> = error.message().chars().collect();
+                    for (start, end) in wrap_chars(&chars, inner.max(1), tab) {
+                        output.push(Row::Diagram(char_window(&chars, start, end)));
+                    }
+                    previous = diagram.rows.start;
+                }
+                _ => {}
+            }
+        }
+        if !replacement.is_empty() {
+            output.extend_from_slice(&base.rows[previous..diagram.rows.start]);
+            output.extend(replacement);
+            previous = diagram.rows.end;
+        }
+    }
+    if output.is_empty() {
+        return None;
+    }
+    output.extend_from_slice(&base.rows[previous..]);
+    Some(Expansion { rows: output })
+}
+
 /// A picture is never taller than this, however tall its pixels are. A
 /// portrait photograph would otherwise push the rest of the composition off the
 /// screen, and an embed is a thing you read PAST.
@@ -239,7 +376,7 @@ fn picture(path: &Path, label: String, alt: Option<&str>, measure: u16, inner: u
         id: crate::image::kitty_id(&bytes),
         // A format no protocol accepts still gets its box and its caption —
         // it just never gets pixels, so there is nothing to send.
-        payload: if info.sendable { bytes } else { Vec::new() },
+        payload: if info.sendable { bytes.into() } else { Arc::from([]) },
     })];
     out.extend((1..rows).map(|_| Row::Reserved));
     out.push(Row::Caption(format!("{name} · {}×{}", info.width, info.height)));
@@ -568,6 +705,78 @@ mod tests {
             assert_eq!(text_width(&rows[0], 4), 8, "border {border}: {rows:?}");
             assert_eq!(text_width(&rows[2], 4), 8, "border {border}: {rows:?}");
         }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn diagram_sources_track_only_closed_fences_and_their_wrapped_rows() {
+        let d = vault("diagram-fences");
+        std::fs::write(
+            d.join("frag.md"),
+            "~~~rust\n```mermaid\n~~~\n1. List\n\n   ~~~~mermaid\n   flowchart TD\n   A --> AReallyLongNodeName\n   ~~~~\n\n```mermaid\nunfinished\n",
+        )
+        .unwrap();
+        let (expanded, diagrams) = expand_with_diagrams(
+            &Link::parse("frag").unwrap(),
+            &d.join("note.md"),
+            &TranscludeConfig::default(),
+            22,
+            Mode::Short,
+            true,
+            4,
+            &|text, _, _| (text.to_string(), Vec::new()),
+        );
+        assert_eq!(diagrams.len(), 1);
+        assert_eq!(diagrams[0].source, "flowchart TD\nA --> AReallyLongNodeName\n");
+        let rows = &expanded.rows[diagrams[0].rows.clone()];
+        assert!(matches!(rows.first(), Some(Row::Body(text, _, _)) if text.trim_start().starts_with("~~~~mermaid")));
+        assert!(matches!(rows.last(), Some(Row::Body(text, _, _)) if text.trim() == "~~~~"));
+        assert!(rows.len() > 4, "the long body wraps inside the replacement range");
+        assert!(body_text(&expanded).iter().any(|row| row == "unfinished"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagram_preview_replaces_its_source_and_keeps_the_other_embed_rows() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let d = vault("diagram-render");
+        let executable = d.join("renderer");
+        let renderer_path = executable.to_str().unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' '  A --> B'\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            d.join("frag.md"),
+            "before\n\n```mermaid\nflowchart LR\nA --> B\n```\n\nafter\n",
+        )
+        .unwrap();
+        let (base, diagrams) = expand_with_diagrams(
+            &Link::parse("frag").unwrap(),
+            &d.join("note.md"),
+            &TranscludeConfig::default(),
+            36,
+            Mode::Short,
+            true,
+            4,
+            &|text, _, _| (text.to_string(), Vec::new()),
+        );
+        let mut renderer = MermaidRenderer::default();
+        assert!(mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 36, true, false, 4).is_none());
+        renderer.request(renderer_path, &diagrams[0].source);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while renderer.cached(renderer_path, &diagrams[0].source).is_none() {
+            assert!(Instant::now() < deadline, "renderer did not complete");
+            std::thread::sleep(Duration::from_millis(5));
+            renderer.poll();
+        }
+        let expanded = mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 36, true, false, 4).unwrap();
+        assert!(matches!(expanded.rows.first(), Some(Row::Top(_))));
+        assert!(matches!(expanded.rows.last(), Some(Row::Bottom)));
+        assert!(expanded.rows.iter().any(|row| matches!(row, Row::Diagram(s) if s.ends_with("  A --> B"))));
+        assert_eq!(body_text(&expanded), ["before", "", "", "after"]);
+        assert!(mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 8, true, false, 4).is_none());
         std::fs::remove_dir_all(&d).ok();
     }
 

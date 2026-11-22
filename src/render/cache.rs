@@ -34,6 +34,9 @@
 //! applied to a clone of the cached spans, for VISIBLE lines only — which is
 //! what keeps the expensive work O(viewport) while the row index stays O(lines).
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use crate::app::{App, BufferState};
 use crate::render::pane::PaneId;
 use crate::config::schema::{GlyphConfig, MarkdownConfig};
@@ -44,8 +47,9 @@ use crate::render::layout::{
     content_column, no_wrap, tab_stop, text_width, wrap_hanging, wrap_with_inset, RowSource, VisualRow, MIN_WRAP_WIDTH,
 };
 use crate::render::markdown::{self, block::BlockKind};
+use crate::render::mermaid::{PicturePreview, Preview, MAX_SOURCE_BYTES};
 use crate::render::theme::Theme;
-use crate::transclude::preview::Expansion;
+use crate::transclude::preview::{self, Diagram, Expansion, Picture};
 use crate::render::StyledSpan;
 use crate::text::buffer::{shared_ends, shares_chunks, Buffer, Syntax};
 
@@ -78,6 +82,7 @@ pub struct LineEntry {
     /// and preview is on. Captured when the line is parsed, so the target is
     /// read once per edit rather than once per frame.
     pub embed: Option<Expansion>,
+    embed_diagrams: Vec<Diagram>,
     /// The serial of the build that made this entry: unique for the cache's
     /// lifetime, so a changed serial means a rebuilt line. A display block's
     /// layout is keyed by its lines' serials.
@@ -229,6 +234,11 @@ pub struct RenderCache {
     /// The display blocks drawn laid out in the current row index, whole and
     /// top to bottom.
     laid_out: Vec<std::ops::Range<usize>>,
+    diagrams: BTreeMap<usize, DiagramLayout>,
+    pictures: BTreeMap<usize, Picture>,
+    diagram_embeds: BTreeMap<usize, Expansion>,
+    embed_openers: Vec<usize>,
+    diagram_status: BTreeMap<usize, &'static str>,
     /// Display blocks laid out since startup. Instrumentation, like `builds`:
     /// it grows when a block changes, not with frames or cursor moves.
     layouts: u64,
@@ -259,6 +269,11 @@ pub struct RenderCache {
     indexes: u64,
 }
 
+struct DiagramLayout {
+    rows: Arc<[String]>,
+    pad: usize,
+}
+
 /// Everything the row index is a function of, besides the entries, which
 /// `builds` stands for: a sync that finds these unchanged keeps the index
 /// it has. Several panes on one document share the cache and each sync
@@ -279,6 +294,8 @@ struct IndexKey {
     active: ActiveSet,
     conceal: bool,
     spacing: u16,
+    mermaid_revision: u64,
+    mermaid_graphics: bool,
     folded: Hidden,
 }
 
@@ -417,6 +434,8 @@ impl RenderCache {
             active: app.active.clone(),
             conceal: app.config.layout.conceal,
             spacing: app.config.layout.line_spacing,
+            mermaid_revision: app.mermaid_revision,
+            mermaid_graphics: graphics_enabled(app),
             folded: hidden::of(doc.folds_in(pane), &[]),
         };
         if self.indexed.as_ref() != Some(&key) {
@@ -485,6 +504,11 @@ impl RenderCache {
         let folds = doc.folds_in(pane);
         self.folded = hidden::of(folds, &[]);
         self.laid_out.clear();
+        self.diagrams.clear();
+        self.pictures.clear();
+        self.diagram_embeds.clear();
+        self.embed_openers.clear();
+        self.diagram_status.clear();
         if conceal_on && doc.blocks.revision == doc.buffer.revision {
             for b in hidden::math_blocks(&doc.blocks).iter().cloned() {
                 let active = current && app.active.start < b.end && app.active.end >= b.start;
@@ -492,6 +516,8 @@ impl RenderCache {
                     self.laid_out.push(b);
                 }
             }
+            self.index_mermaid(app, doc, current);
+            self.laid_out.sort_unstable_by_key(|b| b.start);
         }
         self.hidden = hidden::of(folds, &self.laid_out);
         let ranges = self.hidden.ranges();
@@ -520,9 +546,10 @@ impl RenderCache {
             }
             let entry = self.entries[line].as_deref();
             rows += match self.laid_out.get(next_block).filter(|b| b.start == line) {
-                Some(_) => layout_rows(entry).map_or(1, <[String]>::len),
-                None => content_rows(entry, concealed),
+                Some(_) => self.display_len(line).unwrap_or(1),
+                None => self.content_rows(line, entry, concealed),
             };
+            rows += usize::from(self.diagram_status.contains_key(&line));
             // Spacing goes between a line and the next one SHOWN, so before
             // a hidden run it is the spacing the run's last line would take.
             let last = match run {
@@ -532,6 +559,131 @@ impl RenderCache {
             rows += spacer_rows(spacing, doc, last, n);
         }
         self.row_starts.push(rows);
+    }
+
+    fn index_mermaid(&mut self, app: &App, doc: &BufferState, current: bool) {
+        let Some(executable) = app.config.markdown.mermaid_renderer.as_deref().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let renderer = app.mermaid.borrow();
+        for block in hidden::mermaid_blocks(&doc.blocks) {
+            if (current && app.active.start < block.end && app.active.end >= block.start)
+                || self.folded.count_in(block.clone()) != 0
+            {
+                continue;
+            }
+            let Some(body) = diagram_body(doc, block) else {
+                self.diagram_status.insert(block.start, "Mermaid source is too large");
+                continue;
+            };
+            let tab = app.config.editor.tab_width;
+            let opener = &self.entries[block.start].as_ref().expect("indexed line").source;
+            let prefix = opener.len() - opener.trim_start_matches([' ', '\t']).len();
+            let indent = text_width(&opener[..prefix], tab);
+            let room = self.measure.saturating_sub(indent);
+            if graphics_enabled(app) {
+                if let Some(PicturePreview::Ready(bytes)) = renderer.cached_png(executable, &body) {
+                    if let Some(picture) = crate::image::mermaid_picture(bytes, room) {
+                        self.pictures.insert(block.start, picture);
+                        self.laid_out.push(block.clone());
+                        continue;
+                    }
+                }
+            }
+            let Some(preview) = renderer.cached(executable, &body) else { continue };
+            match preview {
+                Preview::Pending => {}
+                Preview::Failed(error) => {
+                    self.diagram_status.insert(block.start, error.message());
+                }
+                Preview::Ready(rows) => {
+                    let width = rows.iter().map(|row| text_width(row, tab)).max().unwrap_or(0);
+                    if width == 0 || width > room {
+                        self.diagram_status.insert(block.start, "Mermaid diagram does not fit");
+                        continue;
+                    }
+                    let pad = usize::from(indent + (room - width) / 2);
+                    self.diagrams.insert(block.start, DiagramLayout { rows, pad });
+                    self.laid_out.push(block.clone());
+                }
+            }
+        }
+        let bordered = app.config.transclude.border && app.embed_mode.framed();
+        for (line, entry) in self.entries.iter().enumerate() {
+            let Some(entry) = entry.as_ref().filter(|entry| !entry.embed_diagrams.is_empty()) else {
+                continue;
+            };
+            if (current && app.active.contains(line)) || self.folded.run(line).is_some() {
+                continue;
+            }
+            self.embed_openers.push(line);
+            let Some(base) = entry.embed.as_ref() else { continue };
+            if let Some(expansion) = preview::mermaid_expansion(
+                base,
+                &entry.embed_diagrams,
+                &renderer,
+                executable,
+                self.measure,
+                bordered,
+                graphics_enabled(app),
+                app.config.editor.tab_width,
+            ) {
+                self.diagram_embeds.insert(line, expansion);
+            }
+        }
+    }
+
+    /// Start work for source fences intersecting the rows about to be drawn.
+    pub fn request_mermaid(
+        &self,
+        app: &App,
+        doc: &BufferState,
+        rows: std::ops::Range<usize>,
+        mut limit: usize,
+    ) -> bool {
+        let Some(executable) = app.config.markdown.mermaid_renderer.as_deref() else { return false };
+        if !self.conceal_on || doc.blocks.revision != doc.buffer.revision || rows.is_empty() {
+            return false;
+        }
+        let first = self.row_starts.partition_point(|&row| row <= rows.start).saturating_sub(1);
+        let blocks = hidden::mermaid_blocks(&doc.blocks);
+        let start = blocks.partition_point(|block| block.end <= first);
+        let current = std::ptr::eq(doc, &app.docs[app.current()]);
+        let mut renderer = app.mermaid.borrow_mut();
+        let mut pending = false;
+        let graphics = graphics_enabled(app);
+        let mut request = |body: &str| {
+            pending |= renderer.request(executable, body) == Preview::Pending;
+            if graphics {
+                pending |= renderer.request_png(executable, body) == PicturePreview::Pending;
+            }
+        };
+        for block in &blocks[start..] {
+            if limit == 0 || self.row_starts[block.start] >= rows.end {
+                break;
+            }
+            if (current && app.active.start < block.end && app.active.end >= block.start)
+                || self.folded.count_in(block.clone()) != 0
+            {
+                continue;
+            }
+            if let Some(body) = diagram_body(doc, block) {
+                limit -= 1;
+                request(&body);
+            }
+        }
+        let start = self.embed_openers.partition_point(|&line| line < first);
+        for &line in &self.embed_openers[start..] {
+            if limit == 0 || self.row_starts[line] >= rows.end {
+                break;
+            }
+            let entry = self.entry(line).expect("indexed embed");
+            for diagram in entry.embed_diagrams.iter().take(limit) {
+                limit -= 1;
+                request(&diagram.source);
+            }
+        }
+        pending
     }
 
     /// Lay out the closed display block `b` if its layout is missing or
@@ -584,23 +736,68 @@ impl RenderCache {
     /// laid-out display block.
     fn laid_out_rows(&self, line: usize) -> Option<&[String]> {
         self.laid_out.binary_search_by_key(&line, |b| b.start).ok()?;
+        self.display_rows(line)
+    }
+
+    fn display_rows(&self, line: usize) -> Option<&[String]> {
+        if let Some(diagram) = self.diagrams.get(&line) {
+            return Some(&diagram.rows);
+        }
         layout_rows(self.entry(line))
     }
 
     /// Row `index` of the layout `line` draws, and the cells to its left
     /// within the measure.
-    pub fn math_row(&self, line: usize, index: usize) -> Option<(usize, &str)> {
+    pub fn display_row(&self, line: usize, index: usize) -> Option<(usize, &str)> {
         let row = self.laid_out_rows(line)?.get(index)?;
-        let pad = self.entry(line)?.math.as_ref()?.pad;
+        let pad = match self.diagrams.get(&line) {
+            Some(diagram) => diagram.pad,
+            None => self.entry(line)?.math.as_ref()?.pad,
+        };
         Some((pad, row.as_str()))
+    }
+
+    #[cfg(test)]
+    pub fn math_row(&self, line: usize, index: usize) -> Option<(usize, &str)> {
+        self.display_row(line, index)
+    }
+
+    pub fn diagram_status(&self, line: usize) -> Option<&'static str> {
+        self.diagram_status.get(&line).copied()
+    }
+
+    pub fn mermaid_picture(&self, line: usize) -> Option<&Picture> {
+        self.pictures.get(&line)
+    }
+
+    pub fn embed(&self, line: usize) -> Option<&Expansion> {
+        self.diagram_embeds.get(&line).or_else(|| self.entry(line)?.embed.as_ref())
+    }
+
+    fn display_len(&self, line: usize) -> Option<usize> {
+        if let Some(picture) = self.mermaid_picture(line) {
+            return Some(usize::from(picture.rows));
+        }
+        self.display_rows(line).map(<[String]>::len)
+    }
+
+    fn content_rows(&self, line: usize, entry: Option<&LineEntry>, concealed: bool) -> usize {
+        if concealed {
+            if let Some(embed) = self.embed(line) {
+                return embed.len();
+            }
+        }
+        entry.map_or(1, |entry| entry.wrap(concealed).len())
     }
 
     /// How many rows `line`'s own content takes this frame.
     fn own_rows(&self, line: usize) -> usize {
-        match self.laid_out_rows(line) {
-            Some(rows) => rows.len(),
-            None => content_rows(self.entry(line), self.is_concealed(line)),
+        if self.laid_out.binary_search_by_key(&line, |block| block.start).is_ok() {
+            if let Some(len) = self.display_len(line) {
+                return len;
+            }
         }
+        self.content_rows(line, self.entry(line), self.is_concealed(line))
     }
 
     /// Lines parsed since startup.
@@ -662,7 +859,17 @@ impl RenderCache {
         // Line spacing's rows trail the line's own, so anything past its
         // content is air. It answers with the line it follows, which is what
         // makes a click in the gap land somewhere sensible.
-        if within >= self.own_rows(line) {
+        let own = self.own_rows(line);
+        if within == own && self.diagram_status.contains_key(&line) {
+            return Some(VisualRow {
+                source: RowSource::Embedded { line, index: within },
+                start_col: 0,
+                end_col: 0,
+                hanging: 0,
+                editable: false,
+            });
+        }
+        if within >= own {
             return Some(VisualRow {
                 source: RowSource::Spacer(line),
                 start_col: 0,
@@ -673,7 +880,7 @@ impl RenderCache {
         }
         // A laid-out display block: its rows are not in the rope either, and
         // a click on one lands on the opening line, as on an embed.
-        if self.laid_out_rows(line).is_some() {
+        if self.laid_out.binary_search_by_key(&line, |block| block.start).is_ok() {
             return Some(VisualRow {
                 source: RowSource::Embedded { line, index: within },
                 start_col: 0,
@@ -683,7 +890,7 @@ impl RenderCache {
             });
         }
         if concealed {
-            if let Some(x) = &entry.embed {
+            if let Some(x) = self.embed(line) {
                 if within < x.len() {
                     return Some(VisualRow {
                         source: RowSource::Embedded { line, index: within },
@@ -741,7 +948,7 @@ impl RenderCache {
         };
         let base = self.row_starts.get(line).copied().unwrap_or(0);
         // A laid-out block has no columns: its first row stands for it.
-        if self.laid_out_rows(line).is_some() {
+        if self.laid_out.binary_search_by_key(&line, |block| block.start).is_ok() {
             return (base, 0);
         }
         let wrap = entry.wrap(self.is_concealed(line));
@@ -758,16 +965,25 @@ impl RenderCache {
     }
 }
 
-/// How many rows a line's own content occupies, in the form it is taking.
-fn content_rows(entry: Option<&LineEntry>, concealed: bool) -> usize {
-    match entry {
-        Some(e) if concealed => match &e.embed {
-            Some(x) => x.len(),
-            None => e.wrap(true).len(),
-        },
-        Some(e) => e.wrap(false).len(),
-        None => 1,
+/// Remove the opener's indentation from list fences and normalize line endings.
+fn diagram_body(doc: &BufferState, block: &std::ops::Range<usize>) -> Option<String> {
+    let rope = &doc.buffer.rope;
+    let body = rope.slice(rope.line_to_char(block.start + 1)..rope.line_to_char(block.end - 1));
+    if body.len_bytes() > MAX_SOURCE_BYTES {
+        return None;
     }
+    let indent = rope.line(block.start).chars().take_while(|ch| matches!(ch, ' ' | '\t')).count();
+    let mut source = String::with_capacity(body.len_bytes());
+    for line in body.to_string().lines() {
+        let prefix = line.bytes().take(indent).take_while(|ch| matches!(ch, b' ' | b'\t')).count();
+        source.push_str(&line[prefix..]);
+        source.push('\n');
+    }
+    Some(source)
+}
+
+fn graphics_enabled(app: &App) -> bool {
+    app.config.markdown.mermaid_graphics && app.image_protocol != crate::image::Protocol::None
 }
 
 /// The layout cached on an opening line, when the block fit.
@@ -900,18 +1116,19 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
                 .path
                 .clone()
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            crate::transclude::preview::expand(
-                &link,
-                &from,
-                &app.config.transclude,
-                measure,
-                app.embed_mode,
-                app.config.markdown.math,
-                app.config.editor.tab_width,
-                // Each embedded line is wrapped on, and drawn from, its text
-                // as the document's own rules draw it.
-                &|text, kind, inner| crate::transclude::preview::drawn(text, kind, &app.theme, cfg, inner),
-            )
+            let draw = |text: &str, kind: &BlockKind, inner| preview::drawn(text, kind, &app.theme, cfg, inner);
+            if app.config.markdown.mermaid_renderer.is_some() {
+                preview::expand_with_diagrams(
+                    &link, &from, &app.config.transclude, measure, app.embed_mode,
+                    app.config.markdown.math, app.config.editor.tab_width, &draw,
+                )
+            } else {
+                let expansion = preview::expand(
+                    &link, &from, &app.config.transclude, measure, app.embed_mode,
+                    app.config.markdown.math, app.config.editor.tab_width, &draw,
+                );
+                (expansion, Vec::new())
+            }
         })
     } else {
         None
@@ -946,6 +1163,10 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         )
     };
 
+    let (embed, embed_diagrams) = match embed {
+        Some((expansion, diagrams)) => (Some(expansion), diagrams),
+        None => (None, Vec::new()),
+    };
     LineEntry {
         wrap_raw,
         wrap_concealed,
@@ -957,6 +1178,7 @@ fn build(app: &App, doc: &BufferState, line: usize, block: BlockKind, measure: u
         hang_raw,
         hang_concealed,
         embed,
+        embed_diagrams,
         id: 0,
         math: None,
     }

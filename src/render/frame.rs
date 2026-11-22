@@ -40,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     // pictures it was covering.
     app.overlay.set(None);
     app.images.borrow_mut().clear();
+    app.image_payloads.borrow_mut().clear();
     let cfg = &app.config;
 
     // Paint the theme background across the whole surface so a theme is
@@ -85,13 +86,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     // than one measure clipped in half.
     let geo = app.layout.geometry(pane_area(app, area));
     let mut caret = None;
+    let mermaid_limit = crate::render::mermaid::MAX_CACHE_ENTRIES / geo.panes.len().max(1);
     // The focused pane last: the render cache then ends the frame with its
     // row index, which is the one the next key's motion reads, so a pane of
     // another width on the same document costs that key no re-parse.
     let (focused, others): (Vec<_>, Vec<_>) = geo.panes.iter().copied().partition(|(id, _)| *id == app.focus_pane);
     for (id, rect) in others.into_iter().chain(focused) {
         let Some(pane) = app.layout.pane(id) else { continue };
-        if let Some(pos) = render_pane(frame, app, pane, rect, id == app.focus_pane) {
+        if let Some(pos) = render_pane(frame, app, pane, rect, id == app.focus_pane, mermaid_limit) {
             caret = Some(pos);
         }
     }
@@ -262,6 +264,7 @@ fn render_pane(
     pane: &crate::render::pane::Pane,
     rect: Rect,
     focused: bool,
+    mermaid_limit: usize,
 ) -> Option<Position> {
     let cfg = &app.config;
     let bg = app.theme.background.to_ratatui();
@@ -313,6 +316,7 @@ fn render_pane(
     // every frame, which reads as the viewport jumping around on navigation
     // instead of scrolling smoothly.
     pane.scroll.set(top);
+    cache.request_mermaid(app, doc, top..top + usize::from(lay.height), mermaid_limit);
 
     let text_area = Rect {
         x: rect.x + lay.margin_left,
@@ -367,13 +371,28 @@ fn render_pane(
                 height: 1,
             };
             // A laid-out display block's rows aren't in the rope either.
-            if let Some((pad, text)) = cache.math_row(row.line(), index) {
-                render_math_row(frame, app, pad, text, r, bg);
+            if let Some((pad, text)) = cache.display_row(row.line(), index) {
+                render_display_row(frame, app, pad, text, r, bg);
+                leave(&mut current);
+                continue;
+            }
+            if let Some(status) = cache.diagram_status(row.line()) {
+                render_display_row(frame, app, 0, status, r, bg);
                 leave(&mut current);
                 continue;
             }
             let view = (text_area.y, text_area.y + lay.height);
-            render_embed_row(frame, app, &cache, row.line(), index, r, view, bg);
+            if let Some(pic) = cache.mermaid_picture(row.line()) {
+                let pad = r.width.saturating_sub(pic.cols) / 2;
+                let picture_rect = Rect { x: r.x + pad, width: r.width - pad, ..r };
+                let mut spans = picture_spans(
+                    app, pic, row.line(), 0, index, picture_rect, view, frame.area().width, "Mermaid diagram",
+                );
+                spans.insert(0, Span::raw(" ".repeat(usize::from(pad))));
+                frame.render_widget(Paragraph::new(Line::from(spans)).style(Style::default().bg(bg)), r);
+            } else {
+                render_embed_row(frame, app, &cache, row.line(), index, r, view, bg);
+            }
             leave(&mut current);
             continue;
         }
@@ -515,8 +534,6 @@ enum Edge {
 
 /// One row of a picture's box, as `picture_row` found it.
 struct BoxRow {
-    /// The expansion row holding the picture.
-    first: usize,
     cols: u16,
     edge: Edge,
     /// The caption to write in this row, when the picture is cut off where
@@ -524,33 +541,30 @@ struct BoxRow {
     label: Option<String>,
 }
 
-/// Place row `index` of an embed in its picture's box, and record the
-/// picture's placement on the box's first visible row.
-///
-/// That row is the box's own first one when it is on screen, and the text
-/// area's top row when the box starts above it: a picture scrolled half off
-/// the top is still placed, with `skip` saying how much of it is gone.
+/// Place a picture on its first visible row, accounting for rows clipped
+/// above and below the text area.
+#[allow(clippy::too_many_arguments)]
 fn picture_row(
     app: &App,
-    exp: &crate::transclude::preview::Expansion,
+    pic: &crate::transclude::preview::Picture,
     line: usize,
+    first: usize,
     index: usize,
     rect: Rect,
     view: (u16, u16),
     term_cols: u16,
-) -> Option<BoxRow> {
-    use crate::transclude::preview::Row;
-    let first = (0..=index).rev().find(|&j| matches!(exp.rows.get(j), Some(Row::Image(_))))?;
-    let Some(Row::Image(pic)) = exp.rows.get(first) else {
-        return None;
-    };
-    let rows = pic.rows as i32;
+    caption: &str,
+) -> BoxRow {
+    let rows = i32::from(pic.rows);
     let at = (index - first) as i32;
     let top = rect.y as i32 - at;
     let skip = (view.0 as i32 - top).clamp(0, rows);
     let shown = ((top + rows).min(view.1 as i32) - (top + skip)).max(0);
     let lead = at == skip;
     if lead {
+        if !pic.payload.is_empty() && app.image_protocol != crate::image::Protocol::None {
+            app.image_payloads.borrow_mut().entry(pic.id).or_insert_with(|| pic.payload.clone());
+        }
         app.images.borrow_mut().push(crate::render::Placement {
             x: rect.x,
             y: rect.y,
@@ -569,7 +583,7 @@ fn picture_row(
     // is not drawn by either, and its box stays as it is.
     let cut = skip > 0 || shown < rows;
     let crops = app.image_protocol == crate::image::Protocol::Kitty;
-    let side = rect.x + pic.cols > term_cols;
+    let side = rect.x.saturating_add(pic.cols) > term_cols;
     let outlined = cut
         && !crops
         && !side
@@ -577,10 +591,7 @@ fn picture_row(
         && !pic.payload.is_empty();
     // `Some` turns the outline on for every row of the box; the caption itself
     // goes on its first row on screen.
-    let label = outlined.then(|| match exp.rows.get(first + pic.rows as usize) {
-        Some(Row::Caption(text)) if lead => text.clone(),
-        _ => String::new(),
-    });
+    let label = outlined.then(|| if lead { caption.to_string() } else { String::new() });
     let edge = if at == 0 {
         Edge::Top
     } else if at == rows - 1 {
@@ -588,7 +599,7 @@ fn picture_row(
     } else {
         Edge::Middle
     };
-    Some(BoxRow { first, cols: pic.cols, edge, label })
+    BoxRow { cols: pic.cols, edge, label }
 }
 
 /// One row of a picture's outline, `w` cells wide, with `label` written in it
@@ -611,9 +622,48 @@ fn outline_row(w: usize, edge: Edge, label: Option<&str>) -> String {
     }
 }
 
-/// One row of a laid-out display math block (#77): the box, `pad` cells in,
-/// in the style a math line wears (`markdown::style_line_with`).
-fn render_math_row(frame: &mut Frame, app: &App, pad: usize, text: &str, rect: Rect, bg: ratatui::style::Color) {
+/// Reserve the cells in a picture row, or draw an outline where the
+/// terminal cannot paint its pixels.
+#[allow(clippy::too_many_arguments)]
+fn picture_spans(
+    app: &App,
+    pic: &crate::transclude::preview::Picture,
+    line: usize,
+    first: usize,
+    index: usize,
+    rect: Rect,
+    view: (u16, u16),
+    term_cols: u16,
+    caption: &str,
+) -> Vec<Span<'static>> {
+    let row = picture_row(app, pic, line, first, index, rect, view, term_cols, caption);
+    let pixels = app.image_protocol != crate::image::Protocol::None;
+    if pixels && row.label.is_none() {
+        vec![Span::raw(" ".repeat(row.cols as usize))]
+    } else {
+        let dim = ThemeStyle::fg(app.theme.text_dim).to_ratatui();
+        let width = row.cols.min(rect.width).max(2) as usize;
+        vec![Span::styled(outline_row(width, row.edge, row.label.as_deref()), dim)]
+    }
+}
+
+/// Keep the right-hand border of a note embed aligned by display cells.
+fn framed_embed_row(
+    mut spans: Vec<Span<'static>>,
+    width: usize,
+    used: usize,
+    dim: Style,
+) -> Vec<Span<'static>> {
+    spans.insert(0, Span::styled("\u{2502} ", dim));
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used + 4)) + " \u{2502}",
+        dim,
+    ));
+    spans
+}
+
+/// One literal row of a display layout, inset by `pad` cells.
+fn render_display_row(frame: &mut Frame, app: &App, pad: usize, text: &str, rect: Rect, bg: ratatui::style::Color) {
     let style = ThemeStyle { fg: app.theme.code, bg: app.theme.code_bg, attrs: Default::default() }.to_ratatui();
     let line = Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(text.to_string(), style)]);
     frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
@@ -640,7 +690,7 @@ fn render_embed_row(
     bg: ratatui::style::Color,
 ) {
     use crate::transclude::preview::Row;
-    let Some(exp) = cache.entry(line).and_then(|e| e.embed.as_ref()) else {
+    let Some(exp) = cache.embed(line) else {
         return;
     };
     let Some(row) = exp.rows.get(index) else {
@@ -650,21 +700,49 @@ fn render_embed_row(
     let dim = ThemeStyle::fg(theme.text_dim).to_ratatui();
     let width = rect.width as usize;
 
-    // A picture's box is drawn as an OUTLINE when the terminal cannot show
-    // pixels, and as plain spaces when it can — there, the outline would only
-    // be something for the image to cover up.
-    let pixels = app.image_protocol != crate::image::Protocol::None;
+    let framed = matches!(exp.rows.first(), Some(Row::Top(_)));
     let spans: Vec<Span> = match row {
         Row::Image(_) | Row::Reserved => {
-            let Some(cut) = picture_row(app, exp, line, index, rect, view, frame.area().width) else {
+            let Some(first) = (0..=index).rev().find(|&j| matches!(exp.rows[j], Row::Image(_))) else {
                 return;
             };
-            if pixels && cut.label.is_none() {
-                // Plain spaces: the picture is painted over them.
-                vec![Span::raw(if index == cut.first { " ".repeat(cut.cols as usize) } else { String::new() })]
+            let Row::Image(pic) = &exp.rows[first] else { return };
+            let caption = match exp.rows.get(first + usize::from(pic.rows)) {
+                Some(Row::Caption(text)) => text.as_str(),
+                Some(Row::DiagramCaption) => "Mermaid diagram",
+                _ => "",
+            };
+            let room = rect.width.saturating_sub(if framed { 4 } else { 0 });
+            let pad = if framed { room.saturating_sub(pic.cols) / 2 } else { 0 };
+            let picture_rect = Rect {
+                x: rect.x + if framed { 2 + pad } else { 0 },
+                width: room.saturating_sub(pad),
+                ..rect
+            };
+            let mut spans = picture_spans(app, pic, line, first, index, picture_rect, view, frame.area().width, caption);
+            if framed {
+                spans.insert(0, Span::raw(" ".repeat(usize::from(pad))));
+                framed_embed_row(spans, width, usize::from(pad + pic.cols), dim)
             } else {
-                let w = (cut.cols as usize).min(width).max(2);
-                vec![Span::styled(outline_row(w, cut.edge, cut.label.as_deref()), dim)]
+                spans
+            }
+        }
+        Row::Diagram(text) => {
+            let text = elide(text, width.saturating_sub(if framed { 4 } else { 0 }));
+            let style = ThemeStyle { fg: theme.code, bg: theme.code_bg, attrs: Default::default() }.to_ratatui();
+            let spans = screen_spans(&text, style);
+            if framed {
+                framed_embed_row(spans, width, display_width(&text) as usize, dim)
+            } else {
+                spans
+            }
+        }
+        Row::DiagramCaption => {
+            let caption = "Mermaid diagram";
+            if framed {
+                framed_embed_row(screen_spans(caption, dim), width, caption.len(), dim)
+            } else {
+                screen_spans(caption, dim)
             }
         }
         // A label or message can carry a file name, and a file name a separator.
@@ -2698,6 +2776,25 @@ mod tests {
         app.images.borrow().clone()
     }
 
+    #[test]
+    fn frame_keeps_picture_payload_from_an_unfocused_document() {
+        let (dir, mut app) = picture_note(1, 1, crate::image::Protocol::Kitty);
+        let other = dir.join("other.md");
+        std::fs::write(&other, "No picture here.\n").unwrap();
+        app.split_pane_for_test(true);
+        app.run_command(&format!("edit {}", other.display()));
+        app.refresh_blocks();
+        assert_ne!(app.current(), 0);
+
+        render_to(&app, 120, 30);
+        let places = placed(&app);
+        assert_eq!(places.len(), 1);
+        let payloads = app.image_payloads.borrow();
+        let expected = std::fs::read(dir.join("photo.png")).unwrap();
+        assert_eq!(payloads.get(&places[0].id).unwrap().as_ref(), expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A picture scrolled half off the TOP is placed at the text area's first
     /// row, with the rows above it counted; kitty draws that part, so its
     /// cells stay blank for it.
@@ -2738,18 +2835,15 @@ mod tests {
     /// leaves no row of the pane for it.
     #[test]
     fn a_picture_taller_than_the_screen_is_cut_at_both_ends() {
-        use crate::transclude::preview::{Expansion, Picture, Row};
-        let mut rows = vec![Row::Image(Picture { cols: 30, rows: 20, payload: vec![1], id: 9 })];
-        rows.extend((1..20).map(|_| Row::Reserved));
-        rows.push(Row::Caption("tall.png \u{b7} 300\u{d7}2000".into()));
-        let exp = Expansion { rows };
+        use crate::transclude::preview::Picture;
+        let picture = Picture { cols: 30, rows: 20, payload: [1].into(), id: 9 };
+        let caption = "tall.png \u{b7} 300\u{d7}2000";
         let mut app = app_with("x\n");
         app.image_protocol = crate::image::Protocol::Kitty;
         // Text area rows 1..9; the box's row 5 is drawn on row 1, so five of
         // its rows are above the area and seven below it.
         let rect = Rect { x: 4, y: 1, width: 60, height: 1 };
-        let row = picture_row(&app, &exp, 3, 5, rect, (1, 9), 80).unwrap();
-        assert_eq!(row.first, 0);
+        let row = picture_row(&app, &picture, 3, 0, 5, rect, (1, 9), 80, caption);
         let p = placed(&app);
         assert_eq!(
             p,
@@ -2759,12 +2853,12 @@ mod tests {
 
         // The next row of the same box records nothing more.
         app.images.borrow_mut().clear();
-        let _ = picture_row(&app, &exp, 3, 6, Rect { y: 2, ..rect }, (1, 9), 80);
+        let _ = picture_row(&app, &picture, 3, 0, 6, Rect { y: 2, ..rect }, (1, 9), 80, caption);
         assert!(placed(&app).is_empty());
 
         // Under iTerm2 the first visible row carries the caption, mid-box.
         app.image_protocol = crate::image::Protocol::Iterm2;
-        let row = picture_row(&app, &exp, 3, 5, rect, (1, 9), 80).unwrap();
+        let row = picture_row(&app, &picture, 3, 0, 5, rect, (1, 9), 80, caption);
         assert_eq!(row.label.as_deref(), Some("tall.png \u{b7} 300\u{d7}2000"));
         assert_eq!(
             outline_row(30, row.edge, row.label.as_deref()),
@@ -2772,7 +2866,7 @@ mod tests {
             "the caption, then the box's width in blanks",
         );
         // Cut off at the side as well: today's blank box, no caption.
-        let row = picture_row(&app, &exp, 3, 5, Rect { x: 60, ..rect }, (1, 9), 80).unwrap();
+        let row = picture_row(&app, &picture, 3, 0, 5, Rect { x: 60, ..rect }, (1, 9), 80, caption);
         assert!(row.label.is_none());
     }
 

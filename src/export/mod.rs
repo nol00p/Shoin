@@ -6,6 +6,8 @@
 //! put it on the web, or hand it to someone who wants a printed page.
 
 pub mod html;
+mod mermaid;
+mod pdf_assets;
 pub mod plain;
 
 use std::path::{Path, PathBuf};
@@ -78,16 +80,14 @@ pub fn default_path(source: &Path, format: Format) -> PathBuf {
 /// `page` only reaches HTML, which is the one format with a look of its own to
 /// get right; the others are text and are the same on every machine.
 ///
-/// The `Some` it returns is a note to add to the report that the file was
-/// written: the HTML page kept its math as TeX (no `pandoc`, see
-/// [`html::render_math`]). The export itself still succeeded.
+/// A returned note describes content the export kept as source.
 pub fn write(
     source: &Path,
     dest: &Path,
     format: Format,
     cfg: &TranscludeConfig,
     page: &html::Page,
-) -> Result<Option<&'static str>> {
+) -> Result<Option<String>> {
     // Every file the compile read is part of what is being exported, so
     // writing onto any of them would destroy the document: the source, an
     // embedded note, an embedded picture. `sources` starts with the source.
@@ -126,13 +126,13 @@ pub fn write(
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "document".into());
-            let (html, note) = html::render_math(&flat, &title, page);
+            let (html, note) = html::render_with_mermaid(&flat, &title, page);
             std::fs::write(dest, html).with_context(|| short(dest))?;
             return Ok(note);
         }
         Format::Pdf => {
             let flat = rebase_images(&flat, source, None, &page.md);
-            write_pdf(&flat, source, dest, page.md.math)?
+            return write_pdf(&flat, source, dest, &page.md);
         }
     }
     Ok(None)
@@ -500,10 +500,7 @@ fn short(p: &Path) -> String {
 /// DELIBERATELY not built in. A PDF writer means a layout engine and embedded
 /// fonts inside a terminal text editor, for output worse than what the tools
 /// people already have produce. Shoin passes the Markdown to `pandoc`.
-fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<()> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
+fn write_pdf(markdown: &str, source: &Path, dest: &Path, md: &MarkdownConfig) -> Result<Option<String>> {
     let Some(tool) = which("pandoc") else {
         // Short on purpose: this is read on a one-row status line, and a
         // message that does not fit loses its ending — which is the half that
@@ -518,10 +515,26 @@ fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<(
         bail!("{NO_ENGINE}");
     };
 
+    write_pdf_with(markdown, source, dest, md, &tool, engine)
+}
+
+fn write_pdf_with(
+    markdown: &str,
+    source: &Path,
+    dest: &Path,
+    md: &MarkdownConfig,
+    tool: &Path,
+    engine: &str,
+) -> Result<Option<String>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // Hold the generated PNGs through the converter and its page engine.
+    let prepared = pdf_assets::prepare(markdown, md);
     let mut child = Command::new(tool)
         // pandoc reads `$…$` as math by default; with `math = false` followed
         // into export, it is the text the editor shows.
-        .arg(if math { "--from=markdown" } else { "--from=markdown-tex_math_dollars" })
+        .arg(if md.math { "--from=markdown" } else { "--from=markdown-tex_math_dollars" })
         .arg(format!("--pdf-engine={engine}"))
         .args(engine_args(engine))
         // pandoc runs here, not in the document's folder. Pictures arrive
@@ -536,14 +549,16 @@ fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<(
         .spawn()
         .context("running pandoc")?;
 
-    child
-        .stdin
-        .as_mut()
-        .context("pandoc took no input")?
-        .write_all(markdown.as_bytes())
-        .context("sending the document to pandoc")?;
-
-    let out = child.wait_with_output().context("waiting for pandoc")?;
+    let (out, wrote) = std::thread::scope(|scope| {
+        let mut stdin = child.stdin.take().expect("piped pandoc stdin");
+        let markdown = prepared.markdown.as_bytes();
+        // Drain stderr while writing stdin so a full diagnostic pipe cannot
+        // delay exit and keep the generated assets alive indefinitely.
+        let writer = scope.spawn(move || stdin.write_all(markdown));
+        let out = child.wait_with_output();
+        (out, writer.join())
+    });
+    let out = out.context("waiting for pandoc")?;
     if !out.status.success() {
         // pandoc's own diagnostics are far better than anything we could infer
         // — a missing LaTeX engine, say — so they are passed through.
@@ -551,7 +566,9 @@ fn write_pdf(markdown: &str, source: &Path, dest: &Path, math: bool) -> Result<(
         let why = why.lines().next().unwrap_or("pandoc failed").trim();
         bail!("pandoc: {why}");
     }
-    Ok(())
+    wrote.map_err(|_| anyhow::anyhow!("pandoc input writer failed"))?
+        .context("sending the document to pandoc")?;
+    Ok(prepared.note)
 }
 
 /// The HTML page's formulas as MathML, through `pandoc` (an
@@ -1202,6 +1219,78 @@ mod tests {
         0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60,
         0x82,
     ];
+
+    #[cfg(unix)]
+    #[test]
+    fn pdf_mermaid_pngs_live_through_pandoc_and_are_cleaned_after_failure() {
+        const TEST_PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+            0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0x0f, 0x04, 0x00,
+            0x09, 0xfb, 0x03, 0xfd, 0xfb, 0x5e, 0x6b, 0x2b, 0x00, 0x00, 0x00, 0x00,
+            0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let d = vault("pdf-mermaid");
+        std::fs::write(d.join("diagram.png"), TEST_PNG).unwrap();
+        let renderer = script(
+            &d,
+            "renderer",
+            "#!/bin/sh\n[ -n \"$SHOIN_PROBE\" ] && exit 0\ncase $(cat) in *broken*) exit 1;; esac\ncat \"$(dirname \"$0\")/diagram.png\"\n",
+            true,
+        );
+        let pandoc = script(
+            &d,
+            "pandoc",
+            r#"#!/bin/sh
+[ -n "$SHOIN_PROBE" ] && exit 0
+while [ "$#" -gt 1 ] && [ "$1" != --output ]; do shift; done
+dest=$2
+cat > "$dest.md"
+sed -n 's/.*](<\(.*\.png\)>).*/\1/p' "$dest.md" > "$dest.paths"
+while IFS= read -r p; do
+    cmp "$p" "$(dirname "$0")/diagram.png" || exit 9
+    [ "$(ls -ld "$p" | cut -c 5-10)" = '------' ] || exit 9
+done < "$dest.paths"
+case "$dest" in *fail.pdf) echo 'fake engine failed' >&2; exit 8;; esac
+printf '%%PDF-fake\n' > "$dest"
+"#,
+            true,
+        );
+        let md = MarkdownConfig {
+            mermaid_renderer: Some(renderer.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        let markdown = concat!(
+            "Before\n```mermaid\nflowchart LR\nA --> B\n```\nBetween\n\n",
+            "```mermaid\nflowchart LR\nA --> B\n```\n\n~~~mermaid\nbroken\n~~~\n",
+        );
+        for filename in ["out.pdf", "fail.pdf"] {
+            let dest = d.join(filename);
+            let result = write_pdf_with(markdown, &d.join("source.md"), &dest, &md, &pandoc, "typst");
+            if filename == "out.pdf" {
+                let message = result.unwrap().unwrap();
+                assert!(message.contains("rendering failed"), "{message}");
+                assert!(dest.is_file());
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert_eq!(error, "pandoc: fake engine failed");
+            }
+            let input = std::fs::read_to_string(d.join(format!("{filename}.md"))).unwrap();
+            assert!(input.starts_with("Before\n\n![Mermaid"), "{input}");
+            assert!(input.contains(">)\n\nBetween"), "{input}");
+            assert!(!input.contains("A --> B"));
+            assert!(input.contains("~~~mermaid\nbroken\n~~~"));
+            let paths = std::fs::read_to_string(d.join(format!("{filename}.paths"))).unwrap();
+            let paths: Vec<_> = paths.lines().collect();
+            assert_eq!(paths.len(), 2);
+            assert_eq!(paths[0], paths[1], "duplicate diagrams share their PNG");
+            let path = Path::new(paths[0]);
+            assert!(!path.exists() && !path.parent().unwrap().exists());
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
 
     /// `notes/a.md` with a picture in `notes/img/`, and `notes/my pic (1).png`.
     fn document_with_pictures(d: &Path) -> PathBuf {

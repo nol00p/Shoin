@@ -7836,6 +7836,44 @@ fn screen_of(app: &mut App, w: u16, h: u16) -> Vec<String> {
     (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect()
 }
 
+#[cfg(unix)]
+#[test]
+fn mermaid_preview_replaces_the_fence_and_reveals_current_source() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let executable = std::env::temp_dir().join(format!("shoin-mermaid-preview-{}", std::process::id()));
+    std::fs::write(&executable, "#!/bin/sh\nprintf 'diagram row\\n'\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = crate::config::Config::default();
+    config.layout.conceal = true;
+    config.markdown.mermaid_renderer = Some(executable.to_string_lossy().into_owned());
+    let mut app = crate::test_support::app_with_config(
+        "intro\n\n```mermaid\nflowchart TD\n```\n\nafter\n",
+        config,
+    );
+
+    screen_of(&mut app, 60, 20);
+    assert!(app.cache.borrow().hidden().run(3).is_none());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !app.poll_mermaid() {
+        assert!(Instant::now() < deadline, "renderer did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let screen = screen_of(&mut app, 60, 20).join("\n");
+    assert!(screen.contains("diagram row"));
+    assert!(!screen.contains("flowchart TD"));
+    assert_eq!(app.cache.borrow().hidden().shown(4), 2);
+
+    feed(&mut app, "3j");
+    let screen = screen_of(&mut app, 60, 20).join("\n");
+    assert!(screen.contains("flowchart TD"));
+    assert!(!screen.contains("diagram row"));
+    assert!(app.cache.borrow().hidden().run(3).is_none());
+    std::fs::remove_file(app.config.markdown.mermaid_renderer.as_deref().unwrap()).unwrap();
+}
+
 /// The rows the layout of the block opened at `line` draws this frame.
 fn math_rows(app: &App, line: usize) -> Vec<(usize, String)> {
     let cache = app.cache.borrow();

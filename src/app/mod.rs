@@ -362,10 +362,15 @@ pub struct App {
     /// Which terminal graphics protocol this session can use, read once at
     /// startup — the environment does not change under a running editor.
     pub image_protocol: crate::image::Protocol,
+    pub(crate) mermaid: RefCell<crate::render::mermaid::MermaidRenderer>,
+    pub(crate) mermaid_revision: u64,
     /// Where the last frame put its pictures. Filled while the frame is built
     /// (hence the cell: rendering only has `&App`) and drained by the painter
     /// straight after.
     pub images: std::cell::RefCell<Vec<crate::render::Placement>>,
+    /// Shared picture bytes registered by the same frame as its placements.
+    /// The line cache may be rebuilt for another pane before painting.
+    pub(crate) image_payloads: RefCell<std::collections::HashMap<u32, std::sync::Arc<[u8]>>>,
     /// What the painter last actually sent, and the terminal size it sent it
     /// at. A picture already on screen in the right place must not be sent
     /// again — that is the difference between typing and typing through
@@ -1064,6 +1069,9 @@ impl App {
             keymap,
             image_protocol: crate::image::detect(),
             images: std::cell::RefCell::new(Vec::new()),
+            image_payloads: RefCell::default(),
+            mermaid: RefCell::default(),
+            mermaid_revision: 0,
             painted: std::cell::RefCell::new((Vec::new(), (0, 0))),
             overlay: std::cell::Cell::new(None),
             tree_window_prefix: false,
@@ -1116,6 +1124,7 @@ impl App {
             // Between frames: a background copy that fell back to OSC 52
             // writes its escape here, never in the middle of a draw.
             self.clipboard.poll();
+            self.poll_mermaid();
             self.refresh_blocks();
             // A reload from disk moves the folds of the panes on that file.
             self.sync_folds();
@@ -1154,6 +1163,15 @@ impl App {
             set_cursor_color(None);
         }
         Ok(crate::recover::Ended::Quit)
+    }
+
+    pub(crate) fn poll_mermaid(&mut self) -> bool {
+        if !self.mermaid.get_mut().poll() {
+            return false;
+        }
+        self.mermaid_revision = self.mermaid_revision.wrapping_add(1);
+        self.needs_redraw = true;
+        true
     }
 
     /// Keep the block cache in step with the buffer.
@@ -1249,6 +1267,7 @@ impl App {
                 // active set widened over the blocks they now hold, before
                 // the next frame rather than at the next key.
                 self.refresh_blocks();
+                self.active = self.active_set(self.anchor);
                 self.clipboard.set_background(self.config.editor.clipboard_background);
                 // A reload re-reads the file, which knows nothing about `--zen`
                 // or a `:zen` toggle — put those back on top of it.
