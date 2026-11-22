@@ -252,6 +252,10 @@ pub struct App {
     /// A read-only motion moved the view this input, already within the
     /// text: `sync_after_input` has nothing left to clamp.
     reading_clamped: bool,
+    /// A substitute repeated after `$` left the cursor on its line's end
+    /// with `$`'s goal on purpose (Neovim's `endcolumn`), so the edit does
+    /// not set the goal afresh in [`App::settle_goal`].
+    goal_kept: bool,
     /// How much of an `![[…]]` line expands in place. Starts at
     /// `transclude.embed`; `:embed [mode]` changes it.
     pub embed_mode: crate::transclude::Mode,
@@ -948,6 +952,7 @@ impl App {
             edit_offered: false,
             reading: HashMap::new(),
             reading_clamped: false,
+            goal_kept: false,
             embed_mode: crate::transclude::Mode::parse(&config.transclude.embed)
                 .unwrap_or_default(),
             last_embed_mode: crate::transclude::Mode::Short,
@@ -1945,6 +1950,9 @@ impl App {
             self.buffer.history.begin_group(anchor);
         }
 
+        // Only the key that kept it may: a `:&&` typed on the command line
+        // does not settle, and must not leave the next key's goal alone.
+        self.goal_kept = false;
         let goal = self.goal_before(&mode);
         match mode {
             Mode::Normal => self.on_key_normal(key),
@@ -2022,7 +2030,8 @@ impl App {
             self.visual_onto_line_break();
         }
         let cur = self.buffer.cursor;
-        if cur.goal_col != Cursor::LINE_END || before.cursor.goal_col != Cursor::LINE_END {
+        let kept = std::mem::take(&mut self.goal_kept);
+        if kept || cur.goal_col != Cursor::LINE_END || before.cursor.goal_col != Cursor::LINE_END {
             return;
         }
         let edited = self.buffer.revision != before.revision;

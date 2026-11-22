@@ -9576,6 +9576,26 @@ fn writing_through_own_file_aliases_is_a_save() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// An emptied buffer saved through a hard link to its own file writes it in
+/// place as zero bytes, as `:w` on the file itself does.
+#[cfg(unix)]
+#[test]
+fn emptied_buffer_saved_through_a_hard_link_is_zero_bytes() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = two_files();
+    let one = dir.join("one.md");
+    let alias = dir.join("alias.md");
+    std::fs::hard_link(&one, &alias).unwrap();
+    let mut app = app_with("");
+    assert!(app.open_file(one.clone()));
+    feed(&mut app, "dd");
+    app.run_command(&format!("w {}", alias.display()));
+    assert!(!app.buffer.modified, "{}", flash_text(&app));
+    assert_eq!(std::fs::read(&one).unwrap(), b"");
+    assert_eq!(std::fs::metadata(&one).unwrap().ino(), std::fs::metadata(&alias).unwrap().ino());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn saveas_refuses_a_hard_link_to_another_open_file() {
@@ -10165,6 +10185,64 @@ fn repeating_a_counted_replace_with_tab_as_neovim() {
     misses.extend(nv_misses(noet, "abcde\nx\n", &[
         ("2r\tj0.", "\t\tcde\n\t\t\n", (1, 1), Some((1, 1)), None),
         ("2r\tj03.", "\t\tcde\n\t\t\t\n", (1, 2), Some((1, 2)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `n`, `N`, `*` and `#` set the goal where they land, and a failed `n`
+/// where the cursor is. `:s` with a pattern goes to the first non-blank,
+/// while a repeat (`&`, `:&&`, `:s`) after `$` goes to the end of the line
+/// and keeps `$`'s goal; a failed one keeps it too. `:s///c` leaves the goal
+/// as it was unless `a` is pressed. All as Neovim's `normal_search` and
+/// `do_sub`.
+#[test]
+fn search_and_substitute_set_the_goal_as_neovim() {
+    let mut misses = Vec::new();
+    misses.extend(nv_misses(Config::default, "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", &[
+        ("/foo\rgg$n", "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", (1, 0), Some((2, 0)), None),
+        ("/foo\rG$N", "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", (2, 3), Some((3, 3)), None),
+        ("/foo\rggv$n", "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", (1, 0), Some((2, 0)), None),
+        ("/foo\rggv$nd", "oo xxxxx\nab foo\nlonger line here\n", (0, 0), Some((1, 0)), Some(("zzzzzzz\nf", false))),
+    ]));
+    misses.extend(nv_misses(Config::default, "x foo\nfoo bar\nab foo\nlonger line here\n", &[
+        ("$*", "x foo\nfoo bar\nab foo\nlonger line here\n", (1, 0), Some((2, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "here\nab here\nlonger line here\n", &[
+        ("G$#", "here\nab here\nlonger line here\n", (1, 3), Some((2, 3)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "foo zzzzzzzzz\nyy\nabcdefghijklmnopq\n", &[
+        ("/qqq\rgg$nj", "foo zzzzzzzzz\nyy\nabcdefghijklmnopq\n", (1, 1), Some((2, 12)), None),
+        ("/foo\rgg$nj", "foo zzzzzzzzz\nyy\nabcdefghijklmnopq\n", (1, 0), Some((2, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", &[
+        (":s/foo/b/\rj$&", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 7), Some((2, 1)), None),
+        (":s/foo/b/\r$&", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 5), Some((1, 9)), None),
+        (":s/foo/b/\rj$g&", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 0)), None),
+        ("$:s/foo/b/\r", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 0)), None),
+        ("$:s/qq/b/\r", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 7), Some((1, 9)), None),
+        ("$:%s/foo/b/c\ryy", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\ryn", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\rnq", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\rq", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 9)), None),
+        ("$:%s/foo/b/c\rl", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 9)), None),
+        ("$:%s/foo/b/c\ra", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 0)), None),
+        ("$:%s/foo/b/c\rnl", "foo zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\rny", "foo zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("lll:%s/foo/b/c\ryy", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("lll:%s/foo/b/c\ryyj", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 3)), None),
+        ("lll:%s/foo/b/c\rqj", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 3), Some((2, 1)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "zfoo zzzz\nzfoo zzzzzz\nab\nxyzxyzxyzxyz\n", &[
+        (":s/foo/b/\rj$:&\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        (":s/foo/b/\rj$:s\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        (":s/foo/b/\rj$:&&\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        (":s/foo/b/\rj$:%&&\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        ("$:s/foo/b/c\ry", "zb zzzz\nzfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 10)), None),
+        (":s/foo/b/\rjlll&j", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (2, 0), Some((3, 0)), None),
+        (":s/foo/b/\rj$:s/zb/q/\r", "zb zzzz\nzfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 10), Some((2, 1)), None),
+        (":s/foo/b/\rj$:&&\rxj", "zb zzzz\nzb zzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 7)), Some(("z", false))),
+        (":s/foo/b/\rj$&xj", "zb zzzz\nzb zzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 7)), Some(("z", false))),
+        (":s/foo/b/\rj$:&&\rrXj", "zb zzzz\nzb zzzzzX\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 8)), None),
     ]));
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }

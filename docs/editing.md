@@ -399,7 +399,9 @@ middle or the bottom of the pane. The cursor stays where it is.
   of each line they land on, long or short, as in Vim, and so does a
   selection started there. A move along the line, an edit, a yank or
   leaving Visual mode ends that. Scrolling with `Ctrl-e`, `Ctrl-y` or the
-  wheel keeps it.
+  wheel keeps it. So do `&`, `:&&` and a bare `:s`, which then end on the
+  last character of the line they changed; `:s` with the `c` flag keeps
+  the column `j` was keeping unless you answer `a`.
 - In Visual mode `$`, `l` past the last character, and `j` or `k` onto a
   line shorter than the column they keep, put the cursor on the line break,
   as in Vim, so `v$d` deletes the line's end and its line break, joining the

@@ -31,6 +31,12 @@ pub(super) struct Confirmation {
     matches: Vec<Edit>,
     change: Changes,
     next: usize,
+    /// The cursor the command started from, whose goal is left as it was
+    /// unless `a` is pressed, as Neovim's.
+    start: Cursor,
+    /// The command reused the previous pattern after `$`: see
+    /// [`App::land_after_substitute`].
+    end_column: bool,
 }
 
 #[derive(Default)]
@@ -104,6 +110,7 @@ impl App {
         let previous = self.substitute.as_ref();
         let args = args.trim_start();
         let separator = args.chars().next().filter(|ch| ch.is_ascii_punctuation() && !matches!(ch, '\\' | '"' | '|'));
+        let mut reused = false;
         let (pattern, replacement, flags) = if let Some(separator) = separator.filter(|_| !repeat) {
             let (pattern, rest) = search::pattern_field(&args[1..], separator, false);
             let (replacement, flags) = rest.map_or_else(|| (String::new(), None), |rest| search::field(rest, separator, false));
@@ -114,6 +121,7 @@ impl App {
             };
             (pattern, expand_tilde(&replacement, self.previous_replacement().unwrap_or("")), flags.unwrap_or(""))
         } else {
+            reused = true;
             let previous = previous.ok_or("no previous substitute")?;
             (previous.pattern.clone(), previous.replacement.clone(), args)
         };
@@ -124,6 +132,9 @@ impl App {
         if !flags.count && self.refuse_read_only() {
             return Ok(());
         }
+        // Vim's `endcolumn`: only a command that reuses the pattern (`&`,
+        // `:&&`, a bare `:s`) keeps `$`'s line end.
+        let end_column = reused && self.buffer.cursor.goal_col == Cursor::LINE_END;
         let compiled = Pattern::compile(&pattern, flags.ignore_case, self.previous_replacement())?;
         let Some((first, last)) = self.range_span(range, count) else { return Ok(()) };
         let searched = if flags.ignore_case {
@@ -213,18 +224,19 @@ impl App {
         } else if !self.buffer.is_editable(&(edits[0].range.start..edits[edits.len() - 1].range.end)) {
             return Err("substitution crosses read-only text".into());
         } else if flags.confirm {
+            let start = self.buffer.cursor;
             self.confirmation = Some(Confirmation {
                 doc: self.dot_mark(), replacement, matches: edits,
-                change: Changes::default(), next: 0,
+                change: Changes::default(), next: 0, start, end_column,
             });
             self.mode = Mode::SubstituteConfirm;
-            let start = self.buffer.cursor;
-            self.buffer.history.begin_group(Some(start));
+            self.buffer.history.begin_group(Some(Cursor::new(start.line, start.col)));
             self.show_substitute_confirmation();
         } else {
             let mut change = Changes::default();
             self.buffer.history.begin_group(None);
             self.apply_substitutions(&edits, &mut change);
+            self.land_after_substitute(end_column);
             self.finish_substitutions(change);
         }
         Ok(())
@@ -290,8 +302,16 @@ impl App {
         };
         if done || pending.next == pending.matches.len() {
             self.mode = Mode::Normal;
-            if matches!(cmd, KeyCode::Char('y' | 'l')) {
-                self.buffer.cursor = Cursor::new(self.buffer.cursor.line, 0);
+            if cmd == KeyCode::Char('a') {
+                self.land_after_substitute(pending.end_column);
+            } else {
+                if matches!(cmd, KeyCode::Char('y' | 'l')) {
+                    self.buffer.cursor = Cursor::new(self.buffer.cursor.line, 0);
+                }
+                // While asking, Neovim moves the cursor without setting the
+                // goal: the one the command started with still holds.
+                self.buffer.cursor.goal_col = pending.start.goal_col;
+                self.buffer.cursor.goal_cells = pending.start.goal_cells;
             }
             self.finish_substitutions(pending.change);
         } else {
@@ -336,6 +356,19 @@ impl App {
             self.buffer.insert_str(at, &text);
         }
         self.buffer.cursor = self.first_non_blank_on(destination.min(self.buffer.last_line()));
+    }
+
+    /// Where a substitute that did not ask leaves the cursor: on the first
+    /// non-blank of the last line it changed (`apply_substitutions`), or,
+    /// for a repeat after `$` (`end_column`), on that line's last character
+    /// with `$`'s goal kept, as Neovim's `do_sub`.
+    fn land_after_substitute(&mut self, end_column: bool) {
+        if end_column {
+            let line = self.buffer.cursor.line;
+            let col = self.buffer.line_len(line).saturating_sub(1);
+            self.buffer.cursor = Cursor { goal_col: Cursor::LINE_END, goal_cells: Some(Cursor::LINE_END), ..Cursor::new(line, col) };
+            self.goal_kept = true;
+        }
     }
 
     fn finish_substitutions(&mut self, mut change: Changes) {

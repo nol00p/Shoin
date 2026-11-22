@@ -444,7 +444,14 @@ impl App {
                 self.forget_reading();
                 self.notify(message, FlashKind::Info);
             }
-            None => self.notify(format!("pattern not found: {pattern}"), FlashKind::Error),
+            None => {
+                let message = format!("pattern not found: {pattern}");
+                // The goal is set where the cursor is even so, as Neovim's
+                // `normal_search`: `$` then a failed `n` forgets the line end.
+                let col = self.buffer.cursor.col;
+                self.buffer.cursor.set_col(col);
+                self.notify(message, FlashKind::Error);
+            }
         }
     }
 
