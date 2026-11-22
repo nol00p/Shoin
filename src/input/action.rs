@@ -84,6 +84,8 @@ pub enum Action {
     SearchNext { reverse: bool },
     /// `*`.
     SearchWordUnderCursor,
+    SearchWordBackward,
+    RepeatSubstitute { all: bool },
     /// `Ctrl-e` / `Ctrl-y` — scroll the page a row, leaving the cursor where
     /// it is unless it would go off screen.
     ScrollView { down: bool },

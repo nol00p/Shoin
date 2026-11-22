@@ -291,15 +291,8 @@ impl App {
     /// is already open. Nothing is displaced, so unlike before there is no
     /// reason to refuse when the current buffer has unsaved changes.
     pub(super) fn open_file(&mut self, path: PathBuf) -> bool {
-        // One file, one buffer, however it was spelled: the clean path catches
-        // `n.md` against `./n.md`, `same_file` a symlink against its target.
         let path = self.absolute(&path);
-        let real = std::fs::canonicalize(&path).ok();
-        let open = self.docs.iter().position(|d| {
-            d.buffer.path.as_deref().is_some_and(|p| {
-                p == path || real.is_some() && std::fs::canonicalize(p).ok() == real
-            })
-        });
+        let open = self.docs.iter().position(|d| d.buffer.writes_own_file(&path));
         if let Some(i) = open {
             self.switch_to(i);
             return true;

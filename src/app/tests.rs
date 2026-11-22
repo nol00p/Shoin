@@ -4815,18 +4815,18 @@ fn search_wraps_to_a_match_at_the_cursor() {
     assert_eq!(app.buffer.cursor, Cursor::new(1, 4), "wrapped past the end");
 }
 
-/// `?` finds the last match that STARTS strictly before the cursor, even
-/// one that runs over it, and wraps to the last match of the document.
+/// `?` visits non-overlapping matches from the start of each line, then
+/// wraps to the last match of the document.
 #[test]
 fn search_backward_is_strictly_before_the_cursor() {
     let mut app = app_with("aaaa\n");
     app.buffer.cursor = Cursor::new(0, 2);
     search_for(&mut app, '?', "aa");
-    assert_eq!(app.buffer.cursor, Cursor::new(0, 1), "overlaps the cursor");
-    feed(&mut app, "n");
     assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
     feed(&mut app, "n");
     assert_eq!(app.buffer.cursor, Cursor::new(0, 2), "wrapped to the last match");
+    feed(&mut app, "n");
+    assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
 
     let mut app = app_with("foo\nbar foo\nbaz\n");
     app.buffer.cursor = Cursor::new(1, 4);
@@ -4851,52 +4851,6 @@ fn search_counts_multibyte_characters() {
     assert_eq!(app.buffer.cursor, Cursor::new(1, 5));
     search_for(&mut app, '?', "日本");
     assert_eq!(app.buffer.cursor, Cursor::new(0, 2));
-}
-
-/// The rope search against the obvious one over a `Vec<char>`, on random
-/// text built from few letters (so matches overlap and repeat), multi-byte
-/// characters and line breaks, at every start position.
-#[test]
-fn rope_search_matches_the_naive_search() {
-    fn naive_find(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
-        if needle.is_empty() || needle.len() > hay.len() {
-            return None;
-        }
-        (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
-    }
-    fn naive_rfind(hay: &[char], needle: &[char], before: usize) -> Option<usize> {
-        if needle.is_empty() || needle.len() > hay.len() {
-            return None;
-        }
-        let max = before.min(hay.len() - needle.len());
-        (0..=max).rev().find(|&i| hay[i..i + needle.len()] == needle[..])
-    }
-    let alphabet = ['a', 'b', 'é', '日', '\n', '\r', '\u{2028}'];
-    let mut seed = 0x2545_f491_4f6c_dd1du64;
-    let mut next = |n: usize| {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed % n as u64) as usize
-    };
-    for _ in 0..400 {
-        let hay: String = (0..next(30)).map(|_| alphabet[next(alphabet.len())]).collect();
-        let needle: String = (0..next(4)).map(|_| alphabet[next(alphabet.len())]).collect();
-        let rope = ropey::Rope::from_str(&hay);
-        let (h, n): (Vec<char>, Vec<char>) = (hay.chars().collect(), needle.chars().collect());
-        for at in 0..=h.len() + 1 {
-            assert_eq!(
-                rope_find(&rope, &needle, at),
-                naive_find(&h, &n, at),
-                "find {needle:?} in {hay:?} from {at}"
-            );
-            assert_eq!(
-                rope_rfind(&rope, &needle, at),
-                naive_rfind(&h, &n, at),
-                "rfind {needle:?} in {hay:?} before {at}"
-            );
-        }
-    }
 }
 
 #[test]
@@ -8667,7 +8621,7 @@ fn read_only_cursor_on_a_wrapped_row_is_a_source_column() {
     feed(&mut app, "yiw");
     assert_eq!(app.registers.get(&'"').map(|r| r.text.clone()), Some(word.clone()));
     feed(&mut app, "*");
-    assert_eq!(app.search.as_ref().map(|s| s.pattern.clone()), Some(word.clone()));
+    assert_eq!(app.search.as_ref().map(|s| s.pattern.clone()), Some(format!(r"\<{word}\>")));
 
     let mut app = app_with(&text);
     let (word, col) = onto_row(&mut app);
@@ -8750,7 +8704,7 @@ fn read_only_motions_reuse_the_focused_row_index() {
 /// first row on top.
 #[test]
 fn read_only_explicit_jumps_to_the_parked_cursor_show_the_line() {
-    let keys: [&dyn Fn(&mut App); 2] = [&|app| feed(app, "3G"), &|app| cmd(app, "/$$ \\begin")];
+    let keys: [&dyn Fn(&mut App); 2] = [&|app| feed(app, "3G"), &|app| cmd(app, r"/\V$$ \\begin")];
     for (i, jump) in keys.iter().enumerate() {
         let mut app = app_with(&tall_math(12).replace("$$\n\\begin", "$$ \\begin"));
         reader(&mut app);
@@ -9592,6 +9546,90 @@ fn app_line(text: &str, l: usize) -> &str {
     text.lines().nth(l).unwrap()
 }
 
+#[cfg(unix)]
+#[test]
+fn writing_through_own_file_aliases_is_a_save() {
+    let mut app = app_with("one\n");
+    let dir = two_files();
+    let notes = dir.join("notes.md");
+    app.run_command(&format!("w {}", notes.display()));
+    let alias = dir.join("alias.md");
+    let sym = dir.join("sym.md");
+    std::fs::hard_link(&notes, &alias).unwrap();
+    std::os::unix::fs::symlink("notes.md", &sym).unwrap();
+
+    for (command, destination, text) in [
+        ("w", &alias, "two"),
+        ("w", &sym, "three"),
+        ("saveas", &alias, "four"),
+        ("saveas", &sym, "five"),
+    ] {
+        feed(&mut app, &format!("cc{text}"));
+        esc(&mut app);
+        app.run_command(&format!("{command} {}", destination.display()));
+        assert!(!app.buffer.modified, "{}", flash_text(&app));
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), format!("{text}\n"));
+        app.run_command("w");
+        assert!(flash_text(&app).contains("written"), "{}", flash_text(&app));
+    }
+    assert!(sym.is_symlink());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An emptied buffer saved through a hard link to its own file writes it in
+/// place as zero bytes, as `:w` on the file itself does.
+#[cfg(unix)]
+#[test]
+fn emptied_buffer_saved_through_a_hard_link_is_zero_bytes() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = two_files();
+    let one = dir.join("one.md");
+    let alias = dir.join("alias.md");
+    std::fs::hard_link(&one, &alias).unwrap();
+    let mut app = app_with("");
+    assert!(app.open_file(one.clone()));
+    feed(&mut app, "dd");
+    app.run_command(&format!("w {}", alias.display()));
+    assert!(!app.buffer.modified, "{}", flash_text(&app));
+    assert_eq!(std::fs::read(&one).unwrap(), b"");
+    assert_eq!(std::fs::metadata(&one).unwrap().ino(), std::fs::metadata(&alias).unwrap().ino());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn saveas_refuses_a_hard_link_to_another_open_file() {
+    let dir = two_files();
+    let a = dir.join("one.md");
+    let b = dir.join("two.md");
+    let alias = dir.join("alias.md");
+    std::fs::hard_link(&b, &alias).unwrap();
+    let mut app = app_with("");
+    assert!(app.open_file(b.clone()));
+    assert!(app.open_file(a.clone()));
+    let before = std::fs::read(&b).unwrap();
+    app.run_command(&format!("saveas! {}", alias.display()));
+    assert_eq!(app.buffer.path.as_deref(), Some(a.as_path()));
+    assert!(flash_text(&app).contains("another buffer"));
+    assert_eq!(std::fs::read(&b).unwrap(), before);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn vim_regex_search_and_substitution() {
+    let mut app = app_with("head\nfooXmd foo.md\n  foo-md\n");
+    feed(&mut app, "/foo.md");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.buffer.cursor.line, 1);
+    assert_eq!(app.buffer.cursor.col, 0);
+    app.run_command("%s/foo.md/new/g");
+    assert_eq!(app.buffer.rope.to_string(), "head\nnew new\n  new\n");
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (2, 2));
+    assert_eq!(flash_text(&app), "3 substitutions on 2 lines");
+    feed(&mut app, "u");
+    assert_eq!(app.buffer.rope.to_string(), "head\nfooXmd foo.md\n  foo-md\n");
+}
+
 // ------------------------------------------------- Neovim normal-mode parity
 //
 // Every expected value below is Neovim's (`nvim --clean --headless`, with
@@ -10147,6 +10185,64 @@ fn repeating_a_counted_replace_with_tab_as_neovim() {
     misses.extend(nv_misses(noet, "abcde\nx\n", &[
         ("2r\tj0.", "\t\tcde\n\t\t\n", (1, 1), Some((1, 1)), None),
         ("2r\tj03.", "\t\tcde\n\t\t\t\n", (1, 2), Some((1, 2)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `n`, `N`, `*` and `#` set the goal where they land, and a failed `n`
+/// where the cursor is. `:s` with a pattern goes to the first non-blank,
+/// while a repeat (`&`, `:&&`, `:s`) after `$` goes to the end of the line
+/// and keeps `$`'s goal; a failed one keeps it too. `:s///c` leaves the goal
+/// as it was unless `a` is pressed. All as Neovim's `normal_search` and
+/// `do_sub`.
+#[test]
+fn search_and_substitute_set_the_goal_as_neovim() {
+    let mut misses = Vec::new();
+    misses.extend(nv_misses(Config::default, "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", &[
+        ("/foo\rgg$n", "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", (1, 0), Some((2, 0)), None),
+        ("/foo\rG$N", "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", (2, 3), Some((3, 3)), None),
+        ("/foo\rggv$n", "zzzzzzz\nfoo xxxxx\nab foo\nlonger line here\n", (1, 0), Some((2, 0)), None),
+        ("/foo\rggv$nd", "oo xxxxx\nab foo\nlonger line here\n", (0, 0), Some((1, 0)), Some(("zzzzzzz\nf", false))),
+    ]));
+    misses.extend(nv_misses(Config::default, "x foo\nfoo bar\nab foo\nlonger line here\n", &[
+        ("$*", "x foo\nfoo bar\nab foo\nlonger line here\n", (1, 0), Some((2, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "here\nab here\nlonger line here\n", &[
+        ("G$#", "here\nab here\nlonger line here\n", (1, 3), Some((2, 3)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "foo zzzzzzzzz\nyy\nabcdefghijklmnopq\n", &[
+        ("/qqq\rgg$nj", "foo zzzzzzzzz\nyy\nabcdefghijklmnopq\n", (1, 1), Some((2, 12)), None),
+        ("/foo\rgg$nj", "foo zzzzzzzzz\nyy\nabcdefghijklmnopq\n", (1, 0), Some((2, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", &[
+        (":s/foo/b/\rj$&", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 7), Some((2, 1)), None),
+        (":s/foo/b/\r$&", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 5), Some((1, 9)), None),
+        (":s/foo/b/\rj$g&", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 0)), None),
+        ("$:s/foo/b/\r", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 0)), None),
+        ("$:s/qq/b/\r", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 7), Some((1, 9)), None),
+        ("$:%s/foo/b/c\ryy", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\ryn", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\rnq", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\rq", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 9)), None),
+        ("$:%s/foo/b/c\rl", "b zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 9)), None),
+        ("$:%s/foo/b/c\ra", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 0)), None),
+        ("$:%s/foo/b/c\rnl", "foo zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("$:%s/foo/b/c\rny", "foo zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("lll:%s/foo/b/c\ryy", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 0), Some((2, 1)), None),
+        ("lll:%s/foo/b/c\ryyj", "b zzzz\nb zzzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 3)), None),
+        ("lll:%s/foo/b/c\rqj", "foo zzzz\nfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 3), Some((2, 1)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "zfoo zzzz\nzfoo zzzzzz\nab\nxyzxyzxyzxyz\n", &[
+        (":s/foo/b/\rj$:&\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        (":s/foo/b/\rj$:s\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        (":s/foo/b/\rj$:&&\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        (":s/foo/b/\rj$:%&&\r", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 8), Some((2, 1)), None),
+        ("$:s/foo/b/c\ry", "zb zzzz\nzfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (0, 0), Some((1, 10)), None),
+        (":s/foo/b/\rjlll&j", "zb zzzz\nzb zzzzzz\nab\nxyzxyzxyzxyz\n", (2, 0), Some((3, 0)), None),
+        (":s/foo/b/\rj$:s/zb/q/\r", "zb zzzz\nzfoo zzzzzz\nab\nxyzxyzxyzxyz\n", (1, 10), Some((2, 1)), None),
+        (":s/foo/b/\rj$:&&\rxj", "zb zzzz\nzb zzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 7)), Some(("z", false))),
+        (":s/foo/b/\rj$&xj", "zb zzzz\nzb zzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 7)), Some(("z", false))),
+        (":s/foo/b/\rj$:&&\rrXj", "zb zzzz\nzb zzzzzX\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 8)), None),
     ]));
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }

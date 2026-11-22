@@ -41,6 +41,7 @@ pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
     ("saveas", &["sav"]),
     ("set", &[]),
     ("split", &["sp"]),
+    ("substitute", &["s", "su"]),
     ("typewriter", &["tw"]),
     ("undo", &["u", "un", "und"]),
     ("view", &[]),
@@ -104,7 +105,7 @@ pub(crate) fn canonical(table: &[(&'static str, &[&str])], typed: &str) -> Optio
 
 impl App {
     pub(crate) fn run_command(&mut self, cmd: &str) {
-        let cmd = cmd.trim();
+        let cmd = cmd.trim_start();
         if cmd.is_empty() {
             return;
         }
@@ -113,6 +114,11 @@ impl App {
         // opens, a block shows its source, read-only mode puts the line on
         // top and the column is kept exactly as the keys do.
         let (range, rest) = range::parse(cmd);
+        if let Some((args, repeat)) = substitute::command(rest) {
+            return self.run_substitute(range, args, repeat);
+        }
+        let cmd = cmd.trim_end();
+        let rest = rest.trim_end();
         if let (Some(r), "") = (range, rest) {
             return self.jump_to_range(r);
         }
@@ -561,7 +567,7 @@ impl App {
                 return self.save_as(typed, force);
             }
             let p = self.typed_path(typed);
-            if !self.buffer.is_own_file(&p) {
+            if !self.buffer.writes_own_file(&p) {
                 return self.write_copy(&p, force);
             }
         }
@@ -577,7 +583,7 @@ impl App {
         // A file is edited in ONE buffer (`open_file` holds to that); taking
         // over another buffer's file would leave two copies racing to save.
         let current = self.current();
-        if self.docs.iter().enumerate().any(|(i, d)| i != current && d.buffer.is_own_file(&p)) {
+        if self.docs.iter().enumerate().any(|(i, d)| i != current && d.buffer.writes_own_file(&p)) {
             self.notify(format!("{} is open in another buffer", self.shown(&p)), FlashKind::Error);
             return false;
         }

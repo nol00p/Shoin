@@ -252,6 +252,10 @@ pub struct App {
     /// A read-only motion moved the view this input, already within the
     /// text: `sync_after_input` has nothing left to clamp.
     reading_clamped: bool,
+    /// A substitute repeated after `$` left the cursor on its line's end
+    /// with `$`'s goal on purpose (Neovim's `endcolumn`), so the edit does
+    /// not set the goal afresh in [`App::settle_goal`].
+    goal_kept: bool,
     /// How much of an `![[…]]` line expands in place. Starts at
     /// `transclude.embed`; `:embed [mode]` changes it.
     pub embed_mode: crate::transclude::Mode,
@@ -325,6 +329,8 @@ pub struct App {
 
     /// The last executed search; drives `n`/`N` and match highlighting.
     pub search: Option<Search>,
+    substitute: Option<substitute::Substitute>,
+    confirmation: Option<substitute::Confirmation>,
 
     // --- `.` repeat ---
     /// Input of the last change, replayed by `.`.
@@ -492,85 +498,7 @@ struct DotMark {
     rev: u64,
 }
 
-/// The last executed search, for `n`/`N` repeats and match highlighting.
-#[derive(Clone)]
-pub struct Search {
-    pub pattern: String,
-    /// The original direction (`/` vs `?`); `n` follows it, `N` reverses it.
-    pub reverse: bool,
-}
-
-// Search runs per keypress (`/`, `n`, `N`), so it reads the rope a line at a
-// time with `str::find` rather than copying the document into a `Vec<char>`
-// and comparing at every position. Positions are CHAR indexes into the rope;
-// bytes are only ever an offset inside one line's text.
-
-/// The byte offset of char `col` in `s`, or `s.len()` past its end.
-fn byte_of(s: &str, col: usize) -> usize {
-    s.char_indices().nth(col).map_or(s.len(), |(b, _)| b)
-}
-
-/// First char index at or after `from` where `needle` starts in `hay`.
-fn str_find(hay: &str, needle: &str, from: usize) -> Option<usize> {
-    let at = byte_of(hay, from);
-    let found = hay[at..].find(needle)?;
-    Some(from + hay[at..at + found].chars().count())
-}
-
-/// Last char index at or before `before` where `needle` starts in `hay`. The
-/// match may run past `before`, so the text searched ends a needle's length
-/// after it: no match starting later fits in that.
-fn str_rfind(hay: &str, needle: &str, before: usize) -> Option<usize> {
-    let end = byte_of(hay, before.saturating_add(needle.chars().count()));
-    let found = hay[..end].rfind(needle)?;
-    Some(hay[..found].chars().count())
-}
-
-/// One line's text: borrowed when the rope holds it in one chunk, as it does
-/// for all but the rare line that straddles two.
-fn line_str(rope: &ropey::Rope, line: usize) -> std::borrow::Cow<'_, str> {
-    let slice = rope.line(line);
-    match slice.as_str() {
-        Some(s) => std::borrow::Cow::Borrowed(s),
-        None => std::borrow::Cow::Owned(slice.to_string()),
-    }
-}
-
-/// First char index at or after `from` where `needle` occurs in `rope`.
-fn rope_find(rope: &ropey::Rope, needle: &str, from: usize) -> Option<usize> {
-    if needle.is_empty() || from >= rope.len_chars() {
-        return None;
-    }
-    // Only `\n` ends a rope line here (ropey is built without `unicode_lines`
-    // and `cr_lines`), so a needle without one lies inside a single line. One
-    // with it — it would have to be pasted into the search line — is looked
-    // for in the whole text.
-    if needle.contains('\n') {
-        return str_find(&rope.to_string(), needle, from);
-    }
-    let first = rope.char_to_line(from);
-    (first..rope.len_lines()).find_map(|line| {
-        let base = rope.line_to_char(line);
-        str_find(&line_str(rope, line), needle, from.max(base) - base).map(|i| base + i)
-    })
-}
-
-/// Last char index at or before `before` where `needle` occurs in `rope`.
-fn rope_rfind(rope: &ropey::Rope, needle: &str, before: usize) -> Option<usize> {
-    if needle.is_empty() {
-        return None;
-    }
-    let before = before.min(rope.len_chars());
-    if needle.contains('\n') {
-        return str_rfind(&rope.to_string(), needle, before);
-    }
-    let last = rope.char_to_line(before);
-    (0..=last).rev().find_map(|line| {
-        let base = rope.line_to_char(line);
-        let limit = if line == last { before - base } else { usize::MAX };
-        str_rfind(&line_str(rope, line), needle, limit).map(|i| base + i)
-    })
-}
+pub use search::Search;
 
 /// An emphasis span the bold and italic toggles can strip, in char indexes
 /// into the rope (`inline::InlineSpan` counts from the start of its line).
@@ -941,6 +869,9 @@ mod visual;
 mod insert;
 mod prompts;
 mod search;
+mod substitute;
+#[cfg(test)]
+mod substitute_tests;
 mod commands;
 mod range;
 #[cfg(test)] pub(crate) use commands::COMMANDS;
@@ -1021,6 +952,7 @@ impl App {
             edit_offered: false,
             reading: HashMap::new(),
             reading_clamped: false,
+            goal_kept: false,
             embed_mode: crate::transclude::Mode::parse(&config.transclude.embed)
                 .unwrap_or_default(),
             last_embed_mode: crate::transclude::Mode::Short,
@@ -1051,6 +983,8 @@ impl App {
             last_numbers: NumberMode::Absolute,
             text_align: TextAlign::parse(&config_text_align).unwrap_or_default(),
             search: None,
+            substitute: None,
+            confirmation: None,
             dot: Vec::new(),
             recording: Vec::new(),
             in_key: false,
@@ -1671,7 +1605,9 @@ impl App {
             }
             Action::PasteAfter => self.paste(true, count),
             Action::PasteBefore => self.paste(false, count),
-            Action::SearchWordUnderCursor => self.search_word_under_cursor(),
+            Action::SearchWordUnderCursor => self.search_word_under_cursor(false),
+            Action::SearchWordBackward => self.search_word_under_cursor(true),
+            Action::RepeatSubstitute { all } => self.repeat_substitute(all),
             Action::AppendParagraph => {
                 self.move_by(Motion::ParagraphForward, 1);
                 self.enter_insert();
@@ -1910,6 +1846,8 @@ impl App {
             | Action::YankLine
             | Action::SearchNext { .. }
             | Action::SearchWordUnderCursor
+            | Action::SearchWordBackward
+            | Action::RepeatSubstitute { .. }
             | Action::ScrollView { .. }
             | Action::AppendParagraph
             | Action::Window(_)
@@ -1954,6 +1892,10 @@ impl App {
         // field, so `a` while it is up is a letter, not another `a` command.
         if let Mode::Prompt(p) = self.mode.clone() {
             self.on_key_prompt(key, p);
+            return;
+        }
+        if self.mode == Mode::SubstituteConfirm {
+            self.on_key_substitute(key);
             return;
         }
         // The file tree owns input while it has focus.
@@ -2008,6 +1950,9 @@ impl App {
             self.buffer.history.begin_group(anchor);
         }
 
+        // Only the key that kept it may: a `:&&` typed on the command line
+        // does not settle, and must not leave the next key's goal alone.
+        self.goal_kept = false;
         let goal = self.goal_before(&mode);
         match mode {
             Mode::Normal => self.on_key_normal(key),
@@ -2016,6 +1961,7 @@ impl App {
             Mode::Command(buf) => self.on_key_command(key, buf),
             Mode::Search { query, reverse } => self.on_key_search(key, query, reverse),
             Mode::Prompt(p) => self.on_key_prompt(key, p),
+            Mode::SubstituteConfirm => unreachable!("confirmation handles keys before Normal mode"),
         }
 
         if let Some(before) = goal {
@@ -2032,7 +1978,7 @@ impl App {
         }
 
         // Seal the step unless we are still inserting.
-        if !matches!(self.mode, Mode::Insert) {
+        if !matches!(self.mode, Mode::Insert | Mode::SubstituteConfirm) {
             self.buffer.history.end_group();
         }
 
@@ -2084,7 +2030,8 @@ impl App {
             self.visual_onto_line_break();
         }
         let cur = self.buffer.cursor;
-        if cur.goal_col != Cursor::LINE_END || before.cursor.goal_col != Cursor::LINE_END {
+        let kept = std::mem::take(&mut self.goal_kept);
+        if kept || cur.goal_col != Cursor::LINE_END || before.cursor.goal_col != Cursor::LINE_END {
             return;
         }
         let edited = self.buffer.revision != before.revision;

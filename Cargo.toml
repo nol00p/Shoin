@@ -40,6 +40,9 @@ notify = "8.2"
 # Text handling
 unicode-width = "0.2"
 
+# Vim patterns translate to regex so matching needs no backtracking engine.
+regex = "1"
+
 # CLI + errors
 clap = { version = "4.6", features = ["derive"] }
 anyhow = "1.0"

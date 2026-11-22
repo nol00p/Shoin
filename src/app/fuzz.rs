@@ -5,8 +5,11 @@
 //! that scrolls must move the view unless it is at that end. At the end it undoes
 //! everything and checks the original text is back, then redoes it all.
 //!
-//! It changes the working directory and `HOME` (to a temp folder), so it is
-//! `#[ignore]`d and runs on its own, in one thread:
+//! `fuzz_multiline_substitute` runs random multi-line `:s` commands and
+//! searches on a few short lines instead.
+//!
+//! The session test changes the working directory and `HOME` (to a temp
+//! folder), so it is `#[ignore]`d and runs on its own, in one thread:
 //!
 //! ```sh
 //! cargo test -- --ignored --test-threads=1 fuzz
@@ -69,6 +72,53 @@ const DOCS: &[&str] = &[
     "top\n\n$$\n\\begin{bmatrix}\na \\\\\nb \\\\\nc \\\\\nd \\\\\ne \\\\\nf \\\\\ng \\\\\nh \\\\\ni \\\\\nj \\\\\nk \\\\\nl\n\\end{bmatrix}\n$$\nafter one\nwords words words words words words words words words words words words words words words words words words words words words\n\n$$\n\\begin{pmatrix}\n1 \\\\\n2 \\\\\n3 \\\\\n4 \\\\\n5 \\\\\n6\n\\end{pmatrix}\n$$",
 ];
 
+/// Pattern atoms for [`DOCS`].
+const DOC_ATOMS: &[&str] = &[
+    "a", "e", "o", " ", ".", r"\n", r"\n", "^", "$", r"\zs", r"\ze", r"\zs", r"[a-z]", r"[^a]", r"[a\n]",
+    r"\w", r"\s", r"\<", r"\>", "-", "#", r"\(e\|\n\)",
+];
+
+/// A random Vim pattern from `atoms`, mostly multi-line: `\n`, `\zs`/`\ze`
+/// and branches such as `\|^` that put matches out of order or past the end.
+fn random_pattern(rng: &mut Rng, atoms: &[&str]) -> String {
+    const MULTIS: &[&str] = &["*", r"\+", r"\=", r"\{-}", r"\{,2}", r"\{-1,2}"];
+    let branch = |rng: &mut Rng, len: usize| {
+        let mut branch = String::new();
+        for _ in 0..len {
+            let atom = atoms[rng.below(atoms.len())];
+            branch.push_str(atom);
+            if rng.below(4) == 0 && !matches!(atom, "^" | "$" | r"\zs" | r"\ze" | r"\<" | r"\>") {
+                branch.push_str(MULTIS[rng.below(MULTIS.len())]);
+            }
+        }
+        branch
+    };
+    let mut branches = Vec::new();
+    if rng.below(2) == 0 {
+        // A match `\zs` moves onto a later line than it starts on.
+        let lines = r"\n".repeat(1 + rng.below(2));
+        let (before, after) = (rng.below(2), rng.below(2));
+        branches.push(format!("{}{lines}{}\\zs{}", branch(rng, before), branch(rng, after), branch(rng, 1)));
+    }
+    for _ in 0..1 + rng.below(2) {
+        let len = 1 + rng.below(4);
+        branches.push(branch(rng, len));
+    }
+    if rng.below(3) == 0 {
+        branches.push(["^", "$", r"\n", "."][rng.below(4)].into());
+    }
+    branches.join(r"\|")
+}
+
+/// A random `:s` with a [`random_pattern`], a range, a replacement that may
+/// add or join lines, and flags (`c` answers come from the session).
+fn random_substitute(rng: &mut Rng, atoms: &[&str]) -> String {
+    let range = ["%", "", "1,3", ".,$", "2"][rng.below(5)];
+    let replacement = ["X", "", "<&>", r"\r", r"\U&", r"a\rb", "~"][rng.below(7)];
+    let flags = ["", "g", "c", "gc", "n", "e", "ge", "&"][rng.below(8)];
+    format!("{range}s/{}/{replacement}/{flags}", random_pattern(rng, atoms))
+}
+
 /// One session of `steps` random events from `seed`. Every event is pushed to
 /// `trace` before it runs, so a panic still leaves the full trace behind.
 fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), String> {
@@ -93,6 +143,7 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         "bp", "set conceal off", "set conceal on", "set measure 20", "set measure 200", "set tab_width 8", "set math off",
         "set math on", "diff", "revert", "ls", "help", "set hints off", "b 1", "3", "+2", "d", "2,4d", "y 3",
         ".,+2>", "<", "%<", "m 0", "m $", "1,3m $", "t 0", "$-1,$t 0", "'<,'>d", "'<,'>m 0", "%fixlist",
+        "%s/[ab]/z/g", "s/[^ ]/x/c", "%s/\\<line\\>/new/n", "%s#\\v(a|b)#\\1!#ge", "&&",
     ];
     let mut term = Terminal::new(TestBackend::new(w.max(1), h.max(1))).unwrap();
     for step in 0..steps {
@@ -102,8 +153,17 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         // Where read-only mode's view stood before a key that scrolls it.
         let reading = app.view && !overlay && matches!(app.mode, Mode::Normal) && app.pending.is_clean();
         let before = if reading { reading_rows(&app) } else { None };
-        let ev: Option<KeyEvent> = if roll < 3 {
-            let c = ex[rng.below(ex.len())];
+        let ev: Option<KeyEvent> = if app.mode == Mode::SubstituteConfirm {
+            let keys = ['y', 'n', 'a', 'q', 'l'];
+            Some(KeyEvent::new(KeyCode::Char(keys[rng.below(keys.len())]), KeyModifiers::NONE))
+        } else if roll < 3 {
+            let generated;
+            let c = if rng.below(2) == 0 {
+                generated = random_substitute(&mut rng, DOC_ATOMS);
+                generated.as_str()
+            } else {
+                ex[rng.below(ex.len())]
+            };
             trace.push(format!(":{c}"));
             if !overlay {
                 app.run_command(c);
@@ -177,6 +237,15 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
                 app.sync_after_input();
             }
             None
+        } else if roll == 39 && app.is_clean() && !overlay {
+            let patterns = [r"\<line\>", r"\va(b|c)*", r"\c^[a-z]", r".\zs.", r"pasted.\+\nsecond"];
+            let generated = random_pattern(&mut rng, DOC_ATOMS);
+            let pattern = if rng.below(2) == 0 { &generated } else { patterns[rng.below(patterns.len())] };
+            trace.push(format!("/{pattern}"));
+            for ch in format!("/{pattern}").chars() {
+                key(&mut app, KeyCode::Char(ch));
+            }
+            Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         } else if roll < 39 {
             let files = ["a.md", "b.md", "c.txt", "pic.png", "sub/d.md"];
             let f = files[rng.below(files.len())];
@@ -465,4 +534,106 @@ fn fuzz_random_sessions() {
         eprintln!("{f}\n");
     }
     assert!(failures.is_empty(), "{} of {sessions} random sessions failed (traces above)", failures.len());
+}
+
+/// `FUZZ_N` × 20 random `:s` commands (default 50 × 20) from `FUZZ_SEED`
+/// on a few short lines, with multi-line patterns, `\zs`/`\ze` and `\|^`
+/// branches, and random answers for `c`; then `/` with `n` and `N`. Checks
+/// nothing panics, the cursor stays in the text, and undo and redo restore
+/// it; in a debug build the edits are also asserted to be in source order.
+/// A failure prints its seed; `FUZZ_N=1 FUZZ_SEED=<seed>` replays it (as its
+/// first case).
+#[test]
+#[ignore = "slow; run alone: cargo test -- --ignored --test-threads=1 fuzz"]
+fn fuzz_multiline_substitute() {
+    const ATOMS: &[&str] = &[
+        "a", "b", "X", " ", ".", r"\n", r"\n", "^", "$", r"\zs", r"\zs", r"\ze", "[ab]", r"[a\n]", r"\w", r"\s",
+        r"\<", r"\>", r"\(a\|\n\)", r"\%(\n\|b\)",
+    ];
+    let cases: u64 = env_or::<u64>("FUZZ_N", 50) * 20;
+    let base: u64 = env_or("FUZZ_SEED", 1);
+    let quiet = std::env::var_os("FUZZ_LOUD").is_none();
+    let old_hook = quiet.then(|| {
+        let old = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        old
+    });
+    let mut failures = Vec::new();
+    for s in base..base + cases {
+        let mut rng = Rng(s.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let lines: Vec<String> = (0..1 + rng.below(5))
+            .map(|_| (0..rng.below(6)).map(|_| ['a', 'b', 'X', ' ', 'a'][rng.below(5)]).collect())
+            .collect();
+        let mut original = lines.join("\n");
+        if rng.below(3) > 0 {
+            original.push('\n');
+        }
+        let command = random_substitute(&mut rng, ATOMS);
+        let answers: Vec<char> = (0..8).map(|_| ['y', 'n', 'a', 'q', 'l'][rng.below(5)]).collect();
+        let search = random_pattern(&mut rng, ATOMS);
+        let line = rng.below(lines.len());
+        let mut trace = format!("text {original:?} :{command} answers {answers:?} /{search}");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            let mut app = app_with(&original);
+            app.buffer.cursor = Cursor::new(line, 0);
+            app.run_command(&command);
+            app.sync_after_input();
+            for &answer in &answers {
+                if app.mode != Mode::SubstituteConfirm {
+                    break;
+                }
+                key(&mut app, KeyCode::Char(answer));
+            }
+            if app.mode == Mode::SubstituteConfirm {
+                key(&mut app, KeyCode::Char('q'));
+            }
+            check_cursor(&app)?;
+            let changed = text(&app);
+            while app.buffer.undo() {}
+            if text(&app) != original {
+                return Err(format!("undo gave {:?}", text(&app)));
+            }
+            while app.buffer.redo() {}
+            if text(&app) != changed {
+                return Err(format!("redo gave {:?}, not {changed:?}", text(&app)));
+            }
+            for ch in format!("/{search}").chars() {
+                key(&mut app, KeyCode::Char(ch));
+            }
+            key(&mut app, KeyCode::Enter);
+            for ch in "nnNjN$n".chars() {
+                key(&mut app, KeyCode::Char(ch));
+                check_cursor(&app)?;
+            }
+            Ok(())
+        }));
+        let msg = match r {
+            Ok(Ok(())) => continue,
+            Ok(Err(e)) => e,
+            Err(p) => {
+                let m = p.downcast_ref::<String>().cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                format!("panic: {m}")
+            }
+        };
+        trace.insert_str(0, &format!("FUZZ_SEED={s}: {msg}\n"));
+        failures.push(trace);
+    }
+    if let Some(old) = old_hook {
+        std::panic::set_hook(old);
+    }
+    for f in &failures {
+        eprintln!("{f}\n");
+    }
+    assert!(failures.is_empty(), "{} of {cases} random substitutions failed (above)", failures.len());
+}
+
+fn check_cursor(app: &App) -> Result<(), String> {
+    let cursor = app.buffer.cursor;
+    let last = app.buffer.last_line();
+    if cursor.line > last || cursor.col > app.buffer.line_len(cursor.line) {
+        return Err(format!("cursor {cursor:?} outside {:?}", text(app)));
+    }
+    Ok(())
 }

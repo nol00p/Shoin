@@ -26,6 +26,7 @@ impl App {
             return;
         }
         match self.mode.clone() {
+            Mode::SubstituteConfirm => return,
             Mode::Command(mut buf) => {
                 buf.push_str(&first_line());
                 self.mode = Mode::Command(buf);

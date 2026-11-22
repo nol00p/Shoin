@@ -43,7 +43,7 @@ impl App {
     }
 
     /// The document on screen and its revision now.
-    fn dot_mark(&self) -> DotMark {
+    pub(super) fn dot_mark(&self) -> DotMark {
         DotMark { doc: self.id, rev: self.buffer.revision }
     }
 
