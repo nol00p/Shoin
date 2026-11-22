@@ -87,6 +87,31 @@ nothing (see Details). Each command is one undo step and `.` repeats it.
 the delete ring, newest first. `"+` is the system clipboard — see
 [Clipboard](clipboard.md).
 
+## Search and replace
+
+Type `/` to search forward or `?` to search backward, then enter a Vim
+pattern. Matches are highlighted. `n` continues in the same direction and
+`N` goes the other way. `*` and `#` look for the word under the cursor.
+Use `/pattern/e` to land at the end of a match or `/pattern/+1` to land one
+line below it.
+
+`:%s/old/new/g` replaces every match in the file. Leave out `%` to work on the
+current line, or use a range such as `:3,7s/old/new/`. With no `g`, each
+addressed line contributes its first match. An optional count starts at the
+last line of the range. `:s#a/b#c#` uses `#` as the separator, and
+`:s/old/new` leaves off the final separator.
+
+Add `c` to confirm each match. `y` replaces it, `n` skips it, `a` replaces
+the rest, `q` or `Esc` stops, and `l` replaces this one and stops. One `u`
+reverses all the replacements. `n` as a flag counts matches without
+editing, including in read-only mode. Use `i` to ignore case, `I` to match
+case, and `e` to suppress a missing-pattern error.
+
+`:s`, `:&`, and Normal `&` repeat the last substitution without flags.
+`:&&` keeps the last flags. `g&` applies the last replacement and flags to
+the last search pattern across the document. In `:s//new/` an empty
+pattern uses the last search. A substitution also sets the pattern for `n`.
+
 ## The command line
 
 `:` opens the command line. `Tab` completes the word you are typing: a
@@ -151,6 +176,22 @@ has sections and lists to try it on.
 middle or the bottom of the pane. The cursor stays where it is.
 
 ## Details
+
+- In a pattern, `.` matches a character, `[abc]` matches a character from
+  a set, and `^` and `$` mark line boundaries. Use `*`, `\+`, `\?`, or
+  `\{n,m}` for repetitions. `\(...\)` captures a group, `\|` separates
+  alternatives, and `\<` and `\>` mark word boundaries. `\n` can cross a
+  line break. `\zs` and `\ze` set the returned match's start and end.
+- `\v`, `\m`, `\M`, and `\V` switch magic modes. `\c` and `\C` override
+  case matching for the pattern. Patterns start case-sensitive by default.
+  Pattern back-references and look-around atoms give an error.
+- In a replacement, `&` and `\0` insert the match, `\1` to `\9` insert
+  captures, and `~` inserts the last replacement. `\u` and `\l` change
+  the next character's case. `\U` and `\L` change subsequent characters
+  until `\E` or `\e`. Use `\&` and `\~` for literals, `\\` for a backslash,
+  `\r` for a line break, and `\n` for NUL. Replacement expressions are
+  unsupported.
+
 
 - `zc` folds the innermost item or section around the cursor that is still
   open, and moves the cursor to its first line. Pressed again, it folds the

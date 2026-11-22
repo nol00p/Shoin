@@ -161,7 +161,7 @@ impl Buffer {
     /// Reject edits in read-only buffers or overlapping protected ranges.
     /// Preview leaves the range list empty because the cursor stays on source
     /// text. The range check is here for when embeds need editable regions.
-    pub(super) fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
+    pub(crate) fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
         !self.read_only
             && !self
             .readonly_ranges

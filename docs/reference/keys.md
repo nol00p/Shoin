@@ -19,7 +19,7 @@ In Normal and Visual mode. Motions take a count, such as `3w`.
 | `gg` `G` | first / last line (with a count, go to that line) |
 | `f` `t` `F` `T` | find / till the next character you type, forward / backward |
 | `;` `,` | repeat / reverse the last `f` or `t` |
-| `*` | search for the word under the cursor |
+| `*` `#` | search for the word under the cursor forward / backward |
 | `H` `M` `L` | top / middle / bottom of the visible screen |
 | `Ctrl-d` `Ctrl-u` | half a page down / up |
 | `Ctrl-f` `Ctrl-b` | a full page down / up |
@@ -119,6 +119,7 @@ and `list_indent` and `list_outdent` (Insert) — see
 | `v` `V` | start a charwise / linewise selection |
 | `u` `Ctrl-r` | undo / redo |
 | `.` | repeat the last change |
+| `&` `g&` | repeat the last substitution on this line / throughout the document with its flags |
 | `Esc` | cancel a count, operator or most pending sequences |
 
 ## Insert mode
@@ -152,6 +153,7 @@ Enter Insert with `i`, `a`, `I`, `A`, `o` or `O` from
 | `p` `P` | replace the selection with the register; `p` puts what it replaced in the register, `P` keeps the register |
 | `~` `r` | toggle the case / replace every selected character with the next character you type |
 | `J` | join the selected lines |
+| `g&` | repeat the last substitution with its flags on the selected lines |
 | `D` `X` `Y` | delete / delete / yank the selected lines |
 | `C` `S` `R` | change the selected lines |
 | `I` `A` | insert before / append after the selection |

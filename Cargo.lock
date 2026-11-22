@@ -1392,6 +1392,7 @@ dependencies = [
  "clap",
  "notify",
  "ratatui",
+ "regex",
  "ropey",
  "serde",
  "toml",

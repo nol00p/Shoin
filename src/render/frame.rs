@@ -174,6 +174,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     } else if let Mode::Search { query, reverse } = &app.mode {
         let prompt = if *reverse { "?" } else { "/" };
         render_command_box(frame, app, " search ", prompt, query, ea);
+    } else if let Some(prompt) = app.substitute_prompt() {
+        render_command_box(frame, app, " substitute ", &prompt, "", ea);
     } else if let Some(pos) = caret {
         frame.set_cursor_position(pos);
     }
@@ -1965,7 +1967,6 @@ fn display_line_of(
     // only in the focused pane; ones that follow the TEXT (search matches)
     // apply wherever that text is shown. `doc` is what tells the two apart when
     // the same document is open in several panes.
-    let _ = doc;
     let Some(entry) = cache.entry(line) else {
         return DisplayLine {
             text: String::new(),
@@ -1997,10 +1998,12 @@ fn display_line_of(
     // Highlight every search match on this line (source coords, pre-conceal).
     // All of a line's matches are painted in one pass: one pass per match
     // rebuilt the line's spans thousands of times on a long line.
-    if let Some(search) = &app.search {
-        let matches = match_cols(source, &search.pattern);
-        let bg = app.theme.search_match;
-        overlay_all(&mut styled, &matches, |style| style.bg = bg);
+    let matches = app.search_highlights(doc, line, source);
+    overlay_all(&mut styled, &matches, |style| style.bg = app.theme.search_match);
+    if focused {
+        if let Some(range) = app.substitute_highlight(line) {
+            overlay_bg(&mut styled, range, app.theme.selection);
+        }
     }
 
     // Raw 1:1 when the line is active, when the user turned concealment off, or
@@ -2122,30 +2125,6 @@ fn overlay_all(
         }
     }
     *spans = out;
-}
-
-/// The char columns to highlight for `pattern` in `line`: every match, left
-/// to right, each starting past the end of the one before, so `aa` in `aaaa`
-/// lights 0..2 and 2..4. (`n` steps one char at a time and also stops at the
-/// overlapping match at 1; only the highlight skips it.) An empty pattern
-/// matches nothing.
-///
-/// Found with `str::match_indices`, which is fast on a long line, and turned
-/// from byte offsets into char columns by counting forward from the previous
-/// match, so the line is walked once whatever the number of matches.
-fn match_cols(line: &str, pattern: &str) -> Vec<std::ops::Range<usize>> {
-    if pattern.is_empty() {
-        return Vec::new();
-    }
-    let width = pattern.chars().count();
-    let (mut byte, mut col) = (0usize, 0usize);
-    line.match_indices(pattern)
-        .map(|(at, _)| {
-            col += line[byte..at].chars().count();
-            byte = at;
-            col..col + width
-        })
-        .collect()
 }
 
 /// Faintly de-emphasize the source columns of `line` that fall outside the
@@ -2379,11 +2358,8 @@ mod tests {
     /// left to right, each starting past the end of the one before.
     #[test]
     fn search_matches_are_char_columns() {
-        assert_eq!(match_cols("aaaa", "aa"), vec![0..2, 2..4]);
-        assert_eq!(match_cols("é aa é aaa", "aa"), vec![2..4, 7..9]);
-        assert_eq!(match_cols("ééé", "é"), vec![0..1, 1..2, 2..3]);
-        assert_eq!(match_cols("abc", ""), Vec::<std::ops::Range<usize>>::new());
-        assert_eq!(match_cols("abc", "abcd"), Vec::<std::ops::Range<usize>>::new());
+        let pattern = crate::text::pattern::Pattern::compile("a.", false, None).unwrap();
+        assert_eq!(pattern.char_ranges("界 aa é aaa").collect::<Vec<_>>(), vec![2..4, 7..9]);
     }
 
     /// Painting many ranges in one pass gives exactly the spans that painting

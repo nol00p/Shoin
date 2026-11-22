@@ -111,6 +111,8 @@ pub fn normal(key: Key) -> Option<Verb> {
         (KeyCode::Char('n'), false) => Verb::Act(Action::SearchNext { reverse: false }),
         (KeyCode::Char('N'), false) => Verb::Act(Action::SearchNext { reverse: true }),
         (KeyCode::Char('*'), false) => Verb::Act(Action::SearchWordUnderCursor),
+        (KeyCode::Char('#'), false) => Verb::Act(Action::SearchWordBackward),
+        (KeyCode::Char('&'), false) => Verb::Act(Action::RepeatSubstitute { all: false }),
         (KeyCode::Char(':'), false) => Verb::Act(Action::Command),
         (KeyCode::Char('.'), false) => Verb::Act(Action::Repeat),
         (KeyCode::Esc, _) => Verb::Act(Action::NormalMode),
@@ -152,6 +154,7 @@ pub fn visual(key: Key) -> Option<Verb> {
         // reads `ChangeToEol` linewise in Visual). Normal has no `S`/`R`.
         KeyCode::Char('S') | KeyCode::Char('R') => Verb::Act(Action::ChangeToEol),
         KeyCode::Char('o') => Verb::Act(Action::SwapSelectionEnds),
+        KeyCode::Char('&') => return None,
         KeyCode::Char('v') => Verb::Act(Action::Visual),
         KeyCode::Char('V') => Verb::Act(Action::VisualLine),
         KeyCode::Esc => Verb::Act(Action::NormalMode),
@@ -175,6 +178,7 @@ pub fn after_prefix(prefix: char, key: Key) -> Option<Verb> {
     };
     Some(match (prefix, c) {
         ('g', 'g') => Verb::Goto(Motion::BufferStart),
+        ('g', '&') => Verb::Act(Action::RepeatSubstitute { all: true }),
         // `gu`/`gU` take a motion like any operator; in Visual the selection is
         // already the range, as for the bare `u`/`U` there.
         ('g', 'u') => Verb::Operator(Operator::Lowercase),

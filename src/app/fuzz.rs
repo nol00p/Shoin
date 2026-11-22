@@ -93,6 +93,7 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         "bp", "set conceal off", "set conceal on", "set measure 20", "set measure 200", "set tab_width 8", "set math off",
         "set math on", "diff", "revert", "ls", "help", "set hints off", "b 1", "3", "+2", "d", "2,4d", "y 3",
         ".,+2>", "<", "%<", "m 0", "m $", "1,3m $", "t 0", "$-1,$t 0", "'<,'>d", "'<,'>m 0", "%fixlist",
+        "%s/[ab]/z/g", "s/[^ ]/x/c", "%s/\\<line\\>/new/n", "%s#\\v(a|b)#\\1!#ge", "&&",
     ];
     let mut term = Terminal::new(TestBackend::new(w.max(1), h.max(1))).unwrap();
     for step in 0..steps {
@@ -102,7 +103,10 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
         // Where read-only mode's view stood before a key that scrolls it.
         let reading = app.view && !overlay && matches!(app.mode, Mode::Normal) && app.pending.is_clean();
         let before = if reading { reading_rows(&app) } else { None };
-        let ev: Option<KeyEvent> = if roll < 3 {
+        let ev: Option<KeyEvent> = if app.mode == Mode::SubstituteConfirm {
+            let keys = ['y', 'n', 'a', 'q', 'l'];
+            Some(KeyEvent::new(KeyCode::Char(keys[rng.below(keys.len())]), KeyModifiers::NONE))
+        } else if roll < 3 {
             let c = ex[rng.below(ex.len())];
             trace.push(format!(":{c}"));
             if !overlay {
@@ -177,6 +181,14 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
                 app.sync_after_input();
             }
             None
+        } else if roll == 39 && app.is_clean() && !overlay {
+            let patterns = [r"\<line\>", r"\va(b|c)*", r"\c^[a-z]", r".\zs.", r"pasted.\+\nsecond"];
+            let pattern = patterns[rng.below(patterns.len())];
+            trace.push(format!("/{pattern}"));
+            for ch in format!("/{pattern}").chars() {
+                key(&mut app, KeyCode::Char(ch));
+            }
+            Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         } else if roll < 39 {
             let files = ["a.md", "b.md", "c.txt", "pic.png", "sub/d.md"];
             let f = files[rng.below(files.len())];

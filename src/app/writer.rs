@@ -425,12 +425,27 @@ impl App {
     }
 
     /// `*`: search forward for the word under the cursor.
-    pub(super) fn search_word_under_cursor(&mut self) {
+    pub(super) fn search_word_under_cursor(&mut self, reverse: bool) {
         let cur = self.buffer.cursor;
-        if let Some((s, e)) = self.word_range(cur.line, cur.col) {
-            let word: String = self.buffer.line_text(cur.line).chars().skip(s).take(e - s).collect();
-            self.search = Some(Search { pattern: word, reverse: false });
-            self.search_move(false);
+        let line: Vec<char> = self.buffer.line_text(cur.line).chars().collect();
+        let keyword = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let col = cur.col.min(line.len());
+        let word = self.word_range(cur.line, col)
+            .or_else(|| (col..line.len()).find(|&i| keyword(line[i])).and_then(|i| self.word_range(cur.line, i)));
+        let (start, end, bounded) = if let Some((start, end)) = word {
+            (start, end, true)
+        } else {
+            let blank = |ch| matches!(ch, ' ' | '\t');
+            let Some(at) = (col..line.len()).find(|&i| !blank(line[i])) else { return };
+            let start = (0..at).rev().find(|&i| blank(line[i])).map_or(0, |i| i + 1);
+            let end = (at..line.len()).find(|&i| blank(line[i])).unwrap_or(line.len());
+            (start, end, false)
+        };
+        let word = line[start..end].iter().collect::<String>().replace('\\', r"\\");
+        let pattern = if bounded { format!(r"\<{word}\>") } else { format!(r"\V{word}") };
+        if self.set_search(pattern, reverse) {
+            self.buffer.cursor = Cursor::new(cur.line, start);
+            self.search_move(reverse);
         }
     }
 

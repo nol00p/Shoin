@@ -286,11 +286,11 @@ fn count(s: &str) -> Result<Option<Option<usize>>, String> {
 /// `top` (counted from 1, 0 for the top of the file), `before` lines long
 /// before the command and `after` lines long after it. `diff` is the first
 /// line of the block that differs, when it is lines changed in place.
-struct UndoEntry {
-    top: usize,
-    before: usize,
-    after: usize,
-    diff: usize,
+pub(super) struct UndoEntry {
+    pub(super) top: usize,
+    pub(super) before: usize,
+    pub(super) after: usize,
+    pub(super) diff: usize,
 }
 
 /// The line Neovim puts the cursor on when it undoes (or redoes) `entries`,
@@ -498,7 +498,7 @@ impl App {
     /// `start` when it lands on that line, else at the goal's screen cell
     /// (`cells`) of the line it lands on. Measured in the text as it is when
     /// this runs.
-    fn undo_cursor(&self, entries: &[UndoEntry], start: Cursor, cells: usize, undo: bool) -> Cursor {
+    pub(super) fn undo_cursor(&self, entries: &[UndoEntry], start: Cursor, cells: usize, undo: bool) -> Cursor {
         // Past the end, the line is the last one, but still the start's:
         // its column is the start's too.
         let landed = undo_line(entries, start.line + 1, undo);

@@ -41,7 +41,8 @@ impl App {
         // A document being compared is frozen: the view holds SNAPSHOTS, and
         // the comparison a reader is deciding about must not move under them
         // because a poll noticed a third write.
-        let under_review = self.diff.as_ref().map(|d| d.doc);
+        let under_review = self.diff.as_ref().map(|d| d.doc)
+            .or_else(|| (self.mode == Mode::SubstituteConfirm).then(|| self.current()));
         for (i, doc) in self.docs.iter_mut().enumerate() {
             if Some(i) == under_review {
                 continue;
@@ -387,6 +388,9 @@ impl App {
         let mut refused: Option<String> = None;
         let (current, typing) = (self.current(), self.mode.allows_past_end());
         for (i, doc) in self.docs.iter_mut().enumerate() {
+            if i == current && self.mode == Mode::SubstituteConfirm {
+                continue;
+            }
             // A file made at the path after this buffer opened it missing is
             // refused until the reader decides (`:w!`, `:revert!`). That is said
             // once per buffer, not every interval; once it is no longer so

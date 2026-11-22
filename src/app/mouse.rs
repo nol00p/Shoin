@@ -29,7 +29,7 @@ impl App {
     /// Left-click positions the cursor and drag-selects from it; the wheel
     /// scrolls the page, as `Ctrl-e` / `Ctrl-y` do.
     pub(super) fn on_mouse(&mut self, m: MouseEvent) {
-        if !self.config.input.mouse {
+        if !self.config.input.mouse || self.mode == Mode::SubstituteConfirm {
             return;
         }
         match m.kind {

@@ -613,9 +613,9 @@ Ctrl-e Ctrl-y :: scroll the page a line; the cursor stays put until it would lea
 mouse wheel :: scrolls the page, three lines a notch
 
 ## Search
-/ ? :: search forward · backward
+/ ? :: search for a Vim pattern forward · backward
 n N :: next · previous match
-* :: search the word under the cursor
+* # :: search the word under the cursor forward · backward
 
 ## Command line, search and prompts
 : :: open the command line from Normal or Visual
@@ -664,6 +664,9 @@ u Ctrl-r :: undo · redo in Normal
 :u :un :und :undo :: undo, the : spelling of u
 :red :redo :: redo, the : spelling of Ctrl-r
 . :: repeat the last change in Normal
+:s :su :substitute :: replace a Vim pattern, as in :%s/old/new/g
+:& :&& :: repeat a substitution · repeat with flags
+& g& :: repeat on this line · repeat throughout the file with flags
 
 ## Text objects — after an operator, or in Visual: diw, ca(, vip
 iw aw :: inner · around word

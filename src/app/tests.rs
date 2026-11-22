@@ -4736,18 +4736,18 @@ fn search_wraps_to_a_match_at_the_cursor() {
     assert_eq!(app.buffer.cursor, Cursor::new(1, 4), "wrapped past the end");
 }
 
-/// `?` finds the last match that STARTS strictly before the cursor, even
-/// one that runs over it, and wraps to the last match of the document.
+/// `?` visits non-overlapping matches from the start of each line, then
+/// wraps to the last match of the document.
 #[test]
 fn search_backward_is_strictly_before_the_cursor() {
     let mut app = app_with("aaaa\n");
     app.buffer.cursor = Cursor::new(0, 2);
     search_for(&mut app, '?', "aa");
-    assert_eq!(app.buffer.cursor, Cursor::new(0, 1), "overlaps the cursor");
-    feed(&mut app, "n");
     assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
     feed(&mut app, "n");
     assert_eq!(app.buffer.cursor, Cursor::new(0, 2), "wrapped to the last match");
+    feed(&mut app, "n");
+    assert_eq!(app.buffer.cursor, Cursor::new(0, 0));
 
     let mut app = app_with("foo\nbar foo\nbaz\n");
     app.buffer.cursor = Cursor::new(1, 4);
@@ -4772,52 +4772,6 @@ fn search_counts_multibyte_characters() {
     assert_eq!(app.buffer.cursor, Cursor::new(1, 5));
     search_for(&mut app, '?', "日本");
     assert_eq!(app.buffer.cursor, Cursor::new(0, 2));
-}
-
-/// The rope search against the obvious one over a `Vec<char>`, on random
-/// text built from few letters (so matches overlap and repeat), multi-byte
-/// characters and line breaks, at every start position.
-#[test]
-fn rope_search_matches_the_naive_search() {
-    fn naive_find(hay: &[char], needle: &[char], from: usize) -> Option<usize> {
-        if needle.is_empty() || needle.len() > hay.len() {
-            return None;
-        }
-        (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
-    }
-    fn naive_rfind(hay: &[char], needle: &[char], before: usize) -> Option<usize> {
-        if needle.is_empty() || needle.len() > hay.len() {
-            return None;
-        }
-        let max = before.min(hay.len() - needle.len());
-        (0..=max).rev().find(|&i| hay[i..i + needle.len()] == needle[..])
-    }
-    let alphabet = ['a', 'b', 'é', '日', '\n', '\r', '\u{2028}'];
-    let mut seed = 0x2545_f491_4f6c_dd1du64;
-    let mut next = |n: usize| {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed % n as u64) as usize
-    };
-    for _ in 0..400 {
-        let hay: String = (0..next(30)).map(|_| alphabet[next(alphabet.len())]).collect();
-        let needle: String = (0..next(4)).map(|_| alphabet[next(alphabet.len())]).collect();
-        let rope = ropey::Rope::from_str(&hay);
-        let (h, n): (Vec<char>, Vec<char>) = (hay.chars().collect(), needle.chars().collect());
-        for at in 0..=h.len() + 1 {
-            assert_eq!(
-                rope_find(&rope, &needle, at),
-                naive_find(&h, &n, at),
-                "find {needle:?} in {hay:?} from {at}"
-            );
-            assert_eq!(
-                rope_rfind(&rope, &needle, at),
-                naive_rfind(&h, &n, at),
-                "rfind {needle:?} in {hay:?} before {at}"
-            );
-        }
-    }
 }
 
 #[test]
@@ -8587,7 +8541,7 @@ fn read_only_cursor_on_a_wrapped_row_is_a_source_column() {
     feed(&mut app, "yiw");
     assert_eq!(app.registers.get(&'"').map(|r| r.text.clone()), Some(word.clone()));
     feed(&mut app, "*");
-    assert_eq!(app.search.as_ref().map(|s| s.pattern.clone()), Some(word.clone()));
+    assert_eq!(app.search.as_ref().map(|s| s.pattern.clone()), Some(format!(r"\<{word}\>")));
 
     let mut app = app_with(&text);
     let (word, col) = onto_row(&mut app);
@@ -8670,7 +8624,7 @@ fn read_only_motions_reuse_the_focused_row_index() {
 /// first row on top.
 #[test]
 fn read_only_explicit_jumps_to_the_parked_cursor_show_the_line() {
-    let keys: [&dyn Fn(&mut App); 2] = [&|app| feed(app, "3G"), &|app| cmd(app, "/$$ \\begin")];
+    let keys: [&dyn Fn(&mut App); 2] = [&|app| feed(app, "3G"), &|app| cmd(app, r"/\V$$ \\begin")];
     for (i, jump) in keys.iter().enumerate() {
         let mut app = app_with(&tall_math(12).replace("$$\n\\begin", "$$ \\begin"));
         reader(&mut app);
@@ -9559,4 +9513,19 @@ fn saveas_refuses_a_hard_link_to_another_open_file() {
     assert!(flash_text(&app).contains("another buffer"));
     assert_eq!(std::fs::read(&b).unwrap(), before);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn vim_regex_search_and_substitution() {
+    let mut app = app_with("head\nfooXmd foo.md\n  foo-md\n");
+    feed(&mut app, "/foo.md");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.buffer.cursor.line, 1);
+    assert_eq!(app.buffer.cursor.col, 0);
+    app.run_command("%s/foo.md/new/g");
+    assert_eq!(app.buffer.rope.to_string(), "head\nnew new\n  new\n");
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (2, 2));
+    assert_eq!(flash_text(&app), "3 substitutions on 2 lines");
+    feed(&mut app, "u");
+    assert_eq!(app.buffer.rope.to_string(), "head\nfooXmd foo.md\n  foo-md\n");
 }

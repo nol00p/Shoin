@@ -30,7 +30,11 @@ after `:e`, `:w`, `:saveas` and `:wq`, an option and then its value after
 |---|---|
 | `:undo` `:u` `:un` `:und` | undo, like `u` |
 | `:redo` `:red` | redo, like `Ctrl-r` |
+| `:substitute /pattern/replacement/[flags] [count]` `:s` `:su` | replace the first match on each addressed line. Use `%` for the whole document and `g` for every match |
 | `:fixlist` | re-indent the list under the cursor, or every list a Visual selection or a range touches, so other tools read it as Shoin shows it — see [Editing](../editing.md#lists) |
+
+See [Search and replace](../editing.md#search-and-replace) for patterns, flags,
+confirmation and repeats.
 
 ## Lines
 
