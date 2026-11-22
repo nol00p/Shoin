@@ -1,7 +1,8 @@
 //! Translate Vim's pattern syntax to the Rust regex engine.
 
-use regex::{Captures, Regex, RegexBuilder};
+use regex::{CaptureLocations, Regex, RegexBuilder};
 use std::ops::Range;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct Pattern {
@@ -9,8 +10,11 @@ pub struct Pattern {
     start: Vec<usize>,
     end: Vec<usize>,
     groups: Vec<usize>,
-    eol: Vec<usize>,
+    /// A match can take in a line break, so runs on the joined lines.
     pub multiline: bool,
+    /// The pattern has a `\n` atom (Vim's `RF_HASNL`): `:s` then goes on
+    /// searching at a line's end. A `[\n]` collection does not count.
+    newline: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -26,12 +30,17 @@ impl Pattern {
         let mut magic = Magic::Default;
         let mut case = None;
         let mut multiline = false;
+        let mut newline = false;
         let mut rx = String::new();
         let mut chars = pattern.chars().peekable();
         let mut markers = 0;
         let mut groups = 0;
         let mut branch_start = true;
         let mut after_anchor = false;
+        // After `\n` a `^` is an anchor, but a `*` repeats the `\n`.
+        let mut after_newline = false;
+        // Vim refuses a multi straight after another (`x**`, `x\{2}*`).
+        let mut after_multi = false;
         while let Some(mut ch) = chars.next() {
             let escaped = ch == '\\';
             if escaped {
@@ -59,6 +68,8 @@ impl Pattern {
                         };
                         markers += 1;
                         rx.push_str(&format!("(?P<{prefix}{markers}>)"));
+                        // Vim: a `^` after `\zs` or `\ze` is a literal.
+                        (branch_start, after_anchor, after_multi) = (false, false, false);
                         continue;
                     }
                     '1'..='9' | 'i' | 'I' | 'k' | 'K' | 'f' | 'F' | 'p' | 'P' | 'Z' => {
@@ -67,11 +78,12 @@ impl Pattern {
                     '_' => match chars.next() {
                         Some('^') => {
                             rx.push('^');
+                            after_multi = false;
                             continue;
                         }
                         Some('$') => {
-                            markers += 1;
-                            rx.push_str(&format!("(?P<eol{markers}>$)"));
+                            rx.push('$');
+                            after_multi = false;
                             continue;
                         }
                         Some(next) => return Err(format!("pattern: \\_{next} not supported")),
@@ -79,6 +91,7 @@ impl Pattern {
                     },
                     'n' | 't' | 'e' | 'r' | 'b' => {
                         multiline |= ch == 'n';
+                        newline |= ch == 'n';
                         rx.push_str(match ch {
                             'n' => r"\n",
                             't' => r"\t",
@@ -87,7 +100,9 @@ impl Pattern {
                             _ => r"\x08",
                         });
                         branch_start = ch == 'n';
+                        after_newline = ch == 'n';
                         after_anchor = false;
+                        after_multi = false;
                         continue;
                     }
                     _ => {}
@@ -98,11 +113,12 @@ impl Pattern {
                     rx.push(')');
                     branch_start = false;
                     after_anchor = false;
+                    after_multi = false;
                     continue;
                 }
             }
             let special = match ch {
-                '*' if branch_start || after_anchor => false,
+                '*' if (branch_start && !after_newline) || after_anchor => false,
                 '.' | '*' | '[' | '~' => match magic {
                     Magic::Very | Magic::Default => !escaped,
                     Magic::No | Magic::Literal => escaped,
@@ -110,16 +126,7 @@ impl Pattern {
                 '^' | '$' => match magic {
                     Magic::Very => !escaped,
                     Magic::Literal => escaped,
-                    _ => !escaped && (if ch == '^' { branch_start } else {
-                        let mut rest = chars.clone();
-                        loop {
-                            match (rest.next(), rest.next()) {
-                                (None, _) | (Some('\\'), Some('|' | ')' | 'n')) => break true,
-                                (Some('\\'), Some('c' | 'C' | 'm' | 'M' | 'v' | 'V')) => {}
-                                _ => break false,
-                            }
-                        }
-                    }),
+                    _ => !escaped && (if ch == '^' { branch_start } else { ends_branch(chars.clone()) }),
                 },
                 '+' | '?' | '=' | '{' | '(' | ')' | '|' | '<' | '>' | '%' | '&' | '@' => {
                     escaped != (magic == Magic::Very)
@@ -128,8 +135,15 @@ impl Pattern {
             };
             branch_start = special && matches!(ch, '(' | '|' | '%');
             after_anchor = special && ch == '^';
+            after_newline = false;
+            let multi = special && matches!(ch, '*' | '+' | '=' | '?' | '{' | '@');
+            if multi && after_multi {
+                return Err("pattern: can't have a multi follow a multi".into());
+            }
+            after_multi = multi;
             if !special {
                 multiline |= ch == '\n';
+                newline |= ch == '\n';
                 rx.push_str(&regex::escape(&ch.to_string()));
                 continue;
             }
@@ -148,17 +162,15 @@ impl Pattern {
                     }
                     return Err(format!("pattern: {atom} not supported"));
                 }
-                '$' => {
-                    markers += 1;
-                    rx.push_str(&format!("(?P<eol{markers}>$)"));
-                }
+                '$' => rx.push('$'),
                 '<' => rx.push_str(r"\b{start}"),
                 '>' => rx.push_str(r"\b{end}"),
                 '=' => rx.push('?'),
                 '~' => {
                     let replacement = replacement.ok_or("no previous substitute regular expression")?;
                     multiline |= replacement.contains('\n');
-                    rx.push_str(&regex::escape(replacement));
+                    // Grouped, so a multi after `~` repeats all of it.
+                    rx.push_str(&format!("(?:{})", regex::escape(replacement)));
                 }
                 '[' => {
                     let mut rest = chars.clone();
@@ -213,79 +225,165 @@ impl Pattern {
                     format!("pattern: {detail}")
                 }
             })?;
-        let mut result = Self { regex, start: Vec::new(), end: Vec::new(), groups: Vec::new(), eol: Vec::new(), multiline };
+        let mut result = Self { regex, start: Vec::new(), end: Vec::new(), groups: Vec::new(), multiline, newline };
         for (index, name) in result.regex.capture_names().enumerate() {
             match name {
                 Some(name) if name.starts_with("start") => result.start.push(index),
                 Some(name) if name.starts_with("end") => result.end.push(index),
                 Some(name) if name.starts_with("vim") => result.groups.push(index),
-                Some(name) if name.starts_with("eol") => result.eol.push(index),
                 _ => {}
             }
         }
         Ok(result)
     }
 
-    pub fn captures<'a>(&'a self, text: &'a str) -> impl Iterator<Item = Captures<'a>> + 'a {
-        let mut regular = self.regex.captures_iter(text);
-        let mut next = Some(0);
-        let mut previous_nonempty_end = None;
-        std::iter::from_fn(move || {
-            if self.end.is_empty() {
-                return regular.next();
-            }
-            let at = next?;
-            let mut captures = self.regex.captures_at(text, at)?;
-            let mut bounds = self.bounds(&captures);
-            // A zero-width match immediately after a replacement belongs to
-            // the match already consumed, as with the regular iterator.
-            if previous_nonempty_end == Some(bounds.start) && bounds.is_empty() {
-                let after = at + text[at..].chars().next()?.len_utf8();
-                captures = self.regex.captures_at(text, after)?;
-                bounds = self.bounds(&captures);
-            }
-            previous_nonempty_end = (!bounds.is_empty()).then_some(bounds.end);
-            next = if bounds.is_empty() {
-                text[bounds.end..].chars().next().map(|ch| bounds.end + ch.len_utf8())
-            } else {
-                Some(bounds.end)
-            };
-            Some(captures)
-        })
+    /// The matches in `text`, found as Vim's `:s` finds them. A search
+    /// starts where the previous match ended. An empty match there is
+    /// skipped one character on. With `by_line`, `:s`'s rule for each line of
+    /// `text`: once a match or a skip reaches the line's end, the line is
+    /// done, unless the pattern has a `\n` or the match took a line break.
+    pub fn matches<'a>(&'a self, text: &'a str, by_line: bool) -> Matches<'a> {
+        Matches {
+            pattern: self, text, locs: self.regex.capture_locations(), at: 0, previous_end: None, by_line,
+            one_per_line: false,
+        }
     }
 
-    pub fn char_ranges<'a>(&'a self, text: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
-        let mut previous = 0;
-        let mut columns = 0;
-        self.captures(text).map(move |captures| {
-            let range = self.bounds(&captures);
+    /// The first match at or after byte `at`.
+    pub fn find_at(&self, text: &str, at: usize) -> Option<Found> {
+        let mut matches = self.matches(text, false);
+        matches.at = at;
+        matches.next()
+    }
+
+    /// The matches' character columns, at most until `deadline`: what was
+    /// found by then is returned, so a pathological line cannot stall a
+    /// redraw (Vim's 'redrawtime' does the same).
+    pub fn char_ranges(&self, text: &str, deadline: Option<Instant>) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
+        let mut matches = self.matches(text, false);
+        let (mut previous, mut columns) = (0, 0);
+        while let Some(found) = matches.next() {
+            let range = found.span;
             columns += text[previous..range.start].chars().count();
             let start = columns;
             columns += text[range.clone()].chars().count();
             previous = range.end;
-            start..columns
-        })
+            ranges.push(start..columns);
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+        }
+        ranges
+    }
+}
+
+/// One match: the bytes the regex consumed and the span `\zs`/`\ze` report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub whole: Range<usize>,
+    pub span: Range<usize>,
+}
+
+/// The matches of a [`Pattern`]; [`Matches::group`] reads the current
+/// match's groups, so this lends rather than iterates.
+pub struct Matches<'a> {
+    pattern: &'a Pattern,
+    text: &'a str,
+    locs: CaptureLocations,
+    at: usize,
+    previous_end: Option<usize>,
+    by_line: bool,
+    /// `:s` without `g`: a skipped empty match ends its line too.
+    pub one_per_line: bool,
+}
+
+impl Matches<'_> {
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<Found> {
+        let pattern = self.pattern;
+        loop {
+            if self.at > self.text.len() {
+                return None;
+            }
+            let whole = pattern.regex.captures_read_at(&mut self.locs, self.text, self.at)?.range();
+            // The last `\zs` and `\ze` that took part; an `\ze` before that
+            // `\zs` is undone by it, as in Vim.
+            let marker = |indices: &[usize]| indices.iter().rev().find_map(|&i| Some((i, self.locs.get(i)?.0)));
+            let zs = marker(&pattern.start);
+            let start = zs.map_or(whole.start, |(_, at)| at);
+            let end = match marker(&pattern.end) {
+                Some((ze, at)) if zs.is_none_or(|(zs, _)| ze > zs) => at.max(start),
+                _ => whole.end.max(start),
+            };
+            if self.previous_end == Some(self.at) && end == self.at {
+                // An empty match where the last one ended: try one character
+                // on (past a line break, the next line starts afresh).
+                if self.one_per_line {
+                    self.next_line(self.at);
+                } else {
+                    self.at += self.text[self.at..].chars().next().map_or(1, char::len_utf8);
+                    self.end_line();
+                }
+                continue;
+            }
+            self.at = end;
+            self.previous_end = Some(end);
+            if !self.text[start..end].contains('\n') {
+                self.end_line();
+            }
+            return Some(Found { whole, span: start..end });
+        }
     }
 
-    pub fn bounds(&self, captures: &Captures<'_>) -> Range<usize> {
-        let whole = captures.get(0).expect("every capture has a whole match");
-        let marker = |indices: &[usize]| indices.iter().rev().find_map(|&i| captures.get(i));
-        let start = marker(&self.start).map_or(whole.start(), |m| m.start());
-        let end = marker(&self.end).map_or(whole.end(), |m| m.start());
-        start..end.max(start)
+    /// Go on searching at the start of the line after the one byte `from` is in.
+    pub fn next_line(&mut self, from: usize) {
+        self.at = self.text[from..].find('\n').map_or(self.text.len() + 1, |i| from + i + 1);
+        self.previous_end = None;
     }
 
-    /// A repeatable empty atom stops before a nonempty line's ending.
-    /// An explicit end anchor or a match that consumed text can reach it.
-    pub fn is_implicit_empty_end(&self, captures: &Captures<'_>, text: &str) -> bool {
-        let whole = captures.get(0).expect("every capture has a whole match");
-        whole.is_empty() && whole.start() > 0 && text.as_bytes()[whole.start() - 1] != b'\n'
-            && (whole.start() == text.len() || text.as_bytes()[whole.start()] == b'\n')
-            && self.eol.iter().all(|&group| captures.get(group).is_none())
+    /// `:s`'s `lastone`: at a line's end the line is done. The next search
+    /// starts on the next line, or nowhere after the last one.
+    fn end_line(&mut self) {
+        if !self.by_line || self.pattern.newline {
+            return;
+        }
+        match self.text.as_bytes().get(self.at) {
+            None => self.at = self.text.len() + 1,
+            Some(b'\n') => {
+                self.at += 1;
+                self.previous_end = None;
+            }
+            Some(_) => {}
+        }
     }
 
-    pub fn group<'a>(&self, captures: &Captures<'a>, n: usize) -> &'a str {
-        self.groups.get(n - 1).and_then(|&i| captures.get(i)).map_or("", |m| m.as_str())
+    /// Vim group `n` (1–9) of the current match, empty when it did not take part.
+    pub fn group(&self, n: usize) -> &str {
+        self.pattern.groups.get(n - 1).and_then(|&i| self.locs.get(i)).map_or("", |(a, b)| &self.text[a..b])
+    }
+}
+
+/// Whether a `$` ends its branch, so is an anchor: Vim's rule looks past
+/// `\c \C \m \M \v \V \Z`, taking the mode they set, for the end, `\|`,
+/// `\)`, `\&` or `\n` (or `|`, `)`, `&` under `\v`).
+fn ends_branch(mut rest: std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut very = false;
+    loop {
+        let mut ahead = rest.clone();
+        match (ahead.next(), ahead.next()) {
+            (Some('\\'), Some(mode @ ('c' | 'C' | 'm' | 'M' | 'v' | 'V' | 'Z'))) => {
+                match mode {
+                    'v' => very = true,
+                    'm' | 'M' | 'V' => very = false,
+                    _ => {}
+                }
+                rest = ahead;
+            }
+            (None, _) | (Some('\\'), Some('|' | '&' | ')' | 'n')) => return true,
+            (Some('|' | '&' | ')'), _) => return very,
+            _ => return false,
+        }
     }
 }
 

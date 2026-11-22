@@ -1,7 +1,6 @@
 use super::*;
-use crate::text::pattern::Pattern;
+use crate::text::pattern::{Matches, Pattern};
 use range::{Range as LineRange, UndoEntry};
-use regex::Captures;
 
 #[derive(Clone, Copy, Default)]
 struct Flags {
@@ -39,6 +38,8 @@ struct Changes {
     entries: Vec<UndoEntry>,
     count: usize,
     char_delta: isize,
+    /// Lines added (or, negative, joined) by the edits applied so far.
+    line_delta: isize,
     edited: bool,
 }
 
@@ -47,14 +48,19 @@ impl Changes {
         edit.range.start.saturating_add_signed(self.char_delta)..edit.range.end.saturating_add_signed(self.char_delta)
     }
 
+    /// One entry per run of lines the edits touch: an edit that starts on a
+    /// line the previous one reached (joined into it) extends its entry. Vim
+    /// counts the lines of its message the same way.
     fn record(&mut self, edit: &Edit, added: usize) {
         self.count += 1;
-        let before = edit.end_line - edit.line + 1;
-        if let Some(entry) = self.entries.last_mut().filter(|entry| entry.top == edit.line) {
-            entry.before = entry.before.max(before);
-            entry.after += added;
-        } else {
-            self.entries.push(UndoEntry { top: edit.line, before, after: added + 1, diff: 0 });
+        let joined = edit.end_line - edit.line;
+        match self.entries.last_mut() {
+            Some(entry) if edit.line < entry.top + entry.before => {
+                let before = entry.before.max(edit.end_line - entry.top + 1);
+                entry.after = (entry.after + added + before).saturating_sub(entry.before + joined);
+                entry.before = before;
+            }
+            _ => self.entries.push(UndoEntry { top: edit.line, before: joined + 1, after: added + 1, diff: 0 }),
         }
     }
 }
@@ -99,7 +105,7 @@ impl App {
         let args = args.trim_start();
         let separator = args.chars().next().filter(|ch| ch.is_ascii_punctuation() && !matches!(ch, '\\' | '"' | '|'));
         let (pattern, replacement, flags) = if let Some(separator) = separator.filter(|_| !repeat) {
-            let (pattern, rest) = search::field(&args[1..], separator, false);
+            let (pattern, rest) = search::pattern_field(&args[1..], separator, false);
             let (replacement, flags) = rest.map_or_else(|| (String::new(), None), |rest| search::field(rest, separator, false));
             let pattern = if pattern.is_empty() {
                 self.search.as_ref().ok_or("no previous search pattern")?.pattern.clone()
@@ -129,59 +135,77 @@ impl App {
         self.substitute = Some(Substitute { pattern: pattern.clone(), replacement: replacement.clone(), flags });
         self.flash = None;
 
+        // One pass in order over the range: running byte, character and
+        // line positions, never a seek into the rope per match.
         let rope = &self.buffer.rope;
+        let pieces = parse_replacement(&replacement);
+        let last_line = self.buffer.last_line();
+        let content_end = rope.line_to_char(last_line) + self.buffer.line_len(last_line);
         let mut edits = Vec::new();
         let (mut matches, mut lines) = (0, 0);
         let mut last_match_line = None;
-        let mut collect = |text: &str, base: usize, line: Option<usize>, limit: usize| {
-            let mut previous_byte = 0;
-            let mut offset = base;
-            for captures in compiled.captures(text) {
-                if compiled.is_implicit_empty_end(&captures, text) {
-                    continue;
-                }
-                let bounds = compiled.bounds(&captures);
-                offset += text[previous_byte..bounds.start].chars().count();
-                previous_byte = bounds.start;
-                if offset > limit {
+        // Something matched, if only after the last line: no error then, as Vim.
+        let mut got_match = false;
+        let mut collect = |text: &str, base: usize, line: usize, limit: usize| {
+            let mut found = compiled.matches(text, true);
+            found.one_per_line = !flags.global;
+            let mut at = Position { byte: 0, char: base, line };
+            while let Some(m) = found.next() {
+                // Vim takes a match whose start is in the range, even when
+                // `\zs` moves what it replaces past the range's end.
+                at.advance(text, m.whole.start);
+                if at.char > limit {
                     break;
                 }
-                let line = line.unwrap_or_else(|| rope.char_to_line(offset));
-                if last_match_line == Some(line) && !flags.global {
-                    continue;
+                at.advance(text, m.span.start);
+                got_match = true;
+                let (start, line) = (at.char, at.line);
+                // `\n\zs` can put it after the last line's break: no line there.
+                if line > last_line {
+                    break;
                 }
                 matches += 1;
                 if last_match_line != Some(line) {
                     lines += 1;
                     last_match_line = Some(line);
                 }
-                if !flags.count {
-                    let end = offset + text[bounds.clone()].chars().count();
-                    edits.push(Edit {
-                        range: offset..end,
-                        line,
-                        end_line: rope.char_to_line(end),
-                        replacement: replace(&replacement, &compiled, &captures, &text[bounds]),
-                    });
+                at.advance(text, m.span.end);
+                // Without `g`, one match a line, except that one taking a
+                // line break searches the rest joined to it again, while the
+                // next line is in the range (Vim's `do_again`). Counting
+                // joins nothing: the next line is searched from its start.
+                let joins = at.line > line;
+                let again = joins && at.line <= last;
+                if flags.count && joins {
+                    found.next_line(m.span.start);
+                } else if !(flags.global || again) {
+                    // After the lines it joined; else from the line the match
+                    // began on: one that `\zs` moved into the next line leaves
+                    // that line its own search.
+                    found.next_line(if joins { m.span.end } else { m.whole.start });
                 }
-                if !flags.global && !compiled.multiline {
-                    break;
+                if !flags.count {
+                    // A match through the last line's break (which the file
+                    // may not have) replaces up to the end of that line.
+                    let end = at.char.min(content_end.max(start));
+                    let mut out = String::new();
+                    expand(&pieces, &text[m.span.clone()], &found, &mut out);
+                    edits.push(Edit { range: start..end, line, end_line: at.line.min(last_line), replacement: out });
                 }
             }
         };
         if compiled.multiline {
-            let base = rope.line_to_char(first);
-            let last_line = self.buffer.last_line();
-            let end = rope.line_to_char(last_line) + self.buffer.line_len(last_line);
             let limit = rope.line_to_char(last) + self.buffer.line_len(last);
-            collect(&rope.slice(base..end).to_string(), base, None, limit);
+            collect(&search::multiline_text(&self.buffer, first), rope.line_to_char(first), first, limit);
         } else {
-            for line in first..=last {
-                collect(&search::searchable_line(rope, line), rope.line_to_char(line), Some(line), usize::MAX);
+            let mut base = rope.line_to_char(first);
+            for (line, slice) in (first..=last).zip(rope.lines_at(first)) {
+                collect(&search::searchable(slice), base, line, usize::MAX);
+                base += slice.len_chars();
             }
         }
         if matches == 0 {
-            if !flags.quiet {
+            if !flags.quiet && !got_match {
                 return Err(format!("pattern not found: {pattern}"));
             }
         } else if flags.count {
@@ -282,21 +306,19 @@ impl App {
         let (Some(first), Some(last)) = (edits.first(), edits.last()) else { return };
         let begin = change.range(first).start;
         let end = change.range(last).end;
-        let mut previous = begin;
         let mut text = String::new();
-        let mut delta = 0isize;
         let mut destination = 0;
+        // The unchanged text between matches, read in order from the rope's chunks.
+        let mut source = RopeReader::new(self.buffer.rope.slice(begin..end), begin);
         for edit in edits {
             let range = change.range(edit);
-            for chunk in self.buffer.rope.slice(previous..range.start).chunks() {
-                text.push_str(chunk);
-            }
+            source.read_to(range.start, Some(&mut text));
+            source.read_to(range.end, None);
             text.push_str(&edit.replacement);
             let added = edit.replacement.bytes().filter(|&b| b == b'\n').count();
-            destination = self.buffer.rope.char_to_line(range.start).saturating_add_signed(delta) + added;
-            delta += added as isize - (edit.end_line - edit.line) as isize;
+            destination = edit.line.saturating_add_signed(change.line_delta) + added;
+            change.line_delta += added as isize - (edit.end_line - edit.line) as isize;
             change.record(edit, added);
-            previous = range.end;
         }
         // A blank last line needs a terminator to be a line in the rope,
         // even when the file was opened without a final newline.
@@ -384,6 +406,66 @@ fn expand_tilde(raw: &str, previous: &str) -> String {
     out
 }
 
+/// Where a walk through matched text is: its byte, and the character and
+/// line those are in the buffer.
+struct Position {
+    byte: usize,
+    char: usize,
+    line: usize,
+}
+
+impl Position {
+    /// Move to byte `to`; back too, where a search starts again on a line
+    /// that the last match went into.
+    fn advance(&mut self, text: &str, to: usize) {
+        let passed = &text[self.byte.min(to)..self.byte.max(to)];
+        let (chars, lines) = (passed.chars().count(), passed.bytes().filter(|&b| b == b'\n').count());
+        if to >= self.byte {
+            (self.char, self.line) = (self.char + chars, self.line + lines);
+        } else {
+            (self.char, self.line) = (self.char - chars, self.line - lines);
+        }
+        self.byte = to;
+    }
+}
+
+/// Reads a rope slice front to back by character index, a chunk at a time.
+struct RopeReader<'a> {
+    chunks: ropey::iter::Chunks<'a>,
+    chunk: &'a str,
+    /// Where in `chunk` the next character is, and its index in the rope.
+    byte: usize,
+    char: usize,
+}
+
+impl<'a> RopeReader<'a> {
+    fn new(slice: ropey::RopeSlice<'a>, start: usize) -> Self {
+        Self { chunks: slice.chunks(), chunk: "", byte: 0, char: start }
+    }
+
+    /// Move to character `to`, appending what is passed to `out`.
+    fn read_to(&mut self, to: usize, mut out: Option<&mut String>) {
+        while self.char < to {
+            if self.byte == self.chunk.len() {
+                let Some(chunk) = self.chunks.next() else { return };
+                (self.chunk, self.byte) = (chunk, 0);
+                continue;
+            }
+            let rest = &self.chunk[self.byte..];
+            let wanted = to - self.char;
+            let (bytes, chars) = match rest.char_indices().nth(wanted) {
+                Some((byte, _)) => (byte, wanted),
+                None => (rest.len(), rest.chars().count()),
+            };
+            if let Some(out) = out.as_deref_mut() {
+                out.push_str(&rest[..bytes]);
+            }
+            self.byte += bytes;
+            self.char += chars;
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Case {
     Keep,
@@ -391,60 +473,81 @@ enum Case {
     Lower,
 }
 
-fn replace(raw: &str, pattern: &Pattern, captures: &Captures<'_>, whole: &str) -> String {
-    let mut out = String::new();
-    let mut case = Case::Keep;
-    let mut once = None;
-    let mut chars = raw.chars();
-    while let Some(mut ch) = chars.next() {
-        let expansion = if ch == '&' {
-            Some(whole)
-        } else if ch == '\\' {
-            match chars.next() {
-                Some('0') => Some(whole),
-                Some(n @ '1'..='9') => Some(pattern.group(captures, n as usize - '0' as usize)),
-                Some(next) => {
-                    match next {
-                        'u' => once = Some(Case::Upper),
-                        'l' => once = Some(Case::Lower),
-                        'U' => case = Case::Upper,
-                        'L' => case = Case::Lower,
-                        'e' | 'E' => { case = Case::Keep; once = None; }
-                        other => {
-                            ch = match other {
-                                'r' => '\n', 'n' => '\0', 't' => '\t', 'b' => '\x08',
-                                literal => literal,
-                            };
-                            append_case(&mut out, ch, once.take().unwrap_or(case));
-                        }
-                    }
-                    continue;
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
-        if let Some(text) = expansion {
-            for item in text.chars() {
-                append_case(&mut out, item, once.take().unwrap_or(case));
-            }
-        } else {
-            append_case(&mut out, ch, once.take().unwrap_or(case));
-        }
-    }
-    out
+/// One part of a parsed replacement string.
+enum Piece {
+    Char(char),
+    Whole,
+    Group(usize),
+    Once(Case),
+    All(Case),
+    /// `\e`, `\E`: back to the matched case.
+    Reset,
 }
 
-fn append_case(out: &mut String, ch: char, case: Case) {
-    match case {
-        Case::Keep => out.push(ch),
-        Case::Upper if ch == 'ß' => out.push('ẞ'),
-        Case::Upper => {
-            let mut upper = ch.to_uppercase();
-            let first = upper.next().unwrap_or(ch);
-            out.push(if upper.next().is_none() { first } else { ch });
-        }
-        Case::Lower => out.push(ch.to_lowercase().next().unwrap_or(ch)),
+fn parse_replacement(raw: &str) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        pieces.push(match ch {
+            '&' => Piece::Whole,
+            '\\' => match chars.next() {
+                Some('0') => Piece::Whole,
+                Some(n @ '1'..='9') => Piece::Group(n as usize - '0' as usize),
+                Some('u') => Piece::Once(Case::Upper),
+                Some('l') => Piece::Once(Case::Lower),
+                Some('U') => Piece::All(Case::Upper),
+                Some('L') => Piece::All(Case::Lower),
+                Some('e' | 'E') => Piece::Reset,
+                Some('r') => Piece::Char('\n'),
+                Some('n') => Piece::Char('\0'),
+                Some('t') => Piece::Char('\t'),
+                Some('b') => Piece::Char('\x08'),
+                Some(literal) => Piece::Char(literal),
+                None => Piece::Char('\\'),
+            },
+            _ => Piece::Char(ch),
+        });
     }
+    pieces
+}
+
+fn expand(pieces: &[Piece], whole: &str, found: &Matches<'_>, out: &mut String) {
+    let mut case = Case::Keep;
+    let mut once = None;
+    let mut append = |text: &str, case: Case, once: &mut Option<Case>| {
+        for ch in text.chars() {
+            append_case(out, ch, once.take().unwrap_or(case));
+        }
+    };
+    for piece in pieces {
+        match *piece {
+            Piece::Char(ch) => append(ch.encode_utf8(&mut [0; 4]), case, &mut once),
+            Piece::Whole => append(whole, case, &mut once),
+            Piece::Group(n) => append(found.group(n), case, &mut once),
+            Piece::Once(next) => once = Some(next),
+            Piece::All(next) => case = next,
+            Piece::Reset => (case, once) = (Case::Keep, None),
+        }
+    }
+}
+
+/// Neovim's one-to-one case mappings: where Unicode's full mapping is more
+/// than one character, the simple mapping (or none), as `utf_toupper`.
+fn append_case(out: &mut String, ch: char, case: Case) {
+    fn single(mut mapped: impl Iterator<Item = char>, ch: char) -> char {
+        let first = mapped.next();
+        first.filter(|_| mapped.next().is_none()).unwrap_or(ch)
+    }
+    out.push(match case {
+        Case::Keep => ch,
+        Case::Upper => match ch as u32 {
+            0xdf => '\u{1e9e}',
+            // Greek with ypogegrammeni: the capital with prosgegrammeni.
+            0x1f80..=0x1f87 | 0x1f90..=0x1f97 | 0x1fa0..=0x1fa7 => char::from_u32(ch as u32 + 8).unwrap_or(ch),
+            0x1fb3 | 0x1fc3 | 0x1ff3 => char::from_u32(ch as u32 + 9).unwrap_or(ch),
+            _ => single(ch.to_uppercase(), ch),
+        },
+        Case::Lower if ch == '\u{130}' => 'i',
+        Case::Lower => single(ch.to_lowercase(), ch),
+    });
 }

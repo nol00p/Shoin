@@ -435,9 +435,11 @@ impl App {
         let (start, end, bounded) = if let Some((start, end)) = word {
             (start, end, true)
         } else {
+            // No keyword under or after the cursor: the non-blank run, from
+            // where its class starts, as Neovim's `find_ident_at_pos`.
             let blank = |ch| matches!(ch, ' ' | '\t');
             let Some(at) = (col..line.len()).find(|&i| !blank(line[i])) else { return };
-            let start = (0..at).rev().find(|&i| blank(line[i])).map_or(0, |i| i + 1);
+            let start = (0..at).rev().find(|&i| blank(line[i]) || keyword(line[i])).map_or(0, |i| i + 1);
             let end = (at..line.len()).find(|&i| blank(line[i])).unwrap_or(line.len());
             (start, end, false)
         };

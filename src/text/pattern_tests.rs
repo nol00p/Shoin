@@ -60,7 +60,7 @@ const CASES: &[Case] = &[
 fn vim_atoms_match_neovim() {
     for (name, text, syntax, expected) in CASES {
         let actual = Pattern::compile(syntax, false, None)
-            .map(|pattern| pattern.captures(text).next().map(|c| pattern.bounds(&c)));
+            .map(|pattern| pattern.matches(text, false).next().map(|found| found.span));
         match expected {
             Ok(range) => assert_eq!(actual, Ok(Some(range.clone())), "{name}: {syntax}"),
             Err(error) => assert_eq!(actual, Err(error.to_string()), "{name}: {syntax}"),
@@ -71,7 +71,29 @@ fn vim_atoms_match_neovim() {
 #[test]
 fn tilde_is_literal_last_replacement() {
     let pattern = Pattern::compile("~", false, Some("a.b")).unwrap();
-    let mut ranges = pattern.char_ranges("axb a.b");
-    assert_eq!(ranges.next(), Some(4..7));
-    assert_eq!(ranges.next(), None);
+    assert_eq!(pattern.char_ranges("axb a.b", None), vec![4..7]);
+}
+
+#[test]
+fn a_multi_after_a_multi_is_an_error() {
+    // Neovim says "E866: Misplaced +" for the last: an error too.
+    assert!(Pattern::compile(r"x*\v+", false, None).is_err());
+    for syntax in ["x**", r"x\{2}*", r"x\+\=", r"\vx+*"] {
+        assert_eq!(Pattern::compile(syntax, false, None).err().as_deref(),
+            Some("pattern: can't have a multi follow a multi"), "{syntax}");
+    }
+    for syntax in ["^**", r"\(*\)*", "x*y*", r"\v(x+)+"] {
+        assert!(Pattern::compile(syntax, false, None).is_ok(), "{syntax}");
+    }
+}
+
+#[test]
+fn star_after_a_line_break_repeats_it_and_caret_after_zs_is_literal() {
+    let pattern = Pattern::compile(r"a\n*b", false, None).unwrap();
+    assert_eq!(pattern.find_at("a\n\nb", 0).map(|found| found.span), Some(0..4));
+    // Neovim: `^` after `\zs` or `\ze` is a literal, after `\c` an anchor.
+    let pattern = Pattern::compile(r"\zs^a", false, None).unwrap();
+    assert_eq!(pattern.find_at("a ^a", 0).map(|found| found.span), Some(2..4));
+    let pattern = Pattern::compile(r"\c^a", false, None).unwrap();
+    assert_eq!(pattern.find_at("^a", 0), None);
 }

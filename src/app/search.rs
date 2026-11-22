@@ -3,6 +3,15 @@ use crate::text::pattern::Pattern;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// How long one line's (or a multi-line pattern's whole document's)
+/// highlights may take before the rest of them is left out, as Vim's
+/// 'redrawtime'. What was found is kept until the text changes.
+const HIGHLIGHT_BUDGET: Duration = Duration::from_millis(50);
+
+/// Lines whose highlights are kept per document before the cache restarts.
+const CACHED_LINES: usize = 4096;
 
 #[derive(Clone, Copy, Default)]
 enum Offset {
@@ -19,25 +28,230 @@ pub struct Search {
     pub reverse: bool,
     compiled: Pattern,
     offset: Offset,
-    multiline_highlights: RefCell<HighlightCache>,
+    matches: RefCell<HashMap<u64, DocMatches>>,
 }
 
-type HighlightCache = HashMap<u64, (Option<u64>, Vec<Range<usize>>)>;
+/// One document's matches at one revision: each drawn line's columns for a
+/// line-local pattern; for a multi-line one, every match's characters (as
+/// highlighted, within [`HIGHLIGHT_BUDGET`]) and where `n` can stop.
+#[derive(Clone, Default)]
+struct DocMatches {
+    revision: u64,
+    lines: HashMap<usize, Vec<Range<usize>>>,
+    whole: Option<Vec<Range<usize>>>,
+    stops: Option<Vec<Range<usize>>>,
+}
 
 impl Search {
     pub(crate) fn new(pattern: String, reverse: bool, compiled: Pattern) -> Self {
-        Self { pattern, reverse, compiled, offset: Offset::Start, multiline_highlights: RefCell::new(HashMap::new()) }
+        Self { pattern, reverse, compiled, offset: Offset::Start, matches: RefCell::default() }
+    }
+
+    /// `doc`'s cached matches, restarted when its text changed.
+    fn doc_matches<'a>(&self, cache: &'a mut HashMap<u64, DocMatches>, doc: &BufferState) -> &'a mut DocMatches {
+        let entry = cache.entry(doc.id).or_default();
+        if entry.revision != doc.buffer.revision {
+            *entry = DocMatches { revision: doc.buffer.revision, ..DocMatches::default() };
+        }
+        entry
+    }
+
+    /// Run `f` on the matches of a multi-line pattern in `doc` to highlight,
+    /// as character ranges.
+    fn with_whole<R>(&self, doc: &BufferState, f: impl FnOnce(&[Range<usize>]) -> R) -> R {
+        let mut cache = self.matches.borrow_mut();
+        let entry = self.doc_matches(&mut cache, doc);
+        f(entry.whole.get_or_insert_with(|| {
+            self.compiled.char_ranges(&multiline_text(&doc.buffer, 0), Some(Instant::now() + HIGHLIGHT_BUDGET))
+        }))
+    }
+
+    /// Run `f` on where `n` and `N` can stop for a multi-line pattern in
+    /// `doc` ([`stops`]), as character ranges in order: one index per
+    /// revision, so each repeat is a binary search.
+    fn with_stops<R>(&self, doc: &BufferState, f: impl FnOnce(&[Range<usize>]) -> R) -> R {
+        let mut cache = self.matches.borrow_mut();
+        let entry = self.doc_matches(&mut cache, doc);
+        f(entry.stops.get_or_insert_with(|| {
+            let text = multiline_text(&doc.buffer, 0);
+            let mut chars = CharCounter::new(&text);
+            let mut all: Vec<_> = stops(&self.compiled, &text)
+                .map(|span| chars.at(span.start)..chars.at(span.end))
+                .collect();
+            all.sort_by_key(|span| span.start);
+            all
+        }))
     }
 }
 
+/// Where Vim's `searchit` can stop in `text`: on each line, the first match
+/// from the line's start, then each one from the end of the one before (a
+/// character on after an empty one), as Neovim's default 'cpoptions' flag
+/// `c` has it, until that is the line's end or a match took a line break.
+/// Byte ranges of the spans `\zs`/`\ze` report, found as they are asked
+/// for: `n` usually needs one or two of a line's.
+fn stops<'a>(pattern: &'a Pattern, text: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let found = pattern.find_at(text, at).filter(|_| at <= text.len())?;
+        let span = found.span;
+        if found.whole.start == text.len() && text.ends_with('\n') {
+            return None; // Vim never searches a line after the last one.
+        }
+        if span.start == text.len() && text.ends_with('\n') {
+            // After the last line's break, where no line is: Vim puts the
+            // cursor at the end of the last line.
+            at = text.len() + 1;
+            return Some(text.len() - 1..text.len() - 1);
+        }
+        let line_end = text[span.start..].find('\n').map_or(text.len(), |i| span.start + i);
+        at = span.end;
+        if span.is_empty() && at < line_end {
+            at += text[at..].chars().next().map_or(1, char::len_utf8);
+        }
+        if at >= line_end || text[span.clone()].contains('\n') {
+            // The next line starts afresh, from its start even when this
+            // match took some of it.
+            at = line_end + 1;
+        }
+        Some(span)
+    })
+}
+
+/// Turns byte offsets in a text into character offsets, counting from the
+/// last one asked for.
+struct CharCounter<'a> {
+    text: &'a str,
+    byte: usize,
+    char: usize,
+}
+
+impl<'a> CharCounter<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { text, byte: 0, char: 0 }
+    }
+
+    fn at(&mut self, byte: usize) -> usize {
+        if byte >= self.byte {
+            self.char += self.text[self.byte..byte].chars().count();
+        } else {
+            self.char -= self.text[byte..self.byte].chars().count();
+        }
+        self.byte = byte;
+        self.char
+    }
+}
+
+/// The text a multi-line pattern matches from line `first` on: through the
+/// last line's break, which Vim matches even when the file has none.
+pub(super) fn multiline_text(buffer: &crate::text::buffer::Buffer, first: usize) -> String {
+    let mut text = buffer.rope.slice(buffer.rope.line_to_char(first)..).to_string();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
 pub(super) fn searchable_line(rope: &ropey::Rope, line: usize) -> Cow<'_, str> {
-    let mut slice = rope.line(line);
+    searchable(rope.line(line))
+}
+
+/// A line's text without its break, borrowed when the rope holds it in one piece.
+pub(super) fn searchable(mut slice: ropey::RopeSlice<'_>) -> Cow<'_, str> {
     let len = slice.len_chars();
     if len > 0 && slice.char(len - 1) == '\n' {
         let cr = usize::from(len > 1 && slice.char(len - 2) == '\r');
         slice = slice.slice(..len - 1 - cr);
     }
     slice.as_str().map_or_else(|| Cow::Owned(slice.to_string()), Cow::Borrowed)
+}
+
+/// Read a delimited pattern as Vim's `skip_regexp` does: a separator inside
+/// a `[]` collection does not end it, and a `[` with no `]` takes the rest of
+/// the text. Only `\v` and `\V` change whether `[` opens one, as in Vim.
+pub(super) fn pattern_field(text: &str, separator: char, unescape: bool) -> (String, Option<&str>) {
+    let mut out = String::new();
+    let mut magic = true;
+    let mut i = 0;
+    while let Some(ch) = text[i..].chars().next() {
+        if ch == separator {
+            return (out, Some(&text[i + ch.len_utf8()..]));
+        }
+        let open = if magic && ch == '[' {
+            1
+        } else if !magic && text[i..].starts_with("\\[") {
+            2
+        } else {
+            0
+        };
+        if open > 0 {
+            let Some(close) = collection_end(&text[i + open..]) else {
+                out.push_str(&text[i..]);
+                return (out, None);
+            };
+            let end = i + open + close + 1;
+            out.push_str(&text[i..end]);
+            i = end;
+            continue;
+        }
+        if ch == '\\' {
+            let Some(next) = text[i + 1..].chars().next() else {
+                out.push(ch);
+                break;
+            };
+            if !unescape || next != separator {
+                out.push(ch);
+            }
+            out.push(next);
+            match next {
+                'v' => magic = true,
+                'V' => magic = false,
+                _ => {}
+            }
+            i += 1 + next.len_utf8();
+        } else {
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    (out, None)
+}
+
+/// Where the `]` that closes a collection is in `text` (which follows the
+/// `[`), as Vim's `skip_anyof`; `None` when there is none.
+fn collection_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let char_len = |at: usize| text[at..].chars().next().map_or(1, char::len_utf8);
+    let mut at = usize::from(bytes.first() == Some(&b'^'));
+    if matches!(bytes.get(at), Some(b']' | b'-')) {
+        at += 1;
+    }
+    while at < bytes.len() && bytes[at] != b']' {
+        match bytes[at] {
+            b'-' => {
+                at += 1;
+                if at < bytes.len() && bytes[at] != b']' {
+                    at += char_len(at);
+                }
+            }
+            b'\\' if bytes.get(at + 1).is_some_and(|b| b"]^-n\\rtebdoxuU".contains(b)) => at += 2,
+            b'[' => at += class_len(&text[at..]).unwrap_or(1),
+            _ => at += char_len(at),
+        }
+    }
+    (at < bytes.len()).then_some(at)
+}
+
+/// The length of a `[:name:]`, `[=x=]` or `[.x.]` at the start of `text`.
+fn class_len(text: &str) -> Option<usize> {
+    if let Some(name) = text.strip_prefix("[:") {
+        let len = name.find(":]")?;
+        return name[..len].bytes().all(|b| b.is_ascii_lowercase()).then_some(len + 4);
+    }
+    let mark = text[1..].chars().next().filter(|&ch| ch == '=' || ch == '.')?;
+    let ch = text[2..].chars().next()?;
+    let tail = &text[2 + ch.len_utf8()..];
+    (tail.starts_with(mark) && tail[1..].starts_with(']')).then_some(2 + ch.len_utf8() + 2)
 }
 
 /// Read a delimited Vim field, retaining regex/replacement escapes.
@@ -73,7 +287,7 @@ impl App {
             }
             FieldKey::Submit => {
                 self.mode = Mode::Normal;
-                let (pattern, suffix) = field(&query, if reverse { '?' } else { '/' }, reverse);
+                let (pattern, suffix) = pattern_field(&query, if reverse { '?' } else { '/' }, reverse);
                 let offset = match suffix.unwrap_or("") {
                     "" => Offset::Start,
                     "e" => Offset::End,
@@ -122,74 +336,105 @@ impl App {
         if let Some(search) = &mut self.search {
             search.pattern = pattern;
             search.compiled = compiled;
-            search.multiline_highlights.get_mut().clear();
+            search.matches.get_mut().clear();
         } else {
             self.search = Some(Search::new(pattern, false, compiled));
         }
     }
 
+    /// `n` (or `N` as `backward`): the next match from the cursor, as
+    /// Vim's `searchit`: past the cursor (a match at a line's end counts as
+    /// on its last character), then the first on each line after, wrapping.
     pub(super) fn search_move(&mut self, backward: bool) {
-        let Some(search) = &self.search else { return };
+        let Some(search) = &self.search else {
+            return self.notify("no previous regular expression", FlashKind::Error);
+        };
         let rope = &self.buffer.rope;
         let last = self.buffer.last_line();
         let cur = self.buffer.cursor;
-        let absolute = match search.offset {
-            Offset::Lines(_) if backward => rope.line_to_char(cur.line),
-            Offset::Lines(_) => rope.line_to_char((cur.line + 1).min(rope.len_lines())),
-            _ => self.buffer.char_index(cur),
-        };
-        let positions = |text: &str, col: usize, current: bool| {
-            let at = text.char_indices().nth(col).map_or(text.len(), |(byte, _)| byte);
-            let end_offset = matches!(search.offset, Offset::End);
-            let line_offset = matches!(search.offset, Offset::Lines(_));
-            if current && line_offset && !search.compiled.multiline {
-                return None;
-            }
-            let mut found = None;
-            for bounds in search.compiled.captures(text).map(|m| search.compiled.bounds(&m)) {
-                let mut pos = if end_offset {
-                    bounds.end - text[bounds.clone()].chars().next_back().map_or(0, char::len_utf8)
-                } else {
-                    bounds.start
-                };
-                if pos == text.len() && !search.compiled.multiline {
-                    pos -= text.chars().next_back().map_or(0, char::len_utf8);
-                }
-                if current && (if backward { pos >= at } else if line_offset { pos < at } else { pos <= at }) {
-                    if backward {
-                        break;
-                    }
-                    continue;
-                }
-                found = Some(pos);
-                if !backward {
-                    break;
-                }
-            }
-            found.map(|byte| text[..byte].chars().count())
+        let line_offset = matches!(search.offset, Offset::Lines(_));
+        // Where a match puts the cursor: its start, or its last character for `/e`.
+        let pos = |m: &Range<usize>| match search.offset {
+            Offset::End if !m.is_empty() => m.end - 1,
+            _ => m.start,
         };
         let found = if search.compiled.multiline {
-            let text = rope.slice(..rope.line_to_char(last) + self.buffer.line_len(last)).to_string();
-            positions(&text, absolute, true).or_else(|| positions(&text, 0, false))
-        } else {
-            let on_line = |line, current| {
-                positions(&searchable_line(rope, line), cur.col, current)
-                    .map(|col| rope.line_to_char(line) + col)
+            let absolute = match search.offset {
+                Offset::Lines(_) if backward => rope.line_to_char(cur.line),
+                Offset::Lines(_) => rope.line_to_char((cur.line + 1).min(rope.len_lines())),
+                _ => self.buffer.char_index(cur),
             };
-            on_line(cur.line.min(last), true).or_else(|| {
-                if backward {
-                    (0..cur.line.min(last)).rev().chain((cur.line.min(last)..=last).rev())
-                        .find_map(|line| on_line(line, false))
+            // Passed over: before the cursor, or on its line no further on
+            // (a match at the line's end counting as on its last character).
+            let next_line = rope.line_to_char((cur.line + 1).min(rope.len_lines()));
+            let at_end = |idx: usize| idx >= rope.len_chars() || rope.char(idx) == '\n';
+            let passed = |m: &Range<usize>| {
+                let p = pos(m);
+                p < next_line && p as isize - isize::from(at_end(p)) <= absolute as isize
+            };
+            search.with_stops(self, |all| {
+                let i = if backward || line_offset {
+                    all.partition_point(|m| pos(m) < absolute)
                 } else {
-                    (cur.line.min(last) + 1..=last).chain(0..=cur.line.min(last))
-                        .find_map(|line| on_line(line, false))
+                    all.partition_point(passed)
+                };
+                if backward {
+                    i.checked_sub(1).and_then(|i| all.get(i)).or(all.last()).map(pos)
+                } else {
+                    all.get(i).or(all.first()).map(pos)
                 }
             })
+        } else {
+            // Each line's stops as cursor columns, tried one at a time.
+            let line_stops = |line, f: &mut dyn FnMut(usize) -> bool| -> Option<usize> {
+                let text = searchable_line(rope, line);
+                let mut chars = CharCounter::new(&text);
+                let mut last = None;
+                for span in stops(&search.compiled, &text) {
+                    let col = pos(&(chars.at(span.start)..chars.at(span.end)));
+                    if !f(col) {
+                        break;
+                    }
+                    last = Some(col);
+                }
+                last
+            };
+            // The first stop `wanted` takes, or (backward) the last one
+            // before `wanted` refuses.
+            let first = |line, wanted: &dyn Fn(usize) -> bool| {
+                let mut found = None;
+                line_stops(line, &mut |col| {
+                    found = wanted(col).then_some(col);
+                    found.is_none()
+                });
+                found
+            };
+            let last_before = |line, before: usize| line_stops(line, &mut |col| col < before);
+            let here = cur.line.min(last);
+            let len = self.buffer.line_len(here) as isize;
+            let on_cursor_line = if line_offset {
+                None
+            } else if backward {
+                last_before(here, cur.col)
+            } else {
+                first(here, &|col| col as isize - isize::from(col as isize >= len) > cur.col as isize)
+            };
+            on_cursor_line.map(|col| (here, col)).or_else(|| {
+                if backward {
+                    (0..here).rev().chain((here..=last).rev())
+                        .find_map(|line| last_before(line, usize::MAX).map(|col| (line, col)))
+                } else {
+                    (here + 1..=last).chain(0..=here)
+                        .find_map(|line| first(line, &|_| true).map(|col| (line, col)))
+                }
+            }).map(|(line, col)| rope.line_to_char(line) + col)
         };
         let pattern = &search.pattern;
         match found {
             Some(idx) => {
                 let mut target = self.idx_to_cursor(idx);
+                // At a line's end: on its last character, as Normal mode.
+                target.col = target.col.min(self.buffer.line_len(target.line).saturating_sub(1));
                 if let Offset::Lines(delta) = search.offset {
                     target = Cursor::new(target.line.saturating_add_signed(delta).min(last), 0);
                 }
@@ -206,22 +451,23 @@ impl App {
     pub(crate) fn search_highlights(&self, doc: &BufferState, line: usize, text: &str) -> Vec<Range<usize>> {
         let Some(search) = &self.search else { return Vec::new() };
         if !search.compiled.multiline {
-            return search.compiled.char_ranges(text).collect();
+            let mut cache = search.matches.borrow_mut();
+            let entry = search.doc_matches(&mut cache, doc);
+            if entry.lines.len() >= CACHED_LINES && !entry.lines.contains_key(&line) {
+                entry.lines.clear();
+            }
+            return entry.lines.entry(line)
+                .or_insert_with(|| search.compiled.char_ranges(text, Some(Instant::now() + HIGHLIGHT_BUDGET)))
+                .clone();
         }
-        let mut cache = search.multiline_highlights.borrow_mut();
         let rope = &doc.buffer.rope;
-        let (revision, matches) = cache.entry(doc.id).or_default();
-        if *revision != Some(doc.buffer.revision) {
-            let last = doc.buffer.last_line();
-            let text = rope.slice(..rope.line_to_char(last) + doc.buffer.line_len(last)).to_string();
-            *matches = search.compiled.char_ranges(&text).collect();
-            *revision = Some(doc.buffer.revision);
-        }
         let first = rope.line_to_char(line);
         let end = first + doc.buffer.line_len(line);
-        matches[matches.partition_point(|m| m.end <= first)..].iter()
-            .take_while(|m| m.start < end)
-            .map(|m| m.start.saturating_sub(first)..m.end.min(end) - first)
-            .collect()
+        search.with_whole(doc, |matches| {
+            matches[matches.partition_point(|m| m.end <= first)..].iter()
+                .take_while(|m| m.start < end)
+                .map(|m| m.start.saturating_sub(first)..m.end.min(end) - first)
+                .collect()
+        })
     }
 }

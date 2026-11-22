@@ -2359,7 +2359,7 @@ mod tests {
     #[test]
     fn search_matches_are_char_columns() {
         let pattern = crate::text::pattern::Pattern::compile("a.", false, None).unwrap();
-        assert_eq!(pattern.char_ranges("界 aa é aaa").collect::<Vec<_>>(), vec![2..4, 7..9]);
+        assert_eq!(pattern.char_ranges("界 aa é aaa", None), vec![2..4, 7..9]);
     }
 
     /// Painting many ranges in one pass gives exactly the spans that painting

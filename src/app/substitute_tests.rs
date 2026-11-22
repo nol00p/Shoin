@@ -10,7 +10,7 @@ fn key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 fn feed(app: &mut App, keys: &str) {
     for ch in keys.chars() {
-        key(app, KeyCode::Char(ch), KeyModifiers::NONE);
+        if ch == '\r' { enter(app) } else { key(app, KeyCode::Char(ch), KeyModifiers::NONE) }
     }
 }
 
@@ -94,6 +94,121 @@ const CASES: &[Case] = &[
     ("normal_gamp", "x x\nx x\n", &[
         (":s/x/y/g", "y y\nx x\n", (0, 0), Some("")),
         ("g&", "y y\ny y\n", (1, 0), Some("")),
+    ]),
+    ("slash_collection", "a/b /\n", &[
+        (":s/[/]/X/g", "aXb X\n", (0, 0), Some("")),
+    ]),
+    ("bracket_first", "a/b ]/\n", &[
+        (":s/[]/]/X/g", "aXb XX\n", (0, 0), Some("")),
+    ]),
+    ("very_collection", "a/b /\n", &[
+        (":s/\\v[/]/X/g", "aXb X\n", (0, 0), Some("")),
+    ]),
+    ("nomagic_collection", "a/b [/]\n", &[
+        (":s/\\M[/]/X/g", "a/b X\n", (0, 0), Some("")),
+    ]),
+    ("literal_collection", "a[b /\n", &[
+        (":s/\\V[/X/g", "aXb /\n", (0, 0), Some("")),
+    ]),
+    ("unclosed_collection", "a[b/x/\n", &[
+        (":s/[b/x/", "a\n", (0, 0), Some("")),
+    ]),
+    ("dollar_very", "a\nb\n", &[
+        (":%s/a\\m$\\v|b/X/g", "X\nX\n", (1, 0), Some("")),
+    ]),
+    ("stacked", "xx\n", &[
+        (":s/x**/y/", "xx\n", (0, 0), Some("pattern: can't have a multi follow a multi")),
+    ]),
+    ("stacked_count", "xx\n", &[
+        (":s/x\\{2}*/y/", "xx\n", (0, 0), Some("pattern: can't have a multi follow a multi")),
+    ]),
+    ("zs_ze_branch", "abc\n", &[
+        (":s/a\\zs\\ze\\|b/X/g", "aXXc\n", (0, 0), Some("")),
+    ]),
+    ("word_end_eol", "abc\n", &[
+        (":s/\\>/X/g", "abcX\n", (0, 0), Some("")),
+    ]),
+    ("empty_repeat", "abc\nbaaa\n", &[
+        (":%s/x\\?/-/g", "-a-b-c\n-b-a-a-a\n", (1, 0), Some("7 substitutions on 2 lines")),
+        (":2s/a*/X/g", "-a-b-c\nX-XbX-X-X-X\n", (1, 0), Some("")),
+    ]),
+    ("char_or_eol", "abc\n", &[
+        (":s/c\\|$/X/g", "abX\n", (0, 0), Some("")),
+    ]),
+    ("zs_multiline_range", "a\nb\nc\n", &[
+        (":1s/a\\n\\zsb/X/", "a\nX\nc\n", (1, 0), Some("")),
+    ]),
+    ("final_break", "a\nb\nz\n", &[
+        (":%s/.\\n/X/g", "XXX\n", (0, 0), Some("")),
+    ]),
+    ("tilde_group", "abbb abab a\nx\n", &[
+        (":2s/x/ab/", "abbb abab a\nab\n", (1, 0), Some("")),
+        (":1s/~*/X/g", "XbXbX X Xa\nab\n", (0, 0), Some("")),
+    ]),
+    ("tilde_repeat", "q\nx\ny\nx\n", &[
+        (":1s/q/x/", "x\nx\ny\nx\n", (0, 0), Some("")),
+        (":2s/~/y/", "x\ny\ny\nx\n", (1, 0), Some("")),
+        (":4s", "x\ny\ny\nx\n", (1, 0), Some("pattern not found: ~")),
+        (":3s", "x\ny\ny\nx\n", (2, 0), Some("")),
+    ]),
+    ("star_punct", "foo++\n++\nfoo++\n", &[
+        ("$*", "foo++\n++\nfoo++\n", (1, 0), None),
+    ]),
+    ("upper_simple", "ᾳ ᾀ ᾓ ß ŉ\n", &[
+        (":s/.*/\\U&/", "ᾼ ᾈ ᾛ ẞ ŉ\n", (0, 0), Some("")),
+    ]),
+    ("lower_simple", "İ ẞ Ω\n", &[
+        (":s/.*/\\L&/", "i ß ω\n", (0, 0), Some("")),
+    ]),
+    ("upper_once", "ᾳx\n", &[
+        (":s/.*/\\u&/", "ᾼx\n", (0, 0), Some("")),
+    ]),
+    ("collection_line_end", "caa\nx\n", &[
+        (":%s/\\s\\|[a\\n]/X/g", "cXX\nxX\n", (1, 0), Some("3 substitutions on 2 lines")),
+    ]),
+    ("collection_joins", "b\nb\n", &[
+        (":%s/[a\\n]/X/g", "bXbX\n", (0, 0), Some("")),
+    ]),
+    ("joined_again", "c \nacb\ncaa  \n", &[
+        (":%s/\\n/X/", "c XacbXcaa  X\n", (0, 0), Some("")),
+    ]),
+    ("joined_in_range", "a\nb\nc\nd\n", &[
+        (":1,2s/\\n/X/", "aXbXc\nd\n", (0, 0), Some("")),
+    ]),
+    ("joined_then_line", "a\nb\nc\nd\n", &[
+        (":%s/\\n\\|b/X/", "aXX\ncXdX\n", (1, 0), Some("4 substitutions on 2 lines")),
+    ]),
+    ("joined_past_end", "\n\n", &[
+        (":%s/\\a*\\n\\{,2}/X/", "X\n", (0, 0), Some("")),
+    ]),
+    ("past_last_line", "b A\n", &[
+        (":%s/[a\\n]\\zs\\(a\\|b\\)\\{-}.*/X/", "b A\n", (0, 0), Some("")),
+    ]),
+    ("ze_before_zs", "c ca\na\n", &[
+        (":%s/\\ze\\zsc/<&>/g", "<c> <c>a\na\n", (0, 0), Some("")),
+    ]),
+    ("star_after_newline", " a\nb\nAA\n\n", &[
+        (":%s/\\%(ab\\)\\=\\n*[a\\n]\\{2}/X/", " Xb\nAAX\n", (1, 0), Some("")),
+    ]),
+    ("caret_after_zs", "a ^a\n", &[
+        (":s/\\zs^a/X/", "a X\n", (0, 0), Some("")),
+    ]),
+    ("search_continues_at_end", "aaca\n abAc\n", &[
+        ("/a\\w\r", "aaca\n abAc\n", (1, 1), None),
+        ("n", "aaca\n abAc\n", (0, 0), None),
+        ("N", "aaca\n abAc\n", (1, 1), None),
+    ]),
+    ("search_empty_lines", "\n\n \nca \n", &[
+        ("/\\n\r", "\n\n \nca \n", (1, 0), None),
+        ("n", "\n\n \nca \n", (2, 0), None),
+        ("n", "\n\n \nca \n", (3, 2), None),
+    ]),
+    ("search_past_last_line", "b A\n", &[
+        ("/[a\\n]\\zs\\(a\\|b\\)\\{-}.*\r", "b A\n", (0, 2), None),
+    ]),
+    ("search_empty_match", "b Aa \n", &[
+        ("/\\(b*\\)\r", "b Aa \n", (0, 1), None),
+        ("n", "b Aa \n", (0, 2), None),
     ]),
 ];
 
@@ -205,6 +320,11 @@ fn invalid_patterns_do_not_move_or_replace_and_view_allows_counting() {
     assert_eq!(at(&app), before);
     assert_eq!(app.search.as_ref().unwrap().pattern, "old");
     assert_eq!(flash(&app), r"pattern: \1 not supported");
+    feed(&mut app, "/x**");
+    enter(&mut app);
+    assert_eq!(at(&app), before);
+    assert_eq!(app.search.as_ref().unwrap().pattern, "old");
+    assert_eq!(flash(&app), "pattern: can't have a multi follow a multi");
     ex(&mut app, r"%s/old/\=0/");
     assert_eq!(flash(&app), r"replacement: \= not supported");
     app.set_view(true);
@@ -222,7 +342,7 @@ fn substitutes_a_large_document_in_one_step() {
     let start = Instant::now();
     app.run_command("%s/x/y/g");
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_secs(8), "substitute took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "substitute took {elapsed:?}");
     assert_eq!(app.buffer.rope.to_string(), "y y\n".repeat(100_000));
     assert!(app.buffer.undo());
     assert_eq!(app.buffer.rope.to_string(), input);
@@ -317,4 +437,116 @@ fn multiline_highlights_use_each_panes_document_and_revision() {
     let start = doc.buffer.rope.line_to_char(2);
     doc.buffer.delete_chars(start, start + 3);
     assert_eq!(columns(&doc, 3).first(), None);
+}
+
+/// Neovim: "E35: No previous regular expression".
+#[test]
+fn a_repeat_without_a_search_is_an_error() {
+    let mut app = app_with("x\n");
+    feed(&mut app, "n");
+    assert_eq!(flash(&app), "no previous regular expression");
+}
+
+#[test]
+fn multiline_search_repeats_reuse_one_index() {
+    let mut app = app_with(&"foo\nbar\n".repeat(50_000));
+    feed(&mut app, r"/foo\nbar");
+    enter(&mut app);
+    assert_eq!(at(&app), (2, 0));
+    let start = Instant::now();
+    for _ in 0..200 {
+        feed(&mut app, "n");
+    }
+    assert_eq!(at(&app), (402, 0));
+    feed(&mut app, "G");
+    for _ in 0..200 {
+        feed(&mut app, "N");
+    }
+    let elapsed = start.elapsed();
+    assert_eq!(at(&app), (99_600, 0));
+    assert!(elapsed < Duration::from_millis(500), "400 repeats took {elapsed:?}");
+    feed(&mut app, "ggN");
+    assert_eq!(at(&app), (99_998, 0));
+}
+
+#[test]
+fn a_pathological_visible_line_does_not_stall_highlighting() {
+    let mut app = app_with(&format!("{}\nz\n", "a".repeat(1 << 20)));
+    assert!(app.set_search(r".*z\|.".into(), false));
+    let text = app.buffer.line_text(0);
+    let start = Instant::now();
+    let first = app.search_highlights(&app, 0, &text);
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_secs(1), "first highlight took {elapsed:?}");
+    assert_eq!(first.first(), Some(&(0..1)));
+    let start = Instant::now();
+    for _ in 0..100 {
+        assert_eq!(app.search_highlights(&app, 0, &text).len(), first.len());
+    }
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_millis(100), "cached highlights took {elapsed:?}");
+    assert_eq!(app.search_highlights(&app, 1, "z"), vec![0..1]);
+    // `n` and `N` try that line's matches only until they pass the cursor.
+    let start = Instant::now();
+    feed(&mut app, "/.*z\\|.\r");
+    assert_eq!(at(&app), (0, 1));
+    feed(&mut app, "N");
+    assert_eq!(at(&app), (0, 0));
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "searching the line took {elapsed:?}");
+}
+
+#[test]
+fn the_final_line_break_matches_without_a_final_newline() {
+    let mut app = app_with("a\nb\nz");
+    ex(&mut app, r"%s/.\n/X/g");
+    assert_eq!(app.buffer.rope.to_string(), "XXX");
+    assert!(app.buffer.undo());
+    assert_eq!(app.buffer.rope.to_string(), "a\nb\nz");
+}
+
+/// Replays cases that `target/nvim-random.py` ran in Neovim: the path in
+/// `SHOIN_ORACLE` holds one case per line (name, text, then commands, tab
+/// separated, `\` escapes), and the results go to `<path>.shoin` for it to
+/// compare. Nothing to do without the variable.
+#[test]
+#[ignore]
+fn replay_neovim_oracle_cases() {
+    let Ok(path) = std::env::var("SHOIN_ORACLE") else { return };
+    let unescape = |text: &str| {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            let escaped = if ch == '\\' { chars.next() } else { None };
+            out.push(match escaped {
+                Some('n') => '\n',
+                Some('t') => '\t',
+                Some('r') => '\r',
+                Some(other) => other,
+                None => ch,
+            });
+        }
+        out
+    };
+    let escape = |text: &str| text.replace('\\', r"\\").replace('\n', r"\n").replace('\t', r"\t").replace('\r', r"\r");
+    let mut out = String::new();
+    for case in std::fs::read_to_string(&path).unwrap().lines() {
+        let fields: Vec<&str> = case.split('\t').collect();
+        let mut app = app_with(&unescape(fields[1]));
+        out.push_str(fields[0]);
+        for command in &fields[2..] {
+            let command = unescape(command);
+            app.flash = None;
+            if let Some(command) = command.strip_prefix(':') {
+                ex(&mut app, command);
+            } else {
+                feed(&mut app, &command);
+            }
+            let error = app.flash.as_ref().is_some_and(|f| matches!(f.kind, FlashKind::Error));
+            let (line, col) = at(&app);
+            out.push_str(&format!("\t{}\t{line}\t{col}\t{}", escape(&app.buffer.rope.to_string()), if error { "E" } else { "-" }));
+        }
+        out.push('\n');
+    }
+    std::fs::write(format!("{path}.shoin"), out).unwrap();
 }

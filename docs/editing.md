@@ -191,7 +191,10 @@ middle or the bottom of the pane. The cursor stays where it is.
   until `\E` or `\e`. Use `\&` and `\~` for literals, `\\` for a backslash,
   `\r` for a line break, and `\n` for NUL. Replacement expressions are
   unsupported.
-
+- A separator inside `[...]` belongs to the pattern, so `:s/[/]/-/g`
+  replaces slashes. Highlighting stops on a line after 50 ms and keeps the
+  matches found by then, so a slow pattern on a very long line cannot freeze
+  the screen, much as Neovim's `redrawtime` limits it.
 
 - `zc` folds the innermost item or section around the cursor that is still
   open, and moves the cursor to its first line. Pressed again, it folds the
