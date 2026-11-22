@@ -1,5 +1,5 @@
 use super::*;
-use crate::render::layout::{cell_width_at, tab_stop};
+use crate::render::layout::{cell_width, cell_width_at, tab_stop};
 
 impl App {
     // -------------------------------------------------------- writer verbs (g)
@@ -475,24 +475,33 @@ impl App {
         }
     }
 
-    /// `r`: overwrite `count` characters with `ch`. With fewer than `count`
-    /// left on the line nothing changes, as Neovim beeps. A tab with
+    /// `r`: overwrite `count` characters with `ch`, each a base character
+    /// with the combining marks on it, as Neovim's grapheme. With fewer than
+    /// `count` left on the line nothing changes, as Neovim beeps. A tab with
     /// `expand_tab` and a line break (`r<CR>`) are Neovim's special cases:
     /// [`App::replace_with_tab_spaces`] and [`App::replace_with_break`].
+    ///
+    /// `.` repeats `r<Tab>` as Neovim records it, a Replace-mode
+    /// `{count}R<Tab>` (its default `smarttab` takes that path without
+    /// `expandtab` too): no count check, the tabs going on past the end of
+    /// a shorter line.
     pub(super) fn replace_chars(&mut self, ch: char, count: usize) {
         let cur = self.buffer.cursor;
-        let len = self.buffer.line_len(cur.line);
         let n = count;
-        if n == 0 || len.saturating_sub(cur.col) < n {
+        let tw = self.config.editor.tab_width.max(1);
+        let chars: Vec<char> = self.buffer.line_text(cur.line).chars().collect();
+        let (end, taken) = graphemes_from(&chars, cur.col, n, tw);
+        let replace_mode = ch == '\t' && self.replaying;
+        if n == 0 || (taken < n && !replace_mode) {
             return;
         }
         match ch {
-            '\n' => return self.replace_with_break(n),
-            '\t' if self.config.editor.expand_tab => return self.replace_with_tab_spaces(n),
+            '\n' => return self.replace_with_break(end),
+            '\t' if self.config.editor.expand_tab => return self.replace_with_tab_spaces(n, end),
             _ => {}
         }
         let start = self.buffer.char_index(cur);
-        let end = self.buffer.char_index(Cursor::new(cur.line, cur.col + n));
+        let end = self.buffer.char_index(Cursor::new(cur.line, end));
         self.buffer.delete_chars(start, end);
         let repl: String = std::iter::repeat_n(ch, n).collect();
         self.buffer.insert_str(cur, &repl);
@@ -503,15 +512,18 @@ impl App {
     /// each of the `n` characters from the cursor becomes the spaces from
     /// where it starts to the next tab stop, so the first one may become
     /// fewer than a tab's width and every later one a whole tab's. The
-    /// cursor ends on the last space; redo comes back to where it started.
-    fn replace_with_tab_spaces(&mut self, n: usize) {
+    /// characters go up to column `end`, fewer than `n` when `.` repeats it
+    /// on a shorter line. The cursor ends on the last space; redo comes back
+    /// to where it started.
+    fn replace_with_tab_spaces(&mut self, n: usize, end: usize) {
         let cur = self.buffer.cursor;
         let tw = self.config.editor.tab_width.max(1);
         let cells = motion::goal_start_cells(&self.buffer, Cursor::new(cur.line, cur.col), tw);
         let spaces = tab_stop(cells, tw) + (n - 1) * tw;
         let revision = self.buffer.revision;
         let start = self.buffer.char_index(cur);
-        self.buffer.delete_chars(start, start + n);
+        let end = self.buffer.char_index(Cursor::new(cur.line, end));
+        self.buffer.delete_chars(start, end);
         self.buffer.insert_str(cur, &" ".repeat(spaces));
         self.buffer.cursor = Cursor::new(cur.line, cur.col + spaces - 1);
         if self.buffer.revision != revision {
@@ -519,20 +531,23 @@ impl App {
         }
     }
 
-    /// `r<CR>`: the `n` characters from the cursor become one line break,
-    /// as Neovim's. With `auto_indent` the new line starts with the indent
-    /// of the text before the cursor, rebuilt to its width as Neovim's is
+    /// `r<CR>`: the characters from the cursor up to column `end` become
+    /// one line break, as Neovim's. With `auto_indent` the new line starts
+    /// with the indent of the text before the cursor, rebuilt to its width
+    /// as Neovim's is
     /// (spaces with `expand_tab`, else tabs and then spaces), in place of
     /// the blanks it would have started with; a new line with nothing
     /// after that indent is left empty. The cursor goes to the indent's
     /// last character, where Neovim's Esc leaves it, and redo to the
-    /// character before the break.
-    fn replace_with_break(&mut self, n: usize) {
+    /// character before the break. A new line left empty at the end of a
+    /// file with no final newline gets one, so it is a line the cursor can
+    /// stand on, as in Neovim.
+    fn replace_with_break(&mut self, end: usize) {
         let cur = self.buffer.cursor;
         let tw = self.config.editor.tab_width.max(1);
         let chars: Vec<char> = self.buffer.line_text(cur.line).chars().collect();
         let blank = |c: &&char| matches!(c, ' ' | '\t');
-        let mut rest = &chars[cur.col + n..];
+        let mut rest = &chars[end..];
         let mut indent = String::new();
         let width = chars[..cur.col].iter().take_while(blank).fold(0, |at, &c| at + cell_width_at(c, at, tw));
         if self.config.editor.auto_indent {
@@ -548,9 +563,11 @@ impl App {
         let revision = self.buffer.revision;
         let start = self.buffer.char_index(cur);
         let end = self.buffer.char_index(Cursor::new(cur.line, chars.len()));
+        let unterminated = end == self.buffer.rope.len_chars();
         self.buffer.delete_chars(start, end);
         let rest: String = rest.iter().collect();
-        self.buffer.insert_str(cur, &format!("\n{indent}{rest}"));
+        let close = if unterminated && rest.is_empty() { "\n" } else { "" };
+        self.buffer.insert_str(cur, &format!("\n{indent}{rest}{close}"));
         let mut landing = Cursor::new(cur.line + 1, indent.chars().count().saturating_sub(1));
         // A new line left empty still had the indent when Neovim's Esc
         // took the goal from it: `j` goes on from its last cell.
@@ -845,4 +862,20 @@ fn vim_recased_len(c: char, mapped: &str) -> usize {
             _ => c.len_utf8(),
         },
     }
+}
+
+/// Where `n` characters from `col` on `chars` end, and how many there were
+/// (fewer than `n` at the line's end). A character takes the combining marks
+/// after it, drawn in no cells of their own, as Neovim's grapheme does.
+fn graphemes_from(chars: &[char], col: usize, n: usize, tab: usize) -> (usize, usize) {
+    let mut end = col.min(chars.len());
+    let mut taken = 0;
+    while taken < n && end < chars.len() {
+        end += 1;
+        while end < chars.len() && cell_width(chars[end], tab) == 0 && !chars[end].is_control() {
+            end += 1;
+        }
+        taken += 1;
+    }
+    (end, taken)
 }

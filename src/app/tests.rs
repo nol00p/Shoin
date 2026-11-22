@@ -9986,3 +9986,88 @@ fn replace_with_enter_splits_the_line_as_neovim() {
     ]));
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
+
+/// `r<CR>` at the end of a file with no final newline opens a real line:
+/// the cursor stays on the new empty line, as Neovim's, so `x` there
+/// deletes nothing.
+#[test]
+fn replace_with_enter_at_an_unterminated_end_as_neovim() {
+    let mut misses = nv_misses(Config::default, "abc", &[
+        ("$r\r", "ab\n\n", (1, 0), Some((1, 0)), None),
+        ("$r\rx", "ab\n\n", (1, 0), Some((1, 0)), None),
+        ("l2r\r", "a\n\n", (1, 0), Some((1, 0)), None),
+        ("$2r\r", "abc", (0, 2), Some((0, 2)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, "  abc", &[
+        ("$r\r", "  ab\n\n", (1, 0), Some((1, 0)), None),
+        ("$r\rx", "  ab\n\n", (1, 0), Some((1, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "abc\n", &[
+        ("$r\r", "ab\n\n", (1, 0), Some((1, 0)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// `r` counts a base character and the combining marks on it as one, as
+/// Neovim's: for the count check and for what it replaces, with a plain
+/// character, a tab or a line break.
+#[test]
+fn replace_takes_a_character_with_its_combining_marks_as_neovim() {
+    let mut misses = nv_misses(Config::default, "a\u{301}bc\n", &[
+        ("0r\r", "\nbc\n", (1, 0), Some((1, 0)), None),
+        ("0r\t", "    bc\n", (0, 3), Some((0, 3)), None),
+        ("0rx", "xbc\n", (0, 0), Some((0, 0)), None),
+        ("2rx", "xxc\n", (0, 1), Some((0, 1)), None),
+        ("3rx", "xxx\n", (0, 2), Some((0, 2)), None),
+        ("4rx", "a\u{301}bc\n", (0, 0), Some((0, 0)), None),
+        ("3r\r", "\n\n", (1, 0), Some((1, 0)), None),
+        ("4r\r", "a\u{301}bc\n", (0, 0), Some((0, 0)), None),
+        ("3r\t", "            \n", (0, 11), Some((0, 11)), None),
+        ("4r\t", "a\u{301}bc\n", (0, 0), Some((0, 0)), None),
+        ("$hrx", "a\u{301}xc\n", (0, 2), Some((0, 2)), None),
+        ("$h2rx", "a\u{301}xx\n", (0, 3), Some((0, 3)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, "ab\u{301}c\n", &[
+        ("lrx", "axc\n", (0, 1), Some((0, 1)), None),
+        ("l2r\r", "a\n\n", (1, 0), Some((1, 0)), None),
+        ("l3rx", "ab\u{301}c\n", (0, 1), Some((0, 1)), None),
+        ("2rx", "xxc\n", (0, 1), Some((0, 1)), None),
+        ("3rx", "xxx\n", (0, 2), Some((0, 2)), None),
+        ("l2r\t", "a       \n", (0, 7), Some((0, 7)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A counted `r<Tab>` checks its count, but `.` repeats it as Neovim
+/// records it, a Replace-mode `{count}R<Tab>`: on a shorter line the
+/// tabs go on past its end. Neovim's default `smarttab` sends the tab
+/// down that path without `expand_tab` too.
+#[test]
+fn repeating_a_counted_replace_with_tab_as_neovim() {
+    let text = "abcde\n\nxyz\nab\n";
+    let mut misses = nv_misses(Config::default, "abcde\nx\n", &[
+        ("2r\tj0.", "        cde\n        \n", (1, 7), Some((1, 7)), None),
+        ("r\tj0.", "    bcde\n    \n", (1, 3), Some((1, 3)), None),
+        ("3r\tjj.", "            de\n            \n", (1, 11), Some((1, 11)), None),
+        ("2r\tj03.", "        cde\n            \n", (1, 11), Some((1, 11)), None),
+        ("2r\rj.", "\ncde\nx\n", (2, 0), Some((2, 0)), None),
+        ("2rxj0.", "xxcde\nx\n", (1, 0), Some((1, 0)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, text, &[
+        ("2r\tj.", "        cde\n        \nxyz\nab\n", (1, 7), Some((2, 2)), None),
+        ("2r\tjj.", "        cde\n\nxy      \nab\n", (2, 7), Some((3, 1)), None),
+        ("2r\tjj.u", "        cde\n\nxyz\nab\n", (2, 2), Some((3, 1)), None),
+        ("2r\tjj.u\u{12}", "        cde\n\nxy      \nab\n", (2, 2), Some((3, 1)), None),
+        ("2r\t3jl.", "        cde\n\nxyz\na       \n", (3, 7), Some((3, 7)), None),
+    ]));
+    let noet = || {
+        let mut cfg = Config::default();
+        cfg.editor.expand_tab = false;
+        cfg
+    };
+    misses.extend(nv_misses(noet, "abcde\nx\n", &[
+        ("2r\tj0.", "\t\tcde\n\t\t\n", (1, 1), Some((1, 1)), None),
+        ("2r\tj03.", "\t\tcde\n\t\t\t\n", (1, 2), Some((1, 2)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
