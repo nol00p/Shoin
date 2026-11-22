@@ -145,6 +145,7 @@ version and then the file's, in the order shown on screen.
   half written.
 - `trim_on_save` strips trailing whitespace, and `final_newline`
   (`preserve`, `always`, `never`) decides the file's last newline.
+  An empty buffer writes zero bytes with every policy, including on autosave.
 - In a Markdown file (`.md`, `.markdown`, judged by the name being saved
   to), `trim_on_save` leaves lines inside a fenced code block alone, and a
   hard line break (two or more spaces after text, with text on the next

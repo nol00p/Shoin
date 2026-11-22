@@ -190,9 +190,9 @@ fn a_picture_with_alt_text_is_captioned_with_it() {
     std::fs::remove_dir_all(&d).ok();
 }
 
-/// A whole kitty picture is put whole: no source rectangle.
+/// The preview, frame and terminal all use the same picture dimensions.
 #[test]
-fn a_whole_kitty_picture_is_put_without_a_crop() {
+fn picture_placement_and_protocol_follow_the_embed_measure() {
     let d = std::env::temp_dir().join(format!("shoin-paint-whole-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     let mut png = vec![
@@ -200,23 +200,57 @@ fn a_whole_kitty_picture_is_put_without_a_crop() {
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
         0x15, 0xC4, 0x89,
     ];
-    png[16..20].copy_from_slice(&800u32.to_be_bytes());
+    png[16..20].copy_from_slice(&400u32.to_be_bytes());
     png[20..24].copy_from_slice(&200u32.to_be_bytes());
     std::fs::write(d.join("photo.png"), &png).unwrap();
     std::fs::write(d.join("note.md"), "top\n![[photo.png]]\nafter\n").unwrap();
-    let mut app = App::new(Config::default(), Some(d.join("note.md")), None).unwrap();
-    app.embed_mode = crate::transclude::Mode::Short;
-    app.image_protocol = crate::image::Protocol::Kitty;
-    app.term_size = (80, 24);
-    app.refresh_blocks();
-    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-    t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
-    let places = app.visible_pictures();
-    let p = places[0];
-    assert!(p.whole(), "{p:?}");
-    let out = app.picture_bytes(&places).unwrap();
+    use crate::image::Protocol;
+    use crate::transclude::Mode;
     let id = crate::image::kitty_id(&png);
-    assert!(out.contains(&format!("\x1b_Ga=p,i={id},q=2,C=1,c={},r={}\x1b\\", p.cols, p.rows)), "{out:?}");
+    for mode in [Mode::Off, Mode::Short, Mode::Rec, Mode::Full] {
+        for border in [false, true] {
+            for protocol in [Protocol::Kitty, Protocol::Iterm2] {
+                let mut cfg = Config::default();
+                cfg.transclude.border = border;
+                cfg.layout.padding_top = 0;
+                cfg.layout.padding_bottom = 0;
+                let mut app = App::new(cfg, Some(d.join("note.md")), None).unwrap();
+                app.embed_mode = mode;
+                app.image_protocol = protocol;
+                app.term_size = (80, 24);
+                app.refresh_blocks();
+                let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+                t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+                let places = app.visible_pictures();
+                let case = (mode, border, protocol);
+                if mode == Mode::Off {
+                    assert!(places.is_empty(), "{case:?}: {places:?}");
+                    continue;
+                }
+                let [p] = places.as_slice() else {
+                    panic!("{case:?}: {places:?}");
+                };
+                let (cols, rows) = match (mode, border) {
+                    (Mode::Short | Mode::Rec, true) => (68, 16),
+                    _ => (72, 17),
+                };
+                assert_eq!((p.x, p.y, p.cols, p.rows, p.shown), (4, 1, cols, rows, rows), "{case:?}");
+                assert!(p.whole(), "{case:?}: {p:?}");
+                let frame = t.backend().buffer();
+                assert_eq!(frame[(p.x, p.y + rows)].symbol(), "p", "{case:?}: caption");
+                assert_eq!(frame[(p.x, p.y + rows + 1)].symbol(), "a", "{case:?}: following line");
+
+                let out = app.picture_bytes(&places).unwrap();
+                let image = match protocol {
+                    Protocol::Kitty => format!("\x1b_Ga=p,i={id},q=2,C=1,c={cols},r={rows}\x1b\\"),
+                    Protocol::Iterm2 => format!("\x1b]1337;File=inline=1;width={cols};height={rows};"),
+                    Protocol::None => unreachable!(),
+                };
+                let placed = format!("\x1b[{};{}H{image}", p.y + 1, p.x + 1);
+                assert!(out.contains(&placed), "{case:?}: {out:?}");
+            }
+        }
+    }
     std::fs::remove_dir_all(&d).ok();
 }
 
@@ -1987,6 +2021,48 @@ fn autosave_writes_a_modified_buffer_and_rearms() {
     app.autosave_at = Some(Instant::now() - Duration::from_secs(1));
     assert!(!app.autosave_tick(), "nothing dirty, nothing to say");
     let _ = std::fs::remove_file(path);
+}
+
+/// Bytes from Neovim --clean --headless with nofixeol, fixeol eol, or
+/// nofixeol noeol, respectively. The same writer handles :w and autosave.
+#[test]
+fn saving_after_deletion_matches_neovim_at_eof() {
+    let cases = [
+        ("a\nb\n", [""; 3], true),
+        ("a\r\nb\r\n", [""; 3], true),
+        ("a\nb", [""; 3], true),
+        ("a\n\nb", ["a\n", "a\n\n", "a\n"], false),
+        ("a\r\n\r\nb", ["a\r\n", "a\r\n\r\n", "a\r\n"], false),
+        ("a\n\n\nb", ["a\n\n", "a\n\n\n", "a\n\n"], false),
+        ("\nb", ["", "\n", ""], false),
+    ];
+    let path = saved_file(&mut app_with("draft\n"), "delete-eof");
+    for (before, expected, empty) in cases {
+        for (policy, want) in ["preserve", "always", "never"].into_iter().zip(expected) {
+            for autosave in [false, true] {
+                std::fs::write(&path, before).unwrap();
+                let mut cfg = Config::default();
+                cfg.editor.final_newline = policy.into();
+                let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+                match (empty, autosave) {
+                    (true, true) => feed(&mut app, "ggdG"),
+                    (true, false) => ex(&mut app, "%d"),
+                    (false, _) => ex(&mut app, "$d"),
+                }
+                if autosave {
+                    autosave_due(&mut app);
+                    assert!(app.autosave_tick());
+                } else {
+                    ex(&mut app, "w");
+                }
+                let case = (before, policy, autosave);
+                assert_eq!(std::fs::read(&path).unwrap(), want.as_bytes(), "{case:?}");
+                assert_eq!(text(&app), want.replace("\r\n", "\n"), "{case:?}");
+                assert!(!app.buffer.modified, "{case:?}");
+            }
+        }
+    }
+    std::fs::remove_file(path).unwrap();
 }
 
 /// THE one that matters: autosave never forces. A file something else has
