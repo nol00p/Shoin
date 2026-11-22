@@ -346,7 +346,11 @@ middle or the bottom of the pane. The cursor stays where it is.
 - After `$`, `j`, `k`, `G`, `gg`, `:42` and the paging keys go to the end
   of each line they land on, long or short, as in Vim, and so does a
   selection started there. A move along the line, an edit, a yank or
-  leaving Visual mode ends that.
+  leaving Visual mode ends that. Scrolling with `Ctrl-e`, `Ctrl-y` or the
+  wheel keeps it.
+- In Visual mode `$`, and `j` or `k` onto a line shorter than the column
+  they keep, put the cursor on the line break, as in Vim, so `v$d` deletes
+  the line's end and its line break, joining the next line on.
 - In Normal mode the cursor on a tab is drawn on the tab's last cell, as in
   Vim; in Insert mode it is drawn on the first, where typing goes. In Visual
   mode it is on the last cell when the cursor is after where the selection

@@ -7,7 +7,9 @@ impl App {
         // A selection dragged out of a counted insert ends the count: what
         // follows is no longer the text the count was for.
         self.insert_repeat = None;
-        self.anchor = Some(self.buffer.cursor);
+        // Without the goal: `o` sets one afresh where it lands, as Neovim's,
+        // rather than bring back `$`'s line end.
+        self.anchor = Some(Cursor::new(self.buffer.cursor.line, self.buffer.cursor.col));
         self.mode = mode;
         self.visual_owner = Some((self.focus_pane, self.current()));
         // A keyboard `v` always returns to Normal. Only the mouse sets this,

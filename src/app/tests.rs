@@ -5004,7 +5004,7 @@ fn ctrl_e_scrolls_the_page_under_the_cursor() {
 }
 
 /// A cursor about to leave the screen is carried along, `scroll_off` in
-/// from the edge, keeping its column.
+/// from the edge, keeping its column and its goal.
 #[test]
 fn scrolling_carries_a_cursor_at_the_edge() {
     let mut app = scroll_app();
@@ -5013,13 +5013,14 @@ fn scrolling_carries_a_cursor_at_the_edge() {
     feed(&mut app, "20");
     ctrl(&mut app, 'e');
     assert_eq!(app.scroll_hint(), 20);
-    assert_eq!(app.buffer.cursor, Cursor::new(20 + pad, 3));
+    let at = |app: &App| (app.buffer.cursor.line, app.buffer.cursor.col, app.buffer.cursor.goal_col);
+    assert_eq!(at(&app), (20 + pad, 3, 3));
 
     feed(&mut app, "20");
     ctrl(&mut app, 'y');
     assert_eq!(app.scroll_hint(), 0);
     let bottom = app.viewport_height() - 1 - pad;
-    assert_eq!(app.buffer.cursor, Cursor::new(bottom, 3));
+    assert_eq!(at(&app), (bottom, 3, 3));
     ctrl(&mut app, 'y');
     assert_eq!(app.scroll_hint(), 0, "nothing above the first line");
 }

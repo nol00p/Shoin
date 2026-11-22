@@ -1434,7 +1434,10 @@ impl App {
         }
         let len = self.buffer.line_len(self.buffer.cursor.line);
         let col = self.buffer.cursor.col;
-        self.buffer.cursor.clamp(len, past_end);
+        // Visual's cursor may stand on a line break a goal put it on
+        // (`App::settle_goal`), as Neovim's.
+        let on_break = matches!(self.mode, Mode::Visual | Mode::VisualLine) && self.buffer.cursor.goal_cells.is_some();
+        self.buffer.cursor.clamp(len, past_end || on_break);
         // A key that left the cursor past the end (`x` on the last
         // character, a redo) leaves it on the column it is clamped to, and
         // that is the goal now, as Neovim's.
@@ -1511,6 +1514,7 @@ impl App {
         let page = self.viewport_height();
         if let Some(res) = motion::resolve(&self.buffer, m, count, page, false, self.config.editor.tab_width) {
             self.buffer.cursor = res.target;
+            self.visual_onto_line_break();
             // Read-only shows a line jump's line from its first row: the
             // kept column is edit mode's, and here it would be the column
             // the view parked the cursor on in the line it left, which puts
@@ -1997,7 +2001,7 @@ impl App {
             self.buffer.history.begin_group(anchor);
         }
 
-        let line_end = self.line_end_goal(&mode);
+        let goal = self.goal_before(&mode);
         match mode {
             Mode::Normal => self.on_key_normal(key),
             Mode::Insert => self.on_key_insert(key),
@@ -2007,8 +2011,8 @@ impl App {
             Mode::Prompt(p) => self.on_key_prompt(key, p),
         }
 
-        if let Some(before) = line_end {
-            self.forget_line_end(before);
+        if let Some(before) = goal {
+            self.settle_goal(before);
         }
 
         // A key that took focus away from a selection (`<C-w>q`, `<C-w>v`,
@@ -2033,51 +2037,70 @@ impl App {
 
 }
 
-/// What a Normal or Visual key started from while the goal was `$`'s line
-/// end ([`Cursor::LINE_END`]), for [`App::forget_line_end`] to tell after
-/// the key whether it still is.
+/// Where a Normal or Visual key started from, for [`App::settle_goal`] to
+/// tell after the key what became of the goal: whether `$`'s line end
+/// ([`Cursor::LINE_END`]) still holds, and whether a move in Visual goes
+/// on to a line break.
 #[derive(Clone, Copy)]
-struct LineEndGoal {
+struct GoalBefore {
+    cursor: Cursor,
     revision: u64,
-    operator: bool,
     visual: bool,
 }
 
 impl App {
-    /// The state before a Normal or Visual key when the goal is the line
-    /// end; `None` otherwise, when there is nothing to forget.
-    fn line_end_goal(&self, mode: &Mode) -> Option<LineEndGoal> {
+    /// The state before a Normal or Visual key; `None` in the other modes,
+    /// where there is nothing to settle.
+    fn goal_before(&self, mode: &Mode) -> Option<GoalBefore> {
         let visual = matches!(mode, Mode::Visual | Mode::VisualLine);
-        let watched = visual || *mode == Mode::Normal;
-        (watched && self.buffer.cursor.goal_col == Cursor::LINE_END).then(|| LineEndGoal {
+        (visual || *mode == Mode::Normal).then_some(GoalBefore {
+            cursor: self.buffer.cursor,
             revision: self.buffer.revision,
-            operator: self.pending.operator.is_some(),
             visual,
         })
     }
 
     /// After a key, the line-end goal gives way to the column the cursor is
-    /// on when the key edited the text (`x`, `p`, `u`), ran an operator
-    /// (`yl`, `vy`), left Visual (`v` `Esc`) or started Insert (`i`), as
-    /// Neovim's `curswant` is
-    /// then set afresh. A motion sets its own goal (`motion::resolve`); a
-    /// motion that cannot move (`l` at the end), a scroll and the line
-    /// commands keep it.
-    fn forget_line_end(&mut self, before: LineEndGoal) {
+    /// on when the key edited the text (`x`, `p`, `u`), left Visual (`v`
+    /// `Esc`, `vy`) or started Insert (`i`), as Neovim's `curswant` is then
+    /// set afresh. A motion sets its own goal (`motion::resolve`), and an
+    /// operator that runs puts the cursor somewhere with its own (`yl`); a
+    /// motion that cannot move (`l` at the end), an operator that does
+    /// nothing (`d` `Esc`), a scroll and the line commands keep it.
+    ///
+    /// In Visual, a move whose goal is past the end of the line it lands on
+    /// (`$`, `j` from a longer line) puts the cursor on the line break, as
+    /// Neovim's does, so the selection takes it (`v$jd`).
+    fn settle_goal(&mut self, before: GoalBefore) {
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        if visual && self.buffer.cursor != before.cursor {
+            self.visual_onto_line_break();
+        }
         let cur = self.buffer.cursor;
-        if cur.goal_col != Cursor::LINE_END {
+        if cur.goal_col != Cursor::LINE_END || before.cursor.goal_col != Cursor::LINE_END {
             return;
         }
         let edited = self.buffer.revision != before.revision;
-        let operated = before.operator && self.pending.operator.is_none();
-        let left_visual = before.visual && !matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        let left_visual = before.visual && !visual;
         let inserting = self.mode == Mode::Insert;
-        if edited || operated || left_visual || inserting {
+        if edited || left_visual || inserting {
             // The column the clamp after the key leaves: `x` at the end
             // leaves it one past the shorter line.
             let len = self.buffer.line_len(cur.line);
             let col = if self.mode.allows_past_end() { cur.col.min(len) } else { cur.col.min(len.saturating_sub(1)) };
             self.buffer.cursor.set_col(col);
+        }
+    }
+
+    /// In Visual, a cursor whose goal is past the end of its line goes on to
+    /// the line break, as Neovim's: [`App::settle_goal`] after a key that
+    /// moved it, and `move_by` for a `$` that leaves it where it was.
+    fn visual_onto_line_break(&mut self) {
+        let cur = self.buffer.cursor;
+        let tw = self.config.editor.tab_width;
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        if visual && cur.goal_cells.is_some_and(|g| motion::past_line_end(&self.buffer, cur.line, g, tw)) {
+            self.buffer.cursor.col = self.buffer.line_len(cur.line);
         }
     }
 }

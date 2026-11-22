@@ -85,7 +85,8 @@ impl App {
             self.escape_run = 0;
             self.escape_since = None;
         } else {
-            let anchor = self.buffer.cursor;
+            // Without the goal, as `handle_key`'s anchor: `u` sets it afresh.
+            let anchor = Cursor::new(self.buffer.cursor.line, self.buffer.cursor.col);
             self.buffer.history.begin_group(Some(anchor));
         }
         self.insert_pasted(&text, inserting);

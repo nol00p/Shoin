@@ -79,8 +79,9 @@ pub fn char_class(c: char) -> u8 {
 /// Resolve a motion from the buffer's current cursor, applying `count`.
 ///
 /// Returns `None` if the motion cannot move (e.g. `k` on line 0), which
-/// operators treat as a no-op rather than an error. `page` is the viewport
-/// height, needed by the scrolling motions.
+/// operators treat as a no-op rather than an error; `0` `^` `$` never fail,
+/// as Neovim's, and answer where the cursor is when it is already there.
+/// `page` is the viewport height, needed by the scrolling motions.
 ///
 /// `operator` is set when the motion is an operator's range (`dw`, `d}`)
 /// rather than a cursor move. A few motions then reach where the cursor can
@@ -319,8 +320,17 @@ pub fn resolve(
 
     // Position only: `Cursor`'s equality also compares the hidden goal column.
     // A linewise operator range that stays put still covers its line, so
-    // `dgg` on the first line deletes it.
-    if (target.line, target.col) == (cur.line, cur.col) && !(operator && kind == Linewise) {
+    // `dgg` on the first line deletes it. `0` `^` `$` cannot fail, as
+    // Neovim's: where the cursor already is they still set the goal, so `$`
+    // on `x` goes on to the end of the next line, and `0` there forgets it.
+    // Under an operator `$` still covers the last character (`d$` on it),
+    // when the line has one.
+    let never_fails = match motion {
+        LineStart | LineFirstNonBlank => !operator,
+        LineEnd => !operator || buffer.line_len(target.line) > 0,
+        _ => false,
+    };
+    if (target.line, target.col) == (cur.line, cur.col) && !(operator && kind == Linewise) && !never_fails {
         return None;
     }
     Some(MotionResult { target, kind })
@@ -383,6 +393,19 @@ pub fn col_at_cells(buffer: &Buffer, line: usize, cells: usize, tab: usize) -> u
         col -= 1;
     }
     col
+}
+
+/// Whether screen cell `cells` is past the last character of `line`: on its
+/// line break, where a goal there puts Visual mode's cursor, as Neovim's
+/// (`v$`, and `j` from a long line onto a shorter one).
+pub fn past_line_end(buffer: &Buffer, line: usize, cells: usize, tab: usize) -> bool {
+    if cells == Cursor::LINE_END {
+        return true;
+    }
+    let len = buffer.line_len(line);
+    let text = buffer.rope.line(line.min(buffer.last_line()));
+    let width = text.chars().take(len).fold(0, |at, c| at + cell_width_at(c, at, tab));
+    cells >= width
 }
 
 /// `cw` on a word: `e`, except that a cursor already on a word's last
@@ -611,9 +634,10 @@ mod tests {
         assert_eq!(go(&b, Motion::LineEnd, 1), Some((0, 16)));
         assert_eq!(kind(&b, Motion::LineEnd), MotionKind::Inclusive);
 
-        // An empty line has nowhere to go.
+        // An empty line has nowhere to go, but `$` cannot fail: it answers
+        // where the cursor is, to set the goal, as Neovim's.
         let b = buf("\nx\n", 0, 0);
-        assert_eq!(go(&b, Motion::LineEnd, 1), None);
+        assert_eq!(go(&b, Motion::LineEnd, 1), Some((0, 0)));
     }
 
     /// A count multiplies a find: `3fx` is the THIRD x on the line.
@@ -725,7 +749,7 @@ mod tests {
         let b = buf("one\ntwo\n", 0, 0);
         assert_eq!(go(&b, Motion::Up, 1), None, "no line above the first");
         assert_eq!(go(&b, Motion::Left, 1), None);
-        assert_eq!(go(&b, Motion::LineStart, 1), None, "already there");
+        assert_eq!(go(&b, Motion::LineStart, 1), Some((0, 0)), "already there, but `0` cannot fail");
 
         // The trailing newline ends `two`; it does not open a line below it,
         // so `two` is the last line, as in vim.

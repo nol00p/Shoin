@@ -261,26 +261,172 @@ fn what_forgets_the_line_end_goal_as_neovim() {
 }
 
 /// Visual mode keeps `$`'s goal too: `v` after `$` and then `j` ends each
-/// line's selection at its end. Neovim's Visual cursor stands on the line
-/// break there (one past the last character); Shoin's stands on the last
-/// character, as its Visual `$` already does, so that is the column here.
+/// line's selection at its end. The Visual cursor stands on the line break
+/// there, one past the last character, as Neovim's does, in `V` as in `v`.
 #[test]
 fn visual_keeps_the_line_end_goal() {
     let out = misses(
         AFTER,
         &[
-            ("2G$vj", (2, 0)),
-            ("2G$vjj", (3, 43)),
-            ("2G$vjjj", (4, 1)),
-            ("2G$Vjj", (3, 43)),
-            ("2G$vjjjk", (3, 43)),
-            ("2G$v4G", (3, 43)),
-            ("2G$vj4G", (3, 43)),
+            ("2G$vj", (2, 1)),
+            ("2G$vjj", (3, 44)),
+            ("2G$vjjj", (4, 2)),
+            ("2G$Vjj", (3, 44)),
+            ("2G$vjjjk", (3, 44)),
+            ("2G$v4G", (3, 44)),
+            ("2G$vj4G", (3, 44)),
+            ("2G$vjjo", (1, 10)),
         ],
     );
     let mut out = out;
-    out.extend(misses(CASE_LINES, &[("$vj", (1, 31)), ("$vjj", (2, 1)), ("6j$vk", (5, 33)), ("6j$Vk", (5, 33))]));
+    out.extend(misses(CASE_LINES, &[("$vj", (1, 32)), ("$vjj", (2, 2)), ("6j$vk", (5, 34)), ("6j$Vk", (5, 34))]));
     assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// Three lines, the middle one a single character: a goal that is still
+/// the line end at the third line lands on its last character, column 9.
+const SHORT_MID: &str = "abcd\nx\nabcdefghij\n";
+
+/// A motion that cannot fail sets its goal even where the cursor already
+/// is, as Neovim's: `$` on a line of one character, `0` and `^` there
+/// after `$`. One that fails (`l` at the end, `h` at the start) keeps it.
+#[test]
+fn a_goal_changes_where_the_cursor_stays_as_neovim() {
+    let mut out = misses("x\nabcdefghij\n", &[("$j", (1, 9)), ("$0j", (1, 0)), ("$^j", (1, 0))]);
+    out.extend(misses(
+        SHORT_MID,
+        &[("$j0j", (2, 0)), ("$j^j", (2, 0)), ("$j$jk", (1, 0)), ("$jlj", (2, 9)), ("$jhj", (2, 9))],
+    ));
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// A text, keys, the text after, where the cursor is and the anchor.
+type VisualCase = (&'static str, &'static str, &'static str, (usize, usize), Option<(usize, usize)>);
+
+/// `$` in Visual, a sticky line end it carries down, and `j` or `k` onto a
+/// line shorter than the goal, end the selection on the line break, so `d`
+/// takes it, as Neovim's: `v$jd` on
+/// `abcd`, `x`, `abcdefghij` leaves `abcdefghij`, not an empty line above
+/// it. Each case is the text, the keys, the text after and where the
+/// cursor is, with Visual's anchor when it is still on.
+#[test]
+fn visual_dollar_takes_the_line_break_as_neovim() {
+    #[rustfmt::skip]
+    let cases: &[VisualCase] = &[
+        (SHORT_MID, "v$jd", "abcdefghij\n", (0, 0), None),
+        (SHORT_MID, "v$d", "x\nabcdefghij\n", (0, 0), None),
+        (SHORT_MID, "v$j", SHORT_MID, (1, 1), Some((0, 0))),
+        (SHORT_MID, "v$jj", SHORT_MID, (2, 10), Some((0, 0))),
+        (SHORT_MID, "v$jk", SHORT_MID, (0, 4), Some((0, 0))),
+        (SHORT_MID, "v$jy", SHORT_MID, (0, 0), None),
+        (SHORT_MID, "$vjd", "abcabcdefghij\n", (0, 3), None),
+        (SHORT_MID, "$vj", SHORT_MID, (1, 1), Some((0, 3))),
+        (SHORT_MID, "jv$d", "abcd\nabcdefghij\n", (1, 0), None),
+        (SHORT_MID, "jv$kd", "abcd\nabcdefghij\n", (0, 3), None),
+        (SHORT_MID, "v$jx", "abcdefghij\n", (0, 0), None),
+        (SHORT_MID, "v$jc\u{1b}", "abcdefghij\n", (0, 0), None),
+        (SHORT_MID, "$vjjkd", "abcabcdefghij\n", (0, 3), None),
+        (SHORT_MID, "V$jd", "abcdefghij\n", (0, 9), None),
+        (SHORT_MID, "v$jo", SHORT_MID, (0, 0), Some((1, 1))),
+        (SHORT_MID, "$vjo", SHORT_MID, (0, 3), Some((1, 1))),
+        (SHORT_MID, "$vjoj", SHORT_MID, (1, 1), Some((1, 1))),
+        (SHORT_MID, "v3lj", SHORT_MID, (1, 1), Some((0, 0))),
+        (SHORT_MID, "v3ljd", "abcdefghij\n", (0, 0), None),
+        (SHORT_MID, "2jv9lkk", SHORT_MID, (0, 4), Some((2, 0))),
+        (SHORT_MID, "lv2lj", SHORT_MID, (1, 1), Some((0, 1))),
+        ("ab\ncd\nef\n", "v$d", "cd\nef\n", (0, 0), None),
+        ("ab\ncd\nef\n", "v$y", "ab\ncd\nef\n", (0, 0), None),
+        ("ab\ncd\nef\n", "jv$d", "ab\nef\n", (1, 0), None),
+        ("ab\ncd\nef\n", "v$hd", "\ncd\nef\n", (0, 0), None),
+        ("ab\ncd\nef\n", "v$l", "ab\ncd\nef\n", (0, 2), Some((0, 0))),
+        ("ab\ncd\nef\n", "v$ld", "cd\nef\n", (0, 0), None),
+        ("ab\ncd\nef\n", "$v$d", "acd\nef\n", (0, 1), None),
+    ];
+    let mut out = Vec::new();
+    for &(text, keys, after, at, anchor) in cases {
+        let mut app = fresh(text, 4);
+        feed(&mut app, keys);
+        let c = app.buffer.cursor;
+        let got = (app.buffer.rope.to_string(), (c.line, c.col), app.visual_anchor().map(|a| (a.line, a.col)));
+        if got != (after.to_string(), at, anchor) {
+            out.push(format!("{text:?} {keys:?}: got {got:?}, Neovim {:?}", (after, at, anchor)));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// An operator that does nothing keeps `$`'s goal, as Neovim's: one
+/// cancelled with Esc, one given a key that is no motion, one whose motion
+/// fails (`dk` on the first line). `Ctrl-r` with nothing to redo still
+/// forgets it, as Neovim's, which says so and sets the goal anyway.
+#[test]
+fn an_operator_that_does_nothing_keeps_the_goal_as_neovim() {
+    let out = misses(
+        SHORT_MID,
+        &[
+            ("$d\u{1b}2j", (2, 9)),
+            ("$c\u{1b}2j", (2, 9)),
+            ("$y\u{1b}2j", (2, 9)),
+            ("$g\u{1b}2j", (2, 9)),
+            ("$d\u{1b}\u{1b}2j", (2, 9)),
+            ("$dx2j", (2, 9)),
+            ("$dk2j", (2, 9)),
+            ("$yk2j", (2, 9)),
+            ("$\u{12}2j", (2, 3)),
+        ],
+    );
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// `Ctrl-e` that pushes the cursor down a line keeps `$`'s goal, as
+/// Neovim's does (both at `scroll_off` 0): the cursor goes to the end of
+/// the line it is carried to, and `j` on to the end of the next.
+#[test]
+fn a_scroll_that_carries_the_cursor_keeps_the_goal_as_neovim() {
+    let mut out = Vec::new();
+    for (keys, want) in [("$\u{5}", (1, 0)), ("$\u{5}j", (2, 9)), ("$\u{19}j", (1, 0))] {
+        let mut app = fresh(SHORT_MID, 4);
+        app.config.editor.scroll_off = 0;
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+        feed(&mut app, keys);
+        let got = (app.buffer.cursor.line, app.buffer.cursor.col);
+        if got != want {
+            out.push(format!("{keys:?}: got {got:?}, Neovim {want:?}"));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
+/// A bracketed paste after `$`, undone, leaves the goal where `u` puts the
+/// cursor, as a typed change does and as Neovim's: `u2j` lands on the
+/// column `u` went back to, not at the end.
+#[test]
+fn undoing_a_paste_takes_the_goal_afresh_as_neovim() {
+    let mut app = fresh(SHORT_MID, 4);
+    feed(&mut app, "$");
+    app.on_paste("Z".to_string());
+    app.sync_after_input();
+    feed(&mut app, "u2j");
+    assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (2, 3));
+}
+
+/// A tab as wide as `tab_width` allows, with the caret on it in Normal
+/// mode, draws the caret at the pane's last column, not past the edge of
+/// a terminal coordinate.
+#[test]
+fn a_huge_tab_width_keeps_the_caret_on_screen() {
+    let mut app = fresh("\tx\n", 65535);
+    let mut t = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+    let x = t.get_cursor_position().unwrap().x;
+    assert!(x < 60, "caret at {x}");
+    for keys in ["0", "l", "0", "a\t\t\u{1b}0"] {
+        feed(&mut app, keys);
+        t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+        let x = t.get_cursor_position().unwrap().x;
+        assert!(x < 60, "{keys:?}: caret at {x}");
+    }
 }
 
 /// Lines with tabs mid-line, at the start, and ending at a stop.
@@ -406,3 +552,27 @@ fn backspace_in_the_indent_goes_back_a_stop_as_neovim() {
     assert!(out.is_empty(), "{}", out.join("\n"));
 }
 
+
+/// `d$` `y$` `c$` on a line's last character take that character, as
+/// Neovim's: `$` cannot fail, under an operator either. Each case is the
+/// keys, the text after and where the cursor is.
+#[test]
+fn an_operator_to_the_end_takes_the_last_character_as_neovim() {
+    let mut out = Vec::new();
+    for (keys, after, at) in [
+        ("$d$", "abc\nx\nabcdefghij\n", (0, 2)),
+        ("$y$P", "abcdd\nx\nabcdefghij\n", (0, 3)),
+        ("$c$Z\u{1b}", "abcZ\nx\nabcdefghij\n", (0, 3)),
+        ("jd$", "abcd\n\nabcdefghij\n", (1, 0)),
+        ("j$d$", "abcd\n\nabcdefghij\n", (1, 0)),
+    ] {
+        let mut app = fresh(SHORT_MID, 4);
+        feed(&mut app, keys);
+        let c = app.buffer.cursor;
+        let got = (app.buffer.rope.to_string(), (c.line, c.col));
+        if got != (after.to_string(), at) {
+            out.push(format!("{keys:?}: got {got:?}, Neovim {:?}", (after, at)));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}

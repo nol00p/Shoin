@@ -500,15 +500,20 @@ fn render_pane(
         }
     };
     let tw = cfg.editor.tab_width;
-    let before = text_width_from(&prefix, at, tw);
+    // `text_width_from`'s cells, counted wide: past a huge tab they need not
+    // fit a terminal column.
+    let before = prefix.chars().fold(0usize, |w, c| w + crate::render::layout::cell_width_at(c, at + w, tw));
     let on_tab = line_text.get(row_start + cursor_offset) == Some(&'\t');
     let tab_end = if on_tab && tab_caret_at_end(app, cursor) {
-        let start = at + before as usize;
-        crate::render::layout::tab_stop(start, tw).saturating_sub(1) as u16
+        let start = at + before;
+        crate::render::layout::tab_stop(start, tw).saturating_sub(1)
     } else {
         0
     };
-    let x = (rect.x + left + before + tab_end + hang + extra).min(rect.right().saturating_sub(1));
+    // Summed wide and clamped before it is a terminal column: a tab can be
+    // as wide as `tab_width`, which may be past any screen.
+    let x = [rect.x, left, hang, extra].iter().map(|&n| usize::from(n)).sum::<usize>() + before + tab_end;
+    let x = x.min(usize::from(rect.right().saturating_sub(1))) as u16;
     Some(Position::new(x, text_area.y + screen_row as u16))
 }
 
@@ -1390,6 +1395,14 @@ pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Curs
     // The first row of a line keeps the column, as `j` does; a later row of a
     // wrapped one starts where that row does.
     let first = cache.locate(line, 0).0 == row;
+    if first && line != cursor.line {
+        // Onto the goal, which it keeps, as `j` does and Neovim's scroll:
+        // after `$`, the end of the line it is carried to.
+        let tw = cfg.editor.tab_width;
+        let cells = crate::text::motion::goal_cells(&app.buffer, cursor, tw);
+        let col = crate::text::motion::col_at_cells(&app.buffer, line, cells, tw);
+        return Some((new_top, Cursor { line, col, goal_col: cursor.goal_col, goal_cells: Some(cells) }));
+    }
     let col = if first { cursor.col } else { target.start_col };
     Some((new_top, Cursor::new(line, col.min(len))))
 }
