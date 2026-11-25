@@ -340,7 +340,7 @@ fn truecolour_draws_as_before() {
     assert_eq!(styles(&marked, 0), styles(&unmarked, 0));
 }
 
-/// A colour set in `[theme]` is the user's choice and is never rewritten,
+/// A palette colour set in `[theme]` is never rewritten,
 /// even onto the page's slot; colours left to the built-in theme still are.
 #[test]
 fn explicit_colours_are_kept_and_defaults_are_guarded() {
@@ -360,6 +360,27 @@ fn explicit_colours_are_kept_and_defaults_are_guarded() {
     let t = theme("background = \"bright_white\"", ColorDepth::Basic16);
     assert_eq!(t.background, C::Indexed(15));
     assert_ne!(t.text, C::Indexed(15));
+}
+
+#[test]
+fn code_slab_guards_converted_rgb_and_keeps_explicit_palette_colours() {
+    let cases = [
+        (ColorDepth::Basic16, "#1a1b26", "#1f2335", 0, 8),
+        (ColorDepth::Indexed256, "#1a1b26", "#1a1b27", 16, 8),
+        (ColorDepth::Basic16, "black", "black", 0, 0),
+        (ColorDepth::Indexed256, "16", "16", 16, 16),
+    ];
+    for (depth, page, slab, page_slot, slab_slot) in cases {
+        let theme = format!("background = \"{page}\"\ncode_bg = \"{slab}\"");
+        let app = app_at("top\n\n```\ncode\n```\n", &theme, depth);
+        let buf = render(&app);
+        let page_row = row_of(&buf, "top");
+        let code_row = row_of(&buf, "code");
+        let page_cell = cells(&buf, page_row, "top").start;
+        let code_cell = cells(&buf, code_row, "code").start;
+        assert_eq!(buf[(page_cell, page_row)].bg, Rt::Indexed(page_slot), "{depth:?}: {page}");
+        assert_eq!(buf[(code_cell, code_row)].bg, Rt::Indexed(slab_slot), "{depth:?}: {slab}");
+    }
 }
 
 /// `==…==` over a heading, bold, a link, code or a tag: the highlight keeps

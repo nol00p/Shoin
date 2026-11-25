@@ -225,8 +225,7 @@ pub struct Theme {
 
     /// The `[theme]` color keys the user set to something other than the
     /// built-in default, in the config or a theme file. [`Theme::adapt`]
-    /// never rewrites these: guards move only the colours left to the
-    /// built-in theme.
+    /// preserves their palette choices and checks converted RGB for contrast.
     pub explicit: std::collections::BTreeSet<String>,
 
     pub dim_markers: bool,
@@ -509,6 +508,11 @@ impl Theme {
         if depth == ColorDepth::TrueColor {
             return;
         }
+        let explicit = std::mem::take(&mut self.explicit);
+        let explicit_palette: std::collections::BTreeSet<_> = explicit.iter()
+            .filter(|key| self.color_mut(key).is_some_and(|c| !matches!(c, Color::Rgb(..))))
+            .map(String::as_str)
+            .collect();
         macro_rules! down {
             ($($f:ident),*) => { $( self.$f = self.$f.downgrade(depth); )* };
         }
@@ -523,21 +527,15 @@ impl Theme {
         for h in self.headings.iter_mut() {
             *h = h.downgrade(depth);
         }
-        for c in self.indent_colors.iter_mut() {
-            *c = c.downgrade(depth);
-        }
-
         // Colours are compared by palette SLOT. A terminal decides what each
         // slot looks like (slot 0 and slot 16 are both "black" only in
         // xterm's own palette), so two slots are two colours, and one slot is
         // one colour whatever RGB it was converted from.
         //
-        // A colour the user set is theirs and is never moved, even onto the
-        // page's slot: these guards repair only the built-in theme's colours
-        // and the ones the user left to it.
-        let explicit = std::mem::take(&mut self.explicit);
+        // Preserve the user's palette choices. An RGB colour's palette slot
+        // comes from conversion, so it still goes through the contrast guard.
         let guard = |key: &str, c: &mut Color, against: &[Color], preferred: [u8; 2]| {
-            if !explicit.contains(key) {
+            if !explicit_palette.contains(key) {
                 *c = c.with_indexed_contrast(against, preferred);
             }
         };
@@ -563,8 +561,13 @@ impl Theme {
         {
             guard(key, color, &[page], [15, 0]);
         }
+        let explicit_indents = explicit.contains("indent_colors");
         for color in &mut self.indent_colors {
-            guard("indent_colors", color, &[page], [15, 0]);
+            let keep = explicit_indents && !matches!(color, Color::Rgb(..));
+            *color = color.downgrade(depth);
+            if !keep {
+                *color = color.with_indexed_contrast(&[page], [15, 0]);
+            }
         }
         let prose = [page, self.text, self.text_dim];
 
@@ -936,13 +939,14 @@ mod tests {
     }
 
     #[test]
-    fn custom_theme_keeps_set_colors_and_repairs_defaults() {
+    fn custom_theme_keeps_palette_colors_and_repairs_converted_rgb() {
         let cfg = crate::config::parse(r##"
             [theme]
             background = "#010101"
             text_dim = "black"
             search_match = "bright_cyan"
             cursor_line = "#040404"
+            indent_colors = [0, 16, "#040404"]
             text = "#c0caf5"
         "##).unwrap().theme;
         let authored = Theme::authored(&cfg).unwrap();
@@ -952,18 +956,18 @@ mod tests {
         // `text` is set to its default, as the shipped theme.conf does: it is
         // still the built-in theme's.
         let set: Vec<_> = authored.explicit.iter().map(String::as_str).collect();
-        assert_eq!(set, ["background", "cursor_line", "search_match", "text_dim"]);
+        assert_eq!(set, ["background", "cursor_line", "indent_colors", "search_match", "text_dim"]);
 
         for depth in [ColorDepth::Basic16, ColorDepth::Indexed256] {
             let mut t = authored.clone();
             t.adapt(depth);
             let basic = depth == ColorDepth::Basic16;
-            // Set by the user: converted to the palette, never moved, even
-            // onto the page's slot (0 in 16 colours, 16 in 256).
             assert_eq!(t.background, Color::Indexed(if basic { 0 } else { 16 }));
             assert_eq!(t.text_dim, Color::Indexed(0));
-            assert_eq!(t.cursor_line, Color::Indexed(if basic { 0 } else { 16 }));
+            assert_ne!(t.cursor_line, t.background);
             assert_eq!(t.search_match, Color::Indexed(14));
+            assert_eq!(&t.indent_colors[..2], &[Color::Indexed(0), t.background]);
+            assert_ne!(t.indent_colors[2], t.background);
             // Left to the built-in theme: kept off the page and the cursor
             // line.
             for (name, c) in [("code_bg", t.code_bg), ("selection", t.selection), ("text", t.text)] {
