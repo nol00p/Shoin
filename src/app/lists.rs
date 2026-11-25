@@ -88,7 +88,7 @@ impl App {
 
         let at = self.buffer.cursor;
         let before = self.buffer.line_len(at.line) as isize;
-        self.shift_lines_by(l1, l2, outdent, cols);
+        self.shift_lines_by(l1, l2, outdent, cols, true);
         if self.config.editor.list_renumber && !touched.is_empty() {
             self.renumber_lists(&touched, &starts, l1);
         }
@@ -564,51 +564,52 @@ impl App {
         self.apply_renumber(edits.into_values());
     }
 
-    /// `>`/`<` over whole lines. One indent unit is `tab_width` spaces, or a
-    /// literal tab when `expand_tab` is off. Blank lines are left alone —
-    /// indenting whitespace-only lines just leaves trailing whitespace behind.
+    /// `>`/`<` over whole lines, by one `tab_width` (Neovim's `shiftwidth`,
+    /// which Shoin keeps equal to `tabstop`).
     pub(super) fn shift_lines(&mut self, l1: usize, l2: usize, outdent: bool) {
         let width = self.config.editor.tab_width.max(1);
-        self.shift_lines_by(l1, l2, outdent, width);
+        self.shift_lines_by(l1, l2, outdent, width, false);
     }
 
-    /// `shift_lines` by `cols` columns instead of one indent unit. Indenting
-    /// inserts tabs only when `expand_tab` is off and `cols` is whole tabs,
-    /// spaces otherwise; outdenting removes leading whitespace up to `cols`
-    /// columns, a tab counting as `tab_width`.
-    fn shift_lines_by(&mut self, l1: usize, l2: usize, outdent: bool, cols: usize) {
+    /// `shift_lines` by `cols` columns, as Neovim's `>` with `shiftround`
+    /// off: each line's indent is measured, moved by `cols` (not below 0)
+    /// and written anew, all spaces with `expand_tab`, else tabs and then
+    /// spaces for the rest. A tab in the old indent counts to its tab stop,
+    /// as Neovim's `tabstop`; `list_cols` counts it as `tab_width` wherever
+    /// it sits instead, the measure the list commands use
+    /// ([`list::indent_cols`]). They differ only where spaces come before a
+    /// tab.
+    ///
+    /// Empty lines are left alone; whitespace-only lines shift too, as in
+    /// Neovim.
+    fn shift_lines_by(&mut self, l1: usize, l2: usize, outdent: bool, cols: usize, list_cols: bool) {
         let width = self.config.editor.tab_width.max(1);
-        let cols = cols.max(1);
-        let unit: String = if !self.config.editor.expand_tab && cols.is_multiple_of(width) {
-            "\t".repeat(cols / width)
-        } else {
-            " ".repeat(cols)
-        };
         for line in l1..=l2.min(self.buffer.line_count().saturating_sub(1)) {
             let text = self.buffer.line_text(line);
-            if text.trim().is_empty() {
+            if text.is_empty() {
                 continue;
             }
-            if !outdent {
-                self.buffer.insert_str(Cursor::new(line, 0), &unit);
+            let ws = crate::render::markdown::block::leading_ws_chars(&text);
+            let old = if list_cols {
+                list::indent_cols(&text, width)
+            } else {
+                text.chars().take(ws).fold(0, |col, c| if c == '\t' { col + width - col % width } else { col + 1 })
+            };
+            let new = if outdent { old.saturating_sub(cols) } else { old + cols };
+            let indent = if self.config.editor.expand_tab {
+                " ".repeat(new)
+            } else {
+                format!("{}{}", "\t".repeat(new / width), " ".repeat(new % width))
+            };
+            if text.chars().take(ws).eq(indent.chars()) {
                 continue;
             }
-            let mut drop = 0usize;
-            let mut gone = 0usize;
-            for c in text.chars() {
-                if gone >= cols {
-                    break;
-                }
-                match c {
-                    '\t' => gone += width,
-                    ' ' => gone += 1,
-                    _ => break,
-                }
-                drop += 1;
+            let start = self.buffer.char_index(Cursor::new(line, 0));
+            if ws > 0 {
+                self.buffer.delete_chars(start, start + ws);
             }
-            if drop > 0 {
-                let start = self.buffer.char_index(Cursor::new(line, 0));
-                self.buffer.delete_chars(start, start + drop);
+            if !indent.is_empty() {
+                self.buffer.insert_str(Cursor::new(line, 0), &indent);
             }
         }
     }

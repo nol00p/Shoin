@@ -2833,6 +2833,111 @@ fn indent_and_outdent_lines() {
     assert_eq!(text(&app), "    one\n    two\n\nthree\n");
 }
 
+/// Lines with tabs and spaces in their indent, a whitespace-only line, an
+/// empty one, for the shift tests below.
+const TAB_INDENTS: &str = "\tX\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n";
+
+/// `>>`, `<<`, `>{motion}`, Visual `>` `<` and `:>` `:<` recompute each
+/// line's whole indent and write it anew, as Neovim's (`shiftround` off):
+/// with `expand_tab` all spaces, so a tab in it becomes spaces. A
+/// whitespace-only line shifts too; only an empty one is left alone.
+#[test]
+fn shifting_rewrites_a_tab_indent_with_expand_tab_as_neovim() {
+    #[rustfmt::skip]
+    let misses = nv_misses(Config::default, TAB_INDENTS, &[
+        (">>", "        X\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 3), Some((1, 1)), None),
+        ("j>>", "\tX\n         X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (1, 3), Some((2, 2)), None),
+        ("j<<", "\tX\n X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (1, 1), Some((2, 1)), None),
+        ("jj>>", "\tX\n \t X\n       \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (2, 3), Some((3, 2)), None),
+        ("jj<<", "\tX\n \t X\n\n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (2, 0), Some((3, 0)), None),
+        ("3j<<", "\tX\n \t X\n   \nX\n\t\tX\n      X\n\n\t  X\nend\n", (3, 0), Some((4, 0)), None),
+        ("4j<<", "\tX\n \t X\n   \n  \tX\n    X\n      X\n\n\t  X\nend\n", (4, 3), Some((5, 3)), None),
+        ("4j>>", "\tX\n \t X\n   \n  \tX\n            X\n      X\n\n\t  X\nend\n", (4, 3), Some((5, 3)), None),
+        ("5j>>", "\tX\n \t X\n   \n  \tX\n\t\tX\n          X\n\n\t  X\nend\n", (5, 3), Some((6, 0)), None),
+        ("5j<<", "\tX\n \t X\n   \n  \tX\n\t\tX\n  X\n\n\t  X\nend\n", (5, 2), Some((6, 0)), None),
+        ("7j>>", "\tX\n \t X\n   \n  \tX\n\t\tX\n      X\n\n          X\nend\n", (7, 3), Some((8, 2)), None),
+        (">G", "        X\n         X\n       \n        X\n            X\n          X\n\n          X\n    end\n", (0, 3), Some((1, 3)), None),
+        ("<G", "X\n X\n\nX\n    X\n  X\n\n  X\nend\n", (0, 0), Some((1, 0)), None),
+        ("Vjjj>", "        X\n         X\n       \n        X\n\t\tX\n      X\n\n\t  X\nend\n", (0, 3), Some((1, 3)), None),
+        ("Vjjj<", "X\n X\n\nX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 0), Some((1, 0)), None),
+        (":%>\r", "        X\n         X\n       \n        X\n            X\n          X\n\n          X\n    end\n", (8, 4), Some((8, 4)), None),
+        (":%<\r", "X\n X\n\nX\n    X\n  X\n\n  X\nend\n", (8, 2), Some((8, 2)), None),
+        (":2,4>>\r", "\tX\n             X\n           \n            X\n\t\tX\n      X\n\n\t  X\nend\n", (3, 12), Some((4, 0)), None),
+        ("2>>", "        X\n         X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 3), Some((1, 3)), None),
+        (">>u", "\tX\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 0), Some((1, 1)), None),
+        ("j>>j.", "\tX\n         X\n       \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (2, 3), Some((3, 2)), None),
+        ("l>>", "        X\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 4), Some((1, 2)), None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// Without `expand_tab` the new indent is tabs, then spaces for what is
+/// left, as Neovim's.
+#[test]
+fn shifting_rewrites_a_tab_indent_without_expand_tab_as_neovim() {
+    let noet = || {
+        let mut cfg = Config::default();
+        cfg.editor.expand_tab = false;
+        cfg
+    };
+    #[rustfmt::skip]
+    let misses = nv_misses(noet, TAB_INDENTS, &[
+        (">>", "\t\tX\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 0), Some((1, 1)), None),
+        ("j>>", "\tX\n\t\t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (1, 0), Some((2, 2)), None),
+        ("j<<", "\tX\n X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (1, 1), Some((2, 1)), None),
+        ("jj>>", "\tX\n \t X\n\t   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (2, 0), Some((3, 2)), None),
+        ("jj<<", "\tX\n \t X\n\n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (2, 0), Some((3, 0)), None),
+        ("3j<<", "\tX\n \t X\n   \nX\n\t\tX\n      X\n\n\t  X\nend\n", (3, 0), Some((4, 0)), None),
+        ("4j<<", "\tX\n \t X\n   \n  \tX\n\tX\n      X\n\n\t  X\nend\n", (4, 0), Some((5, 3)), None),
+        ("4j>>", "\tX\n \t X\n   \n  \tX\n\t\t\tX\n      X\n\n\t  X\nend\n", (4, 0), Some((5, 3)), None),
+        ("5j>>", "\tX\n \t X\n   \n  \tX\n\t\tX\n\t\t  X\n\n\t  X\nend\n", (5, 0), Some((6, 0)), None),
+        ("5j<<", "\tX\n \t X\n   \n  \tX\n\t\tX\n  X\n\n\t  X\nend\n", (5, 2), Some((6, 0)), None),
+        ("7j>>", "\tX\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t\t  X\nend\n", (7, 0), Some((8, 2)), None),
+        (">G", "\t\tX\n\t\t X\n\t   \n\t\tX\n\t\t\tX\n\t\t  X\n\n\t\t  X\n\tend\n", (0, 0), Some((1, 0)), None),
+        ("<G", "X\n X\n\nX\n\tX\n  X\n\n  X\nend\n", (0, 0), Some((1, 0)), None),
+        ("Vjjj>", "\t\tX\n\t\t X\n\t   \n\t\tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 0), Some((1, 0)), None),
+        ("Vjjj<", "X\n X\n\nX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 0), Some((1, 0)), None),
+        (":%>\r", "\t\tX\n\t\t X\n\t   \n\t\tX\n\t\t\tX\n\t\t  X\n\n\t\t  X\n\tend\n", (8, 1), Some((8, 1)), None),
+        (":%<\r", "X\n X\n\nX\n\tX\n  X\n\n  X\nend\n", (8, 2), Some((8, 2)), None),
+        (":2,4>>\r", "\tX\n\t\t\t X\n\t\t   \n\t\t\tX\n\t\tX\n      X\n\n\t  X\nend\n", (3, 3), Some((4, 0)), None),
+        ("2>>", "\t\tX\n\t\t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 0), Some((1, 0)), None),
+        (">>u", "\tX\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 0), Some((1, 1)), None),
+        ("j>>j.", "\tX\n\t\t X\n\t   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (2, 0), Some((3, 2)), None),
+        ("l>>", "\t\tX\n \t X\n   \n  \tX\n\t\tX\n      X\n\n\t  X\nend\n", (0, 1), Some((1, 3)), None),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// The list shifts write the new indent the same way: a tab-indented item
+/// moved by `>al` or `<al` lands on the column the list asks for, with
+/// `expand_tab` in spaces. `<al` on a tab-indented item under a parent 2
+/// columns in takes it out to that parent's column, not past it.
+#[test]
+fn list_shifts_rewrite_a_tab_indent() {
+    let (et, noet) = (true, false);
+    #[rustfmt::skip]
+    let cases: &[(&str, bool, usize, &str, &str)] = &[
+        ("- a\n\t- b\n\t- c\n", et, 2, ">al", "- a\n\t- b\n        - c\n"),
+        ("- a\n\t- b\n\t- c\n", noet, 2, ">al", "- a\n\t- b\n\t\t- c\n"),
+        ("- a\n\t- b\n\t\t- c\n", et, 2, "<al", "- a\n\t- b\n    - c\n"),
+        ("- a\n\t- b\n\t\t- c\n", noet, 2, "<al", "- a\n\t- b\n\t- c\n"),
+        ("- a\n  - b\n\t- c\n", et, 2, "<al", "- a\n  - b\n  - c\n"),
+        ("- a\n  - b\n\t- c\n", noet, 2, "<al", "- a\n  - b\n  - c\n"),
+        ("- a\n  - b\n  - c\n", noet, 2, ">al", "- a\n  - b\n\t- c\n"),
+        ("- a\n\t- b\n\t  more\n- c\n", et, 1, "<al", "- a\n- b\n  more\n- c\n"),
+    ];
+    let mut out = Vec::new();
+    for &(start, expand_tab, line, keys, want) in cases {
+        let mut app = app_with(start);
+        app.config.editor.expand_tab = expand_tab;
+        app.buffer.cursor = Cursor::new(line, 0);
+        feed(&mut app, keys);
+        if text(&app) != want {
+            out.push(format!("{start:?} {keys:?}: {:?}, want {want:?}", text(&app)));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
 /// `>al` nests an item under its previous sibling, children and all, and
 /// leaves the cursor on the same character.
 #[test]

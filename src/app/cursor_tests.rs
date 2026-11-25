@@ -826,3 +826,76 @@ fn a_selected_line_break_is_drawn_as_neovim() {
     }
     assert!(out.is_empty(), "{}", out.join("\n"));
 }
+
+/// The background of the cell just after the last `needle` drawn on
+/// screen, on the last text row that shows it, and of the cell under the
+/// first `needle`'s first char one row down.
+fn bg_after(app: &App, needle: &str) -> (ratatui::style::Color, ratatui::style::Color) {
+    let (w, h) = (40u16, 12u16);
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| crate::render::frame::render(f, app)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let row = |y: u16| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+    // Above the bottom rows, which echo the search.
+    let y = (0..h - 2).rev().find(|&y| row(y).contains(needle)).unwrap_or_else(|| panic!("{needle:?} not drawn"));
+    let text = row(y);
+    let x = text[..text.rfind(needle).unwrap()].chars().count() + needle.chars().count();
+    let below = text[..text.find(needle).unwrap()].chars().count();
+    let under = if y + 1 < h { buf[(below as u16, y + 1)].bg } else { ratatui::style::Color::Reset };
+    (buf[(x as u16, y)].bg, under)
+}
+
+/// A search match that takes a line break is drawn with one highlighted
+/// cell after the line's text, on its last row, as Neovim draws it; an
+/// empty line's break is its one cell. The last line's break counts even
+/// in a file without one, as Vim matches it. The match `:s///c` asks about
+/// is drawn so too.
+#[test]
+fn a_matched_line_break_is_drawn_as_neovim() {
+    let long = format!("{} end", ["word"; 12].join(" "));
+    let wrapped = format!("{long}\nx\n");
+    #[rustfmt::skip]
+    let cases: &[(&str, &str, &str, bool)] = &[
+        ("ab\n\ncd\nef\n", "/\\n\r", "ab", true),
+        ("ab\n\ncd\nef\n", "/\\n\r", "cd", true),
+        ("ab\n\ncd\nef\n", "/\\n\r", "ef", true),
+        ("ab\n\ncd\nef", "/\\n\r", "ef", true),
+        ("ab\ncd\n", "/b\\n\r", "ab", true),
+        ("ab\ncd\n", "/b\\n\r", "cd", false),
+        ("ab\ncd\n", "/b\\nc\r", "ab", true),
+        ("ab\ncd\n", "/b\r", "ab", false),
+        ("ab\ncd\n", "/b\\|\\n\r", "cd", true),
+        (&wrapped, "/end\\n\r", "end", true),
+        (&wrapped, "/end\r", "end", false),
+        ("# Head\n**ab**\nx\n", "/ab..\\n\rgg", "ab", true),
+        ("# Head\n**ab**\nx\n", "/ab\rgg", "ab", false),
+    ];
+    let mut out = Vec::new();
+    for &(text, keys, needle, want) in cases {
+        let mut app = fresh(text, 4);
+        feed(&mut app, keys);
+        let hl = app.theme.search_match.to_ratatui();
+        if (bg_after(&app, needle).0 == hl) != want {
+            out.push(format!("{text:?} {keys:?}: the cell after {needle:?} highlighted: {}, Neovim {want}", !want));
+        }
+    }
+    // An empty line's break is its one cell.
+    let mut app = fresh("ab\n\ncd\n", 4);
+    feed(&mut app, "/\\n\r");
+    if bg_after(&app, "ab").1 != app.theme.search_match.to_ratatui() {
+        out.push("the empty line's matched break is not drawn".into());
+    }
+    // `:s///c` draws the match it asks about, its line break too.
+    let mut app = fresh("ab\ncd\nef\n", 4);
+    feed(&mut app, ":%s/b\\n//c\r");
+    let sel = app.theme.selection.to_ratatui();
+    if bg_after(&app, "ab").0 != sel {
+        out.push(":s/b\\n//c: the line break it asks about is not drawn".into());
+    }
+    let mut app = fresh("ab\n\ncd\n", 4);
+    feed(&mut app, ":%s/\\n//c\rn");
+    if bg_after(&app, "ab").1 != sel {
+        out.push(":s/\\n//c: the empty line's break it asks about is not drawn".into());
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}

@@ -221,6 +221,20 @@ impl<'a> CharCounter<'a> {
     }
 }
 
+/// The char index where `line`'s text ends and its break begins.
+fn line_end(buffer: &crate::text::buffer::Buffer, line: usize) -> usize {
+    buffer.rope.line_to_char(line) + buffer.line_len(line)
+}
+
+/// Whether `range` (char indices) takes `line`'s line break: some of the
+/// chars after its text and before the next line, or the one Vim matches
+/// after the last line when the file ends without one.
+pub(super) fn takes_line_break(buffer: &crate::text::buffer::Buffer, line: usize, range: &Range<usize>) -> bool {
+    let end = line_end(buffer, line);
+    let next = if line + 1 < buffer.line_count() { buffer.rope.line_to_char(line + 1) } else { end + 1 };
+    range.start < next.max(end + 1) && range.end > end
+}
+
 /// The text a multi-line pattern matches from line `first` on: through the
 /// last line's break, which Vim matches even when the file has none.
 pub(super) fn multiline_text(buffer: &crate::text::buffer::Buffer, first: usize) -> String {
@@ -571,6 +585,18 @@ impl App {
                 .take_while(|m| m.start < end)
                 .map(|m| m.start.saturating_sub(first)..m.end.min(end) - first)
                 .collect()
+        })
+    }
+
+    /// Whether a search match on `line` takes its line break, drawn as one
+    /// highlighted cell after the line's text, as Neovim draws it. Only a
+    /// multi-line pattern can match a break; the last line's counts even in
+    /// a file without one ([`multiline_text`]).
+    pub(crate) fn search_takes_line_break(&self, doc: &BufferState, line: usize) -> bool {
+        let Some(search) = self.search.as_ref().filter(|s| s.compiled.multiline) else { return false };
+        search.with_whole(doc, line, |matches| {
+            let at = matches.partition_point(|m| m.end <= line_end(&doc.buffer, line));
+            matches.get(at).is_some_and(|m| takes_line_break(&doc.buffer, line, m))
         })
     }
 }

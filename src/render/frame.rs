@@ -441,10 +441,21 @@ fn render_pane(
         }
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(row_bg)), r);
         // A selected line break is one selected cell after the line's last
-        // character, as Neovim draws it. Not over a closed fold's label, and
-        // not past the pane when the row fills it.
+        // character, as Neovim draws it, and so is one a search match or the
+        // match `:s///c` asks about takes; the selection is drawn over both,
+        // as it is over the text. Not over a closed fold's label, and not
+        // past the pane when the row fills it.
         let folded_after = folded.run(row.line() + 1).is_some();
-        if is_last_row && focused && !folded_after && selects_line_break(app, row.line()) {
+        let break_bg = if !is_last_row || folded_after {
+            None
+        } else if focused && (selects_line_break(app, row.line()) || app.substitute_takes_line_break(row.line())) {
+            Some(app.theme.selection)
+        } else if app.search_takes_line_break(doc, row.line()) {
+            Some(app.theme.search_match)
+        } else {
+            None
+        };
+        if let Some(break_bg) = break_bg {
             let tw = cfg.editor.tab_width;
             let width = text_width_from(&char_window(chars, row.start_col, row.end_col), at, tw);
             let shift = match align {
@@ -454,7 +465,7 @@ fn render_pane(
             let x = usize::from(r.x) + usize::from(shift) + usize::from(width);
             if x < usize::from(rect.right()) {
                 let cell = Rect { x: x as u16, y: r.y, width: 1, height: 1 };
-                frame.render_widget(Paragraph::new(" ").style(Style::default().bg(app.theme.selection.to_ratatui())), cell);
+                frame.render_widget(Paragraph::new(" ").style(Style::default().bg(break_bg.to_ratatui())), cell);
             }
         }
         if fenced {

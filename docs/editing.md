@@ -407,6 +407,19 @@ middle or the bottom of the pane. The cursor stays where it is.
   as in Vim, so `v$d` deletes the line's end and its line break, joining the
   next line on. `p` and `P` replace the line break too. A selected line
   break is drawn as one selected cell after the line's text.
+- A search match that takes a line break (`/b\n`, `/\n`) is drawn with one
+  highlighted cell after the line's text, on its last row, and so is the
+  match `:s///c` asks about. An empty line's break is its one cell, and the
+  last line's break matches even in a file that does not end in one, as in
+  Vim.
+- `>>`, `<<`, `>` over a motion or in Visual, `:>` and `:<` work out each
+  line's whole indent, a tab reaching its tab stop, move it by `tab_width`
+  and write it anew, as Vim does: all spaces with `expand_tab`, otherwise
+  tabs and then spaces. So `>>` on a tab-indented line puts 8 spaces before
+  the text at the default 4. A line of only spaces and tabs shifts too;
+  only an empty line is left alone. The list shifts (`>al`, `<al`, `Tab` in
+  Insert on an item) write the new indent the same way, counting a tab in
+  the old one as `tab_width` columns as the list commands do.
 - In Normal mode the cursor on a tab is drawn on the tab's last cell, as in
   Vim; in Insert mode it is drawn on the first, where typing goes. In Visual
   mode it is on the last cell when the cursor is after where the selection

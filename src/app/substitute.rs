@@ -281,6 +281,15 @@ impl App {
         (start < stop).then(|| start - base..stop - base)
     }
 
+    /// Whether the match `:s///c` asks about takes `line`'s line break,
+    /// drawn as one cell after the line's text.
+    pub(crate) fn substitute_takes_line_break(&self, line: usize) -> bool {
+        let Some(pending) = self.confirmation.as_ref().filter(|p| p.doc == self.dot_mark()) else { return false };
+        pending.matches.get(pending.next).is_some_and(|edit| {
+            search::takes_line_break(&self.buffer, line, &pending.change.range(edit))
+        })
+    }
+
     pub(super) fn on_key_substitute(&mut self, key: KeyEvent) {
         let Some(mut pending) = self.confirmation.take() else {
             self.mode = Mode::Normal;
