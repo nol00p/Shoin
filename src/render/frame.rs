@@ -5,7 +5,7 @@
 //! which slot in where the row `Span` is currently built raw.
 
 use ratatui::layout::{Alignment, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
@@ -132,11 +132,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     if cfg.status.enabled {
         if let Some(status) = status {
-            // In the theme's colours, which `adapt` keeps apart from the
-            // bar's: the terminal's own foreground could be the bar's colour.
+            // The terminal's foreground and ANSI red in truecolour; on 16 and
+            // 256 colours the theme's, which `adapt` keeps off the bar's slot.
+            let theme = &app.theme;
             let style = match app.flash.as_ref().map(|f| &f.kind) {
-                Some(FlashKind::Error) => Style::default().fg(app.theme.error.to_ratatui()),
-                _ => Style::default().fg(app.theme.text.to_ratatui()).add_modifier(Modifier::DIM),
+                Some(FlashKind::Error) if theme.message_error_fg == ThemeColor::None => Style::default().fg(Color::Red),
+                Some(FlashKind::Error) => Style::default().fg(theme.message_error_fg.to_ratatui()),
+                _ if theme.message_fg == ThemeColor::None => Style::default().add_modifier(Modifier::DIM),
+                _ => Style::default().fg(theme.message_fg.to_ratatui()).add_modifier(Modifier::DIM),
             };
             let lay = Layout::compute(&cfg.layout, ea.width, ea.height, STATUS_ROWS);
             let status_area = Rect {

@@ -110,9 +110,9 @@ The first of these that exists wins:
 ## Details
 
 - On 16- and 256-color terminals, Shoin substitutes palette colors when
-  theme colors would put text or a highlight in the same palette slot as
-  its background, and draws selections and search matches in their own
-  text color. This applies to custom themes too.
+  built-in theme colors would put text or a highlight in the same palette
+  slot as its background, and draws selections and search matches in
+  their own text color. Indexed fallbacks never change a color you set.
 - A parse error keeps the running config instead of dropping you into a broken
   one. A malformed binding is skipped with a warning, never fatal.
 - Bindings match exactly, so one that is also the start of a longer binding
