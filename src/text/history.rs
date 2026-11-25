@@ -13,6 +13,11 @@
 //! position in history, which is what lets "saved" be compared across undo and
 //! redo: a revision counter only ever goes up, so it cannot say that undoing
 //! landed back on the version that is on disk.
+//!
+//! A command that changes no text can still be a step, as Neovim records one
+//! (`gUU` on capitals, `>>` on an empty line): `record_unchanged` gives it an
+//! empty change, so `u` and `Ctrl-r` have somewhere to put the cursor. Such a
+//! step may leave the text unmodified, and then `state()` passes over it.
 
 use std::rc::Rc;
 
@@ -45,6 +50,10 @@ pub struct Step {
     /// or a sub-step split out of an insert session mid-flight), where
     /// `cursor_before` is the right answer anyway.
     pub cursor_start: Option<Cursor>,
+    /// Whether the step counts as a modification: any change [`History::record`]
+    /// took does, and a step of nothing but [`History::record_unchanged`]
+    /// ones does not, so undoing or redoing it leaves 'modified' as it was.
+    pub modifies: bool,
 }
 
 pub struct History {
@@ -87,6 +96,14 @@ impl History {
     /// Record one primitive change. Invalidates the redo stack (a fresh edit
     /// forks history). Seals immediately unless inside an explicit group.
     pub fn record(&mut self, change: Change) {
+        self.current.modifies = true;
+        self.record_unchanged(change);
+    }
+
+    /// Record a change that leaves the text as a save would write it, a
+    /// step that is not a modification unless something else in it is:
+    /// Neovim's undo step for a case change that changed nothing.
+    pub fn record_unchanged(&mut self, change: Change) {
         self.redo.clear();
         self.current.changes.push(change);
         if !self.grouping {
@@ -107,17 +124,24 @@ impl History {
 
     /// End the current step but stay grouped — the coalescing seam. Typing a
     /// space mid-insert calls this so the word just typed becomes its own undo.
+    ///
+    /// A step that changed nothing yet (`c$` on an empty line) is not split
+    /// off: the typing that follows is part of it.
     pub fn split(&mut self) {
-        self.seal();
+        if self.current.modifies {
+            self.seal();
+        }
     }
 
     /// Where we are in history: the id of the step last applied, or the id the
     /// in-flight step will take. Two different documents never share one.
+    /// A step that is not a modification takes no id of its own here: the
+    /// text it leaves is the one before it.
     pub fn state(&self) -> u64 {
-        if !self.current.changes.is_empty() {
+        if self.current.modifies {
             return self.next_id;
         }
-        self.undo.last().map(|(id, _)| *id).unwrap_or(0)
+        self.undo.iter().rev().find(|(_, s)| s.modifies).map(|(id, _)| *id).unwrap_or(0)
     }
 
     /// Open an explicit group — everything until `end_group` is one undo step.
@@ -310,6 +334,41 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), seen.len(), "an id came back: {seen:?}");
+    }
+
+    /// A step of unchanged text is a step, one that leaves the position in
+    /// history where it was: undoing or redoing it is no modification.
+    /// Anything else recorded in the same step makes it one.
+    #[test]
+    fn an_unchanged_step_is_a_step_that_keeps_the_position() {
+        let mut h = History::default();
+        h.record(change(0, "", "a"));
+        let saved = h.state();
+        h.record_unchanged(change(1, "", ""));
+        assert_eq!(h.state(), saved, "no modification");
+        let step = h.undo().expect("but a step");
+        assert!(step.changes[0].after.is_empty());
+        assert_eq!(h.state(), saved);
+        h.redo();
+        assert_eq!(h.state(), saved);
+
+        h.begin_group(None);
+        h.record_unchanged(change(1, "", ""));
+        assert_eq!(h.state(), saved, "in flight, still none");
+        h.record(change(1, "", "b"));
+        assert_ne!(h.state(), saved, "a real change in the step makes it one");
+        h.end_group();
+        assert_ne!(h.state(), saved);
+
+        // Mid-insert, a split keeps an unchanged start with what follows.
+        let mut h = History::default();
+        h.begin_group(Some(Cursor::new(0, 0)));
+        h.record_unchanged(change(0, "", ""));
+        h.split();
+        h.record(change(0, "", " "));
+        h.end_group();
+        assert_eq!(h.undo().unwrap().changes.len(), 2, "one step");
+        assert!(h.undo().is_none());
     }
 
     /// An empty group seals nothing — pressing a motion key does not create an

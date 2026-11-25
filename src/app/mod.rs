@@ -358,9 +358,13 @@ pub struct App {
     insert_repeat: Option<InsertRepeat>,
     /// True while `repeat_insert` replays: the escape alias stays out of it.
     replaying_insert: bool,
-    /// The line `cc` left its indent on, so an `Esc` with nothing typed takes
-    /// the unused indent back (vim's 'autoindent').
+    /// The line `cc` or Enter left an indent on, so an `Esc` with nothing
+    /// typed takes the unused indent back (vim's 'autoindent').
     cc_indent_line: Option<usize>,
+    /// Whether the text had no final newline when the command now under
+    /// way began: an insert session that ends with one then made a new
+    /// empty last line ([`App::keep_new_last_line`]).
+    insert_unterminated: bool,
 
     /// User `[keys.*]` bindings overlaid on the built-in grammar.
     keymap: Keymap,
@@ -995,6 +999,7 @@ impl App {
             insert_repeat: None,
             replaying_insert: false,
             cc_indent_line: None,
+            insert_unterminated: false,
             keymap,
             image_protocol: crate::image::detect(),
             images: std::cell::RefCell::new(Vec::new()),
@@ -1579,8 +1584,8 @@ impl App {
             }
             Action::DeleteChar => self.delete_chars_under(count),
             Action::DeleteCharBack => self.delete_chars_before(count),
-            Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete),
-            Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change),
+            Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete, count),
+            Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change, count),
             // `Y` is `yy`, its count and closed folds counted the same, and
             // `2Y` on the last line yanks nothing, as `2yy`.
             Action::YankLine => self.operate(Operator::Yank, Target::Line, count),
@@ -1947,6 +1952,9 @@ impl App {
             // takes the goal afresh, as Neovim's does, and `$`'s line end
             // is not brought back by `u`.
             let anchor = self.is_clean().then(|| Cursor::new(self.buffer.cursor.line, self.buffer.cursor.col));
+            if anchor.is_some() {
+                self.insert_unterminated = self.text_unterminated();
+            }
             self.buffer.history.begin_group(anchor);
         }
 

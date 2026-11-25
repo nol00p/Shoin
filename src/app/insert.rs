@@ -36,9 +36,21 @@ impl App {
         };
 
         let Some(prefix) = prefix else {
+            // Enter on a line that holds only the indent the last Enter laid
+            // down takes it back, as Neovim's 'autoindent': `A<CR><CR>`
+            // leaves an empty line between, and the indent goes on.
+            let mut at = at;
+            if self.cc_indent_line == Some(at.line) && !ws.is_empty() && ws.chars().count() == line.chars().count() {
+                let start = self.buffer.rope.line_to_char(at.line);
+                if self.buffer.delete_chars(start, start + ws.chars().count()).is_some() {
+                    at = Cursor::new(at.line, 0);
+                }
+            }
             let text = format!("\n{ws}");
             if self.buffer.insert_str(at, &text) {
                 self.buffer.cursor = Cursor::new(at.line + 1, ws.chars().count());
+                // Typing nothing on it before Esc takes it back too.
+                self.cc_indent_line = (!ws.is_empty()).then_some(at.line + 1);
             }
             return;
         };
@@ -149,6 +161,10 @@ impl App {
             self.buffer.cursor.goal_cells = Some(cells);
         }
         self.move_by(m, 1);
+        // After `End`, past the last character, where Insert may stand.
+        if self.buffer.cursor.goal_col == Cursor::LINE_END {
+            self.buffer.cursor.col = self.buffer.line_len(self.buffer.cursor.line);
+        }
     }
 
     /// The cells the first `col` chars of `at`'s line take, each tab to its
@@ -279,6 +295,7 @@ impl App {
         }
         let at = self.buffer.cursor;
         self.buffer.history.begin_group(Some(at));
+        self.insert_unterminated = self.text_unterminated();
         self.enter_insert();
     }
 
@@ -298,21 +315,75 @@ impl App {
         self.repeat_insert();
         // `cc` then `Esc` with nothing typed: the indent it laid down was
         // never used, so it goes, as vim's 'autoindent' takes it back.
+        // The goal stays the indent's width, as Neovim's: `k` goes on from
+        // there.
+        let mut goal = None;
         if let Some(line) = self.cc_indent_line.take() {
             let text = self.buffer.line_text(line);
             if line == self.buffer.cursor.line && !text.is_empty() && text.trim().is_empty() {
                 let start = self.buffer.rope.line_to_char(line);
                 let n = text.chars().count();
-                self.buffer.delete_chars(start, start + n);
-                self.buffer.cursor = Cursor::new(line, 0);
+                let width = self.cells_before(Cursor::new(line, 0), n);
+                if self.buffer.delete_chars(start, start + n).is_some() {
+                    self.buffer.cursor = Cursor::new(line, 0);
+                    goal = Some(width);
+                }
             }
         }
+        self.keep_new_last_line();
         if step_back && self.buffer.cursor.col > 0 {
             let col = self.buffer.cursor.col - 1;
             self.buffer.cursor.set_col(col);
+        } else if self.buffer.cursor.goal_col == Cursor::LINE_END {
+            // `End` on an empty line: Esc takes the goal afresh, as Neovim's.
+            let col = self.buffer.cursor.col;
+            self.buffer.cursor.set_col(col);
+        }
+        if goal.is_some() {
+            self.buffer.cursor.goal_cells = goal;
         }
         self.auto_align_table();
         self.touch_status();
+    }
+
+    /// Whether the text has no final newline: the last line is not one the
+    /// text ends with a line break after. An empty text counts, as its one
+    /// line has none.
+    pub(super) fn text_unterminated(&self) -> bool {
+        let len = self.buffer.rope.len_chars();
+        len == 0 || self.buffer.rope.char(len - 1) != '\n'
+    }
+
+    /// The last line an insert session may move to: the empty line after a
+    /// final newline when this session made it, by an Enter or `o` at the
+    /// end of a text that had none, as Neovim has a line there; otherwise
+    /// the last line.
+    fn insert_last_line(&self) -> usize {
+        match self.insert_unterminated {
+            true => self.buffer.line_count() - 1,
+            false => self.buffer.last_line(),
+        }
+    }
+
+    /// At the end of an insert session that began on a text with no final
+    /// newline and ends with one: that newline opened a new empty last
+    /// line (`o` `Esc`, `A` `Enter` `Esc`), which Neovim keeps, with the
+    /// cursor on it. It gets one more newline, so it is a line of its own
+    /// rather than the final newline of the one before, as `r<CR>` gives
+    /// one ([`App::replace_with_break`]). A save that keeps the missing
+    /// final newline then writes what Neovim's `nofixeol` does.
+    fn keep_new_last_line(&mut self) {
+        if !self.insert_unterminated || self.text_unterminated() {
+            return;
+        }
+        let end = self.idx_to_cursor(self.buffer.rope.len_chars());
+        let cursor = self.buffer.cursor;
+        if self.buffer.insert_str(end, "\n") {
+            self.buffer.cursor = cursor;
+        }
+        // Now terminated: a session the count or `.` goes on with is one
+        // on this text.
+        self.insert_unterminated = false;
     }
 
     /// `3ix<Esc>` is `xxx`, `2otext<Esc>` two lines: the keys this insert
@@ -323,7 +394,8 @@ impl App {
     fn repeat_insert(&mut self) {
         let Some(r) = self.insert_repeat.take() else { return };
         let copies = r.count - 1;
-        if r.keys.is_empty() || copies.saturating_mul(r.keys.len()) > INSERT_REPEAT_LIMIT {
+        // `3o<Esc>` opens three lines with nothing typed, as Neovim's.
+        if (r.keys.is_empty() && !r.line) || copies.saturating_mul(r.keys.len().max(1)) > INSERT_REPEAT_LIMIT {
             return;
         }
         // Typing that went back past where it began (Backspace over older
@@ -411,6 +483,7 @@ impl App {
             // Ctrl-C leaves without the count's copies, as in vim.
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.insert_repeat = None;
+                self.keep_new_last_line();
                 self.mode = Mode::Normal;
                 self.escape_run = 0;
                 self.escape_since = None;
@@ -502,16 +575,20 @@ impl App {
                 let len = self.buffer.line_len(c.line);
                 if c.col < len {
                     self.buffer.cursor.set_col(c.col + 1);
-                } else if c.line + 1 < self.buffer.line_count() {
+                } else if c.line < self.insert_last_line() {
                     self.buffer.cursor = Cursor::new(c.line + 1, 0);
                 }
             }
             KeyCode::Up => self.insert_move_by(Motion::Up),
             KeyCode::Down => self.insert_move_by(Motion::Down),
             KeyCode::Home => self.buffer.cursor.set_col(0),
+            // The line-end goal, as `$`'s and Neovim's Insert `<End>`: `Up`
+            // and `Down` go on to the end of each line.
             KeyCode::End => {
                 let len = self.buffer.line_len(self.buffer.cursor.line);
                 self.buffer.cursor.set_col(len);
+                self.buffer.cursor.goal_col = Cursor::LINE_END;
+                self.buffer.cursor.goal_cells = Some(Cursor::LINE_END);
             }
             KeyCode::PageUp => self.insert_move_by(Motion::HalfPageUp),
             KeyCode::PageDown => self.insert_move_by(Motion::HalfPageDown),

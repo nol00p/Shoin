@@ -54,6 +54,34 @@ impl Buffer {
         Some(removed)
     }
 
+    /// An undo step at `at` that changes no text, as Neovim records one for
+    /// a command that ran over text and left it as it was (`gUU` on
+    /// capitals, `x` on an empty line): `u` and `Ctrl-r` come back to `at`.
+    /// With `modifies` it counts as a modification, as Neovim's `>>` on an
+    /// empty line does; without, 'modified' stays as it was. The revision
+    /// moves either way: the command edited, for `.` and the cursor rules.
+    /// False if `at` is read-only.
+    pub fn record_unchanged(&mut self, at: Cursor, modifies: bool) -> bool {
+        let idx = self.char_index(at);
+        if !self.is_editable(&(idx..idx)) {
+            return false;
+        }
+        let change = Change {
+            start: idx,
+            before: String::new(),
+            after: String::new(),
+            cursor_before: self.cursor,
+            cursor_after: Cursor::new(at.line, at.col),
+        };
+        match modifies {
+            true => self.history.record(change),
+            false => self.history.record_unchanged(change),
+        }
+        let line = self.rope.char_to_line(idx);
+        self.touch(line, idx, idx);
+        true
+    }
+
     /// The (line, col) cursor for an absolute char index.
     fn cursor_at(&self, idx: usize) -> Cursor {
         let idx = idx.min(self.rope.len_chars());

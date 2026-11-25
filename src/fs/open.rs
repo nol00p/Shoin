@@ -38,7 +38,9 @@ pub fn decode(bytes: Vec<u8>, what: &str, syntax: Syntax) -> Result<Loaded> {
     })?;
 
     let line_ending = detect_line_ending(&text);
-    let final_newline = text.ends_with('\n');
+    // An empty file has no line yet, and Neovim gives it 'eol': the lines
+    // typed into it end in a newline, as a new file's do.
+    let final_newline = text.is_empty() || text.ends_with('\n');
 
     // The rope always holds \n only; the original ending is reapplied on save.
     let normalized = if line_ending == LineEnding::Crlf {

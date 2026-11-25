@@ -9644,10 +9644,12 @@ type NvCase = (&'static str, &'static str, (usize, usize), Option<(usize, usize)
 
 /// A fresh app on `text` with a 30-row window, after `keys`: plain
 /// characters, but `\t` is the Tab key, `\r` Enter, `\u{1b}` Esc, `\u{8}`
-/// Backspace and `\u{12}` Ctrl-r.
+/// Backspace, `\u{12}` Ctrl-r, the arrows `←` `↑` `→` `↓` the arrow keys,
+/// `⇱` Home and `⇲` End. The text starts unmodified, as a file just read.
 fn nv_keys(cfg: Config, text: &str, keys: &str) -> App {
     let mut app = app_with_config(text, cfg);
     app.buffer.history = Default::default();
+    app.buffer.modified = false;
     app.term_size = (80, 30);
     for c in keys.chars() {
         let code = match c {
@@ -9655,6 +9657,12 @@ fn nv_keys(cfg: Config, text: &str, keys: &str) -> App {
             '\r' => KeyCode::Enter,
             '\u{1b}' => KeyCode::Esc,
             '\u{8}' => KeyCode::Backspace,
+            '←' => KeyCode::Left,
+            '↑' => KeyCode::Up,
+            '→' => KeyCode::Right,
+            '↓' => KeyCode::Down,
+            '⇱' => KeyCode::Home,
+            '⇲' => KeyCode::End,
             '\u{12}' => {
                 ctrl(&mut app, 'r');
                 continue;
@@ -10244,5 +10252,240 @@ fn search_and_substitute_set_the_goal_as_neovim() {
         (":s/foo/b/\rj$&xj", "zb zzzz\nzb zzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 7)), Some(("z", false))),
         (":s/foo/b/\rj$:&&\rrXj", "zb zzzz\nzb zzzzzX\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 8)), None),
     ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// One case where the undo state matters: keys, the whole text after them,
+/// the cursor, and whether the text counts as modified.
+type NvUndoCase = (&'static str, &'static str, (usize, usize), bool);
+
+/// `nv_misses` for [`NvUndoCase`]s: text, cursor and the modified flag.
+fn nv_undo_misses(text: &str, cases: &[NvUndoCase]) -> Vec<String> {
+    let mut misses = Vec::new();
+    for &(keys, want_text, want, modified) in cases {
+        let app = nv_keys(Config::default(), text, keys);
+        let got_text = app.buffer.rope.to_string();
+        let got = (app.buffer.cursor.line, app.buffer.cursor.col);
+        let mut wrong = Vec::new();
+        if got_text != want_text {
+            wrong.push(format!("text {got_text:?}, Neovim {want_text:?}"));
+        }
+        if got != want {
+            wrong.push(format!("cursor {got:?}, Neovim {want:?}"));
+        }
+        if app.buffer.modified != modified {
+            wrong.push(format!("modified {}, Neovim {modified}", app.buffer.modified));
+        }
+        if !wrong.is_empty() {
+            misses.push(format!("{keys:?}: {}", wrong.join("; ")));
+        }
+    }
+    misses
+}
+
+/// A new empty last line in a file with no final newline stays, with the
+/// cursor on it, as Neovim's: `o` `Esc`, `A` `Enter` `Esc`, a count, `.`,
+/// an indent Enter laid down and Esc took back. The text then ends in one
+/// more newline, as after `$r<CR>`, so a save that keeps the missing final
+/// newline writes the line, as Neovim's `nofixeol` does.
+#[test]
+fn a_new_empty_last_line_without_a_final_newline_stays_as_neovim() {
+    let mut misses = nv_misses(Config::default, "abc", &[
+        ("o\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("A\r\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("O\u{1b}", "\nabc", (0, 0), Some((1, 0)), None),
+        ("o\u{1b}x", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("o\u{1b}k", "abc\n\n", (0, 0), Some((1, 0)), None),
+        ("ox\u{8}\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("ox\r\u{1b}", "abc\nx\n\n", (2, 0), Some((2, 0)), None),
+        ("ox\ry\u{8}\u{8}\u{1b}", "abc\nx", (1, 0), Some((1, 0)), None),
+        ("ox\u{1b}", "abc\nx", (1, 0), Some((1, 0)), None),
+        ("A\r\r\u{1b}", "abc\n\n\n", (2, 0), Some((2, 0)), None),
+        ("o\u{1b}.", "abc\n\n\n", (2, 0), Some((2, 0)), None),
+        ("3o\u{1b}", "abc\n\n\n\n", (3, 0), Some((3, 0)), None),
+        ("o\u{1b}kA\r\u{1b}", "abc\n\n\n", (1, 0), Some((2, 0)), None),
+        ("o↑\u{1b}", "abc\n\n", (0, 0), Some((1, 0)), None),
+        ("A\r↑\u{1b}", "abc\n\n", (0, 0), Some((1, 0)), None),
+        ("o\u{1b}u", "abc", (0, 0), Some((0, 0)), None),
+    ]);
+    misses.extend(nv_misses(Config::default, "  abc", &[
+        ("A\r\u{1b}", "  abc\n\n", (1, 0), Some((1, 0)), None),
+        ("A\r\u{1b}k", "  abc\n\n", (0, 2), Some((1, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "abc\nxyz", &[
+        ("jo\u{1b}", "abc\nxyz\n\n", (2, 0), Some((2, 0)), None),
+        ("jA\r\u{1b}", "abc\nxyz\n\n", (2, 0), Some((2, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "abc\n", &[
+        ("o\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("A→\u{1b}", "abc\n", (0, 2), Some((0, 2)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// The bytes a save writes after a new empty last line, from a file with
+/// no final newline: Neovim's with `nofixeol` (`preserve`) and `fixeol`
+/// (`always`).
+#[test]
+fn saving_a_new_empty_last_line_writes_what_neovim_writes() {
+    let cases: [(&str, &str, [&str; 2]); 9] = [
+        ("abc", "o\u{1b}", ["abc\n", "abc\n\n"]),
+        ("abc", "A\r\u{1b}", ["abc\n", "abc\n\n"]),
+        ("abc", "O\u{1b}", ["\nabc", "\nabc\n"]),
+        ("abc", "ox\r\u{1b}", ["abc\nx\n", "abc\nx\n\n"]),
+        ("abc", "3o\u{1b}", ["abc\n\n\n", "abc\n\n\n\n"]),
+        ("abc", "o↑\u{1b}", ["abc\n", "abc\n\n"]),
+        ("  abc", "A\r\u{1b}", ["  abc\n", "  abc\n\n"]),
+        ("abc\n", "o\u{1b}", ["abc\n\n", "abc\n\n"]),
+        ("", "o\u{1b}", ["\n\n", "\n\n"]),
+    ];
+    let path = saved_file(&mut app_with("draft\n"), "new-last-line");
+    let mut misses = Vec::new();
+    for (before, keys, expected) in cases {
+        for (policy, want) in ["preserve", "always"].into_iter().zip(expected) {
+            std::fs::write(&path, before).unwrap();
+            let mut cfg = Config::default();
+            cfg.editor.final_newline = policy.into();
+            let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+            app.term_size = (80, 30);
+            for c in keys.chars() {
+                let code = match c {
+                    '\r' => KeyCode::Enter,
+                    '\u{1b}' => KeyCode::Esc,
+                    '↑' => KeyCode::Up,
+                    c => KeyCode::Char(c),
+                };
+                app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+                app.sync_after_input();
+            }
+            ex(&mut app, "w");
+            let got = std::fs::read_to_string(&path).unwrap();
+            if got != want {
+                misses.push(format!("{before:?} {keys:?} {policy}: wrote {got:?}, Neovim {want:?}"));
+            }
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A change on an empty line enters Insert, as Neovim's, whatever the
+/// motion: `c$`, `C`, `cl`, `cw` and the rest, `2C` as `c2$`. Undo and redo of what
+/// was typed land where Neovim's do.
+#[test]
+fn a_change_on_an_empty_line_enters_insert_as_neovim() {
+    let misses = nv_misses(Config::default, "abc\n\nxyz\n", &[
+        ("jc$Q\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jCQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jclQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jcwQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("\n", true))),
+        ("jcWQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("\n", true))),
+        ("jceQ\u{1b}", "abc\nQ\n", (1, 0), Some((1, 0)), Some(("\nxyz", false))),
+        ("jcbQ\u{1b}", "Q\n\nxyz\n", (0, 0), Some((1, 0)), Some(("abc\n", true))),
+        ("jchQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jc0Q\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jc^Q\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jciwQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jccQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("\n", true))),
+        ("j2c$Q\u{1b}", "abc\nQ\n", (1, 0), Some((1, 0)), Some(("\nxyz", false))),
+        ("j2CQ\u{1b}", "abc\nQ\n", (1, 0), Some((1, 0)), Some(("\nxyz", false))),
+        ("jc$Q\u{1b}j.", "abc\nQ\nQ\n", (2, 0), Some((2, 0)), Some(("xyz", false))),
+        ("jc$Q\u{1b}u", "abc\n\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jc$Q\u{1b}u\u{12}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jc$ Q\u{1b}u", "abc\n\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// Insert's `End` sets the line-end goal, as Neovim's (`curswant` MAXCOL):
+/// `Up` and `Down` then go to the end of each line until a character is
+/// typed or the cursor moves along the line. `Home` sets column 0. Esc
+/// ends it, as Neovim's.
+#[test]
+fn insert_end_keeps_to_the_line_end_as_neovim() {
+    let mut misses = nv_misses(Config::default, "abcdef\nab\nabcdefgh\n", &[
+        ("ji⇲↑x\u{1b}", "abcdefx\nab\nabcdefgh\n", (0, 6), Some((1, 1)), None),
+        ("ja⇲↑x\u{1b}", "abcdefx\nab\nabcdefgh\n", (0, 6), Some((1, 1)), None),
+        ("ji⇲↓x\u{1b}", "abcdef\nab\nabcdefghx\n", (2, 8), None, None),
+        ("ji⇲↑↓↓x\u{1b}", "abcdef\nab\nabcdefghx\n", (2, 8), None, None),
+        ("ji⇲↑↑x\u{1b}", "abcdefx\nab\nabcdefgh\n", (0, 6), Some((1, 1)), None),
+        ("ji⇲\u{1b}k", "abcdef\nab\nabcdefgh\n", (0, 1), Some((1, 1)), None),
+        ("ji⇲←↑x\u{1b}", "axbcdef\nab\nabcdefgh\n", (0, 1), Some((1, 1)), None),
+        ("ji⇲y↑x\u{1b}", "abcxdef\naby\nabcdefgh\n", (0, 3), Some((1, 2)), None),
+        ("$i⇱↓x\u{1b}", "abcdef\nxab\nabcdefgh\n", (1, 0), Some((2, 0)), None),
+        ("$i⇱↓↓x\u{1b}", "abcdef\nab\nxabcdefgh\n", (2, 0), None, None),
+    ]);
+    misses.extend(nv_misses(Config::default, "  abcdef\nab\nabcdefgh\n", &[
+        ("$i⇱↓↓x\u{1b}", "  abcdef\nab\nxabcdefgh\n", (2, 0), None, None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A case change that changes nothing (`g~w` on a space, `gUU` on capitals,
+/// `guiw` on digits, `~` on a digit) is still an undo step, as Neovim's,
+/// one that leaves the text unmodified: `u` and `Ctrl-r` take the cursor
+/// back to where the range starts. So are `x` and `X` on an empty line.
+/// `>>` and `<<` that move nothing and `r` with the same character are
+/// steps too, and Neovim counts those as modifying. `J` on the last line
+/// is no step.
+#[test]
+fn an_edit_that_changes_nothing_is_an_undo_step_as_neovim() {
+    let t = "ab cd\n\nEF\n12 x\n";
+    let misses = nv_undo_misses(t, &[
+        ("llg~w", t, (0, 2), false),
+        ("llg~w$u", t, (0, 2), false),
+        ("llg~w$u$\u{12}", t, (0, 2), false),
+        ("jjgUU", t, (2, 0), false),
+        ("jjgUUGu", t, (2, 0), false),
+        ("jjgUUGuG\u{12}", t, (2, 0), false),
+        ("jjgUUGxu", t, (3, 0), false),
+        ("jjgUUGxuu", t, (2, 0), false),
+        ("jjgUUj.", "ab cd\n\nEF\n12 X\n", (3, 0), true),
+        ("jjgUUj.uGu", t, (2, 0), false),
+        ("jlgUUGu", t, (1, 0), false),
+        ("Gguiw$u", t, (3, 0), false),
+        ("Glguiw$u$\u{12}", t, (3, 0), false),
+        ("jjvUGu", t, (2, 0), false),
+        ("jjVUGu", t, (2, 0), false),
+        ("jjv~Gu", t, (2, 0), false),
+        ("jjg~~Gu", t, (2, 0), false),
+        ("G~", t, (3, 1), false),
+        ("G~ggu", t, (3, 0), false),
+        ("G~ggu$\u{12}", t, (3, 0), false),
+        ("Gl~ggu", t, (3, 1), false),
+        ("jxGu", t, (1, 0), false),
+        ("jxGuG\u{12}", t, (1, 0), false),
+        ("j3xGu", t, (1, 0), false),
+        ("jXGu", t, (1, 0), false),
+        ("j>>", t, (1, 0), true),
+        ("j>>Gu", t, (1, 0), false),
+        ("j>>GuG\u{12}", t, (1, 0), true),
+        ("jj<<", t, (2, 0), true),
+        ("jj<<G$u", t, (2, 0), false),
+        ("jj<<G$uG$\u{12}", t, (2, 0), true),
+        ("jv>Gu", t, (1, 0), false),
+        ("jjlrF", t, (2, 1), true),
+        ("jjlrFggu", t, (2, 1), false),
+        ("jjlrFgguG\u{12}", t, (2, 1), true),
+        ("jc$\u{1b}Gu", t, (1, 0), false),
+        ("jC\u{1b}GuG\u{12}", t, (1, 0), false),
+        ("jcl\u{1b}Gu", t, (1, 0), false),
+        ("jcw\u{1b}", t, (1, 0), true),
+        ("jcw\u{1b}Gu", t, (1, 0), false),
+        ("jcc\u{1b}Gu", t, (1, 0), false),
+        ("jji\u{1b}Gu", t, (3, 0), false),
+        ("jgUiwGu", t, (1, 0), false),
+        ("jdiwGu", t, (3, 0), false),
+        ("j~Gu", t, (3, 0), false),
+        ("jd$Gu", t, (3, 0), false),
+        ("jDGu", t, (3, 0), false),
+        ("jdlGu", t, (1, 0), false),
+        ("jjdhGu", t, (2, 0), false),
+        ("jjd0Gu", t, (2, 0), false),
+        ("jgUlGu", t, (1, 0), false),
+        ("jgU$Gu", t, (1, 0), false),
+        ("GJ", t, (3, 0), false),
+        ("GJgg0u", t, (0, 0), false),
+    ]);
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }
