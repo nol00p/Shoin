@@ -41,8 +41,12 @@ pub struct Buffer {
     pub syntax: Syntax,
     pub line_ending: LineEnding,
 
-    /// Whether the file on disk ended with a newline. Preserved on save so we
-    /// never silently append one.
+    /// Whether the file on disk ended with a newline: Neovim's 'eol'. The
+    /// text holds its lines, the last one with its newline as every other
+    /// (a file without one gets it on load, [`open::decode`]), and this is
+    /// what decides, under `final_newline = "preserve"`, whether the bytes a
+    /// save writes end in one. A save never edits the text for it, so a new
+    /// empty last line stays a line whatever is written.
     pub final_newline: bool,
 
     /// mtime at open/save. Compared before writing to catch external edits.
@@ -264,13 +268,12 @@ impl Buffer {
         let opts = self.save_options(path, policy);
         let mut out = save::outgoing(self.rope.to_string(), &opts);
         // A buffer that refuses the edits (read-only mode, `:view`) is written
-        // as it stands: a file it cannot follow would leave the two apart with
-        // nothing marked modified.
-        let end = self.rope.len_chars();
-        if !out.cuts.iter().all(|r| self.is_editable(r))
-            || (out.added_newline && !self.is_editable(&(end..end)))
-        {
-            out = save::Outgoing::unchanged(self.rope.to_string());
+        // untrimmed: a file it cannot follow would leave the two apart with
+        // nothing marked modified. Its final newline follows the policy, as
+        // that is no edit.
+        if !out.cuts.iter().all(|r| self.is_editable(r)) {
+            let untrimmed = SaveOptions { trim_trailing_whitespace: false, ..opts };
+            out = save::outgoing(self.rope.to_string(), &untrimmed);
         }
         let mtime = save::write_text(path, &out.text, opts.line_ending)?;
         self.disk_mtime = Some(mtime);
@@ -280,12 +283,15 @@ impl Buffer {
         // to come down here rather than needing its own command.
         self.conflict = false;
 
-        let edited = !out.cuts.is_empty() || out.added_newline;
-        if edited && self.history.can_redo() {
+        // The final newline the bytes got or lost is no edit: the buffer's
+        // lines are the same either way, as Neovim's are under 'eol'.
+        let edited = !out.cuts.is_empty();
+        if edited && self.history.can_redo_a_change() {
             // Taking the edits would be a new change, and a new change drops
             // the redo stack: a reader who undid to an older version and saved
             // it would lose the newer one. So the buffer stays as it is, and
             // says it differs from the file, which no history position holds.
+            // A redo of steps that changed nothing loses nothing.
             self.history.split();
             self.saved_state = u64::MAX;
             self.modified = true;
@@ -300,12 +306,13 @@ impl Buffer {
         Ok(())
     }
 
-    /// Bring the text to what a save just wrote (`trim_on_save`, the final
-    /// newline), as ONE undo step, so the buffer and the file agree and `u`
-    /// gives the trimmed spaces back. The edits are the ones `save::outgoing`
-    /// made, replayed exactly.
+    /// Bring the text to what a save just wrote (`trim_on_save`), as ONE
+    /// undo step, so the buffer and the file agree and `u` gives the trimmed
+    /// spaces back. The edits are the ones `save::outgoing` made, replayed
+    /// exactly. The final newline is not among them: the text keeps its
+    /// lines, and the flag and the policy say what the bytes end with.
     fn take_save_edits(&mut self, out: &save::Outgoing, insert_mode: bool) {
-        if out.cuts.is_empty() && !out.added_newline {
+        if out.cuts.is_empty() {
             return;
         }
         let before = self.revision;
@@ -314,10 +321,6 @@ impl Buffer {
         // key typed after it becomes its own undo step.
         let grouped = self.history.is_grouping();
         self.history.begin_group(Some(self.cursor));
-        if out.added_newline {
-            let last = self.rope.len_lines() - 1;
-            self.insert_str(Cursor::new(last, self.rope.line(last).len_chars()), "\n");
-        }
         // Positions in the text as it was; last first, so none moves another.
         for r in &out.cuts {
             self.delete_chars(r.start, r.end);
@@ -328,8 +331,8 @@ impl Buffer {
         }
         self.save_revisions += self.revision - before;
 
-        // A dropped final newline can take the cursor's line with it, and a
-        // trim its column. Insert mode may sit just past the end; Normal not.
+        // A trim can take the cursor's column, and a line of spaces at the
+        // very end its line. Insert mode may sit just past the end; Normal not.
         let last = match insert_mode {
             true => self.rope.len_lines() - 1,
             false => self.last_line(),
@@ -493,7 +496,7 @@ impl Buffer {
             self.delete_chars(0, len);
         }
         if !text.is_empty() {
-            self.insert_str(Cursor::new(0, 0), text);
+            self.insert_exact(Cursor::new(0, 0), text);
         }
         self.history.end_group();
         true
@@ -877,7 +880,7 @@ mod tests {
     #[test]
     fn editing_moves_the_count_along() {
         let mut b = Buffer::empty();
-        b.insert_str(Cursor::new(0, 0), "one two\n");
+        b.insert_exact(Cursor::new(0, 0), "one two\n");
         assert_eq!(b.word_count(), 2);
         b.insert_str(Cursor::new(0, 7), " three");
         assert_eq!(b.word_count(), 3);
@@ -895,7 +898,7 @@ mod tests {
         let full = |b: &Buffer| count_words(b.rope.slice(..));
         let mut b = Buffer::empty();
         let text: String = (0..3000).map(|i| format!("wörd {i} two\tthree  \n")).collect();
-        b.insert_str(Cursor::new(0, 0), &text);
+        b.insert_exact(Cursor::new(0, 0), &text);
         assert_eq!(b.word_count(), full(&b));
         let mut seed = 7u64;
         let mut next = |n: usize| {
@@ -1095,7 +1098,7 @@ mod tests {
 
         std::fs::write(&path, b"a\r\nb\r\nc").unwrap();
         assert!(b.reload(&[]).unwrap());
-        assert_eq!(b.rope.to_string(), "a\nb\nc");
+        assert_eq!(b.rope.to_string(), "a\nb\nc\n", "the lines, each with its newline");
         assert_eq!(b.line_ending, LineEnding::Crlf);
         assert!(!b.final_newline);
 
@@ -1127,9 +1130,10 @@ mod tests {
         assert_eq!(b.rope.to_string(), "old\n", "one step");
     }
 
-    /// A save that changes the text on the way out changes the buffer the
-    /// same way, so `:diff` straight after `:w` finds nothing, and `u` brings
-    /// the trimmed spaces back as one step.
+    /// A save that trims the text on the way out trims the buffer the same
+    /// way, so the two agree, and `u` brings the trimmed spaces back as one
+    /// step. The final newline is the bytes'
+    /// alone: the buffer keeps its lines.
     #[test]
     fn the_buffer_takes_what_the_save_wrote() {
         let d = dir("trim-sync");
@@ -1150,23 +1154,28 @@ mod tests {
         b.save(trim, false).unwrap();
         let disk = std::fs::read_to_string(&path).unwrap();
         assert_eq!(disk, "a\nb  \nc\n```\nd \n```\ne\n\n");
-        assert_eq!(b.rope.to_string(), disk, "the buffer is what the file holds");
+        assert_eq!(b.rope.to_string(), format!("{disk}\n"), "the file's lines, the last newline the policy's");
         assert!(!b.modified);
-        let theirs = crate::fs::open::load(&path, &[]).unwrap().rope.to_string();
-        assert_eq!(crate::diff::lines_of(&b.rope.to_string()), crate::diff::lines_of(&theirs));
+        // The file is what a save of this buffer writes, as often as it is
+        // saved. (Read back, `never` makes its last empty line the file's
+        // final newline, as Neovim's 'noeol' does.)
+        b.save(trim, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), disk);
+        assert!(!b.modified);
 
         assert!(b.undo());
         assert_eq!(b.rope.to_string(), typed, "one step");
         assert!(b.modified, "holding text the file does not have");
 
-        // And the other way: `always` gives the buffer its final newline.
+        // And the other way: `always` gives the file its final newline, and
+        // the buffer keeps its lines.
         write_old(&path, b"x");
         let mut b = Buffer::open(path.clone(), &[]).unwrap();
         b.replace_all("a \nb");
         let always = SavePolicy { final_newline: save::FinalNewline::Always, ..trim };
         b.save(always, false).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
-        assert_eq!(b.rope.to_string(), "a\nb\n");
+        assert_eq!(b.rope.to_string(), "a\nb");
         assert!(!b.modified);
         std::fs::remove_dir_all(&d).ok();
     }
@@ -1203,7 +1212,8 @@ mod tests {
     }
 
     /// Read-only mode can still `:w`, but cannot take the trim: the file gets
-    /// the text as it stands, so the two still agree.
+    /// the text untrimmed, so the two still agree. Its final newline follows
+    /// the policy, which is no edit.
     #[test]
     fn a_read_only_buffer_is_written_as_it_stands() {
         let d = dir("trim-ro");
@@ -1217,7 +1227,7 @@ mod tests {
             ..policy()
         };
         b.save(policy, true).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a \nb\n\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a \nb\n");
         assert_eq!(b.rope.to_string(), "a \nb\n\n");
         std::fs::remove_dir_all(&d).ok();
     }
@@ -1232,18 +1242,19 @@ mod tests {
 
     /// The newline a save drops can sit before a last line of spaces, not at
     /// the very end: the buffer once kept `foo\n ` while the file got `foo`.
+    /// The buffer takes the trim; the newline is the bytes' alone.
     #[test]
     fn a_trimmed_last_line_and_its_newline_both_go() {
         let d = dir("trim-last");
         let path = d.join("n.md");
-        for (typed, saved) in [("foo\n  ", "foo"), ("a\n\n ", "a\n")] {
+        for (typed, saved, kept) in [("foo\n  ", "foo", "foo\n"), ("a\n\n ", "a\n", "a\n\n")] {
             write_old(&path, b"x");
             let mut b = Buffer::open(path.clone(), &[]).unwrap();
             b.replace_all(typed);
             b.cursor = Cursor::new(0, 0);
             b.save(trim_never(), false).unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
-            assert_eq!(b.rope.to_string(), saved, "the buffer follows for {typed:?}");
+            assert_eq!(b.rope.to_string(), kept, "the buffer follows for {typed:?}");
             assert!(!b.modified);
         }
         std::fs::remove_dir_all(&d).ok();
@@ -1272,8 +1283,8 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
-    /// A dropped final newline can take the cursor's line with it: Normal
-    /// mode's cursor comes back to the last line.
+    /// A dropped final newline is the bytes' alone: the empty last line it
+    /// ends stays, with the cursor on it.
     #[test]
     fn the_cursor_stays_on_the_text() {
         let d = dir("trim-cursor");
@@ -1283,9 +1294,10 @@ mod tests {
         b.replace_all("a\n\n");
         b.cursor = Cursor::new(1, 0);
         b.save(trim_never(), false).unwrap();
-        assert_eq!(b.rope.to_string(), "a\n");
-        assert_eq!(b.last_line(), 0);
-        assert_eq!((b.cursor.line, b.cursor.col), (0, 0));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\n");
+        assert_eq!(b.rope.to_string(), "a\n\n");
+        assert_eq!(b.last_line(), 1);
+        assert_eq!((b.cursor.line, b.cursor.col), (1, 0));
 
         // Normal mode on a trailing space: the column comes back too.
         b.replace_all("word \t\nx");
@@ -1549,7 +1561,7 @@ mod drawn {
     fn control_characters_inside_a_line_draw_as_nothing() {
         for sep in ["\u{85}", "\x0b", "\x0c", "\r", "\x07", "\x1b"] {
             let mut app = App::new(Config::default(), None, None).unwrap();
-            app.buffer.insert_str(Cursor::new(0, 0), &format!("abc{sep}def\n"));
+            app.buffer.insert_exact(Cursor::new(0, 0), &format!("abc{sep}def\n"));
             app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
             app.buffer.cursor = Cursor::new(0, 6); // on the `f`
             let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();

@@ -358,13 +358,10 @@ pub struct App {
     insert_repeat: Option<InsertRepeat>,
     /// True while `repeat_insert` replays: the escape alias stays out of it.
     replaying_insert: bool,
-    /// The line `cc` or Enter left an indent on, so an `Esc` with nothing
-    /// typed takes the unused indent back (vim's 'autoindent').
-    cc_indent_line: Option<usize>,
-    /// Whether the text had no final newline when the command now under
-    /// way began: an insert session that ends with one then made a new
-    /// empty last line ([`App::keep_new_last_line`]).
-    insert_unterminated: bool,
+    /// The indent `cc` or Enter left, while nothing has been typed after
+    /// it: Esc, Ctrl-C, Enter or moving to another line take it back
+    /// (vim's 'autoindent'). See [`App::settle_indent`].
+    cc_indent: Option<insert::LaidIndent>,
 
     /// User `[keys.*]` bindings overlaid on the built-in grammar.
     keymap: Keymap,
@@ -998,8 +995,7 @@ impl App {
             replaying: false,
             insert_repeat: None,
             replaying_insert: false,
-            cc_indent_line: None,
-            insert_unterminated: false,
+            cc_indent: None,
             keymap,
             image_protocol: crate::image::detect(),
             images: std::cell::RefCell::new(Vec::new()),
@@ -1952,9 +1948,6 @@ impl App {
             // takes the goal afresh, as Neovim's does, and `$`'s line end
             // is not brought back by `u`.
             let anchor = self.is_clean().then(|| Cursor::new(self.buffer.cursor.line, self.buffer.cursor.col));
-            if anchor.is_some() {
-                self.insert_unterminated = self.text_unterminated();
-            }
             self.buffer.history.begin_group(anchor);
         }
 

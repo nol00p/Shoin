@@ -300,7 +300,7 @@ impl App {
 
     pub(super) fn enter_insert(&mut self) {
         self.insert_repeat = None;
-        self.cc_indent_line = None;
+        self.cc_indent = None;
         self.mode = Mode::Insert;
         self.touch_status();
     }
@@ -749,14 +749,15 @@ impl App {
                 };
                 self.buffer.delete_chars(start_idx, end);
                 self.store_register(text, true, true);
-                // Leave one line to type into.
+                // Leave one line to type into: a whole line, its newline
+                // with it, even where the change took every line.
                 let at = Cursor::new(a.min(self.buffer.line_count().saturating_sub(1)), 0);
-                self.buffer.insert_str(at, &format!("{indent}\n"));
+                self.buffer.insert_exact(at, &format!("{indent}\n"));
                 let line = a.min(self.buffer.line_count().saturating_sub(1));
                 self.buffer.cursor = Cursor::new(line, indent.chars().count());
                 self.enter_insert();
                 if !indent.is_empty() {
-                    self.cc_indent_line = Some(line);
+                    self.lay_indent();
                 }
             }
             Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {

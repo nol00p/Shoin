@@ -379,7 +379,7 @@ fn substitutes_keep_the_file_ending_and_cover_a_closed_fold() {
     let mut app = app_with("");
     app.buffer = Buffer::unnamed(b"old\r\nold".to_vec()).unwrap();
     ex(&mut app, "%su/old/new/");
-    assert_eq!(app.buffer.rope.to_string(), "new\nnew");
+    assert_eq!(app.buffer.rope.to_string(), "new\nnew\n");
     assert_eq!(app.buffer.line_ending, crate::text::buffer::LineEnding::Crlf);
     assert!(!app.buffer.final_newline);
     ex(&mut app, "$s/new//");

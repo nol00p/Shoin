@@ -1235,7 +1235,7 @@ mod tests {
         let mut clean = Buffer::open(d.join("clean.md"), &[]).unwrap();
         clean.modified = false;
         let mut dirty = Buffer::open(d.join("dirty.md"), &[]).unwrap();
-        dirty.insert_str(crate::text::cursor::Cursor::new(0, 0), "typed");
+        dirty.insert_exact(crate::text::cursor::Cursor::new(0, 0), "typed");
         assert!(dirty.modified);
         refresh([&clean, &dirty].into_iter());
         {

@@ -1579,7 +1579,7 @@ mod tests {
     fn kinds_that_catch_up_at_the_same_revision_reach_the_entries() {
         let mut app = app_with("alpha\nbravo\ncharlie\n");
         sync(&mut app);
-        app.buffer.insert_str(Cursor::new(0, 0), "```\n");
+        app.buffer.insert_exact(Cursor::new(0, 0), "```\n");
         // Ahead of the kinds: they still describe the text before the edit.
         app.cache.borrow_mut().sync(&app, MEASURE);
         let builds = sync(&mut app);
