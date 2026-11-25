@@ -165,8 +165,11 @@ dim_markers    = true
   load a theme from `$XDG_CONFIG_HOME/shoin/themes/<name>.toml`. If
   `XDG_CONFIG_HOME` is unset, Shoin uses `~/.config/shoin/themes/<name>.toml`.
 - On 16- and 256-color terminals, Shoin maps theme colors to the terminal
-  palette. If text or a highlight would blend into its background, Shoin
-  uses a distinct palette color. Truecolor terminals use the configured
-  colors.
+  palette. If text or a highlight would take the same palette slot as its
+  background, Shoin uses a different slot. Colors in different slots are
+  kept as set. The selection and search matches also set their own text
+  color, as Neovim's defaults do: black on white for the selection and
+  black on bright yellow for search matches when the theme's colors need
+  replacing. Truecolor terminals use the configured colors.
 - The [shipped configuration files](../../shoin/) explain each setting
   alongside its default.

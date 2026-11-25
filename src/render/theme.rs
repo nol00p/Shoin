@@ -148,6 +148,17 @@ pub struct Theme {
     pub cursor_line: Color,
     pub selection: Color,
     pub search_match: Color,
+    /// The foreground drawn ON a selection (Visual, its line-break cell, the
+    /// `:s///c` match, a selected tree or finder row) and on a search match.
+    /// `None` keeps each glyph's own colour, which is what the authored
+    /// truecolour theme does. [`Theme::adapt`] sets both on 16- and
+    /// 256-colour terminals, as Neovim's cterm defaults give `Visual`
+    /// (`ctermfg=0 ctermbg=15`) and `Search` (`ctermfg=0 ctermbg=11`) a
+    /// foreground of their own: once colours collapse onto slots, a span's
+    /// own colour (bold, a link, code) can be the overlay's. Not `[theme]`
+    /// keys: they follow from `selection` and `search_match`.
+    pub selection_fg: Color,
+    pub search_match_fg: Color,
 
     pub headings: [Color; 6],
 
@@ -242,6 +253,8 @@ impl Default for Theme {
             cursor_line: Color::None,
             selection: rgb(0x28, 0x34, 0x57),
             search_match: rgb(0xe0, 0xaf, 0x68),
+            selection_fg: Color::None,
+            search_match_fg: Color::None,
 
             // The six terminal hues in order — red, green, yellow, blue,
             // magenta, cyan — so a heading's level is told by WHICH color it
@@ -313,6 +326,14 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// `s` as a selected row or cell draws it: the selection background,
+    /// and over a 16- or 256-colour terminal its own foreground
+    /// ([`Theme::selection_fg`]).
+    pub fn selected(&self, s: RtStyle) -> RtStyle {
+        let s = s.bg(self.selection.to_ratatui());
+        if self.selection_fg == Color::None { s } else { s.fg(self.selection_fg.to_ratatui()) }
+    }
+
     /// Resolve a `[theme]` config section into a full theme: start from a base
     /// (a named theme file, or the built-in default), overlay the config's
     /// colors and style flags, then downgrade for the terminal.
@@ -469,38 +490,14 @@ impl Theme {
             *c = c.downgrade(depth);
         }
 
+        // Colours are compared by palette SLOT. A terminal decides what each
+        // slot looks like (slot 0 and slot 16 are both "black" only in
+        // xterm's own palette), so two slots are two colours, and one slot is
+        // one colour whatever RGB it was converted from.
         let page = self.background;
         self.text = self.text.with_indexed_contrast(&[page], [15, 0]);
         self.text_dim = self.text_dim.with_indexed_contrast(&[page], [8, 7]);
-        let prose = [page, self.text, self.text_dim];
-
-        // Neovim's default Visual uses a white background in cterm,
-        // and Search and CurSearch use a bright yellow background
-        // under black text. Shoin keeps the text color on these overlays, so
-        // the background fallback also has to avoid that foreground.
-        self.selection = self.selection.with_indexed_contrast(&prose, [15, 7]);
-        self.search_match = self.search_match.with_indexed_contrast(&prose, [11, 3]);
-        // Default CursorLine has no ctermbg. Use an ANSI grey for a configured
-        // cursor line, following the grey used by Neovim's GUI highlight.
-        self.cursor_line = self.cursor_line.with_indexed_contrast(&prose, [8, 7]);
-        self.highlight_bg = self.highlight_bg.with_indexed_contrast(&[page, self.text], [11, 3]);
-        self.code_bg = self.code_bg.with_indexed_contrast(&[page, self.text, self.code], [8, 7]);
-        self.tag_bg = self.tag_bg.with_indexed_contrast(&[page, self.tag], [8, 7]);
-        self.status_bg = self.status_bg.with_indexed_contrast(&[page, self.status_fg], [8, 7]);
-
-        let effective_bg = |bg| if bg == Color::None { page } else { bg };
-        self.tag = self.tag.with_indexed_contrast(&[effective_bg(self.tag_bg)], [15, 0]);
-        self.code = self.code.with_indexed_contrast(&[effective_bg(self.code_bg)], [15, 0]);
-        self.status_fg = self.status_fg.with_indexed_contrast(&[effective_bg(self.status_bg)], [15, 0]);
-
-        let slab = effective_bg(self.code_bg);
-        for color in [
-            &mut self.syntax_keyword, &mut self.syntax_type, &mut self.syntax_string,
-            &mut self.syntax_literal, &mut self.syntax_comment, &mut self.syntax_function,
-            &mut self.syntax_punct,
-        ] {
-            *color = color.with_indexed_contrast(&[slab], [15, 0]);
-        }
+        // Everything else drawn straight on the page.
         for color in [
             &mut self.cursor, &mut self.bold, &mut self.italic, &mut self.strikethrough,
             &mut self.fence_bar, &mut self.diff_add, &mut self.diff_remove, &mut self.diff_change,
@@ -510,6 +507,51 @@ impl Theme {
         ].into_iter().chain(&mut self.headings).chain(&mut self.indent_colors) {
             *color = color.with_indexed_contrast(&[page], [15, 0]);
         }
+        let prose = [page, self.text, self.text_dim];
+
+        // Backgrounds, each against every colour the renderer draws on it.
+        // Default CursorLine has no ctermbg. Use an ANSI grey for a configured
+        // cursor line, following the grey used by Neovim's GUI highlight.
+        self.cursor_line = self.cursor_line.with_indexed_contrast(&prose, [8, 7]);
+        self.highlight_bg = self.highlight_bg.with_indexed_contrast(&[page, self.text], [11, 3]);
+        // A link label can hold inline code or a tag: the link colour on the
+        // code or tag background.
+        let links = [self.link, self.wiki_link];
+        self.code_bg = self.code_bg.with_indexed_contrast(&[&[page, self.text, self.code][..], &links].concat(), [8, 7]);
+        self.tag_bg = self.tag_bg.with_indexed_contrast(&[&[page, self.tag][..], &links].concat(), [8, 7]);
+        // The bar draws hint keys in `list_bullet`, what they do in
+        // `text_dim`, a message in `text` and an error in `error`.
+        self.status_bg = self.status_bg.with_indexed_contrast(
+            &[page, self.status_fg, self.text, self.text_dim, self.list_bullet, self.error],
+            [8, 7],
+        );
+
+        let effective_bg = |bg| if bg == Color::None { page } else { bg };
+        self.tag = self.tag.with_indexed_contrast(&[effective_bg(self.tag_bg)], [15, 0]);
+        self.code = self.code.with_indexed_contrast(&[effective_bg(self.code_bg)], [15, 0]);
+        self.status_fg = self.status_fg.with_indexed_contrast(&[effective_bg(self.status_bg)], [15, 0]);
+        let slab = effective_bg(self.code_bg);
+        for color in [
+            &mut self.syntax_keyword, &mut self.syntax_type, &mut self.syntax_string,
+            &mut self.syntax_literal, &mut self.syntax_comment, &mut self.syntax_function,
+            &mut self.syntax_punct,
+        ] {
+            *color = color.with_indexed_contrast(&[slab], [15, 0]);
+        }
+
+        // The overlays carry their own foreground, as Neovim's cterm
+        // `Visual` and `Search` do, so their backgrounds need only differ
+        // from the backgrounds they are painted over. The fallbacks are
+        // Neovim's: white (15) for Visual, bright yellow (11) for Search.
+        // The `:s///c` match is drawn in the selection's pair over the
+        // search highlights (Neovim's `CurSearch` and `Search` are one cterm
+        // pair, which would not tell it apart), so the selection must also
+        // differ from the search colour.
+        let under = [page, self.code_bg, self.tag_bg, self.highlight_bg, self.cursor_line];
+        self.search_match = self.search_match.with_indexed_contrast(&under, [11, 3]);
+        self.selection = self.selection.with_indexed_contrast(&[&under[..], &[self.search_match]].concat(), [15, 7]);
+        self.selection_fg = self.selection.indexed_overlay_fg();
+        self.search_match_fg = self.search_match.indexed_overlay_fg();
     }
 }
 
@@ -526,18 +568,39 @@ impl Color {
         }
     }
 
+    /// This slot if no colour in `against` is the same slot; else the first
+    /// of `preferred`, then of a fixed order, that is none of them.
     fn with_indexed_contrast(self, against: &[Color], preferred: [u8; 2]) -> Color {
         let Color::Indexed(index) = self else { return self };
-        // Some colors have two xterm indices, such as black at 0 and 16.
-        let distinct = |index| !against.iter().any(|color| {
-            matches!(*color, Color::Indexed(other) if xterm_rgb(index) == xterm_rgb(other))
-        });
+        let distinct = |index| !against.contains(&Color::Indexed(index));
         if distinct(index) {
             return self;
         }
         preferred.into_iter().chain([8, 7, 15, 0]).chain(0..16)
             .find(|&index| distinct(index))
             .map_or(self, Color::Indexed)
+    }
+}
+
+impl Color {
+    /// The foreground an overlay in this background slot draws its text in:
+    /// black (0), as Neovim's cterm `Visual` and `Search` do, unless the
+    /// slot is a dark one, then bright white (15). The 16 ANSI slots are
+    /// judged by convention, not by RGB, since the terminal sets those:
+    /// 0 to 6 and 8 are the dark ones. The 256-colour cube and grey ramp are
+    /// judged by their xterm values. A transparent overlay keeps the text's
+    /// own colour.
+    fn indexed_overlay_fg(self) -> Color {
+        let Color::Indexed(i) = self else { return Color::None };
+        let dark = match i {
+            0..=6 | 8 => true,
+            7 | 9..=15 => false,
+            _ => {
+                let (r, g, b) = xterm_rgb(i);
+                (299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b)) / 1000 < 128
+            }
+        };
+        Color::Indexed(if dark { 15 } else { 0 })
     }
 }
 
@@ -635,15 +698,21 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Nearest of the 16 ANSI colors: primary bits by channel, plus a bright bit.
+///
+/// A channel counts when it is lit (over 100) and at least half the
+/// brightest one, so a hue keeps its name: sand `#e0af68` is yellow, not
+/// white because its blue passes 100, and coral `#f7768e` is magenta.
 fn rgb_to_16(r: u8, g: u8, b: u8) -> u8 {
+    let max = u16::from(r.max(g).max(b));
+    let lit = |c: u8| c > 100 && 2 * u16::from(c) >= max;
     let mut idx = 0u8;
-    if r > 100 {
+    if lit(r) {
         idx |= 1;
     }
-    if g > 100 {
+    if lit(g) {
         idx |= 2;
     }
-    if b > 100 {
+    if lit(b) {
         idx |= 4;
     }
     let bright = if r.max(g).max(b) > 170 { 8 } else { 0 };
@@ -771,13 +840,29 @@ mod tests {
                 }
             }
             for (fg, bg) in [
-                (t.text, t.selection), (t.text, t.search_match), (t.text, t.highlight_bg),
-                (t.text, t.code_bg), (t.code, t.code_bg), (t.tag, t.tag_bg),
-                (t.status_fg, t.status_bg),
+                (t.selection_fg, t.selection), (t.search_match_fg, t.search_match),
+                (t.text, t.highlight_bg), (t.text, t.code_bg), (t.code, t.code_bg),
+                (t.link, t.code_bg), (t.link, t.tag_bg), (t.tag, t.tag_bg),
+                (t.status_fg, t.status_bg), (t.text, t.status_bg), (t.text_dim, t.status_bg),
+                (t.list_bullet, t.status_bg), (t.error, t.status_bg),
             ] {
+                assert_ne!(fg, Color::None, "Tokyo Night {depth:?}: a foreground is set");
                 assert_ne!(fg, bg, "Tokyo Night {depth:?} foreground on {bg:?}");
             }
+            // The overlays differ from the backgrounds they are painted
+            // over, and the `:s` match (the selection's pair) from search.
+            for bg in [t.background, t.code_bg, t.tag_bg, t.highlight_bg, t.search_match] {
+                assert_ne!(t.selection, bg, "Tokyo Night {depth:?} selection");
+            }
         }
+        // Neovim's cterm pairs: Visual black on white, Search black on yellow.
+        let mut t = Theme::default();
+        t.adapt(ColorDepth::Basic16);
+        assert_eq!((t.selection_fg, t.selection), (Color::Indexed(0), Color::Indexed(15)));
+        assert_eq!((t.search_match_fg, t.search_match), (Color::Indexed(0), Color::Indexed(11)));
+        // Truecolor keeps each glyph's own colour under an overlay.
+        let t = Theme::default();
+        assert_eq!((t.selection_fg, t.search_match_fg), (Color::None, Color::None));
     }
 
     #[test]
@@ -799,11 +884,16 @@ mod tests {
         for depth in [ColorDepth::Basic16, ColorDepth::Indexed256] {
             let mut t = authored.clone();
             t.adapt(depth);
+            // The page is slot 0 in 16 colours and slot 16 in 256, which a
+            // terminal can set apart from slot 0: there `text_dim = "black"`
+            // is a colour of its own and stays.
+            let basic = depth == ColorDepth::Basic16;
             assert_eq!(t.text, Color::Indexed(15));
-            assert_eq!(t.text_dim, Color::Indexed(8));
-            assert_eq!(t.selection, Color::Indexed(7));
+            assert_eq!(t.text_dim, Color::Indexed(if basic { 8 } else { 0 }));
+            assert_eq!(t.selection, Color::Indexed(15));
+            assert_eq!(t.selection_fg, Color::Indexed(0));
             assert_eq!(t.search_match, Color::Indexed(14));
-            assert_eq!(t.cursor_line, Color::Indexed(7));
+            assert_eq!(t.cursor_line, Color::Indexed(if basic { 7 } else { 8 }));
         }
     }
 
@@ -811,7 +901,7 @@ mod tests {
     fn basic16_adapts_extended_palette_indices() {
         let mut t = Theme { selection: Color::Indexed(16), ..Default::default() };
         t.adapt(ColorDepth::Basic16);
-        assert_eq!(t.selection, Color::Indexed(7));
+        assert_eq!(t.selection, Color::Indexed(15));
         assert_eq!(t.cursor_line, Color::None);
     }
 
