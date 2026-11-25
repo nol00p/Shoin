@@ -13,10 +13,11 @@ impl Buffer {
     /// its newline too, as every last line of a text has one
     /// ([`Buffer::final_newline`] says whether the file does): `ix` gives
     /// `x\n`, and `o` on it `\n\n`, two lines. Only when the text was empty
-    /// as the command began: one that took every line and puts lines back
-    /// in the same step (`Vjr`, `gUG`) puts back whole lines.
+    /// as the command began (a step that changed nothing, as `c$` there,
+    /// does not count): one that took every line and puts lines back in the
+    /// same step (`Vjr`, `gUG`) puts back whole lines.
     pub fn insert_str(&mut self, at: Cursor, text: &str) -> bool {
-        match self.rope.len_chars() == 0 && !text.is_empty() && self.history.step_is_empty() {
+        match self.rope.len_chars() == 0 && !text.is_empty() && self.history.step_removed_nothing() {
             true => self.insert_with(at, text, "\n"),
             false => self.insert_with(at, text, ""),
         }

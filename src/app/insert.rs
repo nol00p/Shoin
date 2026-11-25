@@ -350,6 +350,18 @@ impl App {
         self.cc_indent = Some(LaidIndent { line: c.line, col: c.col, revision: self.buffer.revision });
     }
 
+    /// A save trimmed other lines, `spent` revisions' worth, while an
+    /// indent lay unused: the save typed nothing, so it is still unused.
+    /// The save left its line alone (the line being typed), or it would no
+    /// longer be an indent alone, and the rest of its lines stay where
+    /// they were: a trim takes no line.
+    pub(super) fn indent_past_save(&mut self, spent: u64) {
+        let revision = self.buffer.revision;
+        if let Some(laid) = self.cc_indent.as_mut().filter(|l| l.revision + spent == revision) {
+            laid.revision = revision;
+        }
+    }
+
     /// The line of the indent `cc` or Enter laid down, while nothing has
     /// been typed after it.
     fn unused_indent(&self) -> Option<usize> {
@@ -413,7 +425,13 @@ impl App {
         // text) has no first copy to follow: nothing is repeated.
         let grown = self.buffer.rope.len_chars().checked_sub(r.len_before);
         let end = self.buffer.char_index(self.buffer.cursor);
-        let Some(grown) = grown.filter(|_| r.line || end >= r.start) else { return };
+        let Some(mut grown) = grown.filter(|_| r.line || end >= r.start) else { return };
+        // Into an empty text the first copy also brought its line's newline
+        // (`Buffer::insert_str`), after the typing: not part of what is
+        // repeated, so `2ix` gives `xx`.
+        if r.len_before == 0 && !r.line {
+            grown = grown.min(end - r.start);
+        }
         self.replaying_insert = true;
         for k in 1..=copies {
             if r.line {

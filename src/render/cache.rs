@@ -128,13 +128,8 @@ impl LineEntry {
             return false;
         }
         let slice = buffer.rope.line(line);
-        let mut n = slice.len_chars();
-        if n > 0 && slice.char(n - 1) == '\n' {
-            n -= 1;
-            if n > 0 && slice.char(n - 1) == '\r' {
-                n -= 1;
-            }
-        }
+        let n = slice.len_chars();
+        let n = n - usize::from(n > 0 && slice.char(n - 1) == '\n');
         // Compare the SLICE against the string, not char against char. Same
         // answer, but ropey walks whole chunks where the char iterators walked
         // one scalar at a time — and this runs for every line of the document

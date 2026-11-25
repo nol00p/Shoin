@@ -170,6 +170,10 @@ version and then the file's, in the order shown on screen.
   `$XDG_STATE_HOME/shoin/recover-<pid>-<n>.md` (`~/.local/state/shoin/` when
   `XDG_STATE_HOME` is unset), skipping any `<n>` already taken. Recovery files
   are readable by you only.
+- A recovery file holds the bytes `:w` would write with `final_newline =
+  "preserve"` and no trimming: the file's line endings, and no final
+  newline when the file had none. Copied back over the file, it gives back
+  the file's end too.
 - A file name too long to take the recovery endings gets a shortened
   recovery name beside it: the start of the name, `~` and a short hash.
   Recovery files 0.2.4 wrote under the full name are still found.

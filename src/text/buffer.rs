@@ -409,9 +409,11 @@ impl Buffer {
     /// Re-read the file from disk, replacing the buffer's text.
     ///
     /// `Ok(false)` means the file's mtime moved but its CONTENT did not — a
-    /// `touch`, or a writer that rewrote identical bytes. The new mtime is
-    /// absorbed and nothing else happens, because throwing away the cursor to
-    /// replace text with itself is a worse outcome than the stale mtime was.
+    /// `touch`, or a writer that rewrote identical bytes. The new mtime (and
+    /// the file's line ending and final newline) are absorbed and the buffer
+    /// marked clean, but the text is left, because throwing away the cursor
+    /// to replace text with itself is a worse outcome than the stale mtime
+    /// was.
     ///
     /// Two things make this safe to do behind the user's back (`App::check_disk`
     /// only ever calls it on a CLEAN buffer):
@@ -439,10 +441,15 @@ impl Buffer {
 
         if loaded.rope == self.rope {
             // Same text, but perhaps not the same bytes: a tool that turned
-            // LF into CRLF leaves the rope identical, and keeping the old
-            // ending would turn it back on the next save.
+            // LF into CRLF, or one that added or took the final newline,
+            // leaves the rope identical, and keeping the old ending or flag
+            // would turn it back on the next save. The buffer now holds what
+            // the file does, so it is clean, as after a save: `:revert!` of
+            // edits that came back to the file's lines ends modified.
             self.line_ending = loaded.line_ending;
             self.final_newline = loaded.final_newline;
+            self.saved_state = self.history.state();
+            self.modified = false;
             self.disk_mtime = mtime;
             self.was_missing = false;
             self.conflict = false;
@@ -536,6 +543,12 @@ impl Buffer {
     }
 
     /// Line content WITHOUT its trailing newline.
+    ///
+    /// The break is the `\n` alone. A `\r` before it is the line's own
+    /// character: a CRLF file's breaks became `\n` when it was read
+    /// (`fs::open::decode`), so one left over was a literal CR in the file
+    /// (`abc\r` with no newline, or a CRLF line in a file of LF lines), and
+    /// Neovim shows and edits it as one: `A` types after it.
     pub fn line_text(&self, line: usize) -> String {
         if line >= self.rope.len_lines() {
             return String::new();
@@ -544,27 +557,19 @@ impl Buffer {
         let mut s = slice.to_string();
         if s.ends_with('\n') {
             s.pop();
-            if s.ends_with('\r') {
-                s.pop();
-            }
         }
         s
     }
 
-    /// Char count of a line, excluding its trailing newline.
+    /// Char count of a line, excluding its trailing newline (a `\r`
+    /// before it counts, as in [`Buffer::line_text`]).
     pub fn line_len(&self, line: usize) -> usize {
         if line >= self.rope.len_lines() {
             return 0;
         }
         let slice = self.rope.line(line);
-        let mut n = slice.len_chars();
-        if n > 0 && slice.char(n - 1) == '\n' {
-            n -= 1;
-            if n > 0 && slice.char(n - 1) == '\r' {
-                n -= 1;
-            }
-        }
-        n
+        let n = slice.len_chars();
+        n - usize::from(n > 0 && slice.char(n - 1) == '\n')
     }
 
     /// Absolute char index of a cursor position.

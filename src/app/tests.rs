@@ -1253,6 +1253,24 @@ fn diff_on_a_matching_file_opens_nothing() {
     let _ = std::fs::remove_file(path);
 }
 
+/// A carriage return the file holds before a newline, in a file of LF
+/// lines, is the line's own character: a merge keeps it, as `:w` would.
+#[test]
+fn diff_keeps_a_literal_carriage_return() {
+    let path = saved_file(&mut app_with("draft\n"), "diff-cr");
+    write_settled(&path, "a\nb\r\n");
+    let mut app = App::new(Config::default(), Some(path.clone()), None).unwrap();
+    feed(&mut app, "GoZ");
+    esc(&mut app);
+    write_settled(&path, "c\na\nb\r\n");
+    app.open_diff();
+    assert!(app.diff.is_some(), "the files differ");
+    diff_key(&mut app, 'b');
+    diff_key(&mut app, 'w');
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "c\na\nb\r\nZ\n");
+    let _ = std::fs::remove_file(path);
+}
+
 /// `:w` with `trim_on_save` trims the buffer as it trims the file, so
 /// `:diff` straight after finds nothing; and `.` still repeats the edit
 /// made before the save, not the `:w`.
@@ -1814,6 +1832,35 @@ fn revert_takes_the_file_but_only_with_a_bang() {
     assert!(!app.buffer.conflict);
     assert!(flash_text(&app).contains("reverted"), "got: {}", flash_text(&app));
     let _ = std::fs::remove_file(path);
+}
+
+/// `:revert!` of a modified buffer whose lines match the file's, the
+/// file having changed only in its final newline, marks it clean: it
+/// holds the file's lines and takes the file's flag, so `:q` quits and
+/// `:w` writes the file's bytes. Either way round, and the same when the
+/// lines matched all along.
+#[test]
+fn revert_marks_clean_when_only_the_final_newline_differs() {
+    for (before, after) in [("abc", "abc\n"), ("abc\n", "abc"), ("abc\n", "abc\n")] {
+        let path = saved_file(&mut app_with("draft\n"), "revert-eol");
+        write_settled(&path, before);
+        let mut app = App::new(Config::default(), Some(path.clone()), None).unwrap();
+        feed(&mut app, "iX");
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        esc(&mut app);
+        assert!(app.buffer.modified, "{before:?}: an edit, undone by hand");
+        write_settled(&path, after);
+        app.check_disk();
+        ex(&mut app, "revert!");
+        assert!(!app.buffer.modified, "{before:?} → {after:?}: clean after :revert!");
+        assert!(!app.buffer.conflict, "{before:?} → {after:?}");
+        assert_eq!(app.buffer.final_newline, after.ends_with('\n'), "{before:?} → {after:?}");
+        ex(&mut app, "w");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after, "{before:?} → {after:?}");
+        ex(&mut app, "q");
+        assert!(app.quit, "{before:?} → {after:?}: `:q` quits");
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// A conflicted buffer is skipped by autosave. The guard would refuse it
@@ -10401,6 +10448,14 @@ const EOF_SAVES: &[EofCase] = &[
     ("abc\n\n", "GJ", ["abc\n\n", "abc\n\n"], (1, 0)),
     ("abc", "o\u{1b}dd", ["abc", "abc\n"], (0, 0)),
     ("abc", "Go\u{1b}:1d\r", ["", "\n"], (0, 0)),
+    ("", "2ix\u{1b}", ["xx\n", "xx\n"], (0, 1)),
+    ("", "2ax\u{1b}", ["xx\n", "xx\n"], (0, 1)),
+    ("", "2Ax\u{1b}", ["xx\n", "xx\n"], (0, 1)),
+    ("", "3ix\r\u{1b}", ["x\nx\nx\n\n", "x\nx\nx\n\n"], (3, 0)),
+    ("", "c$x\r\u{1b}", ["x\n\n", "x\n\n"], (1, 0)),
+    ("abc\r", "AX\u{1b}", ["abc\rX", "abc\rX\n"], (0, 4)),
+    ("a\nb\r\n", "GAX\u{1b}", ["a\nb\rX\n", "a\nb\rX\n"], (1, 2)),
+    ("abc\r\ndef\r", "GAX\u{1b}", ["abc\r\ndef\rX", "abc\r\ndef\rX\r\n"], (1, 4)),
 ];
 
 /// Each [`EOF_SAVES`] case, from a file, under `preserve` and `always`:
@@ -10524,6 +10579,34 @@ fn an_unused_autoindent_goes_as_neovim() {
         ("jA\r↑↑\u{1b}", "q\n  abc\n\n", (0, 0), None, None),
     ]));
     assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// An autosave mid-insert that trims another line is no typing: the
+/// indent the Enter laid down, which the save keeps as the line being
+/// typed, is still unused, and goes at `Esc` or at a move to another
+/// line, as without the save.
+#[test]
+fn a_save_that_trims_another_line_keeps_an_unused_indent_pending() {
+    let path = saved_file(&mut app_with("draft\n"), "indent-trim");
+    for (keys, want, cursor) in [
+        ("GA\r|\u{1b}", "x\n  abc\n\n", (2, 0)),
+        ("GA\r|↑\u{1b}", "x\n  abc\n\n", (1, 1)),
+        ("GA\r|y\u{1b}", "x\n  abc\n  y\n", (2, 2)),
+    ] {
+        std::fs::write(&path, "x \n  abc\n").unwrap();
+        let mut cfg = Config::default();
+        cfg.editor.trim_on_save = true;
+        let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+        app.term_size = (80, 30);
+        let (before, after) = keys.split_once('|').unwrap();
+        nv_type(&mut app, before);
+        assert!(app.autosave_now(), "{keys:?}: autosaved");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\n  abc\n  \n", "{keys:?}: the save");
+        nv_type(&mut app, after);
+        assert_eq!(text(&app), want, "{keys:?}");
+        assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), cursor, "{keys:?}");
+    }
+    std::fs::remove_file(path).unwrap();
 }
 
 /// Held `x` on an empty line: Neovim keeps a step per press, each taking

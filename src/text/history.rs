@@ -234,9 +234,11 @@ impl History {
         self.grouping
     }
 
-    /// Whether the step being built has no change in it yet.
-    pub fn step_is_empty(&self) -> bool {
-        self.current.changes.is_empty()
+    /// Whether the step being built has taken no text yet: it may hold
+    /// insertions, or a change of nothing (`c$` on an empty line), but no
+    /// deletion.
+    pub fn step_removed_nothing(&self) -> bool {
+        self.current.changes.iter().all(|c| c.before.is_empty())
     }
 
     /// How many chars the step being built has added, less those it took.

@@ -239,8 +239,7 @@ pub(super) fn searchable_line(rope: &ropey::Rope, line: usize) -> Cow<'_, str> {
 pub(super) fn searchable(mut slice: ropey::RopeSlice<'_>) -> Cow<'_, str> {
     let len = slice.len_chars();
     if len > 0 && slice.char(len - 1) == '\n' {
-        let cr = usize::from(len > 1 && slice.char(len - 2) == '\r');
-        slice = slice.slice(..len - 1 - cr);
+        slice = slice.slice(..len - 1);
     }
     slice.as_str().map_or_else(|| Cow::Owned(slice.to_string()), Cow::Borrowed)
 }
