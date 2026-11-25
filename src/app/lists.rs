@@ -574,23 +574,36 @@ impl App {
     /// `shift_lines` by `cols` columns, as Neovim's `>` with `shiftround`
     /// off: each line's indent is measured, moved by `cols` (not below 0)
     /// and written anew, all spaces with `expand_tab`, else tabs and then
-    /// spaces for the rest. A tab in the old indent counts to its tab stop,
-    /// as Neovim's `tabstop`; `list_cols` counts it as `tab_width` wherever
-    /// it sits instead, the measure the list commands use
-    /// ([`list::indent_cols`]). They differ only where spaces come before a
-    /// tab.
+    /// spaces for the rest.
+    ///
+    /// A tab in the old indent counts to its tab stop, as Neovim's
+    /// `tabstop`, except on a list line (an item, or more of one, as the
+    /// list parser reads it before the shift) or anywhere with `list_cols`
+    /// (the list commands): there it counts as `tab_width` wherever it sits,
+    /// the measure the parser nests by ([`list::indent_cols`]), so items
+    /// shifted together keep their nesting. The two differ only where
+    /// spaces come before a tab.
     ///
     /// Empty lines are left alone; whitespace-only lines shift too, as in
     /// Neovim.
     fn shift_lines_by(&mut self, l1: usize, l2: usize, outdent: bool, cols: usize, list_cols: bool) {
         let width = self.config.editor.tab_width.max(1);
-        for line in l1..=l2.min(self.buffer.line_count().saturating_sub(1)) {
+        let l2 = l2.min(self.buffer.line_count().saturating_sub(1));
+        // A shift changes no line numbers, so this holds for the whole loop.
+        let in_list: Vec<bool> = if list_cols || l1 > l2 {
+            Vec::new()
+        } else {
+            self.refresh_blocks();
+            let lists = Lists::new(&self.buffer, &self.blocks.kinds, width);
+            (l1..=l2).map(|l| lists.item_bounds(l).is_some()).collect()
+        };
+        for line in l1..=l2 {
             let text = self.buffer.line_text(line);
             if text.is_empty() {
                 continue;
             }
             let ws = crate::render::markdown::block::leading_ws_chars(&text);
-            let old = if list_cols {
+            let old = if list_cols || in_list[line - l1] {
                 list::indent_cols(&text, width)
             } else {
                 text.chars().take(ws).fold(0, |col, c| if c == '\t' { col + width - col % width } else { col + 1 })

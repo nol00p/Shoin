@@ -2938,6 +2938,37 @@ fn list_shifts_rewrite_a_tab_indent() {
     }
     assert!(out.is_empty(), "{}", out.join("\n"));
 }
+
+/// A list line (an item or more of one) is measured as the list parser
+/// measures it, a tab counting `tab_width` wherever it sits, so a shift keeps
+/// the nesting it had: ` \t- child` (5 columns) stays under `    - parent`
+/// (4). Other lines keep Neovim's tab stops (` \t X` is 4 columns).
+#[test]
+fn shifting_list_lines_keeps_their_nesting() {
+    let (et, noet) = (true, false);
+    #[rustfmt::skip]
+    let cases: &[(&str, bool, &str, &str)] = &[
+        ("- root\n    - parent\n \t- child\n", et, "j>j", "- root\n        - parent\n         - child\n"),
+        ("- root\n    - parent\n \t- child\n", noet, "j>j", "- root\n\t\t- parent\n\t\t - child\n"),
+        ("- root\n    - parent\n \t- child\n", et, "jVj>", "- root\n        - parent\n         - child\n"),
+        ("- root\n    - parent\n \t- child\n", et, "jj>>", "- root\n    - parent\n         - child\n"),
+        ("- a\n    - b\n \t  more\n", et, "j>j", "- a\n        - b\n           more\n"),
+        (" \t- b\n", et, ">>", "         - b\n"),
+        (" \t- b\n", et, "<<", " - b\n"),
+        ("text\n \t X\n", et, "j>>", "text\n         X\n"),
+    ];
+    let mut out = Vec::new();
+    for &(start, expand_tab, keys, want) in cases {
+        let mut app = app_with(start);
+        app.config.editor.expand_tab = expand_tab;
+        feed(&mut app, keys);
+        if text(&app) != want {
+            out.push(format!("{start:?} {keys:?} et={expand_tab}: {:?}, want {want:?}", text(&app)));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
+
 /// `>al` nests an item under its previous sibling, children and all, and
 /// leaves the cursor on the same character.
 #[test]

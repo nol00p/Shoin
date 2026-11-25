@@ -417,9 +417,12 @@ middle or the bottom of the pane. The cursor stays where it is.
   and write it anew, as Vim does: all spaces with `expand_tab`, otherwise
   tabs and then spaces. So `>>` on a tab-indented line puts 8 spaces before
   the text at the default 4. A line of only spaces and tabs shifts too;
-  only an empty line is left alone. The list shifts (`>al`, `<al`, `Tab` in
-  Insert on an item) write the new indent the same way, counting a tab in
-  the old one as `tab_width` columns as the list commands do.
+  only an empty line is left alone. On a list item or a line of one, a tab
+  in the old indent counts as `tab_width` columns wherever it sits, as the
+  list nests by, so items shifted together keep their nesting: ` \t- c`
+  (5 columns) under `    - b` stays one column deeper, and ` \t- c` alone
+  goes to 9 spaces with `>>` where Vim gives 8. The list shifts (`>al`,
+  `<al`, `Tab` in Insert on an item) write the new indent the same way.
 - In Normal mode the cursor on a tab is drawn on the tab's last cell, as in
   Vim; in Insert mode it is drawn on the first, where typing goes. In Visual
   mode it is on the last cell when the cursor is after where the selection

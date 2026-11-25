@@ -897,5 +897,16 @@ fn a_matched_line_break_is_drawn_as_neovim() {
     if bg_after(&app, "ab").1 != sel {
         out.push(":s/\\n//c: the empty line's break it asks about is not drawn".into());
     }
+    // The last line's break in a file without one: the match takes it,
+    // though the replacement stops at the end of the text.
+    let mut app = fresh("ab\ncd", 4);
+    feed(&mut app, ":%s/d\\n/Z/c\r");
+    if bg_after(&app, "cd").0 != sel {
+        out.push(":s/d\\n/Z/c: the missing last break it asks about is not drawn".into());
+    }
+    feed(&mut app, "y");
+    if app.buffer.rope != "ab\ncZ" {
+        out.push(format!(":s/d\\n/Z/c then y: {:?}, Neovim \"ab\\ncZ\"", app.buffer.rope.to_string()));
+    }
     assert!(out.is_empty(), "{}", out.join("\n"));
 }
