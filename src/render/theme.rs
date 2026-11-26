@@ -148,6 +148,28 @@ pub struct Theme {
     pub cursor_line: Color,
     pub selection: Color,
     pub search_match: Color,
+    /// The foreground drawn ON a selection (Visual, its line-break cell, the
+    /// `:s///c` match, a selected tree or finder row) and on a search match.
+    /// `None` keeps each glyph's own colour, which is what the authored
+    /// truecolour theme does. [`Theme::adapt`] sets both on 16- and
+    /// 256-colour terminals, as Neovim's cterm defaults give `Visual`
+    /// (`ctermfg=0 ctermbg=15`) and `Search` (`ctermfg=0 ctermbg=11`) a
+    /// foreground of their own: once colours collapse onto slots, a span's
+    /// own colour (bold, a link, code) can be the overlay's. Not `[theme]`
+    /// keys: they follow from `selection` and `search_match`.
+    pub selection_fg: Color,
+    pub search_match_fg: Color,
+    /// The foreground a glyph takes on an inline `==highlight==` when its own
+    /// colour (a heading's, bold's, a link's) is the highlight's slot.
+    /// `None` in truecolour, where nothing is replaced; [`Theme::adapt`] sets
+    /// it on 16- and 256-colour terminals, as for [`Theme::selection_fg`].
+    pub highlight_fg: Color,
+    /// The status bar's message and error foregrounds. `None` in truecolour,
+    /// where a message keeps the terminal's own foreground and an error is
+    /// ANSI red; on 16- and 256-colour terminals [`Theme::adapt`] sets them
+    /// to `text` and `error`, which it keeps off the bar's background.
+    pub message_fg: Color,
+    pub message_error_fg: Color,
 
     pub headings: [Color; 6],
 
@@ -201,6 +223,11 @@ pub struct Theme {
     pub status_bg: Color,
     pub error: Color,
 
+    /// The `[theme]` color keys the user set to something other than the
+    /// built-in default, in the config or a theme file. [`Theme::adapt`]
+    /// preserves their palette choices and checks converted RGB for contrast.
+    pub explicit: std::collections::BTreeSet<String>,
+
     pub dim_markers: bool,
     pub heading_bold: bool,
     /// Headings in italic as well as bold. Off by default: at heading weight it
@@ -242,6 +269,11 @@ impl Default for Theme {
             cursor_line: Color::None,
             selection: rgb(0x28, 0x34, 0x57),
             search_match: rgb(0xe0, 0xaf, 0x68),
+            selection_fg: Color::None,
+            search_match_fg: Color::None,
+            highlight_fg: Color::None,
+            message_fg: Color::None,
+            message_error_fg: Color::None,
 
             // The six terminal hues in order — red, green, yellow, blue,
             // magenta, cyan — so a heading's level is told by WHICH color it
@@ -302,6 +334,8 @@ impl Default for Theme {
             status_bg: rgb(0x16, 0x16, 0x1e),
             error: rgb(0xf7, 0x76, 0x8e),
 
+            explicit: std::collections::BTreeSet::new(),
+
             dim_markers: true,
             heading_bold: true,
             heading_italic: false,
@@ -313,6 +347,14 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// `s` as a selected row or cell draws it: the selection background,
+    /// and over a 16- or 256-colour terminal its own foreground
+    /// ([`Theme::selection_fg`]).
+    pub fn selected(&self, s: RtStyle) -> RtStyle {
+        let s = s.bg(self.selection.to_ratatui());
+        if self.selection_fg == Color::None { s } else { s.fg(self.selection_fg.to_ratatui()) }
+    }
+
     /// Resolve a `[theme]` config section into a full theme: start from a base
     /// (a named theme file, or the built-in default), overlay the config's
     /// colors and style flags, then downgrade for the terminal.
@@ -364,6 +406,7 @@ impl Theme {
     }
 
     fn apply_colors(&mut self, colors: &std::collections::HashMap<String, toml::Value>) -> Result<()> {
+        let mut defaults = Theme::default();
         for (key, value) in colors {
             if key == "indent_colors" {
                 if let Some(arr) = value.as_array() {
@@ -372,65 +415,79 @@ impl Theme {
                         out.push(value_to_color(v)?);
                     }
                     if !out.is_empty() {
+                        if out != defaults.indent_colors {
+                            self.explicit.insert(key.clone());
+                        } else {
+                            self.explicit.remove(key);
+                        }
                         self.indent_colors = out;
                     }
                 }
                 continue;
             }
             let color = value_to_color(value)?;
-            self.set_color(key, color);
+            if let Some(slot) = self.color_mut(key) {
+                *slot = color;
+                // The shipped theme.conf (`--init-config`) writes out every
+                // default: a color is the user's own only if it differs.
+                if defaults.color_mut(key).is_some_and(|d| *d != color) {
+                    self.explicit.insert(key.clone());
+                } else {
+                    self.explicit.remove(key);
+                }
+            }
         }
         Ok(())
     }
 
-    /// Assign a color by its `[theme]` key name. Unknown keys are ignored, for
-    /// forward compatibility.
-    fn set_color(&mut self, key: &str, c: Color) {
+    /// The color a `[theme]` key names; `None` for a key it doesn't know.
+    /// Unknown keys are ignored, for forward compatibility.
+    fn color_mut(&mut self, key: &str) -> Option<&mut Color> {
         match key {
-            "background" => self.background = c,
-            "text" => self.text = c,
-            "text_dim" => self.text_dim = c,
-            "cursor" => self.cursor = c,
-            "cursor_line" => self.cursor_line = c,
-            "selection" => self.selection = c,
-            "search_match" => self.search_match = c,
-            "heading_1" => self.headings[0] = c,
-            "heading_2" => self.headings[1] = c,
-            "heading_3" => self.headings[2] = c,
-            "heading_4" => self.headings[3] = c,
-            "heading_5" => self.headings[4] = c,
-            "heading_6" => self.headings[5] = c,
-            "bold" => self.bold = c,
-            "italic" => self.italic = c,
-            "strikethrough" => self.strikethrough = c,
-            "highlight_bg" => self.highlight_bg = c,
-            "code" => self.code = c,
-            "code_bg" => self.code_bg = c,
-            "fence_bar" => self.fence_bar = c,
-            "syntax_keyword" => self.syntax_keyword = c,
-            "syntax_type" => self.syntax_type = c,
-            "syntax_string" => self.syntax_string = c,
-            "syntax_literal" => self.syntax_literal = c,
-            "syntax_comment" => self.syntax_comment = c,
-            "syntax_function" => self.syntax_function = c,
-            "syntax_punct" => self.syntax_punct = c,
-            "diff_add" => self.diff_add = c,
-            "diff_remove" => self.diff_remove = c,
-            "diff_change" => self.diff_change = c,
-            "link" => self.link = c,
-            "wiki_link" => self.wiki_link = c,
-            "tag" => self.tag = c,
-            "tag_bg" => self.tag_bg = c,
-            "quote" => self.quote = c,
-            "quote_bar" => self.quote_bar = c,
-            "list_bullet" => self.list_bullet = c,
-            "task_done" => self.task_done = c,
-            "rule" => self.rule = c,
-            "table_border" => self.table_border = c,
-            "status_fg" => self.status_fg = c,
-            "status_bg" => self.status_bg = c,
-            "error" => self.error = c,
-            _ => {}
+            "background" => Some(&mut self.background),
+            "text" => Some(&mut self.text),
+            "text_dim" => Some(&mut self.text_dim),
+            "cursor" => Some(&mut self.cursor),
+            "cursor_line" => Some(&mut self.cursor_line),
+            "selection" => Some(&mut self.selection),
+            "search_match" => Some(&mut self.search_match),
+            "heading_1" => Some(&mut self.headings[0]),
+            "heading_2" => Some(&mut self.headings[1]),
+            "heading_3" => Some(&mut self.headings[2]),
+            "heading_4" => Some(&mut self.headings[3]),
+            "heading_5" => Some(&mut self.headings[4]),
+            "heading_6" => Some(&mut self.headings[5]),
+            "bold" => Some(&mut self.bold),
+            "italic" => Some(&mut self.italic),
+            "strikethrough" => Some(&mut self.strikethrough),
+            "highlight_bg" => Some(&mut self.highlight_bg),
+            "code" => Some(&mut self.code),
+            "code_bg" => Some(&mut self.code_bg),
+            "fence_bar" => Some(&mut self.fence_bar),
+            "syntax_keyword" => Some(&mut self.syntax_keyword),
+            "syntax_type" => Some(&mut self.syntax_type),
+            "syntax_string" => Some(&mut self.syntax_string),
+            "syntax_literal" => Some(&mut self.syntax_literal),
+            "syntax_comment" => Some(&mut self.syntax_comment),
+            "syntax_function" => Some(&mut self.syntax_function),
+            "syntax_punct" => Some(&mut self.syntax_punct),
+            "diff_add" => Some(&mut self.diff_add),
+            "diff_remove" => Some(&mut self.diff_remove),
+            "diff_change" => Some(&mut self.diff_change),
+            "link" => Some(&mut self.link),
+            "wiki_link" => Some(&mut self.wiki_link),
+            "tag" => Some(&mut self.tag),
+            "tag_bg" => Some(&mut self.tag_bg),
+            "quote" => Some(&mut self.quote),
+            "quote_bar" => Some(&mut self.quote_bar),
+            "list_bullet" => Some(&mut self.list_bullet),
+            "task_done" => Some(&mut self.task_done),
+            "rule" => Some(&mut self.rule),
+            "table_border" => Some(&mut self.table_border),
+            "status_fg" => Some(&mut self.status_fg),
+            "status_bg" => Some(&mut self.status_bg),
+            "error" => Some(&mut self.error),
+            _ => None,
         }
     }
 
@@ -451,6 +508,11 @@ impl Theme {
         if depth == ColorDepth::TrueColor {
             return;
         }
+        let explicit = std::mem::take(&mut self.explicit);
+        let explicit_palette: std::collections::BTreeSet<_> = explicit.iter()
+            .filter(|key| self.color_mut(key).is_some_and(|c| !matches!(c, Color::Rgb(..))))
+            .map(String::as_str)
+            .collect();
         macro_rules! down {
             ($($f:ident),*) => { $( self.$f = self.$f.downgrade(depth); )* };
         }
@@ -465,9 +527,104 @@ impl Theme {
         for h in self.headings.iter_mut() {
             *h = h.downgrade(depth);
         }
-        for c in self.indent_colors.iter_mut() {
-            *c = c.downgrade(depth);
+        // Colours are compared by palette SLOT. A terminal decides what each
+        // slot looks like (slot 0 and slot 16 are both "black" only in
+        // xterm's own palette), so two slots are two colours, and one slot is
+        // one colour whatever RGB it was converted from.
+        //
+        // Preserve the user's palette choices. An RGB colour's palette slot
+        // comes from conversion, so it still goes through the contrast guard.
+        let guard = |key: &str, c: &mut Color, against: &[Color], preferred: [u8; 2]| {
+            if !explicit_palette.contains(key) {
+                *c = c.with_indexed_contrast(against, preferred);
+            }
+        };
+        let page = self.background;
+        guard("text", &mut self.text, &[page], [15, 0]);
+        guard("text_dim", &mut self.text_dim, &[page], [8, 7]);
+        // Everything else drawn straight on the page.
+        for (key, color) in [
+            ("cursor", &mut self.cursor), ("bold", &mut self.bold), ("italic", &mut self.italic),
+            ("strikethrough", &mut self.strikethrough), ("fence_bar", &mut self.fence_bar),
+            ("diff_add", &mut self.diff_add), ("diff_remove", &mut self.diff_remove),
+            ("diff_change", &mut self.diff_change), ("link", &mut self.link),
+            ("wiki_link", &mut self.wiki_link), ("quote", &mut self.quote),
+            ("quote_bar", &mut self.quote_bar), ("list_bullet", &mut self.list_bullet),
+            ("task_done", &mut self.task_done), ("rule", &mut self.rule),
+            ("table_border", &mut self.table_border), ("error", &mut self.error),
+        ] {
+            guard(key, color, &[page], [15, 0]);
         }
+        for (key, color) in ["heading_1", "heading_2", "heading_3", "heading_4", "heading_5", "heading_6"]
+            .into_iter()
+            .zip(&mut self.headings)
+        {
+            guard(key, color, &[page], [15, 0]);
+        }
+        let explicit_indents = explicit.contains("indent_colors");
+        for color in &mut self.indent_colors {
+            let keep = explicit_indents && !matches!(color, Color::Rgb(..));
+            *color = color.downgrade(depth);
+            if !keep {
+                *color = color.with_indexed_contrast(&[page], [15, 0]);
+            }
+        }
+        let prose = [page, self.text, self.text_dim];
+
+        // Backgrounds, each against every colour the renderer draws on it.
+        // Default CursorLine has no ctermbg. Use an ANSI grey for a configured
+        // cursor line, following the grey used by Neovim's GUI highlight.
+        guard("cursor_line", &mut self.cursor_line, &prose, [8, 7]);
+        // Other glyphs on a highlight are seen to at render time, through
+        // `highlight_fg`.
+        guard("highlight_bg", &mut self.highlight_bg, &[page, self.text], [11, 3]);
+        // A link label can hold inline code or a tag: the link colour on the
+        // code or tag background.
+        let links = [self.link, self.wiki_link];
+        guard("code_bg", &mut self.code_bg, &[&[page, self.text, self.code][..], &links].concat(), [8, 7]);
+        guard("tag_bg", &mut self.tag_bg, &[&[page, self.tag][..], &links].concat(), [8, 7]);
+        // The bar draws hint keys in `list_bullet`, what they do in
+        // `text_dim`, a message in `text` and an error in `error`.
+        guard(
+            "status_bg",
+            &mut self.status_bg,
+            &[page, self.status_fg, self.text, self.text_dim, self.list_bullet, self.error],
+            [8, 7],
+        );
+
+        let effective_bg = |bg| if bg == Color::None { page } else { bg };
+        guard("tag", &mut self.tag, &[effective_bg(self.tag_bg)], [15, 0]);
+        guard("code", &mut self.code, &[effective_bg(self.code_bg)], [15, 0]);
+        guard("status_fg", &mut self.status_fg, &[effective_bg(self.status_bg)], [15, 0]);
+        let slab = effective_bg(self.code_bg);
+        for (key, color) in [
+            ("syntax_keyword", &mut self.syntax_keyword), ("syntax_type", &mut self.syntax_type),
+            ("syntax_string", &mut self.syntax_string), ("syntax_literal", &mut self.syntax_literal),
+            ("syntax_comment", &mut self.syntax_comment), ("syntax_function", &mut self.syntax_function),
+            ("syntax_punct", &mut self.syntax_punct),
+        ] {
+            guard(key, color, &[slab], [15, 0]);
+        }
+
+        // The overlays carry their own foreground, as Neovim's cterm
+        // `Visual` and `Search` do, so their backgrounds need only differ
+        // from the backgrounds they are painted over. The fallbacks are
+        // Neovim's: white (15) for Visual, bright yellow (11) for Search.
+        // The `:s///c` match is drawn in the selection's pair over the
+        // search highlights (Neovim's `CurSearch` and `Search` are one cterm
+        // pair, which would not tell it apart), so the selection must also
+        // differ from the search colour.
+        let under = [page, self.code_bg, self.tag_bg, self.highlight_bg, self.cursor_line];
+        guard("search_match", &mut self.search_match, &under, [11, 3]);
+        guard("selection", &mut self.selection, &[&under[..], &[self.search_match]].concat(), [15, 7]);
+        self.selection_fg = self.selection.indexed_overlay_fg();
+        self.search_match_fg = self.search_match.indexed_overlay_fg();
+        self.highlight_fg = self.highlight_bg.indexed_overlay_fg();
+        // Status messages in theme colours, which `status_bg` avoids: the
+        // terminal's own foreground could be the bar's slot.
+        self.message_fg = self.text;
+        self.message_error_fg = self.error;
+        self.explicit = explicit;
     }
 }
 
@@ -476,8 +633,47 @@ impl Color {
         match (self, depth) {
             (Color::Rgb(r, g, b), ColorDepth::Indexed256) => Color::Indexed(rgb_to_256(r, g, b)),
             (Color::Rgb(r, g, b), ColorDepth::Basic16) => Color::Indexed(rgb_to_16(r, g, b)),
+            (Color::Indexed(i @ 16..), ColorDepth::Basic16) => {
+                let (r, g, b) = xterm_rgb(i);
+                Color::Indexed(rgb_to_16(r, g, b))
+            }
             _ => self,
         }
+    }
+
+    /// This slot if no colour in `against` is the same slot; else the first
+    /// of `preferred`, then of a fixed order, that is none of them.
+    fn with_indexed_contrast(self, against: &[Color], preferred: [u8; 2]) -> Color {
+        let Color::Indexed(index) = self else { return self };
+        let distinct = |index| !against.contains(&Color::Indexed(index));
+        if distinct(index) {
+            return self;
+        }
+        preferred.into_iter().chain([8, 7, 15, 0]).chain(0..16)
+            .find(|&index| distinct(index))
+            .map_or(self, Color::Indexed)
+    }
+}
+
+impl Color {
+    /// The foreground an overlay in this background slot draws its text in:
+    /// black (0), as Neovim's cterm `Visual` and `Search` do, unless the
+    /// slot is a dark one, then bright white (15). The 16 ANSI slots are
+    /// judged by convention, not by RGB, since the terminal sets those:
+    /// 0 to 6 and 8 are the dark ones. The 256-colour cube and grey ramp are
+    /// judged by their xterm values. A transparent overlay keeps the text's
+    /// own colour.
+    fn indexed_overlay_fg(self) -> Color {
+        let Color::Indexed(i) = self else { return Color::None };
+        let dark = match i {
+            0..=6 | 8 => true,
+            7 | 9..=15 => false,
+            _ => {
+                let (r, g, b) = xterm_rgb(i);
+                (299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b)) / 1000 < 128
+            }
+        };
+        Color::Indexed(if dark { 15 } else { 0 })
     }
 }
 
@@ -504,6 +700,7 @@ pub fn detect_depth() -> ColorDepth {
         }
     }
     match std::env::var("TERM") {
+        Ok(term) if term.ends_with("-16color") => ColorDepth::Basic16,
         Ok(term) if term.contains("256") || term.contains("direct") => ColorDepth::Indexed256,
         Ok(term) if !term.is_empty() && term != "dumb" => ColorDepth::Indexed256,
         _ => ColorDepth::Basic16,
@@ -574,15 +771,21 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Nearest of the 16 ANSI colors: primary bits by channel, plus a bright bit.
+///
+/// A channel counts when it is lit (over 100) and at least half the
+/// brightest one, so a hue keeps its name: sand `#e0af68` is yellow, not
+/// white because its blue passes 100, and coral `#f7768e` is magenta.
 fn rgb_to_16(r: u8, g: u8, b: u8) -> u8 {
+    let max = u16::from(r.max(g).max(b));
+    let lit = |c: u8| c > 100 && 2 * u16::from(c) >= max;
     let mut idx = 0u8;
-    if r > 100 {
+    if lit(r) {
         idx |= 1;
     }
-    if g > 100 {
+    if lit(g) {
         idx |= 2;
     }
-    if b > 100 {
+    if lit(b) {
         idx |= 4;
     }
     let bright = if r.max(g).max(b) > 170 { 8 } else { 0 };
@@ -631,7 +834,7 @@ mod tests {
                 continue;
             }
             let mut one = Theme::default();
-            one.set_color(key, value_to_color(value).unwrap());
+            *one.color_mut(key).unwrap() = value_to_color(value).unwrap();
             assert!(
                 one == Theme::default(),
                 "theme.conf `{key}` = {value} differs from Theme::default()"
@@ -694,8 +897,102 @@ mod tests {
     }
 
     #[test]
+    fn built_in_theme_has_distinct_indexed_colors() {
+        // Tokyo Night (Night) is the sole built-in theme. theme.conf mirrors it.
+        for depth in [ColorDepth::Basic16, ColorDepth::Indexed256] {
+            let mut t = Theme::default();
+            t.adapt(depth);
+            for (name, color) in [
+                ("selection", t.selection), ("search_match", t.search_match),
+                ("cursor_line", t.cursor_line), ("highlight_bg", t.highlight_bg),
+                ("code_bg", t.code_bg), ("tag_bg", t.tag_bg), ("status_bg", t.status_bg),
+                ("text", t.text), ("text_dim", t.text_dim),
+            ] {
+                if color != Color::None {
+                    assert_ne!(color, t.background, "Tokyo Night {depth:?} {name}");
+                }
+            }
+            for (fg, bg) in [
+                (t.selection_fg, t.selection), (t.search_match_fg, t.search_match),
+                (t.text, t.highlight_bg), (t.text, t.code_bg), (t.code, t.code_bg),
+                (t.link, t.code_bg), (t.link, t.tag_bg), (t.tag, t.tag_bg),
+                (t.status_fg, t.status_bg), (t.text, t.status_bg), (t.text_dim, t.status_bg),
+                (t.list_bullet, t.status_bg), (t.error, t.status_bg),
+            ] {
+                assert_ne!(fg, Color::None, "Tokyo Night {depth:?}: a foreground is set");
+                assert_ne!(fg, bg, "Tokyo Night {depth:?} foreground on {bg:?}");
+            }
+            // The overlays differ from the backgrounds they are painted
+            // over, and the `:s` match (the selection's pair) from search.
+            for bg in [t.background, t.code_bg, t.tag_bg, t.highlight_bg, t.search_match] {
+                assert_ne!(t.selection, bg, "Tokyo Night {depth:?} selection");
+            }
+        }
+        // Neovim's cterm pairs: Visual black on white, Search black on yellow.
+        let mut t = Theme::default();
+        t.adapt(ColorDepth::Basic16);
+        assert_eq!((t.selection_fg, t.selection), (Color::Indexed(0), Color::Indexed(15)));
+        assert_eq!((t.search_match_fg, t.search_match), (Color::Indexed(0), Color::Indexed(11)));
+        // Truecolor keeps each glyph's own colour under an overlay.
+        let t = Theme::default();
+        assert_eq!((t.selection_fg, t.search_match_fg), (Color::None, Color::None));
+    }
+
+    #[test]
+    fn custom_theme_keeps_palette_colors_and_repairs_converted_rgb() {
+        let cfg = crate::config::parse(r##"
+            [theme]
+            background = "#010101"
+            text_dim = "black"
+            search_match = "bright_cyan"
+            cursor_line = "#040404"
+            indent_colors = [0, 16, "#040404"]
+            text = "#c0caf5"
+        "##).unwrap().theme;
+        let authored = Theme::authored(&cfg).unwrap();
+        let mut truecolor = authored.clone();
+        truecolor.adapt(ColorDepth::TrueColor);
+        assert!(truecolor == authored);
+        // `text` is set to its default, as the shipped theme.conf does: it is
+        // still the built-in theme's.
+        let set: Vec<_> = authored.explicit.iter().map(String::as_str).collect();
+        assert_eq!(set, ["background", "cursor_line", "indent_colors", "search_match", "text_dim"]);
+
+        for depth in [ColorDepth::Basic16, ColorDepth::Indexed256] {
+            let mut t = authored.clone();
+            t.adapt(depth);
+            let basic = depth == ColorDepth::Basic16;
+            assert_eq!(t.background, Color::Indexed(if basic { 0 } else { 16 }));
+            assert_eq!(t.text_dim, Color::Indexed(0));
+            assert_ne!(t.cursor_line, t.background);
+            assert_eq!(t.search_match, Color::Indexed(14));
+            assert_eq!(&t.indent_colors[..2], &[Color::Indexed(0), t.background]);
+            assert_ne!(t.indent_colors[2], t.background);
+            // Left to the built-in theme: kept off the page and the cursor
+            // line.
+            for (name, c) in [("code_bg", t.code_bg), ("selection", t.selection), ("text", t.text)] {
+                assert_ne!(c, t.background, "{depth:?} {name}");
+            }
+            assert_ne!(t.selection, t.search_match);
+            assert_ne!(t.selection_fg, t.selection);
+        }
+    }
+
+    #[test]
+    fn basic16_adapts_extended_palette_indices() {
+        let mut t = Theme { selection: Color::Indexed(16), ..Default::default() };
+        t.adapt(ColorDepth::Basic16);
+        assert_eq!(t.selection, Color::Indexed(15));
+        assert_eq!(t.cursor_line, Color::None);
+    }
+
+    #[test]
     fn adapt_downgrades_rgb() {
-        let mut t = Theme { text: Color::Rgb(0, 0, 0), ..Default::default() };
+        let mut t = Theme {
+            background: Color::Indexed(15),
+            text: Color::Rgb(0, 0, 0),
+            ..Default::default()
+        };
         t.adapt(ColorDepth::Basic16);
         assert_eq!(t.text, Color::Indexed(0)); // black
         let mut t = Theme { link: Color::Rgb(0, 0, 255), ..Default::default() };

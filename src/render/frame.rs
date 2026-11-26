@@ -132,9 +132,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     if cfg.status.enabled {
         if let Some(status) = status {
+            // The terminal's foreground and ANSI red in truecolour; on 16 and
+            // 256 colours the theme's, which `adapt` keeps off the bar's slot.
+            let theme = &app.theme;
             let style = match app.flash.as_ref().map(|f| &f.kind) {
-                Some(FlashKind::Error) => Style::default().fg(Color::Red),
-                _ => Style::default().add_modifier(Modifier::DIM),
+                Some(FlashKind::Error) if theme.message_error_fg == ThemeColor::None => Style::default().fg(Color::Red),
+                Some(FlashKind::Error) => Style::default().fg(theme.message_error_fg.to_ratatui()),
+                _ if theme.message_fg == ThemeColor::None => Style::default().add_modifier(Modifier::DIM),
+                _ => Style::default().fg(theme.message_fg.to_ratatui()).add_modifier(Modifier::DIM),
             };
             let lay = Layout::compute(&cfg.layout, ea.width, ea.height, STATUS_ROWS);
             let status_area = Rect {
@@ -454,7 +459,7 @@ fn render_pane(
             let x = usize::from(r.x) + usize::from(shift) + usize::from(width);
             if x < usize::from(rect.right()) {
                 let cell = Rect { x: x as u16, y: r.y, width: 1, height: 1 };
-                frame.render_widget(Paragraph::new(" ").style(Style::default().bg(app.theme.selection.to_ratatui())), cell);
+                frame.render_widget(Paragraph::new(" ").style(app.theme.selected(Style::default())), cell);
             }
         }
         if fenced {
@@ -1010,7 +1015,7 @@ fn tree_row<'a>(app: &App, tree: &FileTree, e: &Entry, selected: bool, width: us
 
     let sel_bg = |s: Style| {
         if selected {
-            s.bg(theme.selection.to_ratatui())
+            theme.selected(s)
         } else {
             s
         }
@@ -1323,7 +1328,11 @@ fn help_row(app: &App, row: &crate::help::Row, marked: bool) -> Line<'static> {
         Row::Blank => Line::default(),
     };
     if marked {
-        line = line.style(Style::default().bg(theme.selection.to_ratatui()));
+        line = line.style(theme.selected(Style::default()));
+        // The spans' own colours go too when the selection has its own.
+        for span in &mut line.spans {
+            span.style = theme.selected(span.style);
+        }
     }
     line
 }
@@ -1944,13 +1953,15 @@ fn result_line<'a>(
     let accent = spotlight_accent(app);
 
     let base = if selected {
-        Style::default()
-            .fg(theme.text.to_ratatui())
-            .bg(theme.selection.to_ratatui())
+        theme.selected(Style::default().fg(theme.text.to_ratatui()))
     } else {
         Style::default().fg(theme.text_dim.to_ratatui())
     };
-    let hit = base.fg(accent.to_ratatui()).add_modifier(Modifier::BOLD);
+    // On a selected row that has its own foreground, the matched characters
+    // keep it and are told by their weight.
+    let keep = selected && theme.selection_fg != ThemeColor::None;
+    let tint = |s: Style, c: ThemeColor| if keep { s } else { s.fg(c.to_ratatui()) };
+    let hit = tint(base, accent).add_modifier(Modifier::BOLD);
 
     // Marker, then the same file-type icon the tree draws — read from the FILE
     // NAME, not the whole relative path, or a dotted directory would decide it.
@@ -1961,7 +1972,7 @@ fn result_line<'a>(
         let (glyph, kind) = crate::tree::file_icon(name);
         spans.push(Span::styled(
             format!("{glyph} "),
-            base.fg(icon_color(theme, kind).to_ratatui()),
+            tint(base, icon_color(theme, kind)),
         ));
         lead += 2;
     }
@@ -2062,10 +2073,11 @@ fn display_line_of(
     // All of a line's matches are painted in one pass: one pass per match
     // rebuilt the line's spans thousands of times on a long line.
     let matches = app.search_highlights(doc, line, source);
-    overlay_all(&mut styled, &matches, |style| style.bg = app.theme.search_match);
+    let theme = &app.theme;
+    overlay_all(&mut styled, &matches, |style| paint(style, theme.search_match, theme.search_match_fg));
     if focused {
         if let Some(range) = app.substitute_highlight(line) {
-            overlay_bg(&mut styled, range, app.theme.selection);
+            overlay(&mut styled, range, |style| paint(style, theme.selection, theme.selection_fg));
         }
     }
 
@@ -2076,7 +2088,7 @@ fn display_line_of(
     if !cache.is_concealed(line) {
         // A Visual selection paints its background over the raw text.
         if let Some((s, e)) = selection_cols(app, line, len).filter(|_| focused) {
-            overlay_bg(&mut styled, s..e, app.theme.selection);
+            overlay(&mut styled, s..e, |style| paint(style, theme.selection, theme.selection_fg));
         }
         return DisplayLine {
             text: source.clone(),
@@ -2135,10 +2147,13 @@ fn selects_line_break(app: &App, line: usize) -> bool {
     }
 }
 
-/// Repaint the background of `range` (char columns) across the line's spans,
-/// splitting spans at the boundaries. Keeps the cover gap-free.
-fn overlay_bg(spans: &mut Vec<StyledSpan>, range: std::ops::Range<usize>, bg: ThemeColor) {
-    overlay(spans, range, |style| style.bg = bg);
+/// An overlay's colours: its background, and its foreground unless that is
+/// `None` (keep the glyph's own, as the authored truecolour theme does).
+fn paint(style: &mut crate::render::theme::Style, bg: ThemeColor, fg: ThemeColor) {
+    style.bg = bg;
+    if fg != ThemeColor::None {
+        style.fg = fg;
+    }
 }
 
 /// De-emphasize `range` with the faint attribute, KEEPING its colors — so focus
