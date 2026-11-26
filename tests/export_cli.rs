@@ -346,6 +346,44 @@ fn pdf_export_writes_to_dev_stdout() {
 }
 
 #[test]
+fn export_writes_to_an_inherited_descriptor() {
+    use std::os::unix::process::CommandExt;
+    let vault = Vault::new("dev-fd");
+    fs::write(vault.0.join("note.md"), "hello\n").unwrap();
+    // fd 4 is a second copy of the stdout pipe, as `exec 4> >(lpr)` or
+    // `--out >(cmd)` gives a pipe that is not stdout.
+    let mut command = vault.command();
+    command.args(["--export", "note.md", "--format", "txt", "--out", "/dev/fd/4"]);
+    // SAFETY: dup2 is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| if libc::dup2(1, 4) < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
+    let out = command.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, b"hello\n", "{out:?}");
+}
+
+#[test]
+fn export_writes_to_a_named_pipe_with_a_reader() {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let vault = Vault::new("fifo-reader");
+    fs::write(vault.0.join("note.md"), "hello\n").unwrap();
+    let fifo = vault.0.join("pipe");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a NUL-terminated path inside the test's own directory.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    // A non-blocking open for reading succeeds without a writer.
+    let mut reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+    let out = vault.command().args(["--export", "note.md", "--format", "txt", "--out", "pipe"])
+        .output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let mut text = String::new();
+    reader.read_to_string(&mut text).unwrap();
+    assert_eq!(text, "hello\n");
+}
+
+#[test]
 fn export_refuses_named_pipes_and_directories() {
     let vault = Vault::new("fifo");
     fs::write(vault.0.join("note.md"), "hello\n").unwrap();
@@ -354,7 +392,7 @@ fn export_refuses_named_pipes_and_directories() {
     // SAFETY: a NUL-terminated path inside the test's own directory.
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     fs::create_dir(vault.0.join("dir")).unwrap();
-    for (dest, message) in [("./pipe", "./pipe is a named pipe"), ("dir", "dir is a directory")] {
+    for (dest, message) in [("./pipe", "./pipe is a named pipe with no reader"), ("dir", "dir is a directory")] {
         let start = Instant::now();
         let out = vault.command().args(["--export", "note.md", "--format", "txt", "--out", dest])
             .output().unwrap();

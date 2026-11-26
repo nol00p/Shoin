@@ -62,9 +62,10 @@ instead: it prints the page as the editor shows it, styled, with pictures.
 - `--stdout` works for the text formats only. To pipe a PDF, give
   `--out /dev/stdout`: `shoin --export notes.md --format pdf --out
   /dev/stdout | lpr`.
-- `--out` also takes a character device such as `/dev/null` or a tty,
-  written as it is. Export refuses a directory, a named pipe (it would wait
-  for a reader), a socket and a block device.
+- `--out` also takes a character device such as `/dev/null` or a tty, a
+  named pipe, or a descriptor such as `/dev/fd/4` or `>(lpr)`, written as
+  it is. A named pipe nothing is reading fails at once instead of waiting.
+  Export refuses a directory, a socket and a block device.
 - Export is clean by default: math as math, tables as tables, code
   highlighted, whatever your `[markdown]` settings show in the editor. With
   `export_follows_settings = true` under `[markdown]`, `txt` and `html`

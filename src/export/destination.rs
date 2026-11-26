@@ -39,12 +39,12 @@ pub(super) fn drain() {
 enum Snapshot {
     Existing(Metadata),
     Missing(PathBuf),
-    /// A character device (`/dev/null`, a tty), or a pipe with the same
-    /// identity as Shoin's stdout or stderr reached by another name (such as
-    /// `/dev/fd/3` duplicated from it): written as it is, never truncated.
+    /// A character device (`/dev/null`, a tty) or a named pipe: written as it
+    /// is, never truncated.
     Device(Metadata),
-    /// A name for Shoin's own stdout (1) or stderr (2), such as
-    /// `/dev/stdout`: written through that descriptor, never reopened.
+    /// A name for one of Shoin's own descriptors, such as `/dev/stdout` or
+    /// `/dev/fd/63` from `>(cmd)`: written through that descriptor, never
+    /// reopened.
     Stream(i32, Metadata),
 }
 
@@ -65,14 +65,14 @@ impl Snapshot {
 }
 
 /// Whether an export may write to `meta` without truncating it. A named
-/// pipe with no reader would block the export, so a FIFO only qualifies when
-/// it is the pipe Shoin's own stdout or stderr already writes to.
+/// pipe with no reader cannot block the export: the open uses `O_NONBLOCK`,
+/// which fails at once with ENXIO in that case.
 fn is_device(meta: &Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
         let kind = meta.file_type();
-        kind.is_char_device() || (kind.is_fifo() && own_output(meta))
+        kind.is_char_device() || kind.is_fifo()
     }
     #[cfg(not(unix))]
     {
@@ -81,12 +81,12 @@ fn is_device(meta: &Metadata) -> bool {
     }
 }
 
-/// The descriptor (1 or 2) that `path` names, if it names Shoin's own stdout
-/// or stderr: `/dev/stdout`, `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`,
-/// `/proc/self/fd/1`, `/proc/self/fd/2`, or a chain of symlinks that reaches
-/// one of those names. The match is by name, so it does not depend on what
-/// stat reports through these special files (on macOS, fdesc reports its own
-/// device for `/dev/fd/1`, not the pipe's).
+/// The descriptor that `path` names, if it names one of Shoin's own:
+/// `/dev/stdout` (1), `/dev/stderr` (2), `/dev/fd/N` or `/proc/self/fd/N`,
+/// or a chain of symlinks that reaches one of those names. The match is by
+/// name, so it does not depend on what stat reports through these special
+/// files: on macOS, stat through fdesc's `/dev/fd/N` does not report the
+/// identity of the pipe that fstat of the descriptor gives.
 fn own_stream(path: &Path) -> Option<i32> {
     if !cfg!(unix) {
         return None;
@@ -96,9 +96,11 @@ fn own_stream(path: &Path) -> Option<i32> {
     for _ in 0..40 {
         let name = path.to_str().unwrap_or("");
         let fd = match name {
-            "/dev/stdout" | "/dev/fd/1" | "/proc/self/fd/1" => Some(1),
-            "/dev/stderr" | "/dev/fd/2" | "/proc/self/fd/2" => Some(2),
-            _ => None,
+            "/dev/stdout" => Some(1),
+            "/dev/stderr" => Some(2),
+            _ => name.strip_prefix("/dev/fd/").or_else(|| name.strip_prefix("/proc/self/fd/"))
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|n| n.parse().ok()),
         };
         if fd.is_some() {
             return fd;
@@ -109,13 +111,19 @@ fn own_stream(path: &Path) -> Option<i32> {
     None
 }
 
-/// A duplicate of descriptor `fd` (1 or 2) to write to.
+/// A duplicate of Shoin's descriptor `fd` to write to.
 fn stream(fd: i32) -> std::io::Result<File> {
     #[cfg(unix)]
     {
-        use std::os::fd::AsFd;
-        let owned = if fd == 1 { std::io::stdout().as_fd().try_clone_to_owned() } else { std::io::stderr().as_fd().try_clone_to_owned() };
-        owned.map(File::from)
+        use std::os::fd::FromRawFd;
+        // SAFETY: F_DUPFD_CLOEXEC either fails or returns a new descriptor
+        // that nothing else owns.
+        let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if dup < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `dup` is open and owned only by the returned file.
+        Ok(unsafe { File::from_raw_fd(dup) })
     }
     #[cfg(not(unix))]
     {
@@ -124,27 +132,12 @@ fn stream(fd: i32) -> std::io::Result<File> {
     }
 }
 
-#[cfg(unix)]
-fn own_output(meta: &Metadata) -> bool {
-    use std::os::fd::AsFd;
-    let same = |fd: std::os::fd::BorrowedFd| {
-        fd.try_clone_to_owned()
-            .ok()
-            .and_then(|fd| File::from(fd).metadata().ok())
-            .is_some_and(|own| same_inode(&own, meta))
-    };
-    same(std::io::stdout().as_fd()) || same(std::io::stderr().as_fd())
-}
-
 /// What a refused destination is, for the message.
 fn kind(meta: &Metadata) -> &'static str {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
         let kind = meta.file_type();
-        if kind.is_fifo() {
-            return "a named pipe";
-        }
         if kind.is_socket() {
             return "a socket";
         }
@@ -265,7 +258,13 @@ impl Destination {
             }
             Snapshot::Stream(..) => unreachable!("written above"),
             Snapshot::Device(original) => {
-                let file = options.open(&self.path).with_context(shown)?;
+                let file = match options.open(&self.path) {
+                    #[cfg(unix)]
+                    Err(e) if e.raw_os_error() == Some(libc::ENXIO) && is_fifo(original) => {
+                        bail!("{} is a named pipe with no reader", self.shown)
+                    }
+                    result => result.with_context(shown)?,
+                };
                 let opened = file.metadata().with_context(shown)?;
                 if !same_inode(original, &opened) || !is_device(&opened) {
                     return Err(self.changed());
@@ -313,6 +312,19 @@ fn blocking(file: &File) -> std::io::Result<()> {
     Ok(())
 }
 
+fn is_fifo(meta: &Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        meta.file_type().is_fifo()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 fn same_version(before: &Metadata, now: &Metadata) -> bool {
     #[cfg(unix)]
     if !same_inode(before, now) {
@@ -355,7 +367,9 @@ mod tests {
         for (name, fd) in [
             ("/dev/stdout", Some(1)), ("/dev/fd/1", Some(1)), ("/proc/self/fd/1", Some(1)),
             ("/dev/stderr", Some(2)), ("/dev/fd/2", Some(2)), ("/proc/self/fd/2", Some(2)),
-            ("/dev/fd/0", None), ("/dev/fd/3", None), ("/dev/stdoutx", None), ("/dev/null", None),
+            ("/dev/fd/0", Some(0)), ("/dev/fd/63", Some(63)), ("/proc/self/fd/4", Some(4)),
+            ("/dev/fd/", None), ("/dev/fd/-1", None), ("/dev/fd/+3", None), ("/dev/fd/1x", None),
+            ("/dev/stdoutx", None), ("/dev/null", None),
         ] {
             assert_eq!(own_stream(Path::new(name)), fd, "{name}");
         }
