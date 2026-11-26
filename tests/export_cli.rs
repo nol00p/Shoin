@@ -12,12 +12,20 @@ impl Vault {
     fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!("shoin-export-{name}-{}", std::process::id()));
         fs::create_dir(&path).unwrap();
+        let config = path.join("config/shoin");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("test.conf"), "[markdown]\nmath = true\n").unwrap();
         Self(path)
+    }
+
+    fn fixture_path(&self) -> std::ffi::OsString {
+        std::env::join_paths([self.0.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap()
     }
 
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_shoin"));
-        command.current_dir(&self.0).env_remove("SHOIN_CONFIG");
+        command.current_dir(&self.0).env_remove("SHOIN_CONFIG")
+            .env("HOME", &self.0).env("XDG_CONFIG_HOME", self.0.join("config"));
         command
     }
 }
@@ -64,9 +72,7 @@ echo converted > "$2"
 "#).unwrap();
         fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let mut paths = vec![vault.0.clone()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let mut shoin = vault.command().env("PATH", std::env::join_paths(paths).unwrap())
+    let mut shoin = vault.command().env("PATH", vault.fixture_path())
         .args(["--export", "note.md", "--format", "pdf"])
         .stdout(Stdio::null()).spawn().unwrap();
 
@@ -138,10 +144,55 @@ fn export_creates_the_target_of_a_dangling_symlink() {
 }
 
 #[test]
-fn export_preserves_destination_acl() {
-    if ["setfacl", "getfacl"].iter().any(|tool| Command::new(tool).arg("--version").output().is_err()) {
-        return;
+fn export_refuses_a_destination_changed_during_conversion() {
+    for (name, original, change, expected) in [
+        ("edit", Some("old\n"), "printf 'edit\\n' >> note.pdf", Some("old\nedit\n")),
+        ("mtime", Some("old\n"), "touch -t 200001010000 note.pdf", Some("old\n")),
+        ("replace", Some("old\n"), "cp -p note.pdf replacement; mv replacement note.pdf", Some("old\n")),
+        ("create", None, "echo newer > note.pdf", Some("newer\n")),
+        ("retarget", None, "ln -sf second.pdf target.pdf", None),
+        ("remove", Some("old\n"), "rm note.pdf", None),
+    ] {
+        let vault = Vault::new(name);
+        fs::write(vault.0.join("note.md"), "hello\n").unwrap();
+        let dest = vault.0.join("note.pdf");
+        if let Some(original) = original {
+            fs::write(&dest, original).unwrap();
+        }
+        if name == "retarget" {
+            std::os::unix::fs::symlink("target.pdf", &dest).unwrap();
+            std::os::unix::fs::symlink("first.pdf", vault.0.join("target.pdf")).unwrap();
+        }
+        let script = vault.0.join("pandoc");
+        fs::write(&script, format!(r#"#!/bin/sh
+set -e
+{change}
+while [ "$1" != --output ]; do shift; done
+echo converted > "$2"
+"#)).unwrap();
+        fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(vault.0.join("typst"), "").unwrap();
+        fs::set_permissions(vault.0.join("typst"), fs::Permissions::from_mode(0o700)).unwrap();
+        let out = vault.command().env("PATH", vault.fixture_path())
+            .args(["--export", "note.md", "--format", "pdf"]).output().unwrap();
+        assert!(!out.status.success(), "{name}: {out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("changed while exporting"), "{name}: {out:?}");
+        if name == "retarget" {
+            assert_eq!(fs::read_link(&dest).unwrap(), Path::new("target.pdf"));
+            assert_eq!(fs::read_link(vault.0.join("target.pdf")).unwrap(), Path::new("second.pdf"));
+            for target in ["first.pdf", "second.pdf"] {
+                assert!(!vault.0.join(target).exists(), "{target} was created");
+            }
+        }
+        match expected {
+            Some(content) => assert_eq!(fs::read_to_string(&dest).unwrap(), content, "{name}"),
+            None => assert_eq!(fs::metadata(&dest).unwrap_err().kind(), std::io::ErrorKind::NotFound),
+        }
     }
+}
+
+#[test]
+fn export_preserves_destination_acl() {
     let vault = Vault::new("acl");
     fs::write(vault.0.join("note.md"), "new\n").unwrap();
     let dest = vault.0.join("out.md");
@@ -149,19 +200,23 @@ fn export_preserves_destination_acl() {
     // Use a mapped UID even when the tests run in a user namespace.
     let uid = unsafe { libc::geteuid() };
     let entries = format!("g::---,o::---,u:{uid}:r--");
-    let setup = Command::new("setfacl").args(["-m", &entries]).arg(&dest).output().unwrap();
-    assert!(setup.status.success(), "{setup:?}");
-    let acl = || {
-        let out = Command::new("getfacl").args(["-cn"]).arg(&dest).output().unwrap();
-        assert!(out.status.success(), "{out:?}");
-        out.stdout
-    };
-    let before = acl();
+    if !Command::new("setfacl").args(["-m", &entries]).arg(&dest).output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let acl = || Command::new("getfacl").args(["-cn"]).arg(&dest).output();
+    let Ok(before) = acl() else { return };
+    if !before.status.success() || !String::from_utf8_lossy(&before.stdout).contains(&format!("user:{uid}:r--")) {
+        return;
+    }
 
     let out = vault.command().args(["--export", "note.md", "--out", "out.md"]).output().unwrap();
     assert!(out.status.success(), "{out:?}");
     assert_eq!(fs::read(&dest).unwrap(), b"new\n");
-    assert_eq!(acl(), before);
+    let after = acl().unwrap();
+    assert!(after.status.success(), "{after:?}");
+    assert_eq!(after.stdout, before.stdout);
 }
 
 #[test]
@@ -171,9 +226,7 @@ fn interrupted_stdout_html_reaps_pandoc() {
     let script = vault.0.join("pandoc");
     fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$$\" > pid.tmp\nmv pid.tmp pid\nexec sleep 30\n").unwrap();
     fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut paths = vec![vault.0.clone()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let mut shoin = vault.command().env("PATH", std::env::join_paths(paths).unwrap())
+    let mut shoin = vault.command().env("PATH", vault.fixture_path())
         .args(["--export", "note.md", "--format", "html", "--stdout"])
         .stdout(Stdio::null()).spawn().unwrap();
 

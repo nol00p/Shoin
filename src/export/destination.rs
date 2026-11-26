@@ -36,37 +36,61 @@ pub(super) fn drain() {
     drop(WORKERS.write().unwrap());
 }
 
+enum Snapshot {
+    Existing(Metadata),
+    Missing(PathBuf),
+}
+
+impl Snapshot {
+    fn inspect(path: &Path) -> Result<Self> {
+        match fs::metadata(path) {
+            Ok(meta) if meta.is_file() => Ok(Self::Existing(meta)),
+            Ok(_) => bail!("{} is not a regular file", short(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::Missing(missing_name(path)?)),
+            Err(e) => Err(e).with_context(|| short(path)),
+        }
+    }
+}
+
 pub(super) struct Destination {
     path: PathBuf,
+    original: Snapshot,
     // Preserve the identity seen before the editor can rename or replace a file.
     inputs: Vec<(PathBuf, Option<Metadata>)>,
     compiled: usize,
 }
 
 impl Destination {
-    pub(super) fn new(path: PathBuf, mut sources: Vec<PathBuf>, pictures: Vec<PathBuf>) -> Result<Self> {
-        let compiled = sources.len();
+    pub(super) fn new(path: PathBuf) -> Result<Self> {
+        let original = Snapshot::inspect(&path)?;
+        Ok(Self { path, original, inputs: Vec::new(), compiled: 0 })
+    }
+
+    pub(super) fn with_inputs(mut self, mut sources: Vec<PathBuf>, pictures: Vec<PathBuf>) -> Result<Self> {
+        self.compiled = sources.len();
         sources.extend(pictures);
-        let inputs = sources.into_iter().map(|source| {
+        self.inputs = sources.into_iter().map(|source| {
             let meta = fs::metadata(&source).ok();
             (source, meta)
         }).collect();
-        let dest = Self { path, inputs, compiled };
-        dest.check(inspect(&dest.path)?.as_ref())?;
-        Ok(dest)
+        self.check(&self.original)?;
+        Ok(self)
     }
 
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
 
-    fn check(&self, current: Option<&Metadata>) -> Result<()> {
-        let missing = if current.is_none() { missing_name(&self.path)? } else { None };
+    fn check(&self, snapshot: &Snapshot) -> Result<()> {
+        let (current, missing) = match snapshot {
+            Snapshot::Existing(meta) => (Some(meta), None),
+            Snapshot::Missing(name) => (None, Some(name)),
+        };
         for (index, (source, original)) in self.inputs.iter().enumerate() {
             if current.zip(original.as_ref()).is_some_and(|(a, b)| same_inode(a, b))
                 || current.zip(fs::metadata(source).ok().as_ref()).is_some_and(|(a, b)| same_inode(a, b))
                 || same_file(&self.path, source)
-                || missing.as_ref().is_some_and(|name| missing_name(source).ok().flatten().as_ref() == Some(name))
+                || missing.is_some_and(|name| missing_name(source).as_ref().ok() == Some(name))
             {
                 match index {
                     0 => bail!("that would overwrite the document you are exporting"),
@@ -83,48 +107,81 @@ impl Destination {
         if cancelled() || crate::recover::stopping() {
             bail!("export cancelled");
         }
+        self.revalidate()?;
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", short(parent)))?;
         }
-        self.check(inspect(&self.path)?.as_ref())?;
-
-        // Open through the destination path as usual, including dangling links.
-        // Check the opened inode before truncating so a path swap cannot redirect
-        // the write into a captured input between the check and the open.
+        // Open an existing file without creating or truncating it. For an
+        // absent file, resolve dangling links explicitly so exclusive creation
+        // still works through them.
         let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(false);
+        options.write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             // Avoid blocking on a FIFO swapped in after the path check.
             options.custom_flags(libc::O_NONBLOCK);
         }
-        let mut file = options.open(&self.path).with_context(|| short(&self.path))?;
-        let opened = file.metadata().with_context(|| short(&self.path))?;
-        if !opened.is_file() {
-            bail!("{} is not a regular file", short(&self.path));
-        }
-        self.check(Some(&opened))?;
-        file.set_len(0).with_context(|| short(&self.path))?;
+        let mut file = match &self.original {
+            Snapshot::Existing(original) => {
+                let file = match options.open(&self.path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(self.changed()),
+                    result => result.with_context(|| short(&self.path))?,
+                };
+                self.revalidate()?;
+                let opened = file.metadata().with_context(|| short(&self.path))?;
+                if !opened.is_file() || !same_version(original, &opened) {
+                    return Err(self.changed());
+                }
+                self.check(&Snapshot::Existing(opened))?;
+                file.set_len(0).with_context(|| short(&self.path))?;
+                file
+            }
+            Snapshot::Missing(target) => {
+                self.revalidate()?;
+                match options.create_new(true).open(target) {
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(self.changed()),
+                    result => result.with_context(|| short(&self.path))?,
+                }
+            }
+        };
         write(&mut file).with_context(|| short(&self.path))
     }
-}
 
-/// The name a dangling link or a path in an existing directory would create.
-fn missing_name(path: &Path) -> Result<Option<PathBuf>> {
-    let target = crate::fs::save::through_links(path)?;
-    let Some(name) = target.file_name() else { return Ok(None) };
-    let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    Ok(fs::canonicalize(parent).ok().map(|dir| dir.join(name)))
-}
-
-fn inspect(path: &Path) -> Result<Option<Metadata>> {
-    match fs::metadata(path) {
-        Ok(meta) if meta.is_file() => Ok(Some(meta)),
-        Ok(_) => bail!("{} is not a regular file", short(path)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| short(path)),
+    fn revalidate(&self) -> Result<()> {
+        let current = Snapshot::inspect(&self.path)?;
+        self.check(&current)?;
+        match (&self.original, &current) {
+            (Snapshot::Missing(before), Snapshot::Missing(now)) if before == now => {}
+            (Snapshot::Existing(before), Snapshot::Existing(now)) if same_version(before, now) => {}
+            _ => return Err(self.changed()),
+        }
+        Ok(())
     }
+
+    fn changed(&self) -> anyhow::Error {
+        anyhow::anyhow!("{} changed while exporting", short(&self.path))
+    }
+}
+
+fn same_version(before: &Metadata, now: &Metadata) -> bool {
+    #[cfg(unix)]
+    if !same_inode(before, now) {
+        return false;
+    }
+    // Like Neovim's changed-file check, this accepts same-size edits with an unchanged mtime.
+    before.len() == now.len() && before.modified().ok() == now.modified().ok()
+}
+
+/// Resolve the links and canonicalize the existing portion of a missing path.
+fn missing_name(path: &Path) -> Result<PathBuf> {
+    let target = std::path::absolute(crate::fs::save::through_links(path)?)?;
+    for parent in target.ancestors().skip(1) {
+        if let Ok(dir) = fs::canonicalize(parent) {
+            return Ok(dir.join(target.strip_prefix(parent).unwrap()));
+        }
+    }
+    Ok(target)
 }
 
 fn same_inode(a: &Metadata, b: &Metadata) -> bool {
