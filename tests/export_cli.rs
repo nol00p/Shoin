@@ -18,6 +18,10 @@ impl Vault {
         Self(path)
     }
 
+    fn fixture_path(&self) -> std::ffi::OsString {
+        std::env::join_paths([self.0.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap()
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_shoin"));
         command.current_dir(&self.0).env_remove("SHOIN_CONFIG")
@@ -68,9 +72,7 @@ echo converted > "$2"
 "#).unwrap();
         fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let mut paths = vec![vault.0.clone()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let mut shoin = vault.command().env("PATH", std::env::join_paths(paths).unwrap())
+    let mut shoin = vault.command().env("PATH", vault.fixture_path())
         .args(["--export", "note.md", "--format", "pdf"])
         .stdout(Stdio::null()).spawn().unwrap();
 
@@ -148,6 +150,7 @@ fn export_refuses_a_destination_changed_during_conversion() {
         ("mtime", Some("old\n"), "touch -t 200001010000 note.pdf", Some("old\n")),
         ("replace", Some("old\n"), "cp -p note.pdf replacement; mv replacement note.pdf", Some("old\n")),
         ("create", None, "echo newer > note.pdf", Some("newer\n")),
+        ("retarget", None, "ln -sf second.pdf target.pdf", None),
         ("remove", Some("old\n"), "rm note.pdf", None),
     ] {
         let vault = Vault::new(name);
@@ -155,6 +158,10 @@ fn export_refuses_a_destination_changed_during_conversion() {
         let dest = vault.0.join("note.pdf");
         if let Some(original) = original {
             fs::write(&dest, original).unwrap();
+        }
+        if name == "retarget" {
+            std::os::unix::fs::symlink("target.pdf", &dest).unwrap();
+            std::os::unix::fs::symlink("first.pdf", vault.0.join("target.pdf")).unwrap();
         }
         let script = vault.0.join("pandoc");
         fs::write(&script, format!(r#"#!/bin/sh
@@ -166,12 +173,17 @@ echo converted > "$2"
         fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(vault.0.join("typst"), "").unwrap();
         fs::set_permissions(vault.0.join("typst"), fs::Permissions::from_mode(0o700)).unwrap();
-        let mut paths = vec![vault.0.clone()];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-        let out = vault.command().env("PATH", std::env::join_paths(paths).unwrap())
+        let out = vault.command().env("PATH", vault.fixture_path())
             .args(["--export", "note.md", "--format", "pdf"]).output().unwrap();
         assert!(!out.status.success(), "{name}: {out:?}");
         assert!(String::from_utf8_lossy(&out.stderr).contains("changed while exporting"), "{name}: {out:?}");
+        if name == "retarget" {
+            assert_eq!(fs::read_link(&dest).unwrap(), Path::new("target.pdf"));
+            assert_eq!(fs::read_link(vault.0.join("target.pdf")).unwrap(), Path::new("second.pdf"));
+            for target in ["first.pdf", "second.pdf"] {
+                assert!(!vault.0.join(target).exists(), "{target} was created");
+            }
+        }
         match expected {
             Some(content) => assert_eq!(fs::read_to_string(&dest).unwrap(), content, "{name}"),
             None => assert_eq!(fs::metadata(&dest).unwrap_err().kind(), std::io::ErrorKind::NotFound),
@@ -214,9 +226,7 @@ fn interrupted_stdout_html_reaps_pandoc() {
     let script = vault.0.join("pandoc");
     fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$$\" > pid.tmp\nmv pid.tmp pid\nexec sleep 30\n").unwrap();
     fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut paths = vec![vault.0.clone()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let mut shoin = vault.command().env("PATH", std::env::join_paths(paths).unwrap())
+    let mut shoin = vault.command().env("PATH", vault.fixture_path())
         .args(["--export", "note.md", "--format", "html", "--stdout"])
         .stdout(Stdio::null()).spawn().unwrap();
 
