@@ -335,7 +335,7 @@ struct OutcomeKey {
 /// What a fence with `body` draws, from the renderer's cached results:
 /// `indent` is its opener's, in cells.
 fn fence_outcome(
-    renderer: &crate::render::mermaid::MermaidRenderer,
+    renderer: &crate::render::diagrams::Diagrams,
     executable: &str,
     body: Option<&str>,
     graphics: bool,
@@ -610,6 +610,11 @@ impl RenderCache {
             }
             self.index_mermaid(app, doc, current);
             self.laid_out.sort_unstable_by_key(|b| b.start);
+        } else if !conceal_on {
+            // No diagram is drawn with concealment off: the fences' memos
+            // would only keep deleted fences' bodies alive until it is on.
+            self.fences.clear();
+            self.embed_previews.clear();
         }
         self.hidden = hidden::of(folds, &self.laid_out);
         let ranges = self.hidden.ranges();
@@ -764,8 +769,11 @@ impl RenderCache {
     /// Start work for the source fences whose rows meet `rows`, the rows
     /// about to be drawn: the document's own, and those in the embeds drawn
     /// there, by the rows each fence takes in its embed. At most `limit`
-    /// fences still waiting for the renderer are asked for; one it has the
-    /// answer to costs nothing. Says whether any is still pending.
+    /// fences are asked for, from the top, answered or not: asking keeps an
+    /// answer in the renderer's cache, so as long as every pane's `limit`s
+    /// add up to no more than it holds, no result evicts another fence still
+    /// on screen, which the next frame would ask for again, without end. The
+    /// fences past the limit stay as source. Says whether any is pending.
     pub fn request_mermaid(
         &self,
         app: &App,
@@ -790,7 +798,7 @@ impl RenderCache {
                 waiting |= renderer.request_png(executable, body) == PicturePreview::Pending;
             }
             pending |= waiting;
-            *limit -= usize::from(waiting);
+            *limit -= 1;
         };
         for block in &blocks[start..] {
             if limit == 0 || self.row_starts[block.start] >= rows.end {
@@ -1401,6 +1409,23 @@ mod tests {
         (0..200)
             .map(|i| format!("line {i} with some **bold** text\n"))
             .collect()
+    }
+
+    /// The fences' memos go with concealment: off, nothing is drawn as a
+    /// diagram, and a fence deleted meanwhile would stay in them.
+    #[test]
+    fn fence_memos_are_dropped_with_concealment_off() {
+        let mut app = app_with("intro\n```mermaid\ngraph TD\nA-->B\n```\nafter\n");
+        app.config.layout.conceal = true;
+        app.config.markdown.mermaid_renderer = Some("/nonexistent/shoin-merman".into());
+        sync(&mut app);
+        assert_eq!(app.cache.borrow().fences.len(), 1);
+        app.config.layout.conceal = false;
+        sync(&mut app);
+        assert!(app.cache.borrow().fences.is_empty());
+        app.config.layout.conceal = true;
+        sync(&mut app);
+        assert_eq!(app.cache.borrow().fences.len(), 1, "and come back with it");
     }
 
     /// A new `tab_width` (a config reload) rebuilds the block kinds: a tab's depth, and so which

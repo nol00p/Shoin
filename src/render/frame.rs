@@ -41,7 +41,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     app.overlay.set(None);
     app.images.borrow_mut().clear();
     app.image_payloads.borrow_mut().clear();
-    app.mermaid_waiting.set(false);
     let cfg = &app.config;
 
     // Paint the theme background across the whole surface so a theme is
@@ -325,17 +324,15 @@ fn render_pane(
     // instead of scrolling smoothly.
     pane.scroll.set(top);
     // And where it is in the text, for the next frame to find it again.
-    let anchor = (!app.view).then(|| reading_top(&cache, top, cfg.editor.tab_width)).flatten();
+    let anchor = (!app.view).then(|| anchor_at(&cache, top)).flatten();
     match anchor {
         Some(at) => {
-            let rows = cache.line_span(at.cursor.line).len();
-            app.scroll_anchors.borrow_mut().insert(pane.id, ScrollAnchor { row: top, doc: pane.doc, at, rows })
+            let span = cache.line_span(at.cursor.line);
+            app.scroll_anchors.borrow_mut().insert(pane.id, ScrollAnchor { row: top, doc: pane.doc, at, span })
         }
         None => app.scroll_anchors.borrow_mut().remove(&pane.id),
     };
-    if cache.request_mermaid(app, doc, top..top + usize::from(lay.height), mermaid_limit) {
-        app.mermaid_waiting.set(true);
-    }
+    cache.request_mermaid(app, doc, top..top + usize::from(lay.height), mermaid_limit);
 
     let text_area = Rect {
         x: rect.x + lay.margin_left,
@@ -1583,6 +1580,19 @@ fn reading_top(cache: &RenderCache, row: usize, tab: usize) -> Option<ReadingTop
     Some(ReadingTop { cursor: Cursor::new(line, col), within, col: text.then_some(r.start_col) })
 }
 
+/// Edit mode's [`ReadingTop`] for a view that starts at `row`, kept from
+/// frame to frame ([`ScrollAnchor`]): the same, but for the cursor's
+/// column, which is left at 0. Nothing reads it, and finding it means
+/// measuring the line's text up to the row, the whole of a long wrapped
+/// paragraph's on every frame.
+fn anchor_at(cache: &RenderCache, row: usize) -> Option<ReadingTop> {
+    let r = cache.row(row)?;
+    let line = r.line();
+    let within = row - cache.line_span(line).start;
+    let text = r.editable && !r.is_spacer();
+    Some(ReadingTop { cursor: Cursor::new(line, 0), within, col: text.then_some(r.start_col) })
+}
+
 /// The row a [`ReadingTop`] stands for in the rows as they are now. `None`
 /// once its line takes no rows (folded away, or gone).
 fn kept_row(cache: &RenderCache, top: &ReadingTop) -> Option<usize> {
@@ -1595,11 +1605,22 @@ fn kept_row(cache: &RenderCache, top: &ReadingTop) -> Option<usize> {
         // The last row of the text starting at or before it. Not `locate`:
         // a column where one row ends and the next starts is the end of
         // the first one to it, as a cursor past a row's last character.
-        Some(col) => span
-            .clone()
-            .take_while(|&r| cache.row(r).is_some_and(|r| r.editable && !r.is_spacer() && r.start_col <= col))
-            .last()
-            .unwrap_or(span.start),
+        // The text's rows come first in the line's, in order of their
+        // columns, so this is a binary search, not a walk of a long
+        // paragraph's rows.
+        Some(col) => {
+            let before = |r: usize| cache.row(r).is_some_and(|r| r.editable && !r.is_spacer() && r.start_col <= col);
+            let (mut lo, mut hi) = (span.start, span.end);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if before(mid) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo.saturating_sub(1).max(span.start)
+        }
         None => span.start + top.within.min(span.len() - 1),
     })
 }
@@ -1633,7 +1654,7 @@ fn source_col(cache: &RenderCache, line: usize, display_col: usize, tab: usize) 
 fn anchored_top(app: &App, cache: &RenderCache, pane: &crate::render::pane::Pane) -> usize {
     let row = pane.scroll.get();
     let anchors = app.scroll_anchors.borrow();
-    let Some(ScrollAnchor { at, rows, .. }) = anchors.get(&pane.id).filter(|a| a.row == row && a.doc == pane.doc) else {
+    let Some(ScrollAnchor { at, span: was, .. }) = anchors.get(&pane.id).filter(|a| a.row == row && a.doc == pane.doc) else {
         return row;
     };
     let line = at.cursor.line;
@@ -1641,27 +1662,33 @@ fn anchored_top(app: &App, cache: &RenderCache, pane: &crate::render::pane::Pane
         return row; // the text under it is gone
     }
     let span = cache.line_span(line);
+    // Its line starts on the same row and takes as many as it did: the
+    // row is that place still, with nothing to look up.
+    if span == *was {
+        return row;
+    }
     if span.is_empty() {
         return cache.line_rows(line).0;
     }
-    if at.col.is_none() && span.len() != *rows && *rows > 0 {
-        return span.start + (at.within * span.len() / rows).min(span.len() - 1);
+    if at.col.is_none() && !was.is_empty() {
+        return span.start + (at.within * span.len() / was.len()).min(span.len() - 1);
     }
     kept_row(cache, at).unwrap_or(row)
 }
 
 /// Where a pane's view started in the last frame drawn of it
 /// ([`anchored_top`]).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ScrollAnchor {
     /// The row it started at.
     row: usize,
     /// The document the pane showed.
     doc: usize,
-    /// The place in the text that row is.
+    /// The place in the text that row is (its cursor's column is not kept:
+    /// [`anchor_at`]).
     at: ReadingTop,
-    /// How many rows that place's line took.
-    rows: usize,
+    /// The rows that place's line took.
+    span: std::ops::Range<usize>,
 }
 
 /// The row `scroll_offset` is to keep in view: the cursor's own, except in

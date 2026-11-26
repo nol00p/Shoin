@@ -87,8 +87,9 @@ pub enum Open {
     /// Inside a fenced block opened with this fence string, in the language its
     /// info string named, with the code lexer in this state. `base` is the
     /// column the opener's indent counted from (the text column of the list
-    /// item it is in, else 0): a closer indented 4 or more columns past it is
-    /// a body line, as in CommonMark.
+    /// item it is in, else 0): a closer indented 4 or more columns past it,
+    /// counted with tab stops ([`tab_stop_cols`]), is a body line, as in
+    /// CommonMark.
     InFence { fence: String, lang: Option<Lang>, cont: Cont, base: u16 },
     InFrontMatter,
     /// A table's delimiter row has been seen; the rows that follow belong to it
@@ -515,7 +516,7 @@ fn classify_block(
             return (BlockKind::FrontMatter, leaving);
         }
         Open::InFence { fence, lang, cont, base } => {
-            if indent_cols(line, tab_width) < usize::from(*base) + 4 && closes_fence(line, fence) {
+            if tab_stop_cols(line) < usize::from(*base) + 4 && closes_fence(line, fence) {
                 return (BlockKind::FenceClose, Open::None);
             }
             // The body is lexed HERE, in the pass that already walks every line
@@ -658,6 +659,22 @@ pub fn indent_cols(line: &str, tab_width: usize) -> usize {
             _ => None,
         })
         .sum()
+}
+
+/// The column a line's text starts at, with CommonMark's tab stops: a tab
+/// goes on to the next multiple of [`COMMONMARK_TAB`] from the line start,
+/// so `"  \t"` is column 4, not `2 + 4`. What a fence closer's indent is
+/// checked with, by the editor and export alike.
+pub(crate) fn tab_stop_cols(line: &str) -> usize {
+    let mut col = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += COMMONMARK_TAB - col % COMMONMARK_TAB,
+            _ => break,
+        }
+    }
+    col
 }
 
 /// The number of leading space and tab chars: what to remove to take a
@@ -1057,6 +1074,46 @@ mod tests {
         let c = BlockCache::build(&buf("10. item\n    ```\n    x\n        ```\n    ```\n"), true, 4);
         assert!(matches!(c.kinds[3], BlockKind::FenceBody { .. }), "four past it");
         assert_eq!(c.kinds[4], BlockKind::FenceClose);
+    }
+
+    /// The closer's indent is measured with CommonMark's tab stops (a tab
+    /// goes on to the next multiple of 4), not as `tab_width` columns added
+    /// on: two spaces and a tab is column 4, which under an item whose text
+    /// is at column 2 or 4 is shallow enough to close. Plain code fences in
+    /// lists, the editor and export alike.
+    #[test]
+    fn a_closer_indented_with_spaces_then_a_tab_counts_tab_stops() {
+        for tab in [4, 8] {
+            for (text, close) in [
+                ("- item\n  ```rust\n    let x = 1;\n  \t```\nafter\n", 3),
+                ("1.  item\n    ```rust\n    x\n  \t```\nafter\n", 3),
+                ("- a\n  - b\n    ```rust\n    x\n  \t```\nafter\n", 4),
+                ("```rust\nx\n  \t```\n```\n", 2),
+            ] {
+                let c = BlockCache::build(&buf(text), true, tab);
+                let want = text.contains("- ") || text.starts_with("1.");
+                if want {
+                    assert_eq!(c.kinds[close], BlockKind::FenceClose, "tab {tab}: {text:?}");
+                    assert_eq!(c.kinds[close + 1], BlockKind::Paragraph, "tab {tab}: {text:?}");
+                } else {
+                    // No item: column 4 is four past 0, a body line.
+                    assert!(matches!(c.kinds[close], BlockKind::FenceBody { .. }), "{text:?}");
+                    assert_eq!(c.kinds[close + 1], BlockKind::FenceClose);
+                }
+            }
+        }
+        // A tab after a space stops at 4 as well: ` \t` is column 4.
+        assert_eq!(tab_stop_cols(" \t```"), 4);
+        assert_eq!(tab_stop_cols("  \t```"), 4);
+        assert_eq!(tab_stop_cols("\t  ```"), 6);
+        assert_eq!(tab_stop_cols("\t\t```"), 8);
+        // Export classifies the same way: the prose after the closer is prose.
+        let html = crate::export::html::render(
+            "- item\n  ```rust\n  let x = 1;\n  \t```\n\nafter **bold**\n",
+            "t",
+            &crate::export::html::Page::default(),
+        );
+        assert!(html.contains("<strong>bold</strong>"), "{html}");
     }
 
     #[test]

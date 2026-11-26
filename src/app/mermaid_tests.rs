@@ -34,6 +34,7 @@ impl Drop for Fixture {
 
 const STUB: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
+echo "$*" >>"$dir/log"
 case "$*" in
   *png*)
     cat >/dev/null
@@ -156,6 +157,40 @@ fn fence(name: &str) -> String {
     format!("```mermaid\ngraph TD\n{name}\n```\n")
 }
 
+/// How many times the stub renderer has run.
+fn runs(f: &Fixture) -> usize {
+    std::fs::read_to_string(f.dir.join("log")).map_or(0, |log| log.lines().count())
+}
+
+/// More diagrams on screen than the renderer's cache holds: a stable set
+/// that fits is shown, the rest stay as source, and an idle editor stops
+/// starting renders. Each result once evicted a diagram still on screen,
+/// whose next frame asked for it again, without end.
+#[test]
+fn more_diagrams_on_screen_than_the_cache_holds_do_not_thrash() {
+    let max = crate::render::mermaid::MAX_CACHE_ENTRIES;
+    let body: String = (0..max + 3).map(|i| fence(&format!("F{i}"))).collect();
+    let mut f = fixture(&format!("top\n{body}"), &[], |_| {});
+    f.app.term_size = (60, 4 * (max as u16 + 3) + 10);
+    let shown = |rows: &[String]| rows.iter().filter(|row| row.contains("D[F")).count();
+    let rows = settle(&mut f.app, |rows| shown(rows) == max);
+    assert!(has(&rows, "D[F0]") && !has(&rows, &format!("D[F{}]", max + 2)), "the first ones, in order");
+    let idle = |f: &mut Fixture| {
+        let until = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < until {
+            draw(&mut f.app);
+            f.app.poll_mermaid();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    idle(&mut f);
+    let before = runs(&f);
+    idle(&mut f);
+    assert_eq!(runs(&f), before, "an idle editor started renders");
+    assert_eq!(before, max, "one render per diagram shown");
+    assert_eq!(shown(&screen(&mut f.app)), max);
+}
+
 /// A note embed whose header is above the screen still has the fences in
 /// the part of it on screen rendered.
 #[test]
@@ -270,6 +305,62 @@ fn read_only_search_into_a_diagram_reveals_and_highlights_the_hit() {
     // Any other motion lets it go.
     feed(&mut f.app, "j");
     settle(&mut f.app, |rows| has(rows, "D[A-->needle]"));
+}
+
+/// `-R` with the whole note on screen: the hit is in the last screenful,
+/// so the view cannot start at it and the cursor is parked on the top of
+/// the screen. The fence still shows its source with the hit highlighted;
+/// the clamp used to measure the text with the diagram in place and park
+/// the cursor off the landing, which then revealed nothing.
+#[test]
+fn read_only_search_reveals_a_hit_in_the_last_screenful() {
+    let mut f = fixture("top\nintro\n```mermaid\ngraph TD\nA-->needle\n```\nafter\n", &[], |_| {});
+    f.app.set_view(true);
+    f.app.sync_after_input();
+    settle(&mut f.app, |rows| has(rows, "D[A-->needle]"));
+    feed(&mut f.app, "/needle");
+    key(&mut f.app, KeyCode::Enter);
+    assert_eq!(top(&f.app), 0, "the whole note fits");
+    let rows = screen(&mut f.app);
+    assert!(has(&rows, "A-->needle") && !has(&rows, "D[A-->needle]"), "the source shows:\n{}", rows.join("\n"));
+    // The next frame keeps it, and so does `j`, which cannot move the
+    // view; Esc lets it go.
+    assert!(!has(&screen(&mut f.app), "D[A-->needle]"));
+    feed(&mut f.app, "j");
+    assert!(!has(&screen(&mut f.app), "D[A-->needle]"));
+    key(&mut f.app, KeyCode::Esc);
+    settle(&mut f.app, |rows| has(rows, "D[A-->needle]"));
+}
+
+/// A landing left is gone: coming back to the same place by other motions
+/// shows the diagram, and so does another pane on the same place.
+#[test]
+fn a_read_only_search_landing_once_left_reveals_nothing() {
+    let body = format!("top\n```mermaid\ngraph TD\nA-->B\n```\n{}", "bottom\n".repeat(40));
+    let mut f = fixture(&body, &[], |_| {});
+    f.app.set_view(true);
+    f.app.sync_after_input();
+    settle(&mut f.app, |rows| has(rows, "D[A-->B]"));
+    feed(&mut f.app, "/^graph");
+    key(&mut f.app, KeyCode::Enter);
+    assert_eq!(f.app.buffer.cursor.line, 2);
+    assert!(!has(&screen(&mut f.app), "D[A-->B]"), "revealed");
+    feed(&mut f.app, "gg");
+    settle(&mut f.app, |rows| has(rows, "D[A-->B]"));
+    feed(&mut f.app, "3G");
+    assert_eq!((f.app.buffer.cursor.line, f.app.buffer.cursor.col), (2, 0), "back where the search landed");
+    assert!(has(&screen(&mut f.app), "D[A-->B]"), "not revealed again");
+
+    // Landed again, then a new pane on the same document and position.
+    feed(&mut f.app, "gg");
+    feed(&mut f.app, "/^graph");
+    key(&mut f.app, KeyCode::Enter);
+    assert!(!has(&screen(&mut f.app), "D[A-->B]"));
+    f.app.split_pane_for_test(true);
+    f.app.sync_after_input();
+    assert_eq!(f.app.buffer.cursor.line, 2);
+    assert!(f.app.search_landing.is_none(), "the landing was the other pane's");
+    assert!(!f.app.active.contains(2), "nothing revealed in the new pane");
 }
 
 /// A failed render shows a status row under the opener and keeps the

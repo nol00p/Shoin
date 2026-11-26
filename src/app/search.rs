@@ -551,7 +551,7 @@ impl App {
                 let message = format!("{sigil}{pattern}");
                 self.buffer.cursor = target;
                 self.forget_reading();
-                self.search_landing = self.view.then_some(target);
+                self.search_landing = self.view.then(|| SearchLanding::new(self.focus_pane, self.current(), target));
                 self.notify(message, FlashKind::Info);
             }
             None => {

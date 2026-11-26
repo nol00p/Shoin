@@ -4,6 +4,7 @@
 pub mod align;
 pub mod cache;
 pub mod conceal;
+pub(crate) mod diagrams;
 pub mod focus;
 pub mod frame;
 pub mod hidden;

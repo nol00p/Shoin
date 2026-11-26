@@ -177,6 +177,33 @@ impl BufferState {
     }
 }
 
+/// A read-only search's landing ([`App::search_landing`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SearchLanding {
+    pane: PaneId,
+    /// The document the pane showed.
+    doc: usize,
+    /// The hit's line: the fence holding it is the one revealed.
+    pub(super) line: usize,
+    /// Where the cursor was parked for it: the hit itself, or, once the
+    /// input is over, the top of the last screenful when the hit is in it
+    /// (read-only mode's cursor is the screen's top).
+    parked: Cursor,
+    /// The input that searched is over, and `parked` is final.
+    settled: bool,
+}
+
+impl SearchLanding {
+    pub(super) fn new(pane: PaneId, doc: usize, hit: Cursor) -> Self {
+        SearchLanding { pane, doc, line: hit.line, parked: hit, settled: false }
+    }
+
+    /// Whether the cursor is still where the landing put it, in its pane.
+    pub(super) fn holds(&self, pane: PaneId, doc: usize, cursor: Cursor) -> bool {
+        (self.pane, self.doc, self.parked.line, self.parked.col) == (pane, doc, cursor.line, cursor.col)
+    }
+}
+
 pub struct App {
     /// Every open document, in the order they were opened. `App` derefs to the
     /// one the FOCUSED PANE is showing.
@@ -249,10 +276,11 @@ pub struct App {
     /// Where read-only mode's view starts, by pane: the row each was
     /// scrolled to, kept by line, and the cursor parked for it.
     reading: HashMap<PaneId, frame::ReadingTop>,
-    /// Where the last search in read-only mode put the cursor. While the
-    /// cursor is still there, the Mermaid fence holding it shows its source,
-    /// so the hit can be seen and highlighted, as in edit mode.
-    pub(super) search_landing: Option<Cursor>,
+    /// Where the last search in read-only mode landed. While the cursor
+    /// stays where the landing parked it, in the pane and document searched,
+    /// the Mermaid fence holding the hit shows its source, so the hit can be
+    /// seen and highlighted, as in edit mode.
+    pub(super) search_landing: Option<SearchLanding>,
     /// A read-only motion moved the view this input, already within the
     /// text: `sync_after_input` has nothing left to clamp.
     reading_clamped: bool,
@@ -373,15 +401,13 @@ pub struct App {
     /// Which terminal graphics protocol this session can use, read once at
     /// startup — the environment does not change under a running editor.
     pub image_protocol: crate::image::Protocol,
-    pub(crate) mermaid: RefCell<crate::render::mermaid::MermaidRenderer>,
+    pub(crate) mermaid: RefCell<crate::render::diagrams::Diagrams>,
     /// Where each pane's view started last frame, as a row and as a place
     /// in the text: what keeps the same text on top when rows above it
     /// change height between frames. Edit mode only; read-only mode keeps
     /// its own (`reading`).
     pub(crate) scroll_anchors: RefCell<HashMap<PaneId, frame::ScrollAnchor>>,
     pub(crate) mermaid_revision: u64,
-    /// Whether the last frame left a Mermaid render it asked for running.
-    pub(crate) mermaid_waiting: std::cell::Cell<bool>,
     export_result: Option<std::sync::mpsc::Receiver<anyhow::Result<crate::export::Completed>>>,
     /// Where the last frame put its pictures. Filled while the frame is built
     /// (hence the cell: rendering only has `&App`) and drained by the painter
@@ -1021,7 +1047,6 @@ impl App {
             mermaid: RefCell::default(),
             scroll_anchors: RefCell::default(),
             mermaid_revision: 0,
-            mermaid_waiting: Default::default(),
             export_result: None,
             painted: std::cell::RefCell::new((Vec::new(), (0, 0))),
             overlay: std::cell::Cell::new(None),
@@ -1214,7 +1239,7 @@ impl App {
                 self.keymap = keymap;
                 let was_mouse = self.config.input.mouse;
                 self.config = new;
-                *self.mermaid.get_mut() = Default::default();
+                self.mermaid.get_mut().reset();
                 self.mermaid_revision = self.mermaid_revision.wrapping_add(1);
                 // `[markdown] math` or `tab_width` may have changed: every
                 // document's kinds are rebuilt under the new values, and the
@@ -1420,9 +1445,17 @@ impl App {
         }
         let clamped = std::mem::take(&mut self.reading_clamped);
         if self.view && !clamped {
+            // A search that just landed in a diagram: the view is clamped to
+            // the text with that fence's source shown, which is how it will
+            // be drawn, rather than with the diagram the last frame had.
+            if self.search_landing.is_some_and(|l| !l.settled) {
+                self.refresh_blocks();
+                self.active = self.active_set(None);
+            }
             self.clamp_reading_cursor();
         }
         self.keep_cursor_out_of_folds();
+        self.settle_search_landing();
         // `active_set` reads the block kinds, which an edit has just left
         // behind the text. Brought up to date here (a no-op at an unchanged
         // revision) rather than only before the next frame.
@@ -1463,6 +1496,20 @@ impl App {
         if let Some(pane) = self.layout.pane_mut(id) {
             pane.cursor = cursor;
         }
+    }
+
+    /// The cursor where the read-only clamp left it is where a search's
+    /// landing holds from now on; a landing left (another position, pane or
+    /// document) is dropped, so coming back to it later reveals nothing.
+    fn settle_search_landing(&mut self) {
+        let (pane, doc, cursor) = (self.focus_pane, self.current(), self.buffer.cursor);
+        self.search_landing = self.search_landing.and_then(|mut l| {
+            if !l.settled && (l.pane, l.doc) == (pane, doc) {
+                l.parked = cursor;
+                l.settled = true;
+            }
+            l.holds(pane, doc, cursor).then_some(l)
+        });
     }
 
     /// The last character of the text, or the start of an empty last line.
@@ -1905,7 +1952,13 @@ impl App {
         // Saved and put back rather than cleared: `.` replays keys through
         // here from inside a key.
         let outer = std::mem::replace(&mut self.in_key, true);
+        // Esc in read-only mode lets a search's reveal go: in a note that
+        // fits the pane, no motion can move the cursor off the landing.
+        let esc = self.view && key.code == KeyCode::Esc && matches!(self.mode, Mode::Normal) && self.help.is_none();
         self.handle_key(key);
+        if esc {
+            self.search_landing = None;
+        }
         self.in_key = outer;
     }
 

@@ -123,17 +123,33 @@ fn random_substitute(rng: &mut Rng, atoms: &[&str]) -> String {
     format!("{range}s/{}/{replacement}/{flags}", random_pattern(rng, atoms))
 }
 
+/// The stub Mermaid renderer's diagrams: by the body's line count, a
+/// failure, one row, two, a row too wide for most measures, or four. Its
+/// pictures are a PNG wide enough to be shown.
+fn stub_render(body: &str) -> crate::render::mermaid::Preview {
+    use crate::render::mermaid::{Failure, RenderState};
+    let rows: &[&str] = match body.lines().count() % 5 {
+        0 => return RenderState::Failed(Failure::Invalid),
+        1 => &["one"],
+        2 => &["two", "rows"],
+        3 => &["00000000000000000000000000000000000000000000000000000000000000000000000000000000"],
+        _ => &["a", "b", "c", "d"],
+    };
+    RenderState::Ready(rows.iter().map(|row| row.to_string()).collect())
+}
+
 /// One session of `steps` random events from `seed`. Every event is pushed to
 /// `trace` before it runs, so a panic still leaves the full trace behind.
-fn session(seed: u64, steps: usize, renderer: Option<&std::path::Path>, trace: &mut Vec<String>) -> Result<(), String> {
+fn session(seed: u64, steps: usize, mermaid: bool, trace: &mut Vec<String>) -> Result<(), String> {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut rng = Rng(seed | 1);
     let mut app = app_with(DOCS[rng.below(DOCS.len())]);
     // Half the sessions preview Mermaid fences with the stub renderer, and
     // some of those as pictures, on a terminal that takes them.
-    if let Some(renderer) = renderer.filter(|_| rng.below(2) == 0) {
-        app.config.markdown.mermaid_renderer = Some(renderer.to_string_lossy().into_owned());
+    if mermaid && rng.below(2) == 0 {
+        app.config.markdown.mermaid_renderer = Some("merman".into());
+        *app.mermaid.get_mut() = crate::render::diagrams::Diagrams::stub(stub_render, crate::test_support::sized_png(480, 120).into());
         if rng.below(3) == 0 {
             app.config.markdown.mermaid_graphics = true;
             app.image_protocol = crate::image::Protocol::Kitty;
@@ -356,12 +372,11 @@ fn session(seed: u64, steps: usize, renderer: Option<&std::path::Path>, trace: &
         }
         term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
         // Results come back between frames, as the event loop takes them:
-        // give the renderer a moment, so most land on the step that asked.
-        if app.mermaid_waiting.get() {
-            let until = Instant::now() + Duration::from_millis(20);
-            while !app.poll_mermaid() && Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(1));
-            }
+        // every third step, all those asked for so far. By step, not by
+        // time, so a seed replays the same frames.
+        if step % 3 == 2 && app.mermaid.get_mut().complete() {
+            app.mermaid_revision = app.mermaid_revision.wrapping_add(1);
+            app.needs_redraw = true;
         }
         index_invariant(&app).map_err(|e| format!("step {step}: {e}\ntext: {:?}", text(&app)))?;
         let _ = app.visible_pictures();
@@ -510,21 +525,6 @@ fn fuzz_random_sessions() {
         "Before\n\n```mermaid\ngraph TD\nA-->B\n```\n\n```mermaid\ngraph TD\nA-->B\nB-->C\n```\n\n```mermaid\nx\n```\nafter\n",
     )
     .unwrap();
-    // The stub Mermaid renderer: by the body's line count, a failure, one
-    // row, two, a row too wide for most measures, or four; a PNG wide
-    // enough to be shown for `--format png`.
-    let merman = dir.join("merman");
-    std::fs::write(
-        &merman,
-        "#!/bin/sh\ncase \"$*\" in\n  *png*) cat >/dev/null; cat \"$(dirname \"$0\")/wide.png\" ;;\n  *) n=$(wc -l)\n     case $((n % 5)) in\n       0) echo bad >&2; exit 1 ;;\n       1) echo one ;;\n       2) printf 'two\\nrows\\n' ;;\n       3) printf '%080d\\n' 0 ;;\n       *) printf 'a\\nb\\nc\\nd\\n' ;;\n     esac ;;\nesac\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&merman, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    std::fs::write(dir.join("wide.png"), crate::test_support::sized_png(480, 120)).unwrap();
     std::fs::write(dir.join("b.md"), "---\nt: 1\n---\n# B\n\n![[c.txt]]\n\n## Two\n\n- x\n- y\n\n```\n# not heading\n```\n").unwrap();
     std::fs::write(dir.join("c.txt"), "plain text file\nwith ![[a]] a loop\n").unwrap();
     std::fs::write(dir.join("sub/d.md"), "para one\nline ^blk\n\nother\n").unwrap();
@@ -559,7 +559,7 @@ fn fuzz_random_sessions() {
     for s in base..base + sessions {
         let seed = s.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut trace = Vec::new();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session(seed, steps, Some(&dir.join("merman")), &mut trace)));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session(seed, steps, true, &mut trace)));
         let msg = match r {
             Ok(Ok(())) => continue,
             Ok(Err(e)) => e,

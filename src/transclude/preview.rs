@@ -26,7 +26,8 @@ use crate::render::layout::{char_window, phase, text_width, wrap_chars};
 use crate::render::markdown::block::{classify, BlockKind, Carry, COMMONMARK_TAB};
 use crate::render::theme::Theme;
 use crate::render::StyledSpan;
-use crate::render::mermaid::{MermaidRenderer, PicturePreview, Preview, MAX_SOURCE_BYTES};
+use crate::render::diagrams::Diagrams;
+use crate::render::mermaid::{PicturePreview, Preview, MAX_SOURCE_BYTES};
 
 /// A picture an embed reserved room for. Shared bytes let different pane
 /// layouts reuse a diagram raster from the renderer cache.
@@ -296,7 +297,7 @@ fn row_styles(spans: &[StyledSpan], next: &mut usize, a: usize, b: usize) -> Vec
 pub fn mermaid_expansion(
     base: &Expansion,
     diagrams: &[Diagram],
-    renderer: &MermaidRenderer,
+    renderer: &Diagrams,
     executable: &str,
     measure: u16,
     bordered: bool,
@@ -779,7 +780,7 @@ mod tests {
             4,
             &|text, _, _| (text.to_string(), Vec::new()),
         );
-        let mut renderer = MermaidRenderer::default();
+        let mut renderer = Diagrams::default();
         assert!(mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 36, true, false, 4).0.is_none());
         renderer.request(renderer_path, &diagrams[0].source);
         let deadline = Instant::now() + Duration::from_secs(3);
