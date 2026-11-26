@@ -46,6 +46,31 @@
 - Insert `Tab` with `expand_tab` types spaces to the next tab stop, and
   `Backspace` in a line's indent goes back to the stop before, as
   Neovim's default `smarttab` (#187).
+- `>>`, `<<`, `>` over a motion or in Visual, `:>`, `:<` and the list
+  shifts rewrite a line's whole indent, as Neovim: all spaces with
+  `expand_tab`, else tabs then spaces, so `>>` on a tab-indented line
+  gives 8 spaces, not 4 spaces before the tab. List items shifted
+  together keep their nesting. Whitespace-only lines shift too; only
+  empty lines are skipped (#192).
+- A file without a final newline keeps its lines as Neovim does: a new
+  empty last line, however it was made (`o`, `A` `Enter`, `cc`, `p`,
+  `:t $`), stays a line, also after `:w`, and a save writes what Neovim
+  writes with and without `fixeol`. Typing into an empty file gives its
+  line a newline (#193).
+- The indent `Enter` or `cc` lays down is kept once anything is typed and
+  goes again on `Esc`, `Ctrl-c`, another `Enter` or a move to another
+  line, as Neovim's `autoindent`. Insert `Ctrl-c` steps back as `Esc`
+  does, and Insert `Right` and `Delete` stop at the end of the last line
+  (#193).
+- `c$`, `C`, `cl`, `ch`, `c0`, `c^` and `ciw` on an empty line, or where
+  `h`, `0`, `^` cannot move, enter Insert, as Neovim; `2C` and `2D` act
+  as `c2$` and `d2$` (#193).
+- Insert `End` keeps to the end of each line `Up` and `Down` reach, as
+  `$` does (#193).
+- An edit that changes nothing (`gUU` on capitals, `~` on a digit, `x` on
+  an empty line) is an undo step that leaves the file unmodified, as
+  Neovim; `u` and `Ctrl-r` bring the cursor back to it. `>>` on an empty
+  line marks the file modified (#193).
 
 **Math**
 
@@ -74,6 +99,9 @@
   Neovim; Insert keeps it on the first (#187).
 - Image embeds in `:embed full` use the whole measure when
   `transclude.border` is on (#184).
+- A search match or `:s///c` match that takes a line break (`/b\n`) is
+  drawn with one highlighted cell after the line's text, also on the
+  last line of a file without a final newline (#192).
 
 **Reading**
 
@@ -94,6 +122,20 @@
   (#184).
 - `:w` and `:saveas` to a hard link or symlink of the file being edited
   treat it as that file (#185).
+- On 16- and 256-color terminals, selections, `:s///c` matches and
+  search matches draw their own text color, as Neovim, so bold, links
+  and code under them stay readable, and so does text on an
+  `==highlight==` in the highlight's own color. Fallbacks never change a
+  palette color you set; truecolor is unchanged (#191).
+- A carriage return at a line's end in a file without CRLF endings
+  (`abc\r` with no final newline, one CRLF line among LF ones) is part
+  of the line, as Neovim: `A` types after it, and `:diff` keeps it
+  (#193).
+- A recovery file has the file's own end: no final newline when the
+  file had none (#193).
+- `:revert!` marks the buffer clean when its text already matched the
+  file, when only the final newline or line ending changed on disk
+  (#193).
 
 ## 0.2.5
 
