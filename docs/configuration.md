@@ -107,6 +107,8 @@ The first of these that exists wins:
 5. `$XDG_CONFIG_HOME/shoin/`
 6. `~/.config/shoin/`
 
+Working-directory config (steps 3 and 4) cannot enable `mermaid_renderer`.
+
 ## Details
 
 - On 16- and 256-color terminals, Shoin draws selections and search matches

@@ -100,12 +100,15 @@ pub fn render_math(text: &str, fallback_title: &str, page: &Page) -> (String, Op
 }
 
 /// Export a complete HTML page with MathML and self-contained Mermaid images.
-pub fn render_with_mermaid(text: &str, fallback_title: &str, page: &Page) -> (String, Option<String>) {
-    let diagrams = mermaid::render(text, &page.md);
+pub fn render_with_mermaid(
+    text: &str, fallback_title: &str, page: &Page, renderer: crate::render::mermaid::MermaidRenderer,
+) -> (String, Option<String>) {
+    let diagrams = mermaid::render(text, &page.md, renderer);
     let (html, math_note) = render_with_assets(text, fallback_title, page, &super::pandoc_mathml, &diagrams);
     let note = match (math_note, mermaid::diagnostic(&diagrams)) {
         (Some(math), Some(mermaid)) => Some(format!("{math} · {mermaid}")),
-        (Some(note), None) | (None, Some(note)) => Some(note.to_string()),
+        (Some(note), None) => Some(note.to_owned()),
+        (None, Some(note)) => Some(note),
         (None, None) => None,
     };
     (html, note)

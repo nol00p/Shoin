@@ -5,6 +5,7 @@
 //! people do with a finished piece: keep it as Markdown, read it as plain text,
 //! put it on the web, or hand it to someone who wants a printed page.
 
+mod destination;
 pub mod html;
 mod mermaid;
 mod pdf_assets;
@@ -17,7 +18,7 @@ use anyhow::{bail, Context, Result};
 use crate::config::schema::{MarkdownConfig, TranscludeConfig};
 use crate::render::markdown::block::{classify, has_cell_separator, BlockKind, Carry, Open, COMMONMARK_TAB};
 use crate::render::markdown::inline::Inline;
-use crate::transclude::same_file;
+use destination::Destination;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -77,8 +78,7 @@ pub fn default_path(source: &Path, format: Format) -> PathBuf {
 
 /// Flatten `source` and write it to `dest` in `format`.
 ///
-/// `page` only reaches HTML, which is the one format with a look of its own to
-/// get right; the others are text and are the same on every machine.
+/// `page` supplies rendering settings. HTML also uses its theme.
 ///
 /// A returned note describes content the export kept as source.
 pub fn write(
@@ -88,54 +88,103 @@ pub fn write(
     cfg: &TranscludeConfig,
     page: &html::Page,
 ) -> Result<Option<String>> {
-    // Every file the compile read is part of what is being exported, so
-    // writing onto any of them would destroy the document: the source, an
-    // embedded note, an embedded picture. `sources` starts with the source.
-    let (flat, sources) = crate::transclude::compile::compile_with_sources(source, cfg)?;
-    if let Some(i) = sources.iter().position(|s| same_file(dest, s)) {
-        match i {
-            0 => bail!("that would overwrite the document you are exporting"),
-            _ => bail!("that would overwrite {}, which the document embeds", short(&sources[i])),
+    let result = Job::new(source, dest.to_path_buf(), format, cfg, page)
+        .and_then(|job| job.render(page, Default::default()))
+        .and_then(Completed::commit)
+        .map(|(_, note)| note);
+    #[cfg(unix)]
+    if destination::cancelled() {
+        // The signal thread exits once it has drained the workers and scratch files.
+        loop {
+            std::thread::park();
         }
     }
-    // HTML reads the pictures the document links to, to carry them inside
-    // the page, and pandoc reads them to lay them out: for those two, a
-    // linked picture is as much part of the document as an embedded one.
-    if matches!(format, Format::Html | Format::Pdf) {
-        if let Some(p) = linked_pictures(&flat, &page.base, &page.md).iter().find(|p| same_file(dest, p)) {
-            bail!("that would overwrite {}, which the document shows", short(p));
-        }
+    result
+}
+
+pub(crate) fn shutdown() {
+    destination::stop();
+    crate::render::mermaid::shutdown();
+    destination::drain();
+    pdf_assets::cleanup();
+}
+
+pub(crate) struct Job {
+    source: PathBuf,
+    dest: Destination,
+    flat: String,
+    format: Format,
+}
+
+impl Job {
+    /// Compile and snapshot file identities before returning control to the editor.
+    pub(crate) fn new(
+        source: &Path, dest: PathBuf, format: Format, cfg: &TranscludeConfig, page: &html::Page,
+    ) -> Result<Self> {
+        let (flat, sources) = crate::transclude::compile::compile_with_sources(source, cfg)?;
+        let pictures = match format {
+            Format::Html | Format::Pdf => linked_pictures(&flat, &page.base, &page.md),
+            _ => Vec::new(),
+        };
+        let dest = Destination::new(dest, sources, pictures)?;
+        Ok(Self { source: source.to_path_buf(), dest, flat, format })
     }
-    // The destination is typed into a dialog, so a folder that does not exist
-    // yet is a reasonable thing to ask for rather than a mistake to report.
-    if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", short(parent)))?;
+
+    pub(crate) fn render(
+        self, page: &html::Page, renderer: crate::render::mermaid::MermaidRenderer,
+    ) -> Result<Completed> {
+        let _worker = destination::start()?;
+        let Self { source, dest, flat, format } = self;
+        let (output, note) = match format {
+            Format::Markdown => (Output::Markdown { flat, source, md: page.md.clone() }, None),
+            Format::Text => (Output::Text(plain::render(&flat, page.measure, page.justify, &page.md)), None),
+            Format::Html => {
+                let title = source.file_stem().unwrap_or(std::ffi::OsStr::new("document")).to_string_lossy();
+                let (html, note) = html::render_with_mermaid(&flat, &title, page, renderer);
+                (Output::Text(html), note)
+            }
+            Format::Pdf => {
+                let flat = rebase_images(&flat, &source, None, &page.md);
+                let (scratch, note) = write_pdf(&flat, &source, &page.md, renderer)?;
+                (Output::Pdf(scratch), note)
+            }
+        };
+        Ok(Completed { dest, output, note })
     }
-    match format {
-        Format::Markdown => {
-            let flat = rebase_images(&flat, source, Some(dest), &page.md);
-            std::fs::write(dest, flat).with_context(|| short(dest))?
-        }
-        Format::Text => {
-            std::fs::write(dest, plain::render(&flat, page.measure, page.justify, &page.md))
-                .with_context(|| short(dest))?
-        }
-        Format::Html => {
-            let title = source
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "document".into());
-            let (html, note) = html::render_with_mermaid(&flat, &title, page);
-            std::fs::write(dest, html).with_context(|| short(dest))?;
-            return Ok(note);
-        }
-        Format::Pdf => {
-            let flat = rebase_images(&flat, source, None, &page.md);
-            return write_pdf(&flat, source, dest, &page.md);
-        }
+}
+
+enum Output {
+    Markdown { flat: String, source: PathBuf, md: MarkdownConfig },
+    Text(String),
+    Pdf(pdf_assets::Assets),
+}
+
+pub(crate) struct Completed {
+    dest: Destination,
+    output: Output,
+    note: Option<String>,
+}
+
+impl Completed {
+    /// Interactive callers commit on the editor thread, between file operations.
+    pub(crate) fn commit(self) -> Result<(String, Option<String>)> {
+        use std::io::Write;
+
+        self.dest.commit(|file| match &self.output {
+            Output::Markdown { flat, source, md } => {
+                let flat = rebase_images(flat, source, Some(self.dest.path()), md);
+                file.write_all(flat.as_bytes())
+            }
+            Output::Text(text) => file.write_all(text.as_bytes()),
+            Output::Pdf(scratch) => {
+                let mut pdf = std::fs::File::open(scratch.path().join(PDF_OUTPUT))?;
+                std::io::copy(&mut pdf, file).map(|_| ())
+            }
+        })?;
+        let path = self.dest.path();
+        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+        Ok((name, self.note))
     }
-    Ok(None)
 }
 
 /// Every local picture file `markdown` links to (`![alt](img/p.png)`),
@@ -497,10 +546,14 @@ fn short(p: &Path) -> String {
 
 /// PDF is produced by handing the flattened Markdown to an external converter.
 ///
+const PDF_OUTPUT: &str = "document.pdf";
+
 /// DELIBERATELY not built in. A PDF writer means a layout engine and embedded
 /// fonts inside a terminal text editor, for output worse than what the tools
 /// people already have produce. Shoin passes the Markdown to `pandoc`.
-fn write_pdf(markdown: &str, source: &Path, dest: &Path, md: &MarkdownConfig) -> Result<Option<String>> {
+fn write_pdf(
+    markdown: &str, source: &Path, md: &MarkdownConfig, renderer: crate::render::mermaid::MermaidRenderer,
+) -> Result<(pdf_assets::Assets, Option<String>)> {
     let Some(tool) = which("pandoc") else {
         // Short on purpose: this is read on a one-row status line, and a
         // message that does not fit loses its ending — which is the half that
@@ -515,7 +568,9 @@ fn write_pdf(markdown: &str, source: &Path, dest: &Path, md: &MarkdownConfig) ->
         bail!("{NO_ENGINE}");
     };
 
-    write_pdf_with(markdown, source, dest, md, &tool, engine)
+    let scratch = pdf_assets::Assets::create().context("reserving a PDF work directory")?;
+    let note = write_pdf_with(markdown, source, &scratch.path().join(PDF_OUTPUT), md, &tool, engine, renderer)?;
+    Ok((scratch, note))
 }
 
 fn write_pdf_with(
@@ -525,50 +580,88 @@ fn write_pdf_with(
     md: &MarkdownConfig,
     tool: &Path,
     engine: &str,
+    renderer: crate::render::mermaid::MermaidRenderer,
 ) -> Result<Option<String>> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
 
     // Hold the generated PNGs through the converter and its page engine.
-    let prepared = pdf_assets::prepare(markdown, md);
-    let mut child = Command::new(tool)
+    let prepared = pdf_assets::prepare(markdown, md, renderer);
+    if destination::cancelled() {
+        bail!("export cancelled");
+    }
+
+    // Files let us poll and reap the child independently of how the layout
+    // engine uses stdin and stderr.
+    let scratch = pdf_assets::Assets::create().context("reserving Pandoc input and diagnostics")?;
+    let input = scratch.path().join("stdin");
+    std::fs::File::create(&input)?.write_all(prepared.markdown.as_bytes())?;
+    let input = std::fs::File::open(input)?;
+    let errors = scratch.path().join("stderr");
+    let stderr = std::fs::File::create(&errors)?;
+
+    let mut child = pandoc_command(tool)
         // pandoc reads `$…$` as math by default; with `math = false` followed
         // into export, it is the text the editor shows.
         .arg(if md.math { "--from=markdown" } else { "--from=markdown-tex_math_dollars" })
         .arg(format!("--pdf-engine={engine}"))
         .args(engine_args(engine))
-        // pandoc runs here, not in the document's folder. Pictures arrive
-        // with absolute paths (`rebase_images`); the resource path covers
-        // any left as written, for the engines that read it.
+        // Pictures arrive with absolute paths. The resource path covers any
+        // left as written, for the engines that read it.
         .arg(resource_path(source))
         .arg("--output")
         .arg(dest)
-        .stdin(Stdio::piped())
+        .stdin(input)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(stderr)
         .spawn()
         .context("running pandoc")?;
 
-    let (out, wrote) = std::thread::scope(|scope| {
-        let mut stdin = child.stdin.take().expect("piped pandoc stdin");
-        let markdown = prepared.markdown.as_bytes();
-        // Drain stderr while writing stdin so a full diagnostic pipe cannot
-        // delay exit and keep the generated assets alive indefinitely.
-        let writer = scope.spawn(move || stdin.write_all(markdown));
-        let out = child.wait_with_output();
-        (out, writer.join())
-    });
-    let out = out.context("waiting for pandoc")?;
-    if !out.status.success() {
-        // pandoc's own diagnostics are far better than anything we could infer
-        // — a missing LaTeX engine, say — so they are passed through.
-        let why = String::from_utf8_lossy(&out.stderr);
-        let why = why.lines().next().unwrap_or("pandoc failed").trim();
-        bail!("pandoc: {why}");
+    let status = loop {
+        if destination::cancelled() {
+            stop_pandoc(&mut child);
+            bail!("export cancelled");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(e) => {
+                stop_pandoc(&mut child);
+                return Err(e).context("waiting for pandoc");
+            }
+        }
+    };
+
+    if !status.success() {
+        // Pass through the first diagnostic, which usually names the engine.
+        let why = BufReader::new(std::fs::File::open(errors)?).lines().next()
+            .and_then(std::io::Result::ok).unwrap_or_else(|| "pandoc failed".into());
+        bail!("pandoc: {}", why.trim());
     }
-    wrote.map_err(|_| anyhow::anyhow!("pandoc input writer failed"))?
-        .context("sending the document to pandoc")?;
     Ok(prepared.note)
+}
+
+fn pandoc_command(tool: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(tool);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Pandoc starts the PDF layout engine in the same process group.
+        command.process_group(0);
+    }
+    command
+}
+
+fn stop_pandoc(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: the child was spawned as the leader of this process group
+        // and we have yet to reap it, so the ID cannot have been recycled.
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The HTML page's formulas as MathML, through `pandoc` (an
@@ -616,10 +709,10 @@ fn mathml_with(tool: &Path, formulas: &[html::Formula], limit: std::time::Durati
 /// killed and reaped.
 fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Instant) -> std::result::Result<String, &'static str> {
     use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::sync::mpsc;
 
-    let mut child = Command::new(tool)
+    let mut child = pandoc_command(tool)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -628,8 +721,7 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
         .spawn()
         .map_err(|_| PANDOC_FAILED)?;
     let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_pandoc(&mut child);
         return Err(PANDOC_FAILED);
     };
     // Writing and reading on threads of their own: a long page cannot fill
@@ -646,17 +738,13 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
         read_tx.send(ok.then_some(out))
     });
     let left = || deadline.saturating_duration_since(std::time::Instant::now());
-    let late = |e| match e {
-        mpsc::RecvTimeoutError::Timeout => PANDOC_TIMED_OUT,
-        mpsc::RecvTimeoutError::Disconnected => PANDOC_FAILED,
-    };
     let mut finish = || {
-        let out = read.recv_timeout(left()).map_err(late)?;
-        let wrote = wrote.recv_timeout(left()).map_err(late)?;
+        let out = receive_pandoc(&read, left)?;
+        let wrote = receive_pandoc(&wrote, left)?;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => return Ok((out, wrote, status)),
-                Ok(None) if left().is_zero() => return Err(PANDOC_TIMED_OUT),
+                Ok(None) if left().is_zero() || destination::cancelled() => return Err(PANDOC_TIMED_OUT),
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
                 Err(_) => return Err(PANDOC_FAILED),
             }
@@ -666,9 +754,25 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
         Ok((Some(page), true, status)) if status.success() => Ok(page),
         Ok(_) => Err(PANDOC_FAILED),
         Err(note) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_pandoc(&mut child);
             Err(note)
+        }
+    }
+}
+
+fn receive_pandoc<T>(
+    receiver: &std::sync::mpsc::Receiver<T>, left: impl Fn() -> std::time::Duration,
+) -> std::result::Result<T, &'static str> {
+    use std::sync::mpsc::RecvTimeoutError;
+
+    loop {
+        if destination::cancelled() || left().is_zero() {
+            return Err(PANDOC_TIMED_OUT);
+        }
+        match receiver.recv_timeout(left().min(std::time::Duration::from_millis(10))) {
+            Ok(value) => return Ok(value),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Err(PANDOC_FAILED),
         }
     }
 }
@@ -1268,7 +1372,7 @@ printf '%%PDF-fake\n' > "$dest"
         );
         for filename in ["out.pdf", "fail.pdf"] {
             let dest = d.join(filename);
-            let result = write_pdf_with(markdown, &d.join("source.md"), &dest, &md, &pandoc, "typst");
+            let result = write_pdf_with(markdown, &d.join("source.md"), &dest, &md, &pandoc, "typst", Default::default());
             if filename == "out.pdf" {
                 let message = result.unwrap().unwrap();
                 assert!(message.contains("rendering failed"), "{message}");

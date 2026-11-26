@@ -524,13 +524,7 @@ fn fuzz_random_sessions() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&merman, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let wide = [
-        0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0x01, 0xe0, 0, 0,
-        0, 0x78, 0x08, 0x06, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63,
-        0xf8, 0x0f, 0x04, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0xfb, 0x5e, 0x6b, 0x2b, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44,
-        0xae, 0x42, 0x60, 0x82,
-    ];
-    std::fs::write(dir.join("wide.png"), wide).unwrap();
+    std::fs::write(dir.join("wide.png"), crate::test_support::sized_png(480, 120)).unwrap();
     std::fs::write(dir.join("b.md"), "---\nt: 1\n---\n# B\n\n![[c.txt]]\n\n## Two\n\n- x\n- y\n\n```\n# not heading\n```\n").unwrap();
     std::fs::write(dir.join("c.txt"), "plain text file\nwith ![[a]] a loop\n").unwrap();
     std::fs::write(dir.join("sub/d.md"), "para one\nline ^blk\n\nother\n").unwrap();

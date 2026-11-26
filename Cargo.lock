@@ -1390,11 +1390,13 @@ version = "0.2.5"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "notify",
  "ratatui",
  "regex",
  "ropey",
  "serde",
+ "signal-hook",
  "toml",
  "unicode-width",
 ]

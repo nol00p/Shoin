@@ -8475,6 +8475,110 @@ fn closed_block_ranges_are_kept_with_the_kinds() {
 
 // ── #77 fix round 2 ─────────────────────────────────────────────────────
 
+#[cfg(unix)]
+#[test]
+fn config_reload_clears_mermaid_failures_even_when_the_executable_is_unchanged() {
+    use crate::render::mermaid::{Failure, Preview};
+
+    let (d, mut app) = vault("note", &[]);
+    let executable = d.join("missing").to_string_lossy().into_owned();
+    let conf = d.join("shoin.conf");
+    std::fs::write(&conf, format!("[markdown]\nmermaid_renderer = {executable:?}\n")).unwrap();
+    app.watcher = ConfigWatcher::new(Some(conf)).unwrap();
+    app.config.markdown.mermaid_renderer = Some(executable.clone());
+
+    let source = "graph LR\n";
+    assert_eq!(app.mermaid.get_mut().request(&executable, source), Preview::Pending);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.mermaid.get_mut().cached(&executable, source).is_none() {
+        assert!(Instant::now() < deadline, "renderer did not report failure");
+        std::thread::sleep(Duration::from_millis(5));
+        app.poll_mermaid();
+    }
+    assert_eq!(
+        app.mermaid.get_mut().cached(&executable, source),
+        Some(Preview::Failed(Failure::MissingExecutable)),
+    );
+
+    let revision = app.mermaid_revision;
+    app.reload_config();
+    assert_ne!(app.mermaid_revision, revision);
+    assert_eq!(app.config.markdown.mermaid_renderer.as_deref(), Some(executable.as_str()));
+    assert_eq!(app.mermaid.get_mut().cached(&executable, source), None);
+    drop(app);
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn html_export_waits_for_mermaid_off_the_editor_thread() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (d, mut app) = vault(
+        "start\n\n```mermaid\ngraph LR\nA-->B\n```\n",
+        &[("renderer", "#!/bin/sh\nwhile [ ! -f \"$0.go\" ]; do sleep .01; done\nexit 1\n")],
+    );
+    let executable = d.join("renderer");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    app.config.markdown.mermaid_renderer = executable.to_str().map(str::to_owned);
+
+    let dest = d.join("note.html");
+    cmd(&mut app, ":export html");
+    assert!(matches!(app.mode, Mode::Prompt(_)));
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.export_result.is_some(), "export should return while the renderer waits");
+    assert!(!dest.exists());
+    std::fs::write(d.join("renderer.go"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.export_result.is_some() {
+        assert!(Instant::now() < deadline, "export did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+        app.poll_export();
+    }
+    assert!(std::fs::read_to_string(&dest).unwrap().contains("A--&gt;B"));
+    assert!(app.flash.unwrap().text.unwrap().contains("1 Mermaid diagram left as source (first at line 3)"));
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn html_export_refuses_a_source_renamed_to_the_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (d, mut app) = vault(
+        "start\n\n```mermaid\ngraph LR\nA-->B\n```\n",
+        &[("renderer", "#!/bin/sh\ntouch \"$0.ready\"; while [ ! -f \"$0.go\" ]; do sleep .01; done\nexit 1\n")],
+    );
+    let executable = d.join("renderer");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    app.config.markdown.mermaid_renderer = executable.to_str().map(str::to_owned);
+
+    let dest = d.join("note.html");
+    cmd(&mut app, ":export html");
+    assert!(matches!(app.mode, Mode::Prompt(_)));
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.export_result.is_some(), "export should return while the renderer waits");
+    assert!(!dest.exists());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !d.join("renderer.ready").exists() {
+        assert!(Instant::now() < deadline, "renderer did not start");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let source = app.buffer.path.clone().unwrap();
+    let before = std::fs::read(&source).unwrap();
+    app.move_path(&source, &dest).unwrap();
+    std::fs::write(&source, "replacement").unwrap();
+    std::fs::write(d.join("renderer.go"), "").unwrap();
+    while app.export_result.is_some() {
+        assert!(Instant::now() < deadline, "export did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+        app.poll_export();
+    }
+    assert_eq!(std::fs::read(&dest).unwrap(), before);
+    assert!(app.flash.unwrap().text.unwrap().contains("overwrite the document"));
+    std::fs::remove_dir_all(d).unwrap();
+}
+
 /// Turning `[markdown] math` on by saving the watched config, with the
 /// cursor on a block's opening line and no key pressed, shows the whole
 /// block raw on the next frame: the reload widens the active set over the

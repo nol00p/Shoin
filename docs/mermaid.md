@@ -1,15 +1,20 @@
 # Mermaid previews
 
 Shoin can preview closed `mermaid` fences as text diagrams in the terminal.
-Text previews support flowcharts (`flowchart` and `graph`) and sequence
-diagrams (`sequenceDiagram`). Mermaid syntax support depends on your Merman CLI
-version.
+Flowcharts (`flowchart` and `graph`) and sequence diagrams
+(`sequenceDiagram`) are the main preview examples. Class, state, ER, Gantt,
+and pie diagrams were [smoke-tested](../examples/mermaid/families.md) in text
+and PNG with Merman CLI 0.11.0.
+Shoin passes other families through to Merman. Their output depends on the
+installed Merman version.
 
 ## Enable previews
 
-Install Merman separately and make its `merman-cli`
-executable available on your PATH. Use a release with text output support.
-[Merman releases](https://github.com/Latias94/merman/releases)
+Download the prebuilt Merman CLI for your platform, unpack it, and put
+`merman-cli` on your PATH. Shoin was tested with Merman CLI 0.11.0.
+Merman CLI 0.9.4 and later accept the renderer flags Shoin uses. For example,
+0.10.0 can render pie charts as PNGs, while pie text previews need 0.11.0.
+[Merman CLI 0.11.0 downloads](https://github.com/Latias94/merman/releases/tag/v0.11.0#download-merman-cli-0110)
 
 Add this setting to the existing `[markdown]` section of your trusted Shoin
 config, usually in `~/.config/shoin/input.conf`.
@@ -19,8 +24,9 @@ config, usually in `~/.config/shoin/input.conf`.
 mermaid_renderer = "merman-cli"
 ```
 
-You can also use the absolute path to the executable. The value is a single
-executable name or path. Shoin passes the fence body to that local executable.
+Use a bare name from PATH, an absolute executable path, or a `~/` path
+under your home directory. Shoin warns about relative paths and leaves the
+renderer off. It passes the fence body to the configured local executable.
 Omit the key or set it to `""` to turn previews off, which is the default.
 Shoin accepts this setting from user config or a path selected explicitly with
 `--config` or `SHOIN_CONFIG`. A config discovered automatically in the working
@@ -50,11 +56,11 @@ on terminals with Kitty or iTerm2 graphics support. Shoin uses text while the
 image is being generated, when graphics are unavailable, or when the diagram
 cannot fit as an image. The fenced source remains available if neither preview
 works. Styled output sent to a pager uses text previews where they fit.
+PNG diagrams have a white background, including on dark themes.
 
 Mermaid previews also work inside expanded note embeds. Use `:embed full` to
 enable expansion for the current session. Open the linked note to edit its
-Mermaid source. Graphics support depends on your Merman version
-and includes flowcharts, sequence, class, state, ER, Gantt, and pie diagrams.
+Mermaid source.
 
 ## Export diagrams
 
@@ -62,7 +68,20 @@ With `mermaid_renderer` configured, Shoin renders diagrams in HTML and PDF
 exports. HTML embeds self-contained PNGs and works offline in
 a browser. PDF uses the configured Merman CLI to create PNGs and passes them
 to Pandoc. PDF still requires a Pandoc layout engine such as Typst.
+You can keep editing while an export runs.
 
-A diagram that cannot render stays as source and adds an export diagnostic.
-Markdown and plain text exports always keep Mermaid source. Exported diagrams
-work independently of terminal graphics support.
+Failed diagrams stay as source. The export diagnostic gives the count and
+the first affected line in the flattened Markdown. Markdown and plain text
+exports always keep Mermaid source. Exported diagrams work independently of
+terminal graphics support.
+
+## Details
+
+- Shoin checks PNG chunk types, CRCs, and size limits. The configured renderer
+  can still produce corrupt compressed pixels with matching CRCs. Browsers,
+  terminals, and PDF engines decode the pixels.
+- Supporting SVG would require validating the XML, CSS, and resource
+  references before embedding renderer output.
+- The Phase 0 comparison with mermaid-ascii and mmdc remains open.
+  The [stress fixtures](../examples/mermaid/stress.md) cover a cyclic branch,
+  a long Unicode label, and nested sequence frames.

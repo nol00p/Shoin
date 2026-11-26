@@ -237,19 +237,52 @@ impl App {
             justify,
             md: self.config.markdown.for_export(),
         };
-        match crate::export::write(source, &dest, format, &self.config.transclude, &page) {
+        if self.export_result.is_some() {
+            return self.notify("export already in progress", FlashKind::Info);
+        }
+
+        let job = match crate::export::Job::new(source, dest, format, &self.config.transclude, &page) {
+            Ok(job) => job,
+            Err(e) => return self.show_export_result(Err(e)),
+        };
+        if !matches!(format, Format::Html | Format::Pdf) {
+            return self.show_export_result(job.render(&page, Default::default()));
+        }
+
+        let renderer = self.mermaid.get_mut().with_cached_pngs();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new().name("export".into()).spawn(move || {
+            let result = job.render(&page, renderer);
+            let _ = send.send(result);
+        }) {
+            Ok(_) => {
+                self.export_result = Some(receive);
+                self.notify("exporting…", FlashKind::Info);
+            }
+            Err(e) => self.show_export_result(Err(e.into())),
+        }
+    }
+
+    pub(super) fn poll_export(&mut self) {
+        let Some(receiver) = &self.export_result else { return };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("worker stopped")),
+        };
+        self.export_result = None;
+        self.show_export_result(result);
+    }
+
+    fn show_export_result(&mut self, result: anyhow::Result<crate::export::Completed>) {
+        match result.and_then(crate::export::Completed::commit) {
             Err(e) => self.notify(format!("export: {e}"), FlashKind::Error),
-            Ok(note) => {
-                let name = dest
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| dest.display().to_string());
-                // The note goes last: on a narrow status line it is the part
-                // that is cut, and the file written is what matters most.
+            Ok((name, note)) => {
                 let note = note.map(|n| format!(" · {n}")).unwrap_or_default();
                 self.notify(format!("{name} exported{note}"), FlashKind::Info);
             }
         }
+        self.needs_redraw = true;
     }
 
     /// Rename or move a path, carrying any OPEN buffer along with it.

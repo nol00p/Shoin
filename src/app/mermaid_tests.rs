@@ -50,21 +50,6 @@ case "$*" in
 esac
 "#;
 
-/// A PNG `width` pixels wide and a quarter as tall, as the renderer's
-/// checks and the picture fit read it: only the header's size differs from
-/// a real 1×1 one.
-fn png(width: u32) -> Vec<u8> {
-    let mut bytes = vec![
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-        0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0x0f, 0x04, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0xfb, 0x5e,
-        0x6b, 0x2b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-    ];
-    bytes[16..20].copy_from_slice(&width.to_be_bytes());
-    bytes[20..24].copy_from_slice(&(width / 4).to_be_bytes());
-    bytes
-}
-
 fn fixture(body: &str, files: &[(&str, &str)], tweak: impl FnOnce(&mut Config)) -> Fixture {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
@@ -74,7 +59,7 @@ fn fixture(body: &str, files: &[(&str, &str)], tweak: impl FnOnce(&mut Config)) 
     let stub = dir.join("renderer");
     std::fs::write(&stub, STUB).unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
-    std::fs::write(dir.join("diagram.png"), png(480)).unwrap();
+    std::fs::write(dir.join("diagram.png"), crate::test_support::sized_png(480, 120)).unwrap();
     for (name, text) in files {
         std::fs::write(dir.join(name), text).unwrap();
     }

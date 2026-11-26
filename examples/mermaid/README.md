@@ -4,14 +4,18 @@ This README has two diagrams you can preview and edit, plus one in an embedded n
 
 ## Start Shoin from the checkout
 
-Run these commands from the repository root. Set `renderer` to the absolute
-path of your Merman CLI if it is installed outside your PATH.
+Run these commands from the repository root. Install `merman-cli` on PATH
+first, or set `MERMAID_RENDERER` to its absolute path.
 
 ```sh
-renderer=$(command -v merman-cli)
+renderer=${MERMAID_RENDERER:-merman-cli}
+if ! command -v "$renderer" >/dev/null; then
+    echo "Install merman-cli first or set MERMAID_RENDERER." >&2
+    exit 1
+fi
 config=$(mktemp -d /tmp/shoin-mermaid-demo.XXXXXX)
 printf '[markdown]\nmermaid_renderer = "%s"\nmermaid_graphics = true\n[layout]\nconceal = true\n[transclude]\nembed = "full"\n' "$renderer" > "$config/input.conf"
-cargo run --target-dir /tmp/shoin-mermaid-build -- --config "$config" examples/mermaid/README.md
+cargo run --target-dir target/mermaid-demo -- --config "$config" examples/mermaid/README.md
 ```
 
 `cargo run` builds and runs Shoin from this checkout using a separate build
@@ -20,17 +24,18 @@ with graphics support. Add `-R` after `"$config"` to open read-only from the sta
 
 ## What to try
 
-| Shoin command | What you should see |
-| --- | --- |
-| `gg`, then `/`, type `flowchart` followed by a space and `TD`, then press Enter | Jump into the flowchart fence and reveal its full Mermaid source. You can also click a visible diagram to reveal its fence. |
-| `i`, edit a label, then `Esc` | The source stays visible while your cursor is inside the fence. |
-| `j` or `k` until you leave the fence | The diagram returns and reflects your edit. |
-| `:view` | Enter read-only mode and show previews even when the cursor is on a fence. Run `:view` again to return to editing. |
-| `:set conceal off` | Show the Mermaid source. Use `:set conceal on` to restore previews. |
-| `:q!` | Quit and discard any edits you made to this demo. |
+- `gg`, then search for `flowchart TD` to reveal the flowchart's source.
+  Clicking a visible diagram also reveals its fence in edit mode.
+- `i` edits a label. Press `Esc`, then move beyond the fence to see the
+  updated diagram.
+- `:view` toggles read-only mode, where previews can show under the cursor.
+- `:set conceal off` shows source. Use `:set conceal on` to restore previews.
+- `:q!` discards any edits you made to the demo.
 
 If a diagram is too wide, widen the terminal. If the renderer is missing or
 reports an error, the source stays visible with a diagnostic.
+
+Try more [diagram families](families.md) or the [stress cases](stress.md).
 
 ## Flowchart
 
@@ -66,7 +71,7 @@ output path. In the shell, use the same config to export without opening the
 editor.
 
 ```sh
-cargo run --target-dir /tmp/shoin-mermaid-build -- --config "$config" \
+cargo run --target-dir target/mermaid-demo -- --config "$config" \
   --export examples/mermaid/README.md --format html --out /tmp/shoin-mermaid.html
 ```
 

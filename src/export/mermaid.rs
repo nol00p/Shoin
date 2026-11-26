@@ -31,7 +31,7 @@ struct Fence<'a> {
     body: &'a str,
 }
 
-pub(crate) fn render<'a>(markdown: &'a str, md: &MarkdownConfig) -> Vec<RenderedFence<'a>> {
+pub(crate) fn render<'a>(markdown: &'a str, md: &MarkdownConfig, renderer: MermaidRenderer) -> Vec<RenderedFence<'a>> {
     let Some(executable) = md.mermaid_renderer.as_deref().filter(|path| !path.trim().is_empty()) else {
         return Vec::new();
     };
@@ -44,7 +44,7 @@ pub(crate) fn render<'a>(markdown: &'a str, md: &MarkdownConfig) -> Vec<Rendered
         })
         .collect();
 
-    let images = raster_batch(executable, &sources);
+    let images = raster_batch(executable, &sources, renderer, BATCH_TIMEOUT);
     let mut remaining = MAX_DOCUMENT_PNG_BYTES;
     prepared.into_iter().map(|(fence, job)| {
         let png = job.and_then(|job| {
@@ -64,19 +64,23 @@ pub(crate) fn render<'a>(markdown: &'a str, md: &MarkdownConfig) -> Vec<Rendered
     }).collect()
 }
 
-pub(crate) fn diagnostic(fences: &[RenderedFence<'_>]) -> Option<&'static str> {
+pub(crate) fn diagnostic(fences: &[RenderedFence<'_>]) -> Option<String> {
+    let first = fences.iter().find(|fence| fence.png.is_err())?.lines.start + 1;
+    let count = fences.iter().filter(|fence| fence.png.is_err()).count();
+    let noun = if count == 1 { "diagram" } else { "diagrams" };
     let has = |failure| fences.iter().any(|fence| fence.png.as_ref().err() == Some(&failure));
-    if has(Failure::MissingExecutable) {
-        Some("Mermaid left as source. Install merman-cli or check mermaid_renderer.")
+    let reason = if has(Failure::MissingExecutable) {
+        "Install merman-cli or check mermaid_renderer"
     } else if has(Failure::Timeout) {
-        Some("Mermaid diagrams left as source because rendering timed out")
+        "rendering timed out"
     } else if has(Failure::TooLarge) {
-        Some("Mermaid diagrams left as source because a size or count limit was reached")
-    } else if fences.iter().any(|fence| fence.png.is_err()) {
-        Some("Mermaid diagrams left as source because rendering failed")
+        "size or count limit reached"
+    } else if has(Failure::AssetWrite) {
+        "could not write a temporary PNG"
     } else {
-        None
-    }
+        "rendering failed"
+    };
+    Some(format!("{count} Mermaid {noun} left as source (first at line {first}) · {reason}"))
 }
 
 fn fences(markdown: &str, math: bool) -> impl Iterator<Item = Fence<'_>> {
@@ -144,10 +148,14 @@ fn prepare(fence: &Fence<'_>, sources: &mut Vec<String>) -> Result<usize, Failur
 
 type Raster = Result<Arc<[u8]>, Failure>;
 
-fn raster_batch(executable: &str, sources: &[String]) -> Vec<Option<Raster>> {
-    let mut renderer = MermaidRenderer::default();
+fn raster_batch(
+    executable: &str,
+    sources: &[String],
+    mut renderer: MermaidRenderer,
+    timeout: Duration,
+) -> Vec<Option<Raster>> {
     let mut results = vec![None; sources.len()];
-    let deadline = Instant::now() + BATCH_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         renderer.poll();
         let mut pending = false;
@@ -157,7 +165,7 @@ fn raster_batch(executable: &str, sources: &[String]) -> Vec<Option<Raster>> {
             }
             // The async worker enforces its own per-call timeout. Finish the
             // export when the overall budget expires even if more jobs remain.
-            if Instant::now() >= deadline {
+            if super::destination::cancelled() || Instant::now() >= deadline {
                 return results;
             }
             match renderer.request_png(executable, source) {
@@ -224,19 +232,46 @@ mod tests {
         assert_eq!(prepare(&fences(markdown, true).next().unwrap(), &mut sources), Err(Failure::TooLarge));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn batch_deadline_cancels_and_reaps_the_renderer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("shoin-mermaid-batch-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("renderer");
+        std::fs::write(&executable, r#"#!/bin/sh
+echo $$ > "$0.pid"
+exec sleep 30
+"#).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let results = raster_batch(
+            executable.to_str().unwrap(), &["graph LR".into()],
+            MermaidRenderer::default(), Duration::from_millis(600),
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(root.join("renderer.pid")).unwrap().trim().parse().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        // SAFETY: signal zero only checks the reported renderer PID.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "renderer survived the batch deadline");
+        assert_eq!(results, [None]);
+    }
+
     #[test]
     fn reports_missing_executable_for_a_configured_renderer() {
         let source = "```mermaid\nflowchart LR\n```";
         let mut md = MarkdownConfig::default();
-        assert!(render(source, &md).is_empty());
+        assert!(render(source, &md, MermaidRenderer::default()).is_empty());
         let missing = std::env::temp_dir()
             .join(format!("shoin-merman-missing-{}", std::process::id()))
             .join("merman-cli");
         md.mermaid_renderer = Some(missing.to_string_lossy().into_owned());
-        let results = render(source, &md);
+        let results = render(source, &md, MermaidRenderer::default());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].png, Err(Failure::MissingExecutable));
         assert_eq!(results[0].alt, "Mermaid flowchart");
-        assert!(diagnostic(&results).unwrap().contains("Install merman-cli"));
+        assert_eq!(
+            diagnostic(&results).as_deref(),
+            Some("1 Mermaid diagram left as source (first at line 1) · Install merman-cli or check mermaid_renderer"),
+        );
     }
 }

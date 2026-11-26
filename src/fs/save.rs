@@ -445,7 +445,7 @@ fn finish_rename(
 /// leftover from another run or another user is never truncated or mistaken
 /// for ours, and cut to fit the 255-byte name limit, so a long name can still
 /// be saved by rename (and a NEW file with a long name created at all).
-fn create_beside(path: &Path, dir: &Path, ext: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
+pub(crate) fn create_beside(path: &Path, dir: &Path, ext: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
     let name = path

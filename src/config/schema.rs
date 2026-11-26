@@ -24,6 +24,8 @@ pub struct Config {
     pub tree: TreeConfig,
     pub transclude: TranscludeConfig,
     pub hints: HintsConfig,
+    #[serde(skip)]
+    pub(crate) mermaid_warning: Option<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]

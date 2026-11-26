@@ -382,6 +382,7 @@ pub struct App {
     pub(crate) mermaid_revision: u64,
     /// Whether the last frame left a Mermaid render it asked for running.
     pub(crate) mermaid_waiting: std::cell::Cell<bool>,
+    export_result: Option<std::sync::mpsc::Receiver<anyhow::Result<crate::export::Completed>>>,
     /// Where the last frame put its pictures. Filled while the frame is built
     /// (hence the cell: rendering only has `&App`) and drained by the painter
     /// straight after.
@@ -1021,6 +1022,7 @@ impl App {
             scroll_anchors: RefCell::default(),
             mermaid_revision: 0,
             mermaid_waiting: Default::default(),
+            export_result: None,
             painted: std::cell::RefCell::new((Vec::new(), (0, 0))),
             overlay: std::cell::Cell::new(None),
             tree_window_prefix: false,
@@ -1074,6 +1076,7 @@ impl App {
             // writes its escape here, never in the middle of a draw.
             self.clipboard.poll();
             self.poll_mermaid();
+            self.poll_export();
             self.refresh_blocks();
             // A reload from disk moves the folds of the panes on that file.
             self.sync_folds();
@@ -1211,6 +1214,8 @@ impl App {
                 self.keymap = keymap;
                 let was_mouse = self.config.input.mouse;
                 self.config = new;
+                *self.mermaid.get_mut() = Default::default();
+                self.mermaid_revision = self.mermaid_revision.wrapping_add(1);
                 // `[markdown] math` or `tab_width` may have changed: every
                 // document's kinds are rebuilt under the new values, and the
                 // active set widened over the blocks they now hold, before
