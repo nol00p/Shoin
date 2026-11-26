@@ -255,9 +255,18 @@ impl App {
     ///
     /// Widen the set to the whole source of any display block it touches.
     /// The block kinds must match the current buffer revision.
+    ///
+    /// Read-only mode shows one source: a Mermaid fence a search landed in,
+    /// while the cursor stays where it landed, so the hit inside it shows.
     pub(super) fn active_set(&self, anchor: Option<Cursor>) -> ActiveSet {
         if self.view {
-            return ActiveSet::none();
+            return self.search_landing
+                .filter(|at| (at.line, at.col) == (self.buffer.cursor.line, self.buffer.cursor.col))
+                .filter(|_| self.config.layout.conceal && self.buffer.syntax == crate::text::buffer::Syntax::Markdown)
+                .filter(|_| self.blocks.revision == self.buffer.revision)
+                .filter(|_| self.config.markdown.mermaid_renderer.as_deref().is_some_and(|s| !s.is_empty()))
+                .and_then(|at| crate::render::hidden::mermaid_block_at(&self.blocks, at.line))
+                .map_or_else(ActiveSet::none, |b| ActiveSet { start: b.start, end: b.end - 1 });
         }
         let mut set = ActiveSet::compute(&self.mode, &self.buffer.cursor, anchor);
         let fresh = self.blocks.revision == self.buffer.revision;

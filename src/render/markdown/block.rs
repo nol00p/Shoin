@@ -85,8 +85,11 @@ pub enum Open {
     #[default]
     None,
     /// Inside a fenced block opened with this fence string, in the language its
-    /// info string named, with the code lexer in this state.
-    InFence { fence: String, lang: Option<Lang>, cont: Cont },
+    /// info string named, with the code lexer in this state. `base` is the
+    /// column the opener's indent counted from (the text column of the list
+    /// item it is in, else 0): a closer indented 4 or more columns past it is
+    /// a body line, as in CommonMark.
+    InFence { fence: String, lang: Option<Lang>, cont: Cont, base: u16 },
     InFrontMatter,
     /// A table's delimiter row has been seen; the rows that follow belong to it
     /// until a line without a `|` ends it.
@@ -511,8 +514,8 @@ fn classify_block(
             };
             return (BlockKind::FrontMatter, leaving);
         }
-        Open::InFence { fence, lang, cont } => {
-            if closes_fence(line, fence) {
+        Open::InFence { fence, lang, cont, base } => {
+            if indent_cols(line, tab_width) < usize::from(*base) + 4 && closes_fence(line, fence) {
                 return (BlockKind::FenceClose, Open::None);
             }
             // The body is lexed HERE, in the pass that already walks every line
@@ -526,7 +529,7 @@ fn classify_block(
             };
             return (
                 BlockKind::FenceBody { lang: *lang, cont: *cont },
-                Open::InFence { fence: fence.clone(), lang: *lang, cont: next },
+                Open::InFence { fence: fence.clone(), lang: *lang, cont: next, base: *base },
             );
         }
         // A table runs until a line with no cell separator in it.
@@ -577,7 +580,7 @@ fn classify_block(
         let lang = Lang::from_info(&info);
         return (
             BlockKind::FenceOpen(info),
-            Open::InFence { fence, lang, cont: Cont::None },
+            Open::InFence { fence, lang, cont: Cont::None, base: base.min(usize::from(u16::MAX)) as u16 },
         );
     }
 
@@ -1032,6 +1035,28 @@ mod tests {
         assert_eq!(kind("just prose"), BlockKind::Paragraph);
         // 4-space indent is not a heading/list here — falls through to prose.
         assert_eq!(kind("    # not a heading"), BlockKind::Paragraph);
+    }
+
+    /// A closing fence may be indented up to three columns past the column
+    /// the opener counted from, as in CommonMark; four or more make it a body
+    /// line, and the fence runs on.
+    #[test]
+    fn an_over_indented_closer_is_body() {
+        let c = BlockCache::build(&buf("~~~mermaid\ngraph TD\n    ~~~\nafter\n"), true, 4);
+        assert!(matches!(c.kinds[2], BlockKind::FenceBody { .. }));
+        assert!(matches!(c.kinds[3], BlockKind::FenceBody { .. }));
+        let c = BlockCache::build(&buf("```\nx\n   ```\nafter\n"), true, 4);
+        assert_eq!(c.kinds[2], BlockKind::FenceClose);
+        assert_eq!(c.kinds[3], BlockKind::Paragraph);
+        let c = BlockCache::build(&buf("```\nx\n\t```\n"), true, 4);
+        assert!(matches!(c.kinds[2], BlockKind::FenceBody { .. }), "a tab is four columns");
+        // Inside an item, measured from the item's text column.
+        let c = BlockCache::build(&buf("10. item\n    ```\n    x\n       ```\n    ```\n"), true, 4);
+        assert!(matches!(c.kinds[1], BlockKind::FenceOpen(_)));
+        assert_eq!(c.kinds[3], BlockKind::FenceClose, "three past the text column");
+        let c = BlockCache::build(&buf("10. item\n    ```\n    x\n        ```\n    ```\n"), true, 4);
+        assert!(matches!(c.kinds[3], BlockKind::FenceBody { .. }), "four past it");
+        assert_eq!(c.kinds[4], BlockKind::FenceClose);
     }
 
     #[test]

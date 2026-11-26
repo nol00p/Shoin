@@ -41,6 +41,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     app.overlay.set(None);
     app.images.borrow_mut().clear();
     app.image_payloads.borrow_mut().clear();
+    app.mermaid_waiting.set(false);
     let cfg = &app.config;
 
     // Paint the theme background across the whole surface so a theme is
@@ -314,7 +315,7 @@ fn render_pane(
         &lay,
         &cfg.layout,
         cfg.editor.scroll_off,
-        pane.scroll.get(),
+        anchored_top(app, &cache, pane),
         app.view,
     );
     // Persist the computed top, not just the value this frame drew: without
@@ -323,7 +324,18 @@ fn render_pane(
     // every frame, which reads as the viewport jumping around on navigation
     // instead of scrolling smoothly.
     pane.scroll.set(top);
-    cache.request_mermaid(app, doc, top..top + usize::from(lay.height), mermaid_limit);
+    // And where it is in the text, for the next frame to find it again.
+    let anchor = (!app.view).then(|| reading_top(&cache, top, cfg.editor.tab_width)).flatten();
+    match anchor {
+        Some(at) => {
+            let rows = cache.line_span(at.cursor.line).len();
+            app.scroll_anchors.borrow_mut().insert(pane.id, ScrollAnchor { row: top, doc: pane.doc, at, rows })
+        }
+        None => app.scroll_anchors.borrow_mut().remove(&pane.id),
+    };
+    if cache.request_mermaid(app, doc, top..top + usize::from(lay.height), mermaid_limit) {
+        app.mermaid_waiting.set(true);
+    }
 
     let text_area = Rect {
         x: rect.x + lay.margin_left,
@@ -1603,6 +1615,53 @@ fn source_col(cache: &RenderCache, line: usize, display_col: usize, tab: usize) 
     }
     let before: String = entry.cmap.display_text(&entry.source).chars().take(display_col).collect();
     entry.cmap.source_col(&entry.source, text_width(&before, tab), tab).min(len)
+}
+
+/// The row the pane's view started at last frame, in the rows as they are
+/// now. The previous frame kept where its top was in the text
+/// (`App::scroll_anchors`): while the pane's top is still that frame's,
+/// it is found again by that position, so a block above or under it that
+/// changed height (a Mermaid diagram arriving, or going) leaves the same
+/// text on top rather than the same row number.
+///
+/// A top hidden since (inside a block now laid out, or a fold) is where
+/// its line is shown. A top on a row with no text of its own (an embed's,
+/// a diagram's) whose line now takes another number of rows is as far
+/// into them as it was: an embed whose diagrams arrived keeps about the
+/// same part of it on top. A top set since (a scroll command) stands as
+/// it is.
+fn anchored_top(app: &App, cache: &RenderCache, pane: &crate::render::pane::Pane) -> usize {
+    let row = pane.scroll.get();
+    let anchors = app.scroll_anchors.borrow();
+    let Some(ScrollAnchor { at, rows, .. }) = anchors.get(&pane.id).filter(|a| a.row == row && a.doc == pane.doc) else {
+        return row;
+    };
+    let line = at.cursor.line;
+    if cache.entry(line).is_none() {
+        return row; // the text under it is gone
+    }
+    let span = cache.line_span(line);
+    if span.is_empty() {
+        return cache.line_rows(line).0;
+    }
+    if at.col.is_none() && span.len() != *rows && *rows > 0 {
+        return span.start + (at.within * span.len() / rows).min(span.len() - 1);
+    }
+    kept_row(cache, at).unwrap_or(row)
+}
+
+/// Where a pane's view started in the last frame drawn of it
+/// ([`anchored_top`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollAnchor {
+    /// The row it started at.
+    row: usize,
+    /// The document the pane showed.
+    doc: usize,
+    /// The place in the text that row is.
+    at: ReadingTop,
+    /// How many rows that place's line took.
+    rows: usize,
 }
 
 /// The row `scroll_offset` is to keep in view: the cursor's own, except in

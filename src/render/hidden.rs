@@ -257,6 +257,24 @@ mod tests {
         assert_eq!(mermaid_block_at(&c, 19), None);
     }
 
+    /// A fence whose only closer is indented four columns is not closed, so
+    /// it is never a diagram; three columns still close it.
+    #[test]
+    fn an_over_indented_closer_leaves_the_mermaid_fence_open() {
+        let mut b = Buffer::empty();
+        b.insert_str(crate::text::cursor::Cursor::new(0, 0), "~~~mermaid\ngraph TD\nA-->B\n    ~~~");
+        assert!(mermaid_blocks(&BlockCache::build(&b, true, 4)).is_empty());
+        let mut b = Buffer::empty();
+        b.insert_str(crate::text::cursor::Cursor::new(0, 0), "~~~mermaid\ngraph TD\n   ~~~");
+        assert_eq!(mermaid_blocks(&BlockCache::build(&b, true, 4)).to_vec(), vec![0..3]);
+        let mut b = Buffer::empty();
+        b.insert_str(
+            crate::text::cursor::Cursor::new(0, 0),
+            "- item\n  ```mermaid\n  graph TD\n      ```\n",
+        );
+        assert!(mermaid_blocks(&BlockCache::build(&b, true, 4)).is_empty(), "four past the item's text");
+    }
+
     #[test]
     fn mermaid_discovery_tracks_incremental_edits() {
         use crate::text::cursor::Cursor;
