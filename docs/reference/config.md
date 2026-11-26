@@ -166,5 +166,14 @@ dim_markers    = true
 - Leave `theme.name` unset for the built-in Tokyo Night theme. Set it to
   load a theme from `$XDG_CONFIG_HOME/shoin/themes/<name>.toml`. If
   `XDG_CONFIG_HOME` is unset, Shoin uses `~/.config/shoin/themes/<name>.toml`.
+- On 16- and 256-color terminals, Shoin maps theme colors to the terminal
+  palette. Indexed fallbacks never change a palette colour you set; an RGB
+  colour you set is still kept visible when Shoin converts it to the
+  palette. The selection and search matches also set their own text
+  color, as Neovim's defaults do: black on white for the selection and
+  black on bright yellow for search matches when the theme's colors need
+  replacing. Text on a `==highlight==` in the highlight's own slot, such
+  as a heading, is drawn in black or white. Truecolor terminals use the
+  configured colors.
 - The [shipped configuration files](../../shoin/) explain each setting
   alongside its default.

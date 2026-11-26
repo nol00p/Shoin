@@ -7,24 +7,48 @@ use super::history::Change;
 
 impl Buffer {
     /// Returns false if the target range is read-only.
+    ///
+    /// An empty text is Neovim's empty buffer: one line, with no newline
+    /// after it yet. Anything put into it makes that line real, so it gets
+    /// its newline too, as every last line of a text has one
+    /// ([`Buffer::final_newline`] says whether the file does): `ix` gives
+    /// `x\n`, and `o` on it `\n\n`, two lines. Only when the text was empty
+    /// as the command began (a step that changed nothing, as `c$` there,
+    /// does not count): one that took every line and puts lines back in the
+    /// same step (`Vjr`, `gUG`) puts back whole lines.
     pub fn insert_str(&mut self, at: Cursor, text: &str) -> bool {
+        match self.rope.len_chars() == 0 && !text.is_empty() && self.history.step_removed_nothing() {
+            true => self.insert_with(at, text, "\n"),
+            false => self.insert_with(at, text, ""),
+        }
+    }
+
+    /// [`Buffer::insert_str`] taking `text` as the whole of an empty text,
+    /// newline or none: what a reload or a fixture puts in.
+    pub fn insert_exact(&mut self, at: Cursor, text: &str) -> bool {
+        self.insert_with(at, text, "")
+    }
+
+    /// Insert `text` and then `close`, the cursor's place after `text`.
+    fn insert_with(&mut self, at: Cursor, text: &str, close: &str) -> bool {
         let idx = self.char_index(at);
         if !self.is_editable(&(idx..idx)) {
             return false;
         }
         let cursor_before = self.cursor;
         let line = self.rope.char_to_line(idx);
-        self.rope.insert(idx, text);
+        let all = format!("{text}{close}");
+        self.rope.insert(idx, &all);
         let end = idx + text.chars().count();
         let cursor_after = self.cursor_at(end);
         self.history.record(Change {
             start: idx,
             before: String::new(),
-            after: text.to_string(),
+            after: all,
             cursor_before,
             cursor_after,
         });
-        self.touch(line, idx, end);
+        self.touch(line, idx, end + close.chars().count());
         true
     }
 
@@ -52,6 +76,34 @@ impl Buffer {
         });
         self.touch(line, a, a);
         Some(removed)
+    }
+
+    /// An undo step at `at` that changes no text, as Neovim records one for
+    /// a command that ran over text and left it as it was (`gUU` on
+    /// capitals, `x` on an empty line): `u` and `Ctrl-r` come back to `at`.
+    /// With `modifies` it counts as a modification, as Neovim's `>>` on an
+    /// empty line does; without, 'modified' stays as it was. The revision
+    /// moves either way: the command edited, for `.` and the cursor rules.
+    /// False if `at` is read-only.
+    pub fn record_unchanged(&mut self, at: Cursor, modifies: bool) -> bool {
+        let idx = self.char_index(at);
+        if !self.is_editable(&(idx..idx)) {
+            return false;
+        }
+        let change = Change {
+            start: idx,
+            before: String::new(),
+            after: String::new(),
+            cursor_before: self.cursor,
+            cursor_after: Cursor::new(at.line, at.col),
+        };
+        match modifies {
+            true => self.history.record(change),
+            false => self.history.record_unchanged(change),
+        }
+        let line = self.rope.char_to_line(idx);
+        self.touch(line, idx, idx);
+        true
     }
 
     /// The (line, col) cursor for an absolute char index.
@@ -161,7 +213,7 @@ impl Buffer {
     /// Reject edits in read-only buffers or overlapping protected ranges.
     /// Preview leaves the range list empty because the cursor stays on source
     /// text. The range check is here for when embeds need editable regions.
-    pub(super) fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
+    pub(crate) fn is_editable(&self, range: &std::ops::Range<usize>) -> bool {
         !self.read_only
             && !self
             .readonly_ranges

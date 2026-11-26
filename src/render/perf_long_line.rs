@@ -55,7 +55,7 @@ fn frames(app: &App) -> (Duration, Duration) {
 fn perf_long_line() {
     let search = |unit: &str, pattern: &str| {
         let mut app = app_with(unit, 0);
-        app.search = Some(Search { pattern: pattern.into(), reverse: false });
+        app.search = Some(Search::new(pattern.into(), false, crate::text::pattern::Pattern::compile(pattern, false, None).unwrap()));
         app
     };
     let cases = [

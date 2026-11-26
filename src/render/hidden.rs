@@ -228,7 +228,7 @@ mod tests {
 
     fn blocks(text: &str) -> (Vec<Range<usize>>, BlockCache) {
         let mut b = Buffer::empty();
-        b.insert_str(crate::text::cursor::Cursor::new(0, 0), text);
+        b.insert_exact(crate::text::cursor::Cursor::new(0, 0), text);
         let c = BlockCache::build(&b, true, 4);
         (math_blocks(&c).to_vec(), c)
     }
@@ -309,7 +309,7 @@ mod tests {
     fn a_block_closed_on_the_last_line_follows_edits_to_it() {
         use crate::text::cursor::Cursor;
         let mut b = Buffer::empty();
-        b.insert_str(Cursor::new(0, 0), "p\n$$\nx");
+        b.insert_exact(Cursor::new(0, 0), "p\n$$\nx");
         let mut c = BlockCache::build(&b, true, 4);
         assert!(c.math_open_at_end);
         assert!(math_blocks(&c).is_empty());

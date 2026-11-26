@@ -87,6 +87,31 @@ nothing (see Details). Each command is one undo step and `.` repeats it.
 the delete ring, newest first. `"+` is the system clipboard — see
 [Clipboard](clipboard.md).
 
+## Search and replace
+
+Type `/` to search forward or `?` to search backward, then enter a Vim
+pattern. Matches are highlighted. `n` continues in the same direction and
+`N` goes the other way. `*` and `#` look for the word under the cursor.
+Use `/pattern/e` to land at the end of a match or `/pattern/+1` to land one
+line below it.
+
+`:%s/old/new/g` replaces every match in the file. Leave out `%` to work on the
+current line, or use a range such as `:3,7s/old/new/`. With no `g`, each
+addressed line contributes its first match. An optional count starts at the
+last line of the range. `:s#a/b#c#` uses `#` as the separator, and
+`:s/old/new` leaves off the final separator.
+
+Add `c` to confirm each match. `y` replaces it, `n` skips it, `a` replaces
+the rest, `q` or `Esc` stops, and `l` replaces this one and stops. One `u`
+reverses all the replacements. `n` as a flag counts matches without
+editing, including in read-only mode. Use `i` to ignore case, `I` to match
+case, and `e` to suppress a missing-pattern error.
+
+`:s`, `:&`, and Normal `&` repeat the last substitution without flags.
+`:&&` keeps the last flags. `g&` applies the last replacement and flags to
+the last search pattern across the document. In `:s//new/` an empty
+pattern uses the last search. A substitution also sets the pattern for `n`.
+
 ## The command line
 
 `:` opens the command line. `Tab` completes the word you are typing: a
@@ -120,8 +145,10 @@ too. The [command reference](reference/commands.md#lines) has the rest.
 `Enter` continues a list marker or a quote prefix, and ends the list when the
 item is empty. On a list item's line, `Tab` nests the item under the one above
 and `Shift-Tab` brings it back out, sub-items included, the same as `>al` and
-`<al`; anywhere else `Tab` types a tab. `list_tab = false` in `[editor]` makes
-`Tab` a tab on list items too. A terminal paste goes in exactly as copied: no
+`<al`; anywhere else `Tab` types spaces to the next tab stop, or a tab with
+`expand_tab = false`. `list_tab = false` in `[editor]` makes `Tab` a tab on
+list items too. `Backspace` with only spaces or tabs before the cursor goes
+back to the tab stop before it. A terminal paste goes in exactly as copied: no
 auto-indent, no list continuation, and a `jk` in the pasted text stays text.
 
 ## Folding
@@ -151,6 +178,25 @@ has sections and lists to try it on.
 middle or the bottom of the pane. The cursor stays where it is.
 
 ## Details
+
+- In a pattern, `.` matches a character, `[abc]` matches a character from
+  a set, and `^` and `$` mark line boundaries. Use `*`, `\+`, `\?`, or
+  `\{n,m}` for repetitions. `\(...\)` captures a group, `\|` separates
+  alternatives, and `\<` and `\>` mark word boundaries. `\n` can cross a
+  line break. `\zs` and `\ze` set the returned match's start and end.
+- `\v`, `\m`, `\M`, and `\V` switch magic modes. `\c` and `\C` override
+  case matching for the pattern. Patterns start case-sensitive by default.
+  Pattern back-references and look-around atoms give an error.
+- In a replacement, `&` and `\0` insert the match, `\1` to `\9` insert
+  captures, and `~` inserts the last replacement. `\u` and `\l` change
+  the next character's case. `\U` and `\L` change subsequent characters
+  until `\E` or `\e`. Use `\&` and `\~` for literals, `\\` for a backslash,
+  `\r` for a line break, and `\n` for NUL. Replacement expressions are
+  unsupported.
+- A separator inside `[...]` belongs to the pattern, so `:s/[/]/-/g`
+  replaces slashes. Highlighting stops on a line after 50 ms and keeps the
+  matches found by then, so a slow pattern on a very long line cannot freeze
+  the screen, much as Neovim's `redrawtime` limits it.
 
 - `zc` folds the innermost item or section around the cursor that is still
   open, and moves the cursor to its first line. Pressed again, it folds the
@@ -324,6 +370,18 @@ middle or the bottom of the pane. The cursor stays where it is.
   fewer than five characters to the line's end, or `2dd`, `2yy`, `2>>`,
   `2g~~` or `3J` on the last line. Higher up, `5dd` with two lines left
   deletes them both.
+- In a file with no final newline, a new empty last line (`o` then `Esc`,
+  `A` `Enter` `Esc`, `p`, `:t $`, a change ending in `Enter`) stays a line
+  with the cursor on it, and saving writes it, as in Vim. In Insert, `End`
+  keeps to the end of each line `Up` and `Down` reach, as `$` does.
+- The indent `Enter` or `cc` lays down goes again when nothing is typed
+  after it before `Esc`, `Ctrl-c`, another `Enter` or a move to another
+  line, as Vim's `autoindent`. Anything typed keeps it, a space too, and so
+  does `Home`, `End` or a move along the line.
+- An edit that changes nothing is still a step for `u`, as in Vim: `gUU` on
+  a line already in capitals, `~` on a digit, `x` on an empty line. `u`
+  brings the cursor back to it, and the file is not marked modified; `>>`
+  on an empty line and `r` with the same character do mark it.
 - The escape alias is `input.escape_alias` (default `jk`); set it to `""` to
   turn it off.
 - With the mouse on, a drag selects text the way `mouse=a` does in Vim, and
@@ -349,5 +407,41 @@ middle or the bottom of the pane. The cursor stays where it is.
   mode does nothing. A change made on a dragged selection repeats over as
   much text from the cursor: as many characters, or as many lines down to
   the same column.
+- After `$`, `j`, `k`, `G`, `gg`, `:42` and the paging keys go to the end
+  of each line they land on, long or short, as in Vim, and so does a
+  selection started there. A move along the line, an edit, a yank or
+  leaving Visual mode ends that. Scrolling with `Ctrl-e`, `Ctrl-y` or the
+  wheel keeps it. So do `&`, `:&&` and a bare `:s`, which then end on the
+  last character of the line they changed; `:s` with the `c` flag keeps
+  the column `j` was keeping unless you answer `a`.
+- In Visual mode `$`, `l` past the last character, and `j` or `k` onto a
+  line shorter than the column they keep, put the cursor on the line break,
+  as in Vim, so `v$d` deletes the line's end and its line break, joining the
+  next line on. `p` and `P` replace the line break too. A selected line
+  break is drawn as one selected cell after the line's text.
+- A search match that takes a line break (`/b\n`, `/\n`) is drawn with one
+  highlighted cell after the line's text, on its last row, and so is the
+  match `:s///c` asks about. An empty line's break is its one cell, and the
+  last line's break matches even in a file that does not end in one, as in
+  Vim.
+- `>>`, `<<`, `>` over a motion or in Visual, `:>` and `:<` work out each
+  line's whole indent, a tab reaching its tab stop, move it by `tab_width`
+  and write it anew, as Vim does: all spaces with `expand_tab`, otherwise
+  tabs and then spaces. So `>>` on a tab-indented line puts 8 spaces before
+  the text at the default 4. A line of only spaces and tabs shifts too;
+  only an empty line is left alone. On a list item or a line of one, a tab
+  in the old indent counts as `tab_width` columns wherever it sits, as the
+  list nests by, so items shifted together keep their nesting: ` \t- c`
+  (5 columns) under `    - b` stays one column deeper, and ` \t- c` alone
+  goes to 9 spaces with `>>` where Vim gives 8. The list shifts (`>al`,
+  `<al`, `Tab` in Insert on an item) write the new indent the same way.
+- In Normal mode the cursor on a tab is drawn on the tab's last cell, as in
+  Vim; in Insert mode it is drawn on the first, where typing goes. In Visual
+  mode it is on the last cell when the cursor is after where the selection
+  started, and on the first otherwise.
+- `Tab` with `expand_tab` types as many spaces as reach the next multiple of
+  `tab_width`: after `abc` at the default 4, one space. `Backspace` in the
+  indent takes it back to the multiple before; anywhere else it deletes one
+  character.
 - Every key can be remapped, including whole verbs — see
   [Configuration](configuration.md#key-bindings).

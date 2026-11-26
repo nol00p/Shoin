@@ -29,7 +29,7 @@ impl App {
     /// Left-click positions the cursor and drag-selects from it; the wheel
     /// scrolls the page, as `Ctrl-e` / `Ctrl-y` do.
     pub(super) fn on_mouse(&mut self, m: MouseEvent) {
-        if !self.config.input.mouse {
+        if !self.config.input.mouse || self.mode == Mode::SubstituteConfirm {
             return;
         }
         match m.kind {
@@ -77,6 +77,11 @@ impl App {
                     // its undo step starts at the click.
                     if self.mode == Mode::Insert && self.focus_pane != pane_before {
                         self.buffer.history.begin_group(Some(cursor));
+                    }
+                    // A click off the line an unused indent is on takes it
+                    // back, as `Up` does.
+                    if self.mode == Mode::Insert && self.focus_pane == pane_before {
+                        self.settle_indent();
                     }
                     // A click abandons any half-typed command.
                     self.pending.reset();

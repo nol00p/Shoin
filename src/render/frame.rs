@@ -134,9 +134,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     if cfg.status.enabled {
         if let Some(status) = status {
+            // The terminal's foreground and ANSI red in truecolour; on 16 and
+            // 256 colours the theme's, which `adapt` keeps off the bar's slot.
+            let theme = &app.theme;
             let style = match app.flash.as_ref().map(|f| &f.kind) {
-                Some(FlashKind::Error) => Style::default().fg(Color::Red),
-                _ => Style::default().add_modifier(Modifier::DIM),
+                Some(FlashKind::Error) if theme.message_error_fg == ThemeColor::None => Style::default().fg(Color::Red),
+                Some(FlashKind::Error) => Style::default().fg(theme.message_error_fg.to_ratatui()),
+                _ if theme.message_fg == ThemeColor::None => Style::default().add_modifier(Modifier::DIM),
+                _ => Style::default().fg(theme.message_fg.to_ratatui()).add_modifier(Modifier::DIM),
             };
             let lay = Layout::compute(&cfg.layout, ea.width, ea.height, STATUS_ROWS);
             let status_area = Rect {
@@ -176,6 +181,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     } else if let Mode::Search { query, reverse } = &app.mode {
         let prompt = if *reverse { "?" } else { "/" };
         render_command_box(frame, app, " search ", prompt, query, ea);
+    } else if let Some(prompt) = app.substitute_prompt() {
+        render_command_box(frame, app, " substitute ", &prompt, "", ea);
     } else if let Some(pos) = caret {
         frame.set_cursor_position(pos);
     }
@@ -457,6 +464,40 @@ fn render_pane(
             line = line.alignment(a);
         }
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(row_bg)), r);
+        // A selected line break is one selected cell after the line's last
+        // character, as Neovim draws it, and so is one a search match or the
+        // match `:s///c` asks about takes; the selection is drawn over both,
+        // as it is over the text. Not over a closed fold's label, and not
+        // past the pane when the row fills it.
+        let folded_after = folded.run(row.line() + 1).is_some();
+        let break_style = if !is_last_row || folded_after {
+            None
+        } else if focused && (selects_line_break(app, row.line()) || app.substitute_takes_line_break(row.line())) {
+            Some(app.theme.selected(Style::default()))
+        } else if app.search_takes_line_break(doc, row.line()) {
+            let theme = &app.theme;
+            let style = Style::default().bg(theme.search_match.to_ratatui());
+            Some(if theme.search_match_fg == ThemeColor::None {
+                style
+            } else {
+                style.fg(theme.search_match_fg.to_ratatui())
+            })
+        } else {
+            None
+        };
+        if let Some(style) = break_style {
+            let tw = cfg.editor.tab_width;
+            let width = text_width_from(&char_window(chars, row.start_col, row.end_col), at, tw);
+            let shift = match align {
+                TextAlign::Center | TextAlign::Right => align::align_offset(align, width, r.width),
+                TextAlign::Left | TextAlign::Justified => 0,
+            };
+            let x = usize::from(r.x) + usize::from(shift) + usize::from(width);
+            if x < usize::from(rect.right()) {
+                let cell = Rect { x: x as u16, y: r.y, width: 1, height: 1 };
+                frame.render_widget(Paragraph::new(" ").style(style), cell);
+            }
+        }
         if fenced {
             render_fence_bar(frame, app, r);
         }
@@ -518,10 +559,35 @@ fn render_pane(
             align::justify_offset(&gaps, cursor_offset)
         }
     };
-    // On a tab, the caret is on its first cell.
-    let x = (rect.x + left + text_width_from(&prefix, at, cfg.editor.tab_width) + hang + extra)
-        .min(rect.right().saturating_sub(1));
+    let tw = cfg.editor.tab_width;
+    // `text_width_from`'s cells, counted wide: past a huge tab they need not
+    // fit a terminal column.
+    let before = prefix.chars().fold(0usize, |w, c| w + crate::render::layout::cell_width_at(c, at + w, tw));
+    let on_tab = line_text.get(row_start + cursor_offset) == Some(&'\t');
+    let tab_end = if on_tab && tab_caret_at_end(app, cursor) {
+        let start = at + before;
+        crate::render::layout::tab_stop(start, tw).saturating_sub(1)
+    } else {
+        0
+    };
+    // Summed wide and clamped before it is a terminal column: a tab can be
+    // as wide as `tab_width`, which may be past any screen.
+    let x = [rect.x, left, hang, extra].iter().map(|&n| usize::from(n)).sum::<usize>() + before + tab_end;
+    let x = x.min(usize::from(rect.right().saturating_sub(1))) as u16;
     Some(Position::new(x, text_area.y + screen_row as u16))
+}
+
+/// Whether the caret on a tab is drawn on its last cell rather than its
+/// first, as Neovim's `getvcol` decides: in Normal mode, an operator's
+/// pending motion included, yes; in Insert, where typing goes before the
+/// tab, no; in Visual only when the cursor is past the anchor ('selection'
+/// inclusive).
+fn tab_caret_at_end(app: &App, cursor: Cursor) -> bool {
+    match app.mode {
+        Mode::Normal => true,
+        Mode::Visual | Mode::VisualLine => app.anchor.is_some_and(|a| (a.line, a.col) < (cursor.line, cursor.col)),
+        _ => false,
+    }
 }
 
 /// Which row of a picture's box one row is, for drawing its outline.
@@ -1044,7 +1110,7 @@ fn tree_row<'a>(app: &App, tree: &FileTree, e: &Entry, selected: bool, width: us
 
     let sel_bg = |s: Style| {
         if selected {
-            s.bg(theme.selection.to_ratatui())
+            theme.selected(s)
         } else {
             s
         }
@@ -1357,7 +1423,11 @@ fn help_row(app: &App, row: &crate::help::Row, marked: bool) -> Line<'static> {
         Row::Blank => Line::default(),
     };
     if marked {
-        line = line.style(Style::default().bg(theme.selection.to_ratatui()));
+        line = line.style(theme.selected(Style::default()));
+        // The spans' own colours go too when the selection has its own.
+        for span in &mut line.spans {
+            span.style = theme.selected(span.style);
+        }
     }
     line
 }
@@ -1448,6 +1518,27 @@ pub fn scrolled_view(app: &App, area: Rect, delta: isize) -> Option<(usize, Curs
     // The first row of a line keeps the column, as `j` does; a later row of a
     // wrapped one starts where that row does.
     let first = cache.locate(line, 0).0 == row;
+    if first && line != cursor.line {
+        // Onto the goal, which it keeps, as `j` does and Neovim's scroll:
+        // after `$`, the end of the line it is carried to.
+        // Insert's caret stands before a tab, so a goal not yet measured
+        // is the tab's first cell there, as Insert's Up and Down have it.
+        let tw = cfg.editor.tab_width;
+        let cells = match cursor.goal_cells {
+            None if app.mode.allows_past_end() => crate::text::motion::goal_start_cells(&app.buffer, cursor, tw),
+            _ => crate::text::motion::goal_cells(&app.buffer, cursor, tw),
+        };
+        let mut col = crate::text::motion::col_at_cells(&app.buffer, line, cells, tw);
+        // The goal stays, but the cursor stays on the rows the scroll shows:
+        // a goal on a row of the line past them (`$` on a paragraph taller
+        // than the pane) takes the last column of the last row shown, or the
+        // renderer would scroll on to the cursor.
+        let next = cache.row(hi + 1).filter(|r| r.line() == line && r.editable && !r.is_spacer());
+        if let Some(next) = next {
+            col = col.min(source_col(&cache, line, next.start_col, tw).saturating_sub(1));
+        }
+        return Some((new_top, Cursor { line, col, goal_col: cursor.goal_col, goal_cells: Some(cells) }));
+    }
     let col = if first { cursor.col } else { target.start_col };
     Some((new_top, Cursor::new(line, col.min(len))))
 }
@@ -1957,13 +2048,15 @@ fn result_line<'a>(
     let accent = spotlight_accent(app);
 
     let base = if selected {
-        Style::default()
-            .fg(theme.text.to_ratatui())
-            .bg(theme.selection.to_ratatui())
+        theme.selected(Style::default().fg(theme.text.to_ratatui()))
     } else {
         Style::default().fg(theme.text_dim.to_ratatui())
     };
-    let hit = base.fg(accent.to_ratatui()).add_modifier(Modifier::BOLD);
+    // On a selected row that has its own foreground, the matched characters
+    // keep it and are told by their weight.
+    let keep = selected && theme.selection_fg != ThemeColor::None;
+    let tint = |s: Style, c: ThemeColor| if keep { s } else { s.fg(c.to_ratatui()) };
+    let hit = tint(base, accent).add_modifier(Modifier::BOLD);
 
     // Marker, then the same file-type icon the tree draws — read from the FILE
     // NAME, not the whole relative path, or a dotted directory would decide it.
@@ -1974,7 +2067,7 @@ fn result_line<'a>(
         let (glyph, kind) = crate::tree::file_icon(name);
         spans.push(Span::styled(
             format!("{glyph} "),
-            base.fg(icon_color(theme, kind).to_ratatui()),
+            tint(base, icon_color(theme, kind)),
         ));
         lead += 2;
     }
@@ -2043,7 +2136,6 @@ fn display_line_of(
     // only in the focused pane; ones that follow the TEXT (search matches)
     // apply wherever that text is shown. `doc` is what tells the two apart when
     // the same document is open in several panes.
-    let _ = doc;
     let Some(entry) = cache.entry(line) else {
         return DisplayLine {
             text: String::new(),
@@ -2075,10 +2167,13 @@ fn display_line_of(
     // Highlight every search match on this line (source coords, pre-conceal).
     // All of a line's matches are painted in one pass: one pass per match
     // rebuilt the line's spans thousands of times on a long line.
-    if let Some(search) = &app.search {
-        let matches = match_cols(source, &search.pattern);
-        let bg = app.theme.search_match;
-        overlay_all(&mut styled, &matches, |style| style.bg = bg);
+    let matches = app.search_highlights(doc, line, source);
+    let theme = &app.theme;
+    overlay_all(&mut styled, &matches, |style| paint(style, theme.search_match, theme.search_match_fg));
+    if focused {
+        if let Some(range) = app.substitute_highlight(line) {
+            overlay(&mut styled, range, |style| paint(style, theme.selection, theme.selection_fg));
+        }
     }
 
     // Raw 1:1 when the line is active, when the user turned concealment off, or
@@ -2088,7 +2183,7 @@ fn display_line_of(
     if !cache.is_concealed(line) {
         // A Visual selection paints its background over the raw text.
         if let Some((s, e)) = selection_cols(app, line, len).filter(|_| focused) {
-            overlay_bg(&mut styled, s..e, app.theme.selection);
+            overlay(&mut styled, s..e, |style| paint(style, theme.selection, theme.selection_fg));
         }
         return DisplayLine {
             text: source.clone(),
@@ -2124,10 +2219,36 @@ fn selection_cols(app: &App, line: usize, len: usize) -> Option<(usize, usize)> 
     Some((start.min(len), end.min(len)))
 }
 
-/// Repaint the background of `range` (char columns) across the line's spans,
-/// splitting spans at the boundaries. Keeps the cover gap-free.
-fn overlay_bg(spans: &mut Vec<StyledSpan>, range: std::ops::Range<usize>, bg: ThemeColor) {
-    overlay(spans, range, |style| style.bg = bg);
+/// Whether a Visual selection takes `line`'s line break, drawn as one
+/// selected cell after the line's text: every line of a `V` selection, and
+/// in `v` every line but the last one it covers, that one too when an end
+/// stands on its break (`v$`). Never the file's last line break in `v`,
+/// which no charwise selection takes.
+fn selects_line_break(app: &App, line: usize) -> bool {
+    let Some(anchor) = app.anchor else { return false };
+    let cursor = app.buffer.cursor;
+    let (lo, hi) = if (anchor.line, anchor.col) <= (cursor.line, cursor.col) {
+        (anchor, cursor)
+    } else {
+        (cursor, anchor)
+    };
+    if line < lo.line || line > hi.line {
+        return false;
+    }
+    match app.mode {
+        Mode::VisualLine => true,
+        Mode::Visual => line < app.buffer.last_line() && (line < hi.line || hi.col >= app.buffer.line_len(line)),
+        _ => false,
+    }
+}
+
+/// An overlay's colours: its background, and its foreground unless that is
+/// `None` (keep the glyph's own, as the authored truecolour theme does).
+fn paint(style: &mut crate::render::theme::Style, bg: ThemeColor, fg: ThemeColor) {
+    style.bg = bg;
+    if fg != ThemeColor::None {
+        style.fg = fg;
+    }
 }
 
 /// De-emphasize `range` with the faint attribute, KEEPING its colors — so focus
@@ -2200,30 +2321,6 @@ fn overlay_all(
         }
     }
     *spans = out;
-}
-
-/// The char columns to highlight for `pattern` in `line`: every match, left
-/// to right, each starting past the end of the one before, so `aa` in `aaaa`
-/// lights 0..2 and 2..4. (`n` steps one char at a time and also stops at the
-/// overlapping match at 1; only the highlight skips it.) An empty pattern
-/// matches nothing.
-///
-/// Found with `str::match_indices`, which is fast on a long line, and turned
-/// from byte offsets into char columns by counting forward from the previous
-/// match, so the line is walked once whatever the number of matches.
-fn match_cols(line: &str, pattern: &str) -> Vec<std::ops::Range<usize>> {
-    if pattern.is_empty() {
-        return Vec::new();
-    }
-    let width = pattern.chars().count();
-    let (mut byte, mut col) = (0usize, 0usize);
-    line.match_indices(pattern)
-        .map(|(at, _)| {
-            col += line[byte..at].chars().count();
-            byte = at;
-            col..col + width
-        })
-        .collect()
 }
 
 /// Faintly de-emphasize the source columns of `line` that fall outside the
@@ -2457,11 +2554,8 @@ mod tests {
     /// left to right, each starting past the end of the one before.
     #[test]
     fn search_matches_are_char_columns() {
-        assert_eq!(match_cols("aaaa", "aa"), vec![0..2, 2..4]);
-        assert_eq!(match_cols("é aa é aaa", "aa"), vec![2..4, 7..9]);
-        assert_eq!(match_cols("ééé", "é"), vec![0..1, 1..2, 2..3]);
-        assert_eq!(match_cols("abc", ""), Vec::<std::ops::Range<usize>>::new());
-        assert_eq!(match_cols("abc", "abcd"), Vec::<std::ops::Range<usize>>::new());
+        let pattern = crate::text::pattern::Pattern::compile("a.", false, None).unwrap();
+        assert_eq!(pattern.char_ranges("界 aa é aaa", None), vec![2..4, 7..9]);
     }
 
     /// Painting many ranges in one pass gives exactly the spans that painting
@@ -4828,8 +4922,9 @@ mod tests {
     /// A tab draws as the blank cells to its next stop, a multiple of
     /// `tab_width` from the line's start, as Neovim's `tabstop`: on the raw
     /// cursor line and on a concealed one alike, and the caret on each char
-    /// sits on the cell drawn for it: on a tab, its first cell. The cells
-    /// are Neovim's (`virtcol`) for each width.
+    /// sits on the cell drawn for it: on a tab, in Normal mode, its last
+    /// cell, the one before the next char. The cells are Neovim's
+    /// (`virtcol`, `wincol()`) for each width.
     #[test]
     fn a_tab_draws_to_its_stop() {
         // tab_width, then the cells of `b` and `c` in `a\tb\tc`.
@@ -4837,7 +4932,8 @@ mod tests {
             let mut app = app_with("a\tb\tc\na\tb\tc\n");
             app.config.editor.tab_width = tw as usize;
             app.refresh_blocks();
-            for (col, sym, extra) in [(0, "a", 0), (1, "a", 1), (2, "b", 0), (3, "b", 1), (4, "c", 0)] {
+            // The char whose cell the caret is on, less `back` cells.
+            for (col, sym, back) in [(0, "a", 0), (1, "b", 1), (2, "b", 0), (3, "c", 1), (4, "c", 0)] {
                 app.buffer.cursor = Cursor::new(0, col);
                 let mut t = Terminal::new(TestBackend::new(40, 6)).unwrap();
                 t.draw(|f| render(f, &app)).unwrap();
@@ -4852,7 +4948,7 @@ mod tests {
                         assert_eq!(buf[(x, y)].symbol(), " ", "tab_width {tw}: the tab's cells are blank");
                     }
                 }
-                assert_eq!(caret.x, cell_of(&buf, caret.y, sym) + extra, "tab_width {tw}, col {col}");
+                assert_eq!(caret.x, cell_of(&buf, caret.y, sym) - back, "tab_width {tw}, col {col}");
             }
         }
     }

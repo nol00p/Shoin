@@ -43,7 +43,7 @@ impl App {
     }
 
     /// The document on screen and its revision now.
-    fn dot_mark(&self) -> DotMark {
+    pub(super) fn dot_mark(&self) -> DotMark {
         DotMark { doc: self.id, rev: self.buffer.revision }
     }
 
@@ -187,6 +187,10 @@ impl App {
     /// `Ctrl-r` and friends. Mirror of `undo_or_warn`.
     pub(super) fn redo_or_warn(&mut self) {
         if !self.buffer.redo() {
+            // The goal is set afresh even so, as Neovim's: `$` then a
+            // `Ctrl-r` with nothing to redo forgets the line end.
+            let col = self.buffer.cursor.col;
+            self.buffer.cursor.set_col(col);
             self.notify("already at newest change", FlashKind::Info);
         }
     }
@@ -259,6 +263,9 @@ impl App {
         let fresh = self.blocks.revision == self.buffer.revision;
         let laid_out = self.config.layout.conceal && self.buffer.syntax == crate::text::buffer::Syntax::Markdown;
         if fresh && laid_out {
+            if let Some(last) = self.substitute_match_last_line() {
+                set.end = set.end.max(last);
+            }
             // Binary searches of the blocks kept with the kinds: a cursor move
             // does not walk the block it is in.
             let block = |line| {
@@ -406,6 +413,19 @@ impl App {
     /// behavior.
     pub(super) fn operate_object(&mut self, op: Operator, obj: char, around: bool, count: usize) {
         let Some((first, mut last, linewise)) = self.object_bounds(obj, around) else {
+            // `ciw` on an empty line types there, as Neovim's, the empty
+            // word in the register, and `gUiw` is an undo step that leaves
+            // the text unmodified; `diw` and `yiw` do nothing.
+            let at = self.buffer.cursor;
+            if !around && matches!(obj, 'w' | 'W') && self.buffer.line_len(at.line) == 0 {
+                match op {
+                    Operator::Change => self.change_nothing(at, true),
+                    Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
+                        self.buffer.record_unchanged(at, false);
+                    }
+                    _ => {}
+                }
+            }
             return;
         };
         // `d2aw`: a count takes that many words, each one resolved from just
@@ -480,7 +500,7 @@ impl App {
             _ => motion::resolve(&self.buffer, m, count, page, true, self.config.editor.tab_width),
         };
         let Some(res) = res else {
-            return;
+            return self.operate_on_nothing(op, m);
         };
         if res.kind == Linewise {
             let start = self.linewise_start(from, res.target);
@@ -508,7 +528,37 @@ impl App {
         if op == Operator::Delete && self.delete_goes_linewise(start, end, inclusive) {
             return self.operate_linewise(op, start.line, end.line, start);
         }
+        // Without the goal, which the cursor's end carries: the operator
+        // leaves the cursor with a goal of its own, so `yl` at the end
+        // forgets `$`'s, as Neovim's does.
+        let (start, end) = (Cursor::new(start.line, start.col), Cursor::new(end.line, end.col));
         self.operate_charwise(op, start, end, inclusive)
+    }
+
+    /// An operator whose motion cannot move from here, which Neovim runs
+    /// over no text rather than failing: `h` at a line's start, `0` and `^`
+    /// where they already are, `l` and `$` on an empty line. `c` types
+    /// there and the others are an undo step that leaves the text
+    /// unmodified (`operate_charwise` on an empty range), except `d$`,
+    /// which Neovim's empty-line check stops before the undo is saved.
+    fn operate_on_nothing(&mut self, op: Operator, m: Motion) {
+        let at = self.buffer.cursor;
+        let empty = self.buffer.line_len(at.line) == 0;
+        let runs = match m {
+            Motion::Left => at.col == 0,
+            Motion::Right => empty,
+            Motion::LineStart | Motion::LineFirstNonBlank => true,
+            Motion::LineEnd => empty,
+            _ => false,
+        };
+        if !runs || matches!(op, Operator::Indent | Operator::Outdent) {
+            return;
+        }
+        match (op, m) {
+            (Operator::Change, Motion::LineEnd) => self.change_nothing(at, true),
+            (Operator::Delete | Operator::Yank, Motion::LineEnd) => {}
+            _ => self.operate_charwise(op, at, at, false),
+        }
     }
 
     /// vim's `op_delete` rule: a charwise delete over more than one line that
@@ -535,6 +585,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn multiline_confirmation_reveals_the_whole_mermaid_fence() {
+        let mut config = crate::config::Config::default();
+        config.layout.conceal = true;
+        config.markdown.mermaid_renderer = Some("merman".into());
+        let mut app = crate::test_support::app_with_config(
+            "before\n```mermaid\nflowchart TD\nA --> B\n```\nafter",
+            config,
+        );
+        app.run_substitute(None, r"/before\n```mermaid\nflowchart TD/X/c", false);
+        assert!(app.substitute_prompt().is_some());
+        assert_eq!(app.active_set(None), ActiveSet { start: 0, end: 4 });
+    }
+
+    #[test]
     fn mermaid_source_reveals_on_motions_visual_and_search() {
         let mut config = crate::config::Config::default();
         config.layout.conceal = true;
@@ -558,7 +622,7 @@ mod tests {
 
         app.mode = Mode::Normal;
         app.buffer.cursor = Cursor::new(0, 0);
-        app.search = Some(Search { pattern: "flowchart".into(), reverse: false });
+        assert!(app.set_search("flowchart".into(), false));
         app.search_move(false);
         assert_eq!(app.buffer.cursor.line, 2);
         assert_eq!(app.active_set(None), fence);

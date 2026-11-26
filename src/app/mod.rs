@@ -252,6 +252,10 @@ pub struct App {
     /// A read-only motion moved the view this input, already within the
     /// text: `sync_after_input` has nothing left to clamp.
     reading_clamped: bool,
+    /// A substitute repeated after `$` left the cursor on its line's end
+    /// with `$`'s goal on purpose (Neovim's `endcolumn`), so the edit does
+    /// not set the goal afresh in [`App::settle_goal`].
+    goal_kept: bool,
     /// How much of an `![[…]]` line expands in place. Starts at
     /// `transclude.embed`; `:embed [mode]` changes it.
     pub embed_mode: crate::transclude::Mode,
@@ -325,6 +329,8 @@ pub struct App {
 
     /// The last executed search; drives `n`/`N` and match highlighting.
     pub search: Option<Search>,
+    substitute: Option<substitute::Substitute>,
+    confirmation: Option<substitute::Confirmation>,
 
     // --- `.` repeat ---
     /// Input of the last change, replayed by `.`.
@@ -352,9 +358,10 @@ pub struct App {
     insert_repeat: Option<InsertRepeat>,
     /// True while `repeat_insert` replays: the escape alias stays out of it.
     replaying_insert: bool,
-    /// The line `cc` left its indent on, so an `Esc` with nothing typed takes
-    /// the unused indent back (vim's 'autoindent').
-    cc_indent_line: Option<usize>,
+    /// The indent `cc` or Enter left, while nothing has been typed after
+    /// it: Esc, Ctrl-C, Enter or moving to another line take it back
+    /// (vim's 'autoindent'). See [`App::settle_indent`].
+    cc_indent: Option<insert::LaidIndent>,
 
     /// User `[keys.*]` bindings overlaid on the built-in grammar.
     keymap: Keymap,
@@ -497,85 +504,7 @@ struct DotMark {
     rev: u64,
 }
 
-/// The last executed search, for `n`/`N` repeats and match highlighting.
-#[derive(Clone)]
-pub struct Search {
-    pub pattern: String,
-    /// The original direction (`/` vs `?`); `n` follows it, `N` reverses it.
-    pub reverse: bool,
-}
-
-// Search runs per keypress (`/`, `n`, `N`), so it reads the rope a line at a
-// time with `str::find` rather than copying the document into a `Vec<char>`
-// and comparing at every position. Positions are CHAR indexes into the rope;
-// bytes are only ever an offset inside one line's text.
-
-/// The byte offset of char `col` in `s`, or `s.len()` past its end.
-fn byte_of(s: &str, col: usize) -> usize {
-    s.char_indices().nth(col).map_or(s.len(), |(b, _)| b)
-}
-
-/// First char index at or after `from` where `needle` starts in `hay`.
-fn str_find(hay: &str, needle: &str, from: usize) -> Option<usize> {
-    let at = byte_of(hay, from);
-    let found = hay[at..].find(needle)?;
-    Some(from + hay[at..at + found].chars().count())
-}
-
-/// Last char index at or before `before` where `needle` starts in `hay`. The
-/// match may run past `before`, so the text searched ends a needle's length
-/// after it: no match starting later fits in that.
-fn str_rfind(hay: &str, needle: &str, before: usize) -> Option<usize> {
-    let end = byte_of(hay, before.saturating_add(needle.chars().count()));
-    let found = hay[..end].rfind(needle)?;
-    Some(hay[..found].chars().count())
-}
-
-/// One line's text: borrowed when the rope holds it in one chunk, as it does
-/// for all but the rare line that straddles two.
-fn line_str(rope: &ropey::Rope, line: usize) -> std::borrow::Cow<'_, str> {
-    let slice = rope.line(line);
-    match slice.as_str() {
-        Some(s) => std::borrow::Cow::Borrowed(s),
-        None => std::borrow::Cow::Owned(slice.to_string()),
-    }
-}
-
-/// First char index at or after `from` where `needle` occurs in `rope`.
-fn rope_find(rope: &ropey::Rope, needle: &str, from: usize) -> Option<usize> {
-    if needle.is_empty() || from >= rope.len_chars() {
-        return None;
-    }
-    // Only `\n` ends a rope line here (ropey is built without `unicode_lines`
-    // and `cr_lines`), so a needle without one lies inside a single line. One
-    // with it — it would have to be pasted into the search line — is looked
-    // for in the whole text.
-    if needle.contains('\n') {
-        return str_find(&rope.to_string(), needle, from);
-    }
-    let first = rope.char_to_line(from);
-    (first..rope.len_lines()).find_map(|line| {
-        let base = rope.line_to_char(line);
-        str_find(&line_str(rope, line), needle, from.max(base) - base).map(|i| base + i)
-    })
-}
-
-/// Last char index at or before `before` where `needle` occurs in `rope`.
-fn rope_rfind(rope: &ropey::Rope, needle: &str, before: usize) -> Option<usize> {
-    if needle.is_empty() {
-        return None;
-    }
-    let before = before.min(rope.len_chars());
-    if needle.contains('\n') {
-        return str_rfind(&rope.to_string(), needle, before);
-    }
-    let last = rope.char_to_line(before);
-    (0..=last).rev().find_map(|line| {
-        let base = rope.line_to_char(line);
-        let limit = if line == last { before - base } else { usize::MAX };
-        str_rfind(&line_str(rope, line), needle, limit).map(|i| base + i)
-    })
-}
+pub use search::Search;
 
 /// An emphasis span the bold and italic toggles can strip, in char indexes
 /// into the rope (`inline::InlineSpan` counts from the start of its line).
@@ -946,6 +875,9 @@ mod visual;
 mod insert;
 mod prompts;
 mod search;
+mod substitute;
+#[cfg(test)]
+mod substitute_tests;
 mod commands;
 mod range;
 #[cfg(test)] pub(crate) use commands::COMMANDS;
@@ -1026,6 +958,7 @@ impl App {
             edit_offered: false,
             reading: HashMap::new(),
             reading_clamped: false,
+            goal_kept: false,
             embed_mode: crate::transclude::Mode::parse(&config.transclude.embed)
                 .unwrap_or_default(),
             last_embed_mode: crate::transclude::Mode::Short,
@@ -1056,6 +989,8 @@ impl App {
             last_numbers: NumberMode::Absolute,
             text_align: TextAlign::parse(&config_text_align).unwrap_or_default(),
             search: None,
+            substitute: None,
+            confirmation: None,
             dot: Vec::new(),
             recording: Vec::new(),
             in_key: false,
@@ -1065,7 +1000,7 @@ impl App {
             replaying: false,
             insert_repeat: None,
             replaying_insert: false,
-            cc_indent_line: None,
+            cc_indent: None,
             keymap,
             image_protocol: crate::image::detect(),
             images: std::cell::RefCell::new(Vec::new()),
@@ -1452,7 +1387,18 @@ impl App {
             self.buffer.cursor.line = last;
         }
         let len = self.buffer.line_len(self.buffer.cursor.line);
-        self.buffer.cursor.clamp(len, past_end);
+        let col = self.buffer.cursor.col;
+        // Visual's cursor may stand on a line break a goal put it on
+        // (`App::settle_goal`), as Neovim's.
+        let on_break = matches!(self.mode, Mode::Visual | Mode::VisualLine) && self.buffer.cursor.goal_cells.is_some();
+        self.buffer.cursor.clamp(len, past_end || on_break);
+        // A key that left the cursor past the end (`x` on the last
+        // character, a redo) leaves it on the column it is clamped to, and
+        // that is the goal now, as Neovim's.
+        let clamped = self.buffer.cursor.col;
+        if clamped != col {
+            self.buffer.cursor.set_col(clamped);
+        }
         let clamped = std::mem::take(&mut self.reading_clamped);
         if self.view && !clamped {
             self.clamp_reading_cursor();
@@ -1520,8 +1466,14 @@ impl App {
         }
         let Some(count) = self.fold_count(m, count) else { return };
         let page = self.viewport_height();
-        if let Some(res) = motion::resolve(&self.buffer, m, count, page, false, self.config.editor.tab_width) {
+        // Visual's `l` goes on to the line break after the last character,
+        // as Neovim's, where an operator's range ends (`v4ld` takes it).
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        let to_break = visual && matches!(m, Motion::Right);
+        if let Some(res) = motion::resolve(&self.buffer, m, count, page, to_break, self.config.editor.tab_width) {
             self.buffer.cursor = res.target;
+            self.visual_goal_on_break();
+            self.visual_onto_line_break();
             // Read-only shows a line jump's line from its first row: the
             // kept column is edit mode's, and here it would be the column
             // the view parked the cursor on in the line it left, which puts
@@ -1631,9 +1583,14 @@ impl App {
                 self.operate(op, target, count)
             }
             Action::SelectObject { key, around } => self.select_object(key, around),
+            // Both ends lose their goal, and the cursor sets one afresh where
+            // it lands, as Neovim's: `v$ooj` goes under the first line's
+            // break, not to the end of the next.
             Action::SwapSelectionEnds => {
-                if let Some(anchor) = self.anchor.replace(self.buffer.cursor) {
-                    self.buffer.cursor = anchor;
+                let cur = self.buffer.cursor;
+                if let Some(anchor) = self.anchor.replace(Cursor::new(cur.line, cur.col)) {
+                    self.buffer.cursor = Cursor::new(anchor.line, anchor.col);
+                    self.visual_goal_on_break();
                 }
             }
             Action::ScrollView { down } => {
@@ -1642,8 +1599,8 @@ impl App {
             }
             Action::DeleteChar => self.delete_chars_under(count),
             Action::DeleteCharBack => self.delete_chars_before(count),
-            Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete),
-            Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change),
+            Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete, count),
+            Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change, count),
             // `Y` is `yy`, its count and closed folds counted the same, and
             // `2Y` on the last line yanks nothing, as `2yy`.
             Action::YankLine => self.operate(Operator::Yank, Target::Line, count),
@@ -1668,7 +1625,9 @@ impl App {
             }
             Action::PasteAfter => self.paste(true, count),
             Action::PasteBefore => self.paste(false, count),
-            Action::SearchWordUnderCursor => self.search_word_under_cursor(),
+            Action::SearchWordUnderCursor => self.search_word_under_cursor(false),
+            Action::SearchWordBackward => self.search_word_under_cursor(true),
+            Action::RepeatSubstitute { all } => self.repeat_substitute(all),
             Action::AppendParagraph => {
                 self.move_by(Motion::ParagraphForward, 1);
                 self.enter_insert();
@@ -1907,6 +1866,8 @@ impl App {
             | Action::YankLine
             | Action::SearchNext { .. }
             | Action::SearchWordUnderCursor
+            | Action::SearchWordBackward
+            | Action::RepeatSubstitute { .. }
             | Action::ScrollView { .. }
             | Action::AppendParagraph
             | Action::Window(_)
@@ -1951,6 +1912,10 @@ impl App {
         // field, so `a` while it is up is a letter, not another `a` command.
         if let Mode::Prompt(p) = self.mode.clone() {
             self.on_key_prompt(key, p);
+            return;
+        }
+        if self.mode == Mode::SubstituteConfirm {
+            self.on_key_substitute(key);
             return;
         }
         // The file tree owns input while it has focus.
@@ -1998,10 +1963,17 @@ impl App {
             // Anchor undo to the cursor at a command BOUNDARY only. A Visual
             // selection and an operator-pending motion are continuations of the
             // command that started them, and have already moved the cursor.
-            let anchor = self.is_clean().then_some(self.buffer.cursor);
+            // Without its goal: an undo that puts the cursor back there
+            // takes the goal afresh, as Neovim's does, and `$`'s line end
+            // is not brought back by `u`.
+            let anchor = self.is_clean().then(|| Cursor::new(self.buffer.cursor.line, self.buffer.cursor.col));
             self.buffer.history.begin_group(anchor);
         }
 
+        // Only the key that kept it may: a `:&&` typed on the command line
+        // does not settle, and must not leave the next key's goal alone.
+        self.goal_kept = false;
+        let goal = self.goal_before(&mode);
         match mode {
             Mode::Normal => self.on_key_normal(key),
             Mode::Insert => self.on_key_insert(key),
@@ -2009,6 +1981,11 @@ impl App {
             Mode::Command(buf) => self.on_key_command(key, buf),
             Mode::Search { query, reverse } => self.on_key_search(key, query, reverse),
             Mode::Prompt(p) => self.on_key_prompt(key, p),
+            Mode::SubstituteConfirm => unreachable!("confirmation handles keys before Normal mode"),
+        }
+
+        if let Some(before) = goal {
+            self.settle_goal(before);
         }
 
         // A key that took focus away from a selection (`<C-w>q`, `<C-w>v`,
@@ -2021,7 +1998,7 @@ impl App {
         }
 
         // Seal the step unless we are still inserting.
-        if !matches!(self.mode, Mode::Insert) {
+        if !matches!(self.mode, Mode::Insert | Mode::SubstituteConfirm) {
             self.buffer.history.end_group();
         }
 
@@ -2031,6 +2008,87 @@ impl App {
         }
     }
 
+}
+
+/// Where a Normal or Visual key started from, for [`App::settle_goal`] to
+/// tell after the key what became of the goal: whether `$`'s line end
+/// ([`Cursor::LINE_END`]) still holds, and whether a move in Visual goes
+/// on to a line break.
+#[derive(Clone, Copy)]
+struct GoalBefore {
+    cursor: Cursor,
+    revision: u64,
+    visual: bool,
+}
+
+impl App {
+    /// The state before a Normal or Visual key; `None` in the other modes,
+    /// where there is nothing to settle.
+    fn goal_before(&self, mode: &Mode) -> Option<GoalBefore> {
+        let visual = matches!(mode, Mode::Visual | Mode::VisualLine);
+        (visual || *mode == Mode::Normal).then_some(GoalBefore {
+            cursor: self.buffer.cursor,
+            revision: self.buffer.revision,
+            visual,
+        })
+    }
+
+    /// After a key, the line-end goal gives way to the column the cursor is
+    /// on when the key edited the text (`x`, `p`, `u`), left Visual (`v`
+    /// `Esc`, `vy`) or started Insert (`i`), as Neovim's `curswant` is then
+    /// set afresh. A motion sets its own goal (`motion::resolve`), and an
+    /// operator that runs puts the cursor somewhere with its own (`yl`); a
+    /// motion that cannot move (`l` at the end), an operator that does
+    /// nothing (`d` `Esc`), a scroll and the line commands keep it.
+    ///
+    /// In Visual, a move whose goal is past the end of the line it lands on
+    /// (`$`, `j` from a longer line) puts the cursor on the line break, as
+    /// Neovim's does, so the selection takes it (`v$jd`).
+    fn settle_goal(&mut self, before: GoalBefore) {
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        if visual && self.buffer.cursor != before.cursor {
+            self.visual_onto_line_break();
+        }
+        let cur = self.buffer.cursor;
+        let kept = std::mem::take(&mut self.goal_kept);
+        if kept || cur.goal_col != Cursor::LINE_END || before.cursor.goal_col != Cursor::LINE_END {
+            return;
+        }
+        let edited = self.buffer.revision != before.revision;
+        let left_visual = before.visual && !visual;
+        let inserting = self.mode == Mode::Insert;
+        if edited || left_visual || inserting {
+            // The column the clamp after the key leaves: `x` at the end
+            // leaves it one past the shorter line.
+            let len = self.buffer.line_len(cur.line);
+            let col = if self.mode.allows_past_end() { cur.col.min(len) } else { cur.col.min(len.saturating_sub(1)) };
+            self.buffer.cursor.set_col(col);
+        }
+    }
+
+    /// In Visual, a cursor put on a line break with a fresh goal (`v4l`,
+    /// `o`) has that goal measured, so the clamp after the key leaves it
+    /// there (`sync_after_input`) and `j` keeps its cell.
+    fn visual_goal_on_break(&mut self) {
+        let cur = self.buffer.cursor;
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        if visual && cur.goal_cells.is_none() && cur.col > 0 && cur.col >= self.buffer.line_len(cur.line) {
+            let tw = self.config.editor.tab_width;
+            self.buffer.cursor.goal_cells = Some(motion::goal_start_cells(&self.buffer, cur, tw));
+        }
+    }
+
+    /// In Visual, a cursor whose goal is past the end of its line goes on to
+    /// the line break, as Neovim's: [`App::settle_goal`] after a key that
+    /// moved it, and `move_by` for a `$` that leaves it where it was.
+    fn visual_onto_line_break(&mut self) {
+        let cur = self.buffer.cursor;
+        let tw = self.config.editor.tab_width;
+        let visual = matches!(self.mode, Mode::Visual | Mode::VisualLine);
+        if visual && cur.goal_cells.is_some_and(|g| motion::past_line_end(&self.buffer, cur.line, g, tw)) {
+            self.buffer.cursor.col = self.buffer.line_len(cur.line);
+        }
+    }
 }
 
 /// Window, buffer and panel actions: each ends the command under way, whether

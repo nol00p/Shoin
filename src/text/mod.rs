@@ -10,4 +10,5 @@ pub mod history;
 pub mod list;
 pub mod motion;
 pub mod object;
+pub mod pattern;
 pub mod table;

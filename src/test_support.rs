@@ -11,7 +11,7 @@ pub(crate) fn app_with(text: &str) -> App {
 
 pub(crate) fn app_with_config(text: &str, config: Config) -> App {
     let mut app = App::new(config, None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), text);
+    app.buffer.insert_exact(Cursor::new(0, 0), text);
     app.buffer.cursor = Cursor::new(0, 0);
     app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     app

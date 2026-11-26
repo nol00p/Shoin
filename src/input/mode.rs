@@ -18,6 +18,8 @@ pub enum Mode {
     /// because it has to swallow every key exactly as `:` does, and the answer
     /// belongs to the panel, not the buffer.
     Prompt(Prompt),
+    /// An interactive `:substitute` waiting on a match.
+    SubstituteConfirm,
 }
 
 /// A pending panel question: what is being asked, of which path, and what has

@@ -133,13 +133,8 @@ impl LineEntry {
             return false;
         }
         let slice = buffer.rope.line(line);
-        let mut n = slice.len_chars();
-        if n > 0 && slice.char(n - 1) == '\n' {
-            n -= 1;
-            if n > 0 && slice.char(n - 1) == '\r' {
-                n -= 1;
-            }
-        }
+        let n = slice.len_chars();
+        let n = n - usize::from(n > 0 && slice.char(n - 1) == '\n');
         // Compare the SLICE against the string, not char against char. Same
         // answer, but ropey walks whole chunks where the char iterators walked
         // one scalar at a time — and this runs for every line of the document
@@ -1801,7 +1796,7 @@ mod tests {
     fn kinds_that_catch_up_at_the_same_revision_reach_the_entries() {
         let mut app = app_with("alpha\nbravo\ncharlie\n");
         sync(&mut app);
-        app.buffer.insert_str(Cursor::new(0, 0), "```\n");
+        app.buffer.insert_exact(Cursor::new(0, 0), "```\n");
         // Ahead of the kinds: they still describe the text before the edit.
         app.cache.borrow_mut().sync(&app, MEASURE);
         let builds = sync(&mut app);
