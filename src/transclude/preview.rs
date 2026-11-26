@@ -93,6 +93,13 @@ pub struct Diagram {
     pub source: String,
 }
 
+impl Diagram {
+    /// The rows its source takes in the expansion it was found in.
+    pub fn rows(&self) -> Range<usize> {
+        self.rows.clone()
+    }
+}
+
 /// Expand one link against the filesystem.
 ///
 /// Only ONE level deep, deliberately: a nested `![[…]]` inside an embed stays
@@ -282,7 +289,9 @@ fn row_styles(spans: &[StyledSpan], next: &mut usize, a: usize, b: usize) -> Vec
 }
 
 /// Reuse the wrapped source rows for pending/failed diagrams and replace
-/// completed fences that fit the embed's measure.
+/// completed fences that fit the embed's measure. Returns the expansion
+/// when anything changed it (`None` leaves `base` as it is) and the rows
+/// each diagram takes in what is drawn: its replacement's, else its source's.
 #[allow(clippy::too_many_arguments)]
 pub fn mermaid_expansion(
     base: &Expansion,
@@ -293,9 +302,10 @@ pub fn mermaid_expansion(
     bordered: bool,
     graphics: bool,
     tab: usize,
-) -> Option<Expansion> {
+) -> (Option<Expansion>, Vec<Range<usize>>) {
     let inner = measure.saturating_sub(if bordered { 4 } else { 0 });
     let mut output = Vec::new();
+    let mut ranges = Vec::with_capacity(diagrams.len());
     let mut previous = 0;
     for diagram in diagrams {
         let mut replacement = Vec::new();
@@ -331,17 +341,24 @@ pub fn mermaid_expansion(
                 _ => {}
             }
         }
-        if !replacement.is_empty() {
+        if replacement.is_empty() {
+            // Its source rows come over as they are, after what is already
+            // out and the rows between.
+            let at = output.len() + (diagram.rows.start - previous);
+            ranges.push(at..at + diagram.rows.len());
+        } else {
             output.extend_from_slice(&base.rows[previous..diagram.rows.start]);
+            let at = output.len();
             output.extend(replacement);
+            ranges.push(at..output.len());
             previous = diagram.rows.end;
         }
     }
     if output.is_empty() {
-        return None;
+        return (None, diagrams.iter().map(Diagram::rows).collect());
     }
     output.extend_from_slice(&base.rows[previous..]);
-    Some(Expansion { rows: output })
+    (Some(Expansion { rows: output }), ranges)
 }
 
 /// A picture is never taller than this, however tall its pixels are. A
@@ -763,7 +780,7 @@ mod tests {
             &|text, _, _| (text.to_string(), Vec::new()),
         );
         let mut renderer = MermaidRenderer::default();
-        assert!(mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 36, true, false, 4).is_none());
+        assert!(mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 36, true, false, 4).0.is_none());
         renderer.request(renderer_path, &diagrams[0].source);
         let deadline = Instant::now() + Duration::from_secs(3);
         while renderer.cached(renderer_path, &diagrams[0].source).is_none() {
@@ -771,12 +788,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
             renderer.poll();
         }
-        let expanded = mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 36, true, false, 4).unwrap();
+        let (expanded, ranges) = mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 36, true, false, 4);
+        let expanded = expanded.unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert!(ranges[0].clone().all(|i| matches!(expanded.rows[i], Row::Diagram(_))), "the range is the diagram's");
         assert!(matches!(expanded.rows.first(), Some(Row::Top(_))));
         assert!(matches!(expanded.rows.last(), Some(Row::Bottom)));
         assert!(expanded.rows.iter().any(|row| matches!(row, Row::Diagram(s) if s.ends_with("  A --> B"))));
         assert_eq!(body_text(&expanded), ["before", "", "", "after"]);
-        assert!(mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 8, true, false, 4).is_none());
+        assert!(mermaid_expansion(&base, &diagrams, &renderer, renderer_path, 8, true, false, 4).0.is_none());
         std::fs::remove_dir_all(&d).ok();
     }
 

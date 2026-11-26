@@ -34,7 +34,7 @@
 //! applied to a clone of the cached spans, for VISIBLE lines only — which is
 //! what keeps the expensive work O(viewport) while the row index stays O(lines).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::app::{App, BufferState};
@@ -231,9 +231,22 @@ pub struct RenderCache {
     laid_out: Vec<std::ops::Range<usize>>,
     diagrams: BTreeMap<usize, DiagramLayout>,
     pictures: BTreeMap<usize, Picture>,
-    diagram_embeds: BTreeMap<usize, Expansion>,
+    /// The embeds holding Mermaid fences drawn in this index, by line: the
+    /// expansion when a diagram or a status changed it, and where each
+    /// fence's rows are in what it draws.
+    diagram_embeds: BTreeMap<usize, Arc<EmbedPreview>>,
+    /// The lines of the embeds holding Mermaid fences drawn in this index.
     embed_openers: Vec<usize>,
     diagram_status: BTreeMap<usize, &'static str>,
+    /// What `index_mermaid` found for each fence, by its opening line's
+    /// serial, kept while its lines' serials are the same.
+    fences: HashMap<u64, FenceMemo>,
+    /// The same for each embed holding a fence, by the embed line's serial.
+    embed_previews: HashMap<u64, EmbedMemo>,
+    /// What the kept outcomes were found against, and a number that moves
+    /// whenever it changes: an outcome found at another is found again.
+    outcome_key: Option<OutcomeKey>,
+    outcome_epoch: u64,
     /// Display blocks laid out since startup. Instrumentation, like `builds`:
     /// it grows when a block changes, not with frames or cursor moves.
     layouts: u64,
@@ -264,9 +277,93 @@ pub struct RenderCache {
     indexes: u64,
 }
 
+#[derive(Clone)]
 struct DiagramLayout {
     rows: Arc<[String]>,
     pad: usize,
+}
+
+/// A fence's body and what it draws, kept between row indexes.
+struct FenceMemo {
+    /// The serials of the fence's lines, opener first: the body is the same
+    /// while they are.
+    serials: Vec<u64>,
+    /// The body as the renderer is given it: `None` when it is too large.
+    body: Option<Arc<str>>,
+    /// The `RenderCache::outcome_epoch` `outcome` was found at, 0 for none.
+    epoch: u64,
+    outcome: FenceOutcome,
+    /// The index that last drew the fence: one gone from the text is let go.
+    seen: u64,
+}
+
+enum FenceOutcome {
+    /// Nothing yet, or no renderer answer: the source as it is.
+    Source,
+    /// A status row over the source.
+    Status(&'static str),
+    Diagram(DiagramLayout),
+    Picture(Picture),
+}
+
+/// An embed's Mermaid previews, kept between row indexes like a fence's.
+struct EmbedMemo {
+    epoch: u64,
+    seen: u64,
+    preview: Arc<EmbedPreview>,
+}
+
+/// What an embed holding Mermaid fences draws: `expansion` in place of its
+/// own when a fence's rows changed, and the rows each fence takes in it.
+struct EmbedPreview {
+    expansion: Option<Expansion>,
+    ranges: Vec<std::ops::Range<usize>>,
+}
+
+/// Everything a fence's outcome depends on besides its body.
+#[derive(Clone, PartialEq)]
+struct OutcomeKey {
+    /// `App::mermaid_revision`: moves with every result the renderer has.
+    revision: u64,
+    measure: u16,
+    graphics: bool,
+    bordered: bool,
+    tab: usize,
+    executable: String,
+}
+
+/// What a fence with `body` draws, from the renderer's cached results:
+/// `indent` is its opener's, in cells.
+fn fence_outcome(
+    renderer: &crate::render::mermaid::MermaidRenderer,
+    executable: &str,
+    body: Option<&str>,
+    graphics: bool,
+    measure: u16,
+    indent: u16,
+    tab: usize,
+) -> FenceOutcome {
+    let Some(body) = body else { return FenceOutcome::Status("Mermaid source is too large") };
+    let room = measure.saturating_sub(indent);
+    if graphics {
+        if let Some(PicturePreview::Ready(bytes)) = renderer.cached_png(executable, body) {
+            if let Some(picture) = crate::image::mermaid_picture(bytes, room) {
+                return FenceOutcome::Picture(picture);
+            }
+        }
+    }
+    match renderer.cached(executable, body) {
+        None | Some(Preview::Pending) => FenceOutcome::Source,
+        Some(Preview::Failed(error)) => FenceOutcome::Status(error.message()),
+        Some(Preview::Ready(rows)) => {
+            let width = rows.iter().map(|row| text_width(row, tab)).max().unwrap_or(0);
+            if width == 0 || width > room {
+                return FenceOutcome::Status("Mermaid diagram does not fit");
+            }
+            let pad = usize::from(indent + (room - width) / 2);
+            FenceOutcome::Diagram(DiagramLayout { rows, pad })
+        }
+    }
 }
 
 /// Everything the row index is a function of, besides the entries, which
@@ -556,54 +653,80 @@ impl RenderCache {
         self.row_starts.push(rows);
     }
 
+    /// Find what each closed Mermaid fence and each embed holding one draws
+    /// in this index: a diagram, a picture, a status row over its source, or
+    /// its source alone. Per fence the answer is kept (`fences`,
+    /// `embed_previews`) while its lines and the renderer's results are the
+    /// same, so a cursor move costs a comparison of line serials per fence,
+    /// not a copy of every body.
     fn index_mermaid(&mut self, app: &App, doc: &BufferState, current: bool) {
         let Some(executable) = app.config.markdown.mermaid_renderer.as_deref().filter(|s| !s.is_empty()) else {
+            self.fences.clear();
+            self.embed_previews.clear();
             return;
         };
         let renderer = app.mermaid.borrow();
+        let tab = app.config.editor.tab_width;
+        let graphics = graphics_enabled(app);
+        let bordered = app.config.transclude.border && app.embed_mode.framed();
+        let key = OutcomeKey {
+            revision: app.mermaid_revision,
+            measure: self.measure,
+            graphics,
+            bordered,
+            tab,
+            executable: executable.to_string(),
+        };
+        if self.outcome_key.as_ref() != Some(&key) {
+            self.outcome_key = Some(key);
+            self.outcome_epoch += 1;
+        }
+        let (epoch, pass, measure) = (self.outcome_epoch, self.indexes, self.measure);
         for block in hidden::mermaid_blocks(&doc.blocks) {
             if (current && app.active.start < block.end && app.active.end >= block.start)
                 || self.folded.count_in(block.clone()) != 0
             {
                 continue;
             }
-            let Some(body) = diagram_body(doc, block) else {
-                self.diagram_status.insert(block.start, "Mermaid source is too large");
-                continue;
-            };
-            let tab = app.config.editor.tab_width;
-            let opener = &self.entries[block.start].as_ref().expect("indexed line").source;
-            let prefix = opener.len() - opener.trim_start_matches([' ', '\t']).len();
-            let indent = text_width(&opener[..prefix], tab);
-            let room = self.measure.saturating_sub(indent);
-            if graphics_enabled(app) {
-                if let Some(PicturePreview::Ready(bytes)) = renderer.cached_png(executable, &body) {
-                    if let Some(picture) = crate::image::mermaid_picture(bytes, room) {
-                        self.pictures.insert(block.start, picture);
-                        self.laid_out.push(block.clone());
-                        continue;
-                    }
-                }
+            let serial = |e: &Option<Box<LineEntry>>| e.as_ref().map_or(0, |e| e.id);
+            let lines = &self.entries[block.clone()];
+            let Some(opener) = lines[0].as_deref() else { continue };
+            let memo = self.fences.entry(opener.id).or_insert_with(|| FenceMemo {
+                serials: Vec::new(),
+                body: None,
+                epoch: 0,
+                outcome: FenceOutcome::Source,
+                seen: 0,
+            });
+            if !memo.serials.iter().copied().eq(lines.iter().map(serial)) {
+                memo.serials = lines.iter().map(serial).collect();
+                memo.body = diagram_body(doc, block).map(Arc::from);
+                memo.epoch = 0;
             }
-            let Some(preview) = renderer.cached(executable, &body) else { continue };
-            match preview {
-                Preview::Pending => {}
-                Preview::Failed(error) => {
-                    self.diagram_status.insert(block.start, error.message());
+            memo.seen = pass;
+            if memo.epoch != epoch {
+                let source = &opener.source;
+                let prefix = source.len() - source.trim_start_matches([' ', '\t']).len();
+                let indent = text_width(&source[..prefix], tab);
+                memo.outcome = fence_outcome(&renderer, executable, memo.body.as_deref(), graphics, measure, indent, tab);
+                memo.epoch = epoch;
+            }
+            match &memo.outcome {
+                FenceOutcome::Source => {}
+                FenceOutcome::Status(message) => {
+                    self.diagram_status.insert(block.start, message);
                 }
-                Preview::Ready(rows) => {
-                    let width = rows.iter().map(|row| text_width(row, tab)).max().unwrap_or(0);
-                    if width == 0 || width > room {
-                        self.diagram_status.insert(block.start, "Mermaid diagram does not fit");
-                        continue;
-                    }
-                    let pad = usize::from(indent + (room - width) / 2);
-                    self.diagrams.insert(block.start, DiagramLayout { rows, pad });
+                FenceOutcome::Diagram(layout) => {
+                    self.diagrams.insert(block.start, layout.clone());
+                    self.laid_out.push(block.clone());
+                }
+                FenceOutcome::Picture(picture) => {
+                    self.pictures.insert(block.start, picture.clone());
                     self.laid_out.push(block.clone());
                 }
             }
         }
-        let bordered = app.config.transclude.border && app.embed_mode.framed();
+        self.fences.retain(|_, memo| memo.seen == pass);
         for (line, entry) in self.entries.iter().enumerate() {
             let Some(entry) = entry.as_ref().filter(|entry| !entry.embed_diagrams.is_empty()) else {
                 continue;
@@ -611,24 +734,38 @@ impl RenderCache {
             if (current && app.active.contains(line)) || self.folded.run(line).is_some() {
                 continue;
             }
-            self.embed_openers.push(line);
             let Some(base) = entry.embed.as_ref() else { continue };
-            if let Some(expansion) = preview::mermaid_expansion(
-                base,
-                &entry.embed_diagrams,
-                &renderer,
-                executable,
-                self.measure,
-                bordered,
-                graphics_enabled(app),
-                app.config.editor.tab_width,
-            ) {
-                self.diagram_embeds.insert(line, expansion);
+            self.embed_openers.push(line);
+            let memo = self.embed_previews.entry(entry.id).or_insert_with(|| EmbedMemo {
+                epoch: 0,
+                seen: 0,
+                preview: Arc::new(EmbedPreview { expansion: None, ranges: Vec::new() }),
+            });
+            memo.seen = pass;
+            if memo.epoch != epoch {
+                let (expansion, ranges) = preview::mermaid_expansion(
+                    base,
+                    &entry.embed_diagrams,
+                    &renderer,
+                    executable,
+                    measure,
+                    bordered,
+                    graphics,
+                    tab,
+                );
+                memo.preview = Arc::new(EmbedPreview { expansion, ranges });
+                memo.epoch = epoch;
             }
+            self.diagram_embeds.insert(line, Arc::clone(&memo.preview));
         }
+        self.embed_previews.retain(|_, memo| memo.seen == pass);
     }
 
-    /// Start work for source fences intersecting the rows about to be drawn.
+    /// Start work for the source fences whose rows meet `rows`, the rows
+    /// about to be drawn: the document's own, and those in the embeds drawn
+    /// there, by the rows each fence takes in its embed. At most `limit`
+    /// fences still waiting for the renderer are asked for; one it has the
+    /// answer to costs nothing. Says whether any is still pending.
     pub fn request_mermaid(
         &self,
         app: &App,
@@ -647,11 +784,13 @@ impl RenderCache {
         let mut renderer = app.mermaid.borrow_mut();
         let mut pending = false;
         let graphics = graphics_enabled(app);
-        let mut request = |body: &str| {
-            pending |= renderer.request(executable, body) == Preview::Pending;
+        let mut request = |body: &str, limit: &mut usize| {
+            let mut waiting = renderer.request(executable, body) == Preview::Pending;
             if graphics {
-                pending |= renderer.request_png(executable, body) == PicturePreview::Pending;
+                waiting |= renderer.request_png(executable, body) == PicturePreview::Pending;
             }
+            pending |= waiting;
+            *limit -= usize::from(waiting);
         };
         for block in &blocks[start..] {
             if limit == 0 || self.row_starts[block.start] >= rows.end {
@@ -662,20 +801,36 @@ impl RenderCache {
             {
                 continue;
             }
-            if let Some(body) = diagram_body(doc, block) {
-                limit -= 1;
-                request(&body);
+            let memo = self.entry(block.start).and_then(|e| self.fences.get(&e.id));
+            match memo {
+                Some(memo) => {
+                    if let Some(body) = memo.body.as_deref() {
+                        request(body, &mut limit);
+                    }
+                }
+                None => {
+                    if let Some(body) = diagram_body(doc, block) {
+                        request(&body, &mut limit);
+                    }
+                }
             }
         }
-        let start = self.embed_openers.partition_point(|&line| line < first);
+        let start = self.embed_openers.partition_point(|&line| self.row_starts[line + 1] <= rows.start);
         for &line in &self.embed_openers[start..] {
-            if limit == 0 || self.row_starts[line] >= rows.end {
+            let base = self.row_starts[line];
+            if limit == 0 || base >= rows.end {
                 break;
             }
             let entry = self.entry(line).expect("indexed embed");
-            for diagram in entry.embed_diagrams.iter().take(limit) {
-                limit -= 1;
-                request(&diagram.source);
+            let shown = self.diagram_embeds.get(&line).map(|p| p.ranges.as_slice()).unwrap_or_default();
+            for (i, diagram) in entry.embed_diagrams.iter().enumerate() {
+                let span = shown.get(i).cloned().unwrap_or_else(|| diagram.rows());
+                if limit == 0 || base + span.start >= rows.end {
+                    break;
+                }
+                if base + span.end > rows.start {
+                    request(&diagram.source, &mut limit);
+                }
             }
         }
         pending
@@ -766,7 +921,10 @@ impl RenderCache {
     }
 
     pub fn embed(&self, line: usize) -> Option<&Expansion> {
-        self.diagram_embeds.get(&line).or_else(|| self.entry(line)?.embed.as_ref())
+        match self.diagram_embeds.get(&line).and_then(|p| p.expansion.as_ref()) {
+            Some(expansion) => Some(expansion),
+            None => self.entry(line)?.embed.as_ref(),
+        }
     }
 
     fn display_len(&self, line: usize) -> Option<usize> {
@@ -910,11 +1068,12 @@ impl RenderCache {
 
     /// The first and last rows of `line`'s own text, line spacing left out:
     /// what `zt` puts at the top and `zb` at the bottom. A hidden line answers
-    /// for the line shown in its place.
+    /// for the line shown in its place. A Mermaid fence's status row is its
+    /// opener's.
     pub fn line_rows(&self, line: usize) -> (usize, usize) {
         let line = self.hidden.shown(line);
         let Some(&first) = self.row_starts.get(line) else { return (0, 0) };
-        let rows = self.own_rows(line);
+        let rows = self.own_rows(line) + usize::from(self.diagram_status.contains_key(&line));
         (first, first + rows.saturating_sub(1))
     }
 

@@ -69,6 +69,10 @@ const DOCS: &[&str] = &[
     "Intro\n\n$$\n\\frac{a}{b}\n$$\n$$x^2$$\n$$ a\nb $$\n\n- item\n  $$\n  \\sum_{i=1}^{n} i\n  $$\n  - nested\n\n    $$y$$\n\n$$\nunclosed\n\n> $$\n> q\n> $$\n\n# H\n$$\n\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}\n$$\ntext\n$$\nlast\n$$",
     // A matrix taller than most of the sizes, then lines, and a long wrapped
     // line: read-only mode has to scroll through all of their rows.
+    // Mermaid fences: closed with backticks and tildes, under a list item,
+    // quoted, left open, closed only by an over-indented line, one inside
+    // another fence, then an embed of a note holding more.
+    "Intro\n\n```mermaid\ngraph TD\nA-->B\n```\n\n~~~mermaid\nflowchart LR\nX-->Y\nY-->Z\n~~~\n- item\n  ```mermaid\n  graph TD\n  C-->D\n  ```\n\n> ```mermaid\n> graph TD\n> ```\n\n````text\n```mermaid\ngraph TD\n```\n````\n\n![[m]]\n\n~~~mermaid\ngraph TD\n    ~~~\nmore\n\n```mermaid\nsequenceDiagram\nA->>B: hi\n```\n\n```mermaid\nunclosed\n",
     "top\n\n$$\n\\begin{bmatrix}\na \\\\\nb \\\\\nc \\\\\nd \\\\\ne \\\\\nf \\\\\ng \\\\\nh \\\\\ni \\\\\nj \\\\\nk \\\\\nl\n\\end{bmatrix}\n$$\nafter one\nwords words words words words words words words words words words words words words words words words words words words words\n\n$$\n\\begin{pmatrix}\n1 \\\\\n2 \\\\\n3 \\\\\n4 \\\\\n5 \\\\\n6\n\\end{pmatrix}\n$$",
 ];
 
@@ -121,11 +125,22 @@ fn random_substitute(rng: &mut Rng, atoms: &[&str]) -> String {
 
 /// One session of `steps` random events from `seed`. Every event is pushed to
 /// `trace` before it runs, so a panic still leaves the full trace behind.
-fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), String> {
+fn session(seed: u64, steps: usize, renderer: Option<&std::path::Path>, trace: &mut Vec<String>) -> Result<(), String> {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut rng = Rng(seed | 1);
     let mut app = app_with(DOCS[rng.below(DOCS.len())]);
+    // Half the sessions preview Mermaid fences with the stub renderer, and
+    // some of those as pictures, on a terminal that takes them.
+    if let Some(renderer) = renderer.filter(|_| rng.below(2) == 0) {
+        app.config.markdown.mermaid_renderer = Some(renderer.to_string_lossy().into_owned());
+        if rng.below(3) == 0 {
+            app.config.markdown.mermaid_graphics = true;
+            app.image_protocol = crate::image::Protocol::Kitty;
+        }
+        trace.push(format!("<mermaid graphics={}>", app.config.markdown.mermaid_graphics));
+        app.active = app.active_set(app.anchor);
+    }
     let original = text(&app);
     let sizes = [(80u16, 24u16), (40, 10), (20, 5), (10, 3), (3, 2), (1, 1), (200, 60), (0, 0), (5, 30), (120, 4)];
     let (mut w, mut h) = sizes[rng.below(sizes.len())];
@@ -247,7 +262,7 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
             }
             Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         } else if roll < 39 {
-            let files = ["a.md", "b.md", "c.txt", "pic.png", "sub/d.md"];
+            let files = ["a.md", "b.md", "c.txt", "pic.png", "sub/d.md", "m.md"];
             let f = files[rng.below(files.len())];
             trace.push(format!("<open {f}>"));
             if !overlay {
@@ -340,6 +355,14 @@ fn session(seed: u64, steps: usize, trace: &mut Vec<String>) -> Result<(), Strin
             }
         }
         term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+        // Results come back between frames, as the event loop takes them:
+        // give the renderer a moment, so most land on the step that asked.
+        if app.mermaid_waiting.get() {
+            let until = Instant::now() + Duration::from_millis(20);
+            while !app.poll_mermaid() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         index_invariant(&app).map_err(|e| format!("step {step}: {e}\ntext: {:?}", text(&app)))?;
         let _ = app.visible_pictures();
         math_invariants(&app).map_err(|e| format!("step {step}: {e}\ntext: {:?}", text(&app)))?;
@@ -402,6 +425,20 @@ fn index_invariant(app: &App) -> Result<(), String> {
         let built = (fresh.line_span(line), fresh.is_concealed(line));
         if kept != built {
             return Err(format!("the kept row index has line {line} (rows, concealed) {kept:?}, a fresh one {built:?}"));
+        }
+        // What the rows draw, as well as how many: a diagram's or a
+        // layout's rows, a status row, a picture's box, an embed's rows.
+        let drawn = |c: &crate::render::cache::RenderCache| {
+            let rows: Vec<_> = (0..c.line_span(line).len())
+                .map_while(|i| c.display_row(line, i).map(|(pad, row)| (pad, row.to_string())))
+                .collect();
+            let picture = c.mermaid_picture(line).map(|p| (p.cols, p.rows, p.id));
+            let embed = c.embed(line).filter(|_| c.is_concealed(line)).map(|x| x.len());
+            (rows, c.diagram_status(line), picture, embed)
+        };
+        let (kept, built) = (drawn(&cache), drawn(&fresh));
+        if kept != built {
+            return Err(format!("the kept row index draws line {line} as {kept:?}, a fresh one as {built:?}"));
         }
     }
     if cache.total_rows() != fresh.total_rows() {
@@ -467,7 +504,33 @@ fn fuzz_random_sessions() {
     let dir = std::env::temp_dir().join(format!("shoin-fuzz-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sub")).unwrap();
-    std::fs::write(dir.join("a.md"), "# A\n\n![[b]]\n\n![[pic.png]]\n\n![[b#Two]]\n![[sub/d#^blk]]\n![[a]]\ntext [[b]] end\n").unwrap();
+    std::fs::write(dir.join("a.md"), "# A\n\n![[b]]\n\n![[pic.png]]\n\n![[b#Two]]\n![[sub/d#^blk]]\n![[a]]\n![[m]]\ntext [[b]] end\n").unwrap();
+    std::fs::write(
+        dir.join("m.md"),
+        "Before\n\n```mermaid\ngraph TD\nA-->B\n```\n\n```mermaid\ngraph TD\nA-->B\nB-->C\n```\n\n```mermaid\nx\n```\nafter\n",
+    )
+    .unwrap();
+    // The stub Mermaid renderer: by the body's line count, a failure, one
+    // row, two, a row too wide for most measures, or four; a PNG wide
+    // enough to be shown for `--format png`.
+    let merman = dir.join("merman");
+    std::fs::write(
+        &merman,
+        "#!/bin/sh\ncase \"$*\" in\n  *png*) cat >/dev/null; cat \"$(dirname \"$0\")/wide.png\" ;;\n  *) n=$(wc -l)\n     case $((n % 5)) in\n       0) echo bad >&2; exit 1 ;;\n       1) echo one ;;\n       2) printf 'two\\nrows\\n' ;;\n       3) printf '%080d\\n' 0 ;;\n       *) printf 'a\\nb\\nc\\nd\\n' ;;\n     esac ;;\nesac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&merman, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let wide = [
+        0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0x01, 0xe0, 0, 0,
+        0, 0x78, 0x08, 0x06, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63,
+        0xf8, 0x0f, 0x04, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0xfb, 0x5e, 0x6b, 0x2b, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44,
+        0xae, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(dir.join("wide.png"), wide).unwrap();
     std::fs::write(dir.join("b.md"), "---\nt: 1\n---\n# B\n\n![[c.txt]]\n\n## Two\n\n- x\n- y\n\n```\n# not heading\n```\n").unwrap();
     std::fs::write(dir.join("c.txt"), "plain text file\nwith ![[a]] a loop\n").unwrap();
     std::fs::write(dir.join("sub/d.md"), "para one\nline ^blk\n\nother\n").unwrap();
@@ -502,7 +565,7 @@ fn fuzz_random_sessions() {
     for s in base..base + sessions {
         let seed = s.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let mut trace = Vec::new();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session(seed, steps, &mut trace)));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session(seed, steps, Some(&dir.join("merman")), &mut trace)));
         let msg = match r {
             Ok(Ok(())) => continue,
             Ok(Err(e)) => e,

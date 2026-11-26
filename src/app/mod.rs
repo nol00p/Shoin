@@ -249,6 +249,10 @@ pub struct App {
     /// Where read-only mode's view starts, by pane: the row each was
     /// scrolled to, kept by line, and the cursor parked for it.
     reading: HashMap<PaneId, frame::ReadingTop>,
+    /// Where the last search in read-only mode put the cursor. While the
+    /// cursor is still there, the Mermaid fence holding it shows its source,
+    /// so the hit can be seen and highlighted, as in edit mode.
+    pub(super) search_landing: Option<Cursor>,
     /// A read-only motion moved the view this input, already within the
     /// text: `sync_after_input` has nothing left to clamp.
     reading_clamped: bool,
@@ -370,7 +374,14 @@ pub struct App {
     /// startup — the environment does not change under a running editor.
     pub image_protocol: crate::image::Protocol,
     pub(crate) mermaid: RefCell<crate::render::mermaid::MermaidRenderer>,
+    /// Where each pane's view started last frame, as a row and as a place
+    /// in the text: what keeps the same text on top when rows above it
+    /// change height between frames. Edit mode only; read-only mode keeps
+    /// its own (`reading`).
+    pub(crate) scroll_anchors: RefCell<HashMap<PaneId, frame::ScrollAnchor>>,
     pub(crate) mermaid_revision: u64,
+    /// Whether the last frame left a Mermaid render it asked for running.
+    pub(crate) mermaid_waiting: std::cell::Cell<bool>,
     /// Where the last frame put its pictures. Filled while the frame is built
     /// (hence the cell: rendering only has `&App`) and drained by the painter
     /// straight after.
@@ -957,6 +968,7 @@ impl App {
             view: false,
             edit_offered: false,
             reading: HashMap::new(),
+            search_landing: None,
             reading_clamped: false,
             goal_kept: false,
             embed_mode: crate::transclude::Mode::parse(&config.transclude.embed)
@@ -1006,7 +1018,9 @@ impl App {
             images: std::cell::RefCell::new(Vec::new()),
             image_payloads: RefCell::default(),
             mermaid: RefCell::default(),
+            scroll_anchors: RefCell::default(),
             mermaid_revision: 0,
+            mermaid_waiting: Default::default(),
             painted: std::cell::RefCell::new((Vec::new(), (0, 0))),
             overlay: std::cell::Cell::new(None),
             tree_window_prefix: false,
@@ -2201,6 +2215,9 @@ mod fold_tests;
 
 #[cfg(test)]
 mod fuzz;
+
+#[cfg(test)]
+mod mermaid_tests;
 
 #[cfg(test)]
 mod perf;
