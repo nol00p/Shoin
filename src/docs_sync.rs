@@ -793,7 +793,7 @@ fn default_config_fields() -> BTreeSet<String> {
     // The variable keymap and the theme override maps have their own schema.
     assert!(fields.remove("keys"));
     assert!(fields.remove("theme"));
-    for (function, section) in [("set_color", "theme"), ("set_style", "theme.styles")] {
+    for (function, section) in [("color_mut", "theme"), ("set_style", "theme.styles")] {
         for pattern in dispatch_patterns("src/render/theme.rs", function, "match key") {
             let field = pattern.strip_prefix('"').and_then(|part| part.strip_suffix('"'))
                 .unwrap_or_else(|| panic!("unrecognized theme key: {pattern}"));
