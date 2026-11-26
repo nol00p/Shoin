@@ -19,7 +19,11 @@ pub(super) struct Substitute {
 }
 
 struct Edit {
+    /// What the replacement takes: the match, clipped to the end of the text
+    /// when it takes the last line's break the file does not have.
     range: Range<usize>,
+    /// The end of the match itself, unclipped, which `:s///c` draws.
+    matched_end: usize,
     replacement: String,
     line: usize,
     end_line: usize,
@@ -52,6 +56,13 @@ struct Changes {
 impl Changes {
     fn range(&self, edit: &Edit) -> Range<usize> {
         edit.range.start.saturating_add_signed(self.char_delta)..edit.range.end.saturating_add_signed(self.char_delta)
+    }
+
+    /// `range`, but up to the end of the match itself: past the end of the
+    /// text when it takes a missing last line break.
+    fn matched(&self, edit: &Edit) -> Range<usize> {
+        let range = self.range(edit);
+        range.start..edit.matched_end.saturating_add_signed(self.char_delta)
     }
 
     /// One entry per run of lines the edits touch: an edit that starts on a
@@ -207,7 +218,13 @@ impl App {
                     let end = at.char.min(content_end.max(start));
                     let mut out = String::new();
                     expand(&pieces, &text[m.span.clone()], &found, &mut out);
-                    edits.push(Edit { range: start..end, line, end_line: at.line.min(last_line), replacement: out });
+                    edits.push(Edit {
+                        range: start..end,
+                        matched_end: at.char.max(start),
+                        line,
+                        end_line: at.line.min(last_line),
+                        replacement: out,
+                    });
                 }
             }
         };
@@ -279,6 +296,15 @@ impl App {
         let start = range.start.max(base);
         let stop = range.end.min(end);
         (start < stop).then(|| start - base..stop - base)
+    }
+
+    /// Whether the match `:s///c` asks about takes `line`'s line break,
+    /// drawn as one cell after the line's text.
+    pub(crate) fn substitute_takes_line_break(&self, line: usize) -> bool {
+        let Some(pending) = self.confirmation.as_ref().filter(|p| p.doc == self.dot_mark()) else { return false };
+        pending.matches.get(pending.next).is_some_and(|edit| {
+            search::takes_line_break(&self.buffer, line, &pending.change.matched(edit))
+        })
     }
 
     pub(super) fn on_key_substitute(&mut self, key: KeyEvent) {

@@ -446,10 +446,27 @@ fn render_pane(
         }
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(row_bg)), r);
         // A selected line break is one selected cell after the line's last
-        // character, as Neovim draws it. Not over a closed fold's label, and
-        // not past the pane when the row fills it.
+        // character, as Neovim draws it, and so is one a search match or the
+        // match `:s///c` asks about takes; the selection is drawn over both,
+        // as it is over the text. Not over a closed fold's label, and not
+        // past the pane when the row fills it.
         let folded_after = folded.run(row.line() + 1).is_some();
-        if is_last_row && focused && !folded_after && selects_line_break(app, row.line()) {
+        let break_style = if !is_last_row || folded_after {
+            None
+        } else if focused && (selects_line_break(app, row.line()) || app.substitute_takes_line_break(row.line())) {
+            Some(app.theme.selected(Style::default()))
+        } else if app.search_takes_line_break(doc, row.line()) {
+            let theme = &app.theme;
+            let style = Style::default().bg(theme.search_match.to_ratatui());
+            Some(if theme.search_match_fg == ThemeColor::None {
+                style
+            } else {
+                style.fg(theme.search_match_fg.to_ratatui())
+            })
+        } else {
+            None
+        };
+        if let Some(style) = break_style {
             let tw = cfg.editor.tab_width;
             let width = text_width_from(&char_window(chars, row.start_col, row.end_col), at, tw);
             let shift = match align {
@@ -459,7 +476,7 @@ fn render_pane(
             let x = usize::from(r.x) + usize::from(shift) + usize::from(width);
             if x < usize::from(rect.right()) {
                 let cell = Rect { x: x as u16, y: r.y, width: 1, height: 1 };
-                frame.render_widget(Paragraph::new(" ").style(app.theme.selected(Style::default())), cell);
+                frame.render_widget(Paragraph::new(" ").style(style), cell);
             }
         }
         if fenced {
