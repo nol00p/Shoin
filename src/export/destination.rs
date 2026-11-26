@@ -39,13 +39,21 @@ pub(super) fn drain() {
 enum Snapshot {
     Existing(Metadata),
     Missing(PathBuf),
-    /// A character device (`/dev/null`, a tty), or Shoin's own stdout or
-    /// stderr reached as `/dev/stdout`: written as it is, never truncated.
+    /// A character device (`/dev/null`, a tty), or a pipe with the same
+    /// identity as Shoin's stdout or stderr reached by another name (such as
+    /// `/dev/fd/3` duplicated from it): written as it is, never truncated.
     Device(Metadata),
+    /// A name for Shoin's own stdout (1) or stderr (2), such as
+    /// `/dev/stdout`: written through that descriptor, never reopened.
+    Stream(i32, Metadata),
 }
 
 impl Snapshot {
     fn inspect(path: &Path, shown: &str) -> Result<Self> {
+        if let Some(fd) = own_stream(path) {
+            let meta = stream(fd).and_then(|file| file.metadata()).with_context(|| shown.to_owned())?;
+            return Ok(Self::Stream(fd, meta));
+        }
         match fs::metadata(path) {
             Ok(meta) if meta.is_file() => Ok(Self::Existing(meta)),
             Ok(meta) if is_device(&meta) => Ok(Self::Device(meta)),
@@ -70,6 +78,49 @@ fn is_device(meta: &Metadata) -> bool {
     {
         let _ = meta;
         false
+    }
+}
+
+/// The descriptor (1 or 2) that `path` names, if it names Shoin's own stdout
+/// or stderr: `/dev/stdout`, `/dev/stderr`, `/dev/fd/1`, `/dev/fd/2`,
+/// `/proc/self/fd/1`, `/proc/self/fd/2`, or a chain of symlinks that reaches
+/// one of those names. The match is by name, so it does not depend on what
+/// stat reports through these special files (on macOS, fdesc reports its own
+/// device for `/dev/fd/1`, not the pipe's).
+fn own_stream(path: &Path) -> Option<i32> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let mut path = std::path::absolute(path).ok()?;
+    // Bounded like the kernel's own symlink limit, so a loop ends.
+    for _ in 0..40 {
+        let name = path.to_str().unwrap_or("");
+        let fd = match name {
+            "/dev/stdout" | "/dev/fd/1" | "/proc/self/fd/1" => Some(1),
+            "/dev/stderr" | "/dev/fd/2" | "/proc/self/fd/2" => Some(2),
+            _ => None,
+        };
+        if fd.is_some() {
+            return fd;
+        }
+        let link = fs::read_link(&path).ok()?;
+        path = std::path::absolute(path.parent().unwrap_or(Path::new("/")).join(link)).ok()?;
+    }
+    None
+}
+
+/// A duplicate of descriptor `fd` (1 or 2) to write to.
+fn stream(fd: i32) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        let owned = if fd == 1 { std::io::stdout().as_fd().try_clone_to_owned() } else { std::io::stderr().as_fd().try_clone_to_owned() };
+        owned.map(File::from)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -139,7 +190,8 @@ impl Destination {
         let (current, missing) = match snapshot {
             Snapshot::Existing(meta) => (Some(meta), None),
             Snapshot::Missing(name) => (None, Some(name)),
-            Snapshot::Device(_) => return Ok(()),
+            Snapshot::Stream(_, meta) if meta.is_file() => (Some(meta), None),
+            Snapshot::Device(_) | Snapshot::Stream(..) => return Ok(()),
         };
         for (index, (source, original)) in self.inputs.iter().enumerate() {
             if current.zip(original.as_ref()).is_some_and(|(a, b)| same_inode(a, b))
@@ -163,6 +215,17 @@ impl Destination {
             bail!("export cancelled");
         }
         self.revalidate()?;
+        if let Snapshot::Stream(fd, original) = &self.original {
+            // Write where the shell pointed the stream (a pipe, a tty, or a
+            // file opened with `>` or `>>`), without truncating it.
+            let mut file = stream(*fd).with_context(|| self.shown.clone())?;
+            let opened = file.metadata().with_context(|| self.shown.clone())?;
+            if !same_inode(original, &opened) {
+                return Err(self.changed());
+            }
+            self.check(&Snapshot::Stream(*fd, opened))?;
+            return write(&mut file).with_context(|| self.shown.clone());
+        }
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", short(parent)))?;
         }
@@ -200,6 +263,7 @@ impl Destination {
                     result => result.with_context(shown)?,
                 }
             }
+            Snapshot::Stream(..) => unreachable!("written above"),
             Snapshot::Device(original) => {
                 let file = options.open(&self.path).with_context(shown)?;
                 let opened = file.metadata().with_context(shown)?;
@@ -220,6 +284,7 @@ impl Destination {
             (Snapshot::Missing(before), Snapshot::Missing(now)) if before == now => {}
             (Snapshot::Existing(before), Snapshot::Existing(now)) if same_version(before, now) => {}
             (Snapshot::Device(before), Snapshot::Device(now)) if same_inode(before, now) => {}
+            (Snapshot::Stream(a, before), Snapshot::Stream(b, now)) if a == b && same_inode(before, now) => {}
             _ => return Err(self.changed()),
         }
         Ok(())
@@ -278,5 +343,36 @@ fn same_inode(a: &Metadata, b: &Metadata) -> bool {
     {
         let _ = (a, b);
         false
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_of_our_own_streams_are_recognised_without_stat() {
+        for (name, fd) in [
+            ("/dev/stdout", Some(1)), ("/dev/fd/1", Some(1)), ("/proc/self/fd/1", Some(1)),
+            ("/dev/stderr", Some(2)), ("/dev/fd/2", Some(2)), ("/proc/self/fd/2", Some(2)),
+            ("/dev/fd/0", None), ("/dev/fd/3", None), ("/dev/stdoutx", None), ("/dev/null", None),
+        ] {
+            assert_eq!(own_stream(Path::new(name)), fd, "{name}");
+        }
+        let dir = std::env::temp_dir().join(format!("shoin-stream-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::symlink("/dev/stdout", dir.join("out")).unwrap();
+        std::os::unix::fs::symlink("out", dir.join("again")).unwrap();
+        std::os::unix::fs::symlink("/dev/fd/2", dir.join("err")).unwrap();
+        std::os::unix::fs::symlink("loop", dir.join("loop")).unwrap();
+        fs::write(dir.join("plain"), "").unwrap();
+        assert_eq!(own_stream(&dir.join("out")), Some(1));
+        assert_eq!(own_stream(&dir.join("again")), Some(1));
+        assert_eq!(own_stream(&dir.join("err")), Some(2));
+        assert_eq!(own_stream(&dir.join("loop")), None);
+        assert_eq!(own_stream(&dir.join("plain")), None);
+        assert_eq!(own_stream(&dir.join("absent")), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

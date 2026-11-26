@@ -324,9 +324,8 @@ fn export_writes_to_dev_null() {
 
 #[test]
 fn pdf_export_writes_to_dev_stdout() {
-    if fs::metadata("/dev/stdout").is_err() {
-        return;
-    }
+    // Shoin recognises these names and writes to its fd 1 without opening
+    // the path, so this does not depend on what the platform's /dev/fd does.
     let vault = Vault::new("dev-stdout");
     fs::write(vault.0.join("note.md"), "hello\n").unwrap();
     let script = vault.0.join("pandoc");
@@ -334,14 +333,15 @@ fn pdf_export_writes_to_dev_stdout() {
     fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(vault.0.join("typst"), "").unwrap();
     fs::set_permissions(vault.0.join("typst"), fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink("/dev/stdout", vault.0.join("link")).unwrap();
     // `output()` gives the child a pipe for stdout, as `| lpr` would.
-    for format in ["pdf", "txt"] {
+    for (format, dest) in [("pdf", "/dev/stdout"), ("txt", "/dev/stdout"), ("txt", "/dev/fd/1"), ("txt", "link")] {
         let out = vault.command().env("PATH", vault.fixture_path())
-            .args(["--export", "note.md", "--format", format, "--out", "/dev/stdout"])
+            .args(["--export", "note.md", "--format", format, "--out", dest])
             .output().unwrap();
-        assert!(out.status.success(), "{format}: {out:?}");
+        assert!(out.status.success(), "{format} {dest}: {out:?}");
         let expected: &[u8] = if format == "pdf" { b"converted\n" } else { b"hello\n" };
-        assert_eq!(out.stdout, expected, "{format}: {out:?}");
+        assert_eq!(out.stdout, expected, "{format} {dest}: {out:?}");
     }
 }
 
