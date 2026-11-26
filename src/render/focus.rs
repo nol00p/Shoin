@@ -129,7 +129,7 @@ mod tests {
 
     fn buf(text: &str, line: usize, col: usize) -> Buffer {
         let mut b = Buffer::empty();
-        b.insert_str(Cursor::new(0, 0), text);
+        b.insert_exact(Cursor::new(0, 0), text);
         b.cursor = Cursor::new(line, col);
         b
     }

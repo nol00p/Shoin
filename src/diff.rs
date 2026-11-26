@@ -241,12 +241,17 @@ fn group(rows: &[Row]) -> Vec<Range<usize>> {
 /// Trailing-newline handling matters: `"a\n"` is ONE line, not two. Splitting
 /// naively on `\n` gives a phantom empty last line, which would show up as a
 /// spurious difference against a file that merely lacks the final newline.
+///
+/// `text` is a buffer's or a loaded file's rope, with `\n` breaks only (a
+/// CRLF file's were turned into `\n` as it was read), so a `\r` left before
+/// a `\n` is the line's own character: it is compared, and a merge keeps
+/// it.
 pub fn lines_of(text: &str) -> Vec<String> {
     let body = text.strip_suffix('\n').unwrap_or(text);
     if body.is_empty() && text.is_empty() {
         return Vec::new();
     }
-    body.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect()
+    body.split('\n').map(str::to_string).collect()
 }
 
 /// Which version of one difference survives the merge.
@@ -590,8 +595,10 @@ mod tests {
         assert_eq!(lines_of("a\nb"), v(&["a", "b"]));
         assert_eq!(lines_of(""), Vec::<String>::new());
         assert_eq!(lines_of("\n"), v(&[""]));
-        // CRLF on disk against an LF rope must not read as every line changed.
-        assert_eq!(lines_of("a\r\nb\r\n"), v(&["a", "b"]));
+        // A CR in a rope is a character of its line (CRLF files lose theirs
+        // as they are read).
+        assert_eq!(lines_of("a\r\nb\r\n"), v(&["a\r", "b\r"]));
+        assert!(!align(&lines_of("b\r\n"), &lines_of("b\n")).is_identical());
         assert!(align(&lines_of("a\nb\n"), &lines_of("a\nb")).is_identical());
     }
 

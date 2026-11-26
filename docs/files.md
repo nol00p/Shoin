@@ -152,19 +152,28 @@ version and then the file's, in the order shown on screen.
   line) keeps two spaces.
 - An autosave in Insert mode leaves the line you are typing alone when the
   cursor is in or after its trailing whitespace.
-- A save in read-only mode writes the text as it stands, untrimmed.
+- A save in read-only mode writes the text untrimmed. Its last newline
+  still follows `final_newline`.
 - Without a final newline, a save drops only the last one: blank lines at
   the end of the text stay.
-- When a save trims a line or changes the last newline, the buffer changes
-  the same way, as one step: `u` brings the spaces back. After `u`, while
-  there is something to redo, the save changes only the file, so the redo
-  is kept and the buffer stays marked modified.
+- When a save trims a line, the buffer changes the same way, as one step:
+  `u` brings the spaces back. After `u`, while there is a change to redo,
+  the save changes only the file, so the redo is kept and the buffer stays
+  marked modified.
+- The last newline is the file's alone, as Vim's `eol` and `fixeol`: a save
+  never changes the buffer's lines for it. An empty last line you made in
+  a file without a final newline stays a line after `:w`, and `Aq` on it
+  then writes `q` as the last line.
 - A recovery file is written on a crash, `SIGTERM` or `SIGHUP` only. A
   normal quit, `:q!` included, writes none. A buffer with no filename, or one
   whose folder refuses the write, goes to
   `$XDG_STATE_HOME/shoin/recover-<pid>-<n>.md` (`~/.local/state/shoin/` when
   `XDG_STATE_HOME` is unset), skipping any `<n>` already taken. Recovery files
   are readable by you only.
+- A recovery file holds the bytes `:w` would write with `final_newline =
+  "preserve"` and no trimming: the file's line endings, and no final
+  newline when the file had none. Copied back over the file, it gives back
+  the file's end too.
 - A file name too long to take the recovery endings gets a shortened
   recovery name beside it: the start of the name, `~` and a short hash.
   Recovery files 0.2.4 wrote under the full name are still found.

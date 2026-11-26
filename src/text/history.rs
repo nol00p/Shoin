@@ -13,12 +13,21 @@
 //! position in history, which is what lets "saved" be compared across undo and
 //! redo: a revision counter only ever goes up, so it cannot say that undoing
 //! landed back on the version that is on disk.
+//!
+//! A command that changes no text can still be a step, as Neovim records one
+//! (`gUU` on capitals, `>>` on an empty line): `record_unchanged` gives it an
+//! empty change, so `u` and `Ctrl-r` have somewhere to put the cursor. Such a
+//! step may leave the text unmodified, and then `state()` passes over it:
+//! each entry carries the position it leaves, so that stays one lookup. The
+//! same unchanged step taken again and again (`x` held on an empty line) is
+//! one entry with a count, which `u` and `Ctrl-r` take one at a time, as
+//! Neovim's separate steps are.
 
 use std::rc::Rc;
 
 use super::cursor::Cursor;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Change {
     /// Char index in the rope where the replaced text begins.
     pub start: usize,
@@ -34,7 +43,7 @@ pub struct Change {
 
 /// One undo step: the primitive changes of a single command, in the order they
 /// were applied.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 pub struct Step {
     pub changes: Vec<Change>,
     /// The cursor as it stood when the command that opened this step began —
@@ -45,17 +54,34 @@ pub struct Step {
     /// or a sub-step split out of an insert session mid-flight), where
     /// `cursor_before` is the right answer anyway.
     pub cursor_start: Option<Cursor>,
+    /// Whether the step counts as a modification: any change [`History::record`]
+    /// took does, and a step of nothing but [`History::record_unchanged`]
+    /// ones does not, so undoing or redoing it leaves 'modified' as it was.
+    pub modifies: bool,
 }
 
-pub struct History {
-    /// Sealed steps, each with the id it was given.
-    ///
+/// A sealed step on the undo or redo stack.
+struct Entry {
+    /// The id it was given.
+    id: u64,
     /// Behind an `Rc` because `undo`/`redo` move a step from one stack to the
     /// other AND hand it to the caller to invert. Owning it outright meant
     /// copying every byte the step held — so taking back a `dG` copied the
     /// whole document, at the moment the user is already waiting.
-    undo: Vec<(u64, Rc<Step>)>,
-    redo: Vec<(u64, Rc<Step>)>,
+    step: Rc<Step>,
+    /// How many times in a row the step was taken. More than one only for a
+    /// step that changed nothing, the same each time.
+    count: usize,
+    /// [`History::state`] while this is the last entry applied: its id when
+    /// the step is a modification, else the state of the entry below it.
+    /// Set as it goes onto the undo stack.
+    state: u64,
+}
+
+pub struct History {
+    /// Sealed steps, oldest first.
+    undo: Vec<Entry>,
+    redo: Vec<Entry>,
     /// The step currently accumulating changes.
     current: Step,
     /// Anchor handed to the next step to seal, set by `begin_group` and taken
@@ -87,6 +113,14 @@ impl History {
     /// Record one primitive change. Invalidates the redo stack (a fresh edit
     /// forks history). Seals immediately unless inside an explicit group.
     pub fn record(&mut self, change: Change) {
+        self.current.modifies = true;
+        self.record_unchanged(change);
+    }
+
+    /// Record a change that leaves the text as a save would write it, a
+    /// step that is not a modification unless something else in it is:
+    /// Neovim's undo step for a case change that changed nothing.
+    pub fn record_unchanged(&mut self, change: Change) {
         self.redo.clear();
         self.current.changes.push(change);
         if !self.grouping {
@@ -100,24 +134,83 @@ impl History {
         if !self.current.changes.is_empty() {
             let mut step = std::mem::take(&mut self.current);
             step.cursor_start = self.pending_start.take();
-            self.undo.push((self.next_id, Rc::new(step)));
+            let id = self.next_id;
             self.next_id += 1;
+            self.push_undo(Entry { id, step: Rc::new(step), count: 1, state: 0 });
         }
+    }
+
+    /// Put `entry` on the undo stack with its state, or count it into the
+    /// top one when both are the same step that changed nothing.
+    fn push_undo(&mut self, mut entry: Entry) {
+        let below = self.undo.last_mut();
+        if let Some(top) = below {
+            if !entry.step.modifies && (Rc::ptr_eq(&top.step, &entry.step) || top.step == entry.step) {
+                top.count += entry.count;
+                return;
+            }
+        }
+        let below = self.undo.last().map_or(0, |e| e.state);
+        entry.state = if entry.step.modifies { entry.id } else { below };
+        self.undo.push(entry);
+    }
+
+    /// Put one taking of a step on the redo stack, counted into the top one
+    /// when that is the same step.
+    fn push_redo(&mut self, entry: Entry) {
+        if let Some(top) = self.redo.last_mut() {
+            if Rc::ptr_eq(&top.step, &entry.step) {
+                top.count += entry.count;
+                return;
+            }
+        }
+        self.redo.push(entry);
+    }
+
+    /// One taking of the top entry of `stack`, which leaves it there while
+    /// its count has more.
+    fn take_one(stack: &mut Vec<Entry>) -> Option<Entry> {
+        let top = stack.last_mut()?;
+        if top.count > 1 {
+            top.count -= 1;
+            return Some(Entry { id: top.id, step: Rc::clone(&top.step), count: 1, state: 0 });
+        }
+        stack.pop()
+    }
+
+    /// The last sealed step, to change in place: one taking of it, split off
+    /// its count first so the others stay as they were.
+    fn last_sealed_mut(&mut self) -> Option<&mut Step> {
+        let top = self.undo.last_mut()?;
+        if top.count > 1 {
+            top.count -= 1;
+            let entry = Entry { id: self.next_id, step: Rc::clone(&top.step), count: 1, state: top.state };
+            self.next_id += 1;
+            self.undo.push(entry);
+        }
+        self.undo.last_mut().map(|e| Rc::make_mut(&mut e.step))
     }
 
     /// End the current step but stay grouped — the coalescing seam. Typing a
     /// space mid-insert calls this so the word just typed becomes its own undo.
+    ///
+    /// A step that changed nothing yet (`c$` on an empty line) is not split
+    /// off: the typing that follows is part of it.
     pub fn split(&mut self) {
-        self.seal();
+        if self.current.modifies {
+            self.seal();
+        }
     }
 
     /// Where we are in history: the id of the step last applied, or the id the
     /// in-flight step will take. Two different documents never share one.
+    /// A step that is not a modification takes no id of its own here: the
+    /// text it leaves is the one before it.
     pub fn state(&self) -> u64 {
-        if !self.current.changes.is_empty() {
+        if self.current.modifies {
             return self.next_id;
         }
-        self.undo.last().map(|(id, _)| *id).unwrap_or(0)
+        self.undo.last().map_or(0, |e| e.state)
     }
 
     /// Open an explicit group — everything until `end_group` is one undo step.
@@ -141,9 +234,23 @@ impl History {
         self.grouping
     }
 
-    /// Whether there is anything to redo, which any new change would drop.
-    pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+    /// Whether the step being built has taken no text yet: it may hold
+    /// insertions, or a change of nothing (`c$` on an empty line), but no
+    /// deletion.
+    pub fn step_removed_nothing(&self) -> bool {
+        self.current.changes.iter().all(|c| c.before.is_empty())
+    }
+
+    /// How many chars the step being built has added, less those it took.
+    pub fn step_growth(&self) -> isize {
+        let len = |t: &str| t.chars().count() as isize;
+        self.current.changes.iter().map(|c| len(&c.after) - len(&c.before)).sum()
+    }
+
+    /// Whether a redo would change the text: a new change drops the redo
+    /// stack, and only steps that change nothing are no loss.
+    pub fn can_redo_a_change(&self) -> bool {
+        self.redo.iter().any(|e| e.step.modifies)
     }
 
     pub fn end_group(&mut self) {
@@ -156,7 +263,7 @@ impl History {
     pub fn set_redo_cursor(&mut self, cursor: Cursor) {
         let change = match self.current.changes.last_mut() {
             Some(c) => Some(c),
-            None => self.undo.last_mut().and_then(|(_, s)| Rc::make_mut(s).changes.last_mut()),
+            None => self.last_sealed_mut().and_then(|s| s.changes.last_mut()),
         };
         if let Some(c) = change {
             c.cursor_after = cursor;
@@ -169,25 +276,37 @@ impl History {
     pub fn set_undo_cursor(&mut self, cursor: Cursor) {
         if !self.current.changes.is_empty() {
             self.pending_start = Some(cursor);
-        } else if let Some((_, s)) = self.undo.last_mut() {
-            Rc::make_mut(s).cursor_start = Some(cursor);
+        } else if let Some(s) = self.last_sealed_mut() {
+            s.cursor_start = Some(cursor);
         }
+    }
+
+    /// How many entries the undo stack holds.
+    #[cfg(test)]
+    pub fn undo_entries(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// How many entries the redo stack holds.
+    #[cfg(test)]
+    pub fn redo_entries(&self) -> usize {
+        self.redo.len()
     }
 
     /// Pop the last step for the caller to invert, moving it to the redo stack.
     pub fn undo(&mut self) -> Option<Rc<Step>> {
         self.seal();
-        let entry = self.undo.pop()?;
-        let step = Rc::clone(&entry.1);
-        self.redo.push(entry);
+        let entry = Self::take_one(&mut self.undo)?;
+        let step = Rc::clone(&entry.step);
+        self.push_redo(entry);
         Some(step)
     }
 
     /// Pop the last undone step for the caller to re-apply.
     pub fn redo(&mut self) -> Option<Rc<Step>> {
-        let entry = self.redo.pop()?;
-        let step = Rc::clone(&entry.1);
-        self.undo.push(entry);
+        let entry = Self::take_one(&mut self.redo)?;
+        let step = Rc::clone(&entry.step);
+        self.push_undo(entry);
         Some(step)
     }
 }
@@ -310,6 +429,41 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), seen.len(), "an id came back: {seen:?}");
+    }
+
+    /// A step of unchanged text is a step, one that leaves the position in
+    /// history where it was: undoing or redoing it is no modification.
+    /// Anything else recorded in the same step makes it one.
+    #[test]
+    fn an_unchanged_step_is_a_step_that_keeps_the_position() {
+        let mut h = History::default();
+        h.record(change(0, "", "a"));
+        let saved = h.state();
+        h.record_unchanged(change(1, "", ""));
+        assert_eq!(h.state(), saved, "no modification");
+        let step = h.undo().expect("but a step");
+        assert!(step.changes[0].after.is_empty());
+        assert_eq!(h.state(), saved);
+        h.redo();
+        assert_eq!(h.state(), saved);
+
+        h.begin_group(None);
+        h.record_unchanged(change(1, "", ""));
+        assert_eq!(h.state(), saved, "in flight, still none");
+        h.record(change(1, "", "b"));
+        assert_ne!(h.state(), saved, "a real change in the step makes it one");
+        h.end_group();
+        assert_ne!(h.state(), saved);
+
+        // Mid-insert, a split keeps an unchanged start with what follows.
+        let mut h = History::default();
+        h.begin_group(Some(Cursor::new(0, 0)));
+        h.record_unchanged(change(0, "", ""));
+        h.split();
+        h.record(change(0, "", " "));
+        h.end_group();
+        assert_eq!(h.undo().unwrap().changes.len(), 2, "one step");
+        assert!(h.undo().is_none());
     }
 
     /// An empty group seals nothing — pressing a motion key does not create an

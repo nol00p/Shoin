@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn typing_retires_the_screen() {
         let mut app = bare();
-        app.buffer.insert_str(Cursor::new(0, 0), "H");
+        app.buffer.insert_exact(Cursor::new(0, 0), "H");
         assert!(!active(&app), "a modified buffer is a document, not a start");
 
         let rows = screen(&app, 90, 28);

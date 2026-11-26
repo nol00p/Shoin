@@ -382,7 +382,7 @@ impl App {
     /// `history.split()`), so an undo after an autosave stops at the point it
     /// fired. That is the same boundary a manual save leaves and the same one
     /// `undo_coalesce_ms` draws anyway.
-    fn autosave_now(&mut self) -> bool {
+    pub(super) fn autosave_now(&mut self) -> bool {
         let policy = crate::fs::save::SavePolicy::from_config(&self.config.editor);
         let mut written: Vec<String> = Vec::new();
         let mut refused: Option<String> = None;
@@ -445,12 +445,20 @@ impl App {
     /// A save that trimmed the text edited the buffer, but that edit is not
     /// the reader's command: move the "did this command edit" mark past it, so
     /// `.` and the table alignment on leaving Insert see only the reader's.
+    /// Nor is it typing: an unused indent in the document being typed in
+    /// stays unused ([`App::settle_indent`]).
     pub(super) fn claim_save_revisions(&mut self) {
-        for doc in self.docs.iter_mut() {
+        let current = self.current();
+        let mut current_spent = 0;
+        for (i, doc) in self.docs.iter_mut().enumerate() {
             let spent = std::mem::take(&mut doc.buffer.save_revisions);
             if doc.id == self.dot_rev.doc {
                 self.dot_rev.rev += spent;
             }
+            if i == current {
+                current_spent = spent;
+            }
         }
+        self.indent_past_save(current_spent);
     }
 }
