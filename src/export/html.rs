@@ -19,6 +19,7 @@
 //!     to the syntax highlighting inside fences, which reuses `markdown::code`
 //!     rather than a second, differently-opinionated highlighter.
 
+use super::mermaid::{self, RenderedFence};
 use crate::config::schema::MarkdownConfig;
 use crate::render::markdown::block::{
     classify, has_cell_separator, indent_cols, leading_ws_chars, BlockKind, Carry, Marker, Open, COMMONMARK_TAB,
@@ -63,7 +64,7 @@ impl Default for Page {
 
 /// Convert a Markdown document to a complete HTML page, its math left as TeX
 /// (`\(…\)`, `\[…\]`) whether or not pandoc is installed: the page the
-/// tests compare against. Export uses [`render_math`].
+/// tests compare against. Export uses [`render_with_mermaid`].
 ///
 /// `fallback_title` names the page when the document has no `# Heading` of its
 /// own to be named after — normally the file's stem.
@@ -93,8 +94,24 @@ pub type Convert<'a> = &'a dyn Fn(&[Formula]) -> Result<Vec<Option<String>>, &'s
 ///
 /// `fallback_title` names the page when the document has no `# Heading` of its
 /// own to be named after — normally the file's stem.
+#[cfg(test)]
 pub fn render_math(text: &str, fallback_title: &str, page: &Page) -> (String, Option<&'static str>) {
     render_with(text, fallback_title, page, &super::pandoc_mathml)
+}
+
+/// Export a complete HTML page with MathML and self-contained Mermaid images.
+pub fn render_with_mermaid(
+    text: &str, fallback_title: &str, page: &Page, renderer: crate::render::mermaid::MermaidRenderer,
+) -> (String, Option<String>) {
+    let diagrams = mermaid::render(text, &page.md, renderer);
+    let (html, math_note) = render_with_assets(text, fallback_title, page, &super::pandoc_mathml, &diagrams);
+    let note = match (math_note, mermaid::diagnostic(&diagrams)) {
+        (Some(math), Some(mermaid)) => Some(format!("{math} · {mermaid}")),
+        (Some(note), None) => Some(note.to_owned()),
+        (None, Some(note)) => Some(note),
+        (None, None) => None,
+    };
+    (html, note)
 }
 
 /// [`render_math`] with any converter, so the splicing is tested without
@@ -106,8 +123,24 @@ pub fn render_math(text: &str, fallback_title: &str, page: &Page) -> (String, Op
 /// each one's conversion.
 /// A placeholder would need a string no document can contain. A page with
 /// no math, or with `math` off, never runs the converter.
-pub fn render_with(text: &str, fallback_title: &str, page: &Page, convert: Convert) -> (String, Option<&'static str>) {
-    let (tex_body, math) = Body::new(&page.md, &page.base).run_math(text);
+#[cfg(test)]
+fn render_with(text: &str, fallback_title: &str, page: &Page, convert: Convert) -> (String, Option<&'static str>) {
+    render_with_assets(text, fallback_title, page, convert, &[])
+}
+
+fn render_with_assets(
+    text: &str,
+    fallback_title: &str,
+    page: &Page,
+    convert: Convert,
+    diagrams: &[RenderedFence<'_>],
+) -> (String, Option<&'static str>) {
+    let body = || {
+        let mut body = Body::new(&page.md, &page.base);
+        body.diagrams = diagrams;
+        body
+    };
+    let (tex_body, math) = body().run_math(text);
     let Math::Collect(formulas) = math else { unreachable!("a walk starts out collecting") };
     if formulas.is_empty() {
         return (wrap(&tex_body, text, fallback_title, page), None);
@@ -115,8 +148,9 @@ pub fn render_with(text: &str, fallback_title: &str, page: &Page, convert: Conve
     match convert(&formulas) {
         Err(why) => (wrap(&tex_body, text, fallback_title, page), Some(why)),
         Ok(mut done) => {
+            drop(tex_body);
             done.resize(formulas.len(), None);
-            let mut body = Body::new(&page.md, &page.base);
+            let mut body = body();
             body.math = std::cell::RefCell::new(Math::Splice { done, next: 0 });
             (wrap(&body.run(text), text, fallback_title, page), None)
         }
@@ -206,6 +240,10 @@ struct Body<'a> {
     /// The open fence: its language, the lexer state, and its indent, which
     /// is stripped from its lines.
     fence: Option<(Option<Lang>, Cont, usize)>,
+    /// Completed Mermaid renders in source order, and the original HTML
+    /// offset of a fence we can replace once its closing line is confirmed.
+    diagrams: &'a [RenderedFence<'a>],
+    diagram: Option<(usize, &'a RenderedFence<'a>)>,
 }
 
 /// One line of a paragraph: its text with trailing whitespace gone, and the
@@ -250,6 +288,8 @@ impl<'a> Body<'a> {
             math_block: Vec::new(),
             math: std::cell::RefCell::new(Math::Collect(Vec::new())),
             fence: None,
+            diagrams: &[],
+            diagram: None,
         }
     }
 
@@ -273,13 +313,13 @@ impl<'a> Body<'a> {
             // walk cannot group lines differently from the editor.
             let math_continues = next.open == Open::InMath;
             carry = next;
-            self.line(line, &kind, math_continues);
+            self.line(i, line, &kind, math_continues);
         }
         self.close_all();
         (self.out, self.math.into_inner())
     }
 
-    fn line(&mut self, line: &str, kind: &BlockKind, math_continues: bool) {
+    fn line(&mut self, number: usize, line: &str, kind: &BlockKind, math_continues: bool) {
         let held = std::mem::take(&mut self.held);
         let (next, quoted) = held.step(line, kind, self.md.math);
         self.held = next;
@@ -297,10 +337,18 @@ impl<'a> Body<'a> {
 
             BlockKind::FenceOpen(info) => {
                 self.open_block(indent_cols(line, COMMONMARK_TAB));
+                if info.split_whitespace().next() == Some("mermaid") {
+                    if let Ok(index) = self.diagrams.binary_search_by_key(&number, |item| item.lines.start) {
+                        let diagram = &self.diagrams[index];
+                        if diagram.png.is_ok() {
+                            self.diagram = Some((self.out.len(), diagram));
+                        }
+                    }
+                }
                 self.open_fence(info, leading_ws_chars(line));
             }
             BlockKind::FenceBody { .. } => self.fence_line(line),
-            BlockKind::FenceClose => self.close_fence(),
+            BlockKind::FenceClose => self.close_fence_at(number),
 
             BlockKind::Blank => {
                 // A blank line ends a paragraph, a quote and a table — but NOT
@@ -715,7 +763,23 @@ impl<'a> Body<'a> {
         self.fence = Some((lang, next, indent));
     }
 
+    fn close_fence_at(&mut self, number: usize) {
+        let diagram = self.diagram.take();
+        self.close_fence();
+        if let Some((offset, diagram)) = diagram.filter(|(_, diagram)| diagram.lines.end == number + 1) {
+            if let Ok(png) = &diagram.png {
+                self.out.truncate(offset);
+                self.out.push_str(&format!(
+                    "<img class=\"mermaid\" src=\"data:image/png;base64,{}\" alt=\"{}\">\n",
+                    crate::image::base64(png),
+                    escape_attr(diagram.alt),
+                ));
+            }
+        }
+    }
+
     fn close_fence(&mut self) {
+        self.diagram = None;
         if self.fence.take().is_some() {
             self.out.push_str("</code></pre>\n");
         }
@@ -1242,6 +1306,9 @@ main.justify pre,main.justify table{{text-align:left}}
 ",
         measure = page.measure.max(20)
     ));
+    if page.md.mermaid_renderer.is_some() {
+        css.push_str("img.mermaid{display:block;margin:1.5em auto}\n");
+    }
     css
 }
 
@@ -1251,6 +1318,56 @@ mod tests {
 
     fn body(md: &str) -> String {
         Body::new(&MarkdownConfig::default(), std::path::Path::new("")).run(md)
+    }
+
+    #[test]
+    fn renders_only_closed_mermaid_assets_and_preserves_their_html_containers() {
+        use crate::render::mermaid::Failure;
+        use std::sync::Arc;
+
+        let text = concat!(
+            "1. step\n\n   ```mermaid\n   flowchart LR\n   A --> B\n   ```\n2. next\n\n",
+            "```mermaid\n<script>bad()</script>\n```\n\n",
+            "> ```mermaid\n> graph TD\n> ```\n\n",
+            "```mermaid\nunfinished\n",
+        );
+        // The HTML renderer receives validated image bytes from the adapter.
+        // These short stand-ins make the expected Base64 easy to recognize.
+        let diagrams = [
+            RenderedFence {
+                lines: 2..6,
+                bytes: 0..0,
+                indent: "   ",
+                alt: "Flowchart \"A & B\" <preview>",
+                png: Ok(Arc::from([1, 2, 3])),
+            },
+            RenderedFence {
+                lines: 8..11,
+                bytes: 0..0,
+                indent: "",
+                alt: "Mermaid diagram",
+                png: Err(Failure::Invalid),
+            },
+            RenderedFence {
+                lines: 16..19,
+                bytes: 0..0,
+                indent: "",
+                alt: "Unclosed Mermaid diagram",
+                png: Ok(Arc::from([1, 2, 3])),
+            },
+        ];
+        let page = Page::default();
+        let convert = |_: &[Formula]| panic!("there is no math in this document");
+        let (got, note) = render_with_assets(text, "Test", &page, &convert, &diagrams);
+        assert!(note.is_none());
+        let image = r#"<img class="mermaid" src="data:image/png;base64,AQID" alt="Flowchart &quot;A &amp; B&quot; &lt;preview&gt;">"#;
+        assert!(got.contains(&format!("<li>step{image}\n</li>\n<li>next")), "{got}");
+        assert_eq!(got.matches("data:image/png;").count(), 1);
+        assert!(got.contains("&lt;script&gt;bad()&lt;/script&gt;"), "{got}");
+        assert!(!got.contains("<script>"));
+        assert!(got.contains("<blockquote>\n<pre><code class=\"language-mermaid\">graph TD"));
+        assert!(got.contains("<pre><code class=\"language-mermaid\">unfinished"));
+        assert!(got.contains("img{max-width:100%;height:auto}"));
     }
 
     /// A fence indented under an item stays in it, so the list carries on

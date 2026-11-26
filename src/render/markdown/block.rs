@@ -85,8 +85,12 @@ pub enum Open {
     #[default]
     None,
     /// Inside a fenced block opened with this fence string, in the language its
-    /// info string named, with the code lexer in this state.
-    InFence { fence: String, lang: Option<Lang>, cont: Cont },
+    /// info string named, with the code lexer in this state. `base` is the
+    /// column the opener's indent counted from (the text column of the list
+    /// item it is in, else 0): a closer indented 4 or more columns past it,
+    /// counted with tab stops ([`tab_stop_cols`]) or, when that is less, with
+    /// `tab_width`, is a body line, as in CommonMark (`closer_cols`).
+    InFence { fence: String, lang: Option<Lang>, cont: Cont, base: u16 },
     InFrontMatter,
     /// A table's delimiter row has been seen; the rows that follow belong to it
     /// until a line without a `|` ends it.
@@ -246,6 +250,8 @@ pub struct BlockCache {
     /// again: a cursor move looks a block up in this list rather than walking
     /// the kinds.
     pub(crate) closed_math: std::cell::OnceCell<Vec<std::ops::Range<usize>>>,
+    /// Closed Mermaid fences, discovered from the classified lines on demand.
+    pub(crate) closed_mermaid: std::cell::OnceCell<Vec<std::ops::Range<usize>>>,
     /// Which classification this is: a number no other build or rescan in
     /// the process has, taken by every [`BlockCache::build_from`] and
     /// [`BlockCache::invalidate_from`]. The revision cannot say that: a
@@ -297,6 +303,7 @@ impl BlockCache {
             tab_width,
             math_open_at_end: matches!(cur.open, Open::InMath),
             closed_math: Default::default(),
+            closed_mermaid: Default::default(),
             generation: next_generation(),
         }
     }
@@ -343,6 +350,7 @@ impl BlockCache {
         let start = edited.saturating_sub(1);
         // Whatever the scan changes, the closed blocks are found again.
         self.closed_math.take();
+        self.closed_mermaid.take();
         self.generation = next_generation();
 
         // No valid entering state to resume from — rebuild wholesale.
@@ -507,8 +515,8 @@ fn classify_block(
             };
             return (BlockKind::FrontMatter, leaving);
         }
-        Open::InFence { fence, lang, cont } => {
-            if closes_fence(line, fence) {
+        Open::InFence { fence, lang, cont, base } => {
+            if closer_cols(line, tab_width) < usize::from(*base) + 4 && closes_fence(line, fence) {
                 return (BlockKind::FenceClose, Open::None);
             }
             // The body is lexed HERE, in the pass that already walks every line
@@ -522,7 +530,7 @@ fn classify_block(
             };
             return (
                 BlockKind::FenceBody { lang: *lang, cont: *cont },
-                Open::InFence { fence: fence.clone(), lang: *lang, cont: next },
+                Open::InFence { fence: fence.clone(), lang: *lang, cont: next, base: *base },
             );
         }
         // A table runs until a line with no cell separator in it.
@@ -573,7 +581,7 @@ fn classify_block(
         let lang = Lang::from_info(&info);
         return (
             BlockKind::FenceOpen(info),
-            Open::InFence { fence, lang, cont: Cont::None },
+            Open::InFence { fence, lang, cont: Cont::None, base: base.min(usize::from(u16::MAX)) as u16 },
         );
     }
 
@@ -651,6 +659,31 @@ pub fn indent_cols(line: &str, tab_width: usize) -> usize {
             _ => None,
         })
         .sum()
+}
+
+/// The column a line's text starts at, with CommonMark's tab stops: a tab
+/// goes on to the next multiple of [`COMMONMARK_TAB`] from the line start,
+/// so `"  \t"` is column 4, not `2 + 4`. What a fence closer's indent is
+/// checked with (`closer_cols`), by the editor and export alike.
+pub(crate) fn tab_stop_cols(line: &str) -> usize {
+    let mut col = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += COMMONMARK_TAB - col % COMMONMARK_TAB,
+            _ => break,
+        }
+    }
+    col
+}
+
+/// The indent a fence closer is checked with: CommonMark's tab stops
+/// ([`tab_stop_cols`]), or [`indent_cols`] when that is less. The opener's
+/// test uses `indent_cols`, so with `tab_width` below 4 a `` \t``` `` opens a
+/// fence at top level; the same line has to close it again. At `tab_width`
+/// 4 or more `indent_cols` is never less, and this is the tab-stop measure.
+fn closer_cols(line: &str, tab_width: usize) -> usize {
+    tab_stop_cols(line).min(indent_cols(line, tab_width))
 }
 
 /// The number of leading space and tab chars: what to remove to take a
@@ -1028,6 +1061,84 @@ mod tests {
         assert_eq!(kind("just prose"), BlockKind::Paragraph);
         // 4-space indent is not a heading/list here — falls through to prose.
         assert_eq!(kind("    # not a heading"), BlockKind::Paragraph);
+    }
+
+    /// A closing fence may be indented up to three columns past the column
+    /// the opener counted from, as in CommonMark; four or more make it a body
+    /// line, and the fence runs on.
+    #[test]
+    fn an_over_indented_closer_is_body() {
+        let c = BlockCache::build(&buf("~~~mermaid\ngraph TD\n    ~~~\nafter\n"), true, 4);
+        assert!(matches!(c.kinds[2], BlockKind::FenceBody { .. }));
+        assert!(matches!(c.kinds[3], BlockKind::FenceBody { .. }));
+        let c = BlockCache::build(&buf("```\nx\n   ```\nafter\n"), true, 4);
+        assert_eq!(c.kinds[2], BlockKind::FenceClose);
+        assert_eq!(c.kinds[3], BlockKind::Paragraph);
+        let c = BlockCache::build(&buf("```\nx\n\t```\n"), true, 4);
+        assert!(matches!(c.kinds[2], BlockKind::FenceBody { .. }), "a tab is four columns");
+        // Inside an item, measured from the item's text column.
+        let c = BlockCache::build(&buf("10. item\n    ```\n    x\n       ```\n    ```\n"), true, 4);
+        assert!(matches!(c.kinds[1], BlockKind::FenceOpen(_)));
+        assert_eq!(c.kinds[3], BlockKind::FenceClose, "three past the text column");
+        let c = BlockCache::build(&buf("10. item\n    ```\n    x\n        ```\n    ```\n"), true, 4);
+        assert!(matches!(c.kinds[3], BlockKind::FenceBody { .. }), "four past it");
+        assert_eq!(c.kinds[4], BlockKind::FenceClose);
+    }
+
+    /// The closer's indent is measured with CommonMark's tab stops (a tab
+    /// goes on to the next multiple of 4), not as `tab_width` columns added
+    /// on: two spaces and a tab is column 4, which under an item whose text
+    /// is at column 2 or 4 is shallow enough to close. Plain code fences in
+    /// lists, the editor and export alike.
+    #[test]
+    fn a_closer_indented_with_spaces_then_a_tab_counts_tab_stops() {
+        for tab in [1, 2, 3, 4, 8] {
+            for (text, close) in [
+                ("- item\n  ```rust\n    let x = 1;\n  \t```\nafter\n", 3),
+                ("1.  item\n    ```rust\n    x\n  \t```\nafter\n", 3),
+                ("- a\n  - b\n    ```rust\n    x\n  \t```\nafter\n", 4),
+                ("```rust\nx\n  \t```\n```\n", 2),
+            ] {
+                let c = BlockCache::build(&buf(text), true, tab);
+                // At top level `"  \t"` is column 4 by tab stops, and
+                // `2 + tab` by `tab_width`: under 4 only at tab 1.
+                let want = text.contains("- ") || text.starts_with("1.") || tab == 1;
+                if want {
+                    assert_eq!(c.kinds[close], BlockKind::FenceClose, "tab {tab}: {text:?}");
+                    // After the top-level case's closer, its last line opens a fence.
+                    let after = if text.starts_with("```") { BlockKind::FenceOpen(String::new()) } else { BlockKind::Paragraph };
+                    assert_eq!(c.kinds[close + 1], after, "tab {tab}: {text:?}");
+                } else {
+                    // No item: column 4 is four past 0, a body line.
+                    assert!(matches!(c.kinds[close], BlockKind::FenceBody { .. }), "{text:?}");
+                    assert_eq!(c.kinds[close + 1], BlockKind::FenceClose);
+                }
+            }
+        }
+        // A tab after a space stops at 4 as well: ` \t` is column 4.
+        assert_eq!(tab_stop_cols(" \t```"), 4);
+        assert_eq!(tab_stop_cols("  \t```"), 4);
+        assert_eq!(tab_stop_cols("\t  ```"), 6);
+        assert_eq!(tab_stop_cols("\t\t```"), 8);
+        // A fence opened and closed by `` \t``` `` closes at every tab width:
+        // below 4 the opener is shallow by `tab_width`, and so is the closer.
+        for tab in [1, 2, 3, 4, 8] {
+            let c = BlockCache::build(&buf("# T\n\n\t```rust\n\tlet x = 1;\n\t```\n\nafter\n"), true, tab);
+            if tab < 4 {
+                assert_eq!(c.kinds[2], BlockKind::FenceOpen("rust".into()), "tab {tab}");
+                assert_eq!(c.kinds[4], BlockKind::FenceClose, "tab {tab}");
+            } else {
+                assert_eq!(c.kinds[2], BlockKind::Paragraph, "tab {tab}");
+            }
+            assert_eq!(c.kinds[6], BlockKind::Paragraph, "tab {tab}");
+        }
+        // Export classifies the same way: the prose after the closer is prose.
+        let html = crate::export::html::render(
+            "- item\n  ```rust\n  let x = 1;\n  \t```\n\nafter **bold**\n",
+            "t",
+            &crate::export::html::Page::default(),
+        );
+        assert!(html.contains("<strong>bold</strong>"), "{html}");
     }
 
     #[test]

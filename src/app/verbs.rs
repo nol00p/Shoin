@@ -253,22 +253,37 @@ impl App {
     /// The lines shown raw: the cursor's (or the selection's), or none at all
     /// in read-only mode, where there is nothing to edit under a cursor.
     ///
-    /// A closed display math block the set touches is laid out over several
-    /// rows when the cursor is away (#77), so the set widens to all of it:
-    /// the whole source shows while any line of it is being edited. Read off
-    /// the block kinds, so they must be in step with the text: when they are
-    /// not, nothing widens.
+    /// Widen the set to the whole source of any display block it touches.
+    /// The block kinds must match the current buffer revision.
+    ///
+    /// Read-only mode shows one source: a Mermaid fence a search landed in,
+    /// while the cursor stays where the landing parked it, in the pane and
+    /// document searched ([`SearchLanding`]), so the hit inside it shows.
     pub(super) fn active_set(&self, anchor: Option<Cursor>) -> ActiveSet {
         if self.view {
-            return ActiveSet::none();
+            return self.search_landing
+                .filter(|l| l.holds(self.focus_pane, self.current(), self.buffer.cursor))
+                .filter(|_| self.config.layout.conceal && self.buffer.syntax == crate::text::buffer::Syntax::Markdown)
+                .filter(|_| self.blocks.revision == self.buffer.revision)
+                .filter(|_| self.config.markdown.mermaid_renderer.as_deref().is_some_and(|s| !s.is_empty()))
+                .and_then(|l| crate::render::hidden::mermaid_block_at(&self.blocks, l.line))
+                .map_or_else(ActiveSet::none, |b| ActiveSet { start: b.start, end: b.end - 1 });
         }
         let mut set = ActiveSet::compute(&self.mode, &self.buffer.cursor, anchor);
         let fresh = self.blocks.revision == self.buffer.revision;
         let laid_out = self.config.layout.conceal && self.buffer.syntax == crate::text::buffer::Syntax::Markdown;
         if fresh && laid_out {
+            if let Some(last) = self.substitute_match_last_line() {
+                set.end = set.end.max(last);
+            }
             // Binary searches of the blocks kept with the kinds: a cursor move
             // does not walk the block it is in.
-            let block = |line| crate::render::hidden::math_block_at(&self.blocks, line);
+            let block = |line| {
+                crate::render::hidden::math_block_at(&self.blocks, line).or_else(|| {
+                    self.config.markdown.mermaid_renderer.as_deref().filter(|s| !s.is_empty())?;
+                    crate::render::hidden::mermaid_block_at(&self.blocks, line)
+                })
+            };
             let first = block(set.start);
             // A cursor alone (or a selection within one block) needs one.
             let last = match &first {
@@ -572,5 +587,57 @@ impl App {
             .skip(end.col + usize::from(inclusive))
             .all(char::is_whitespace);
         in_indent && rest_blank
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multiline_confirmation_reveals_the_whole_mermaid_fence() {
+        let mut config = crate::config::Config::default();
+        config.layout.conceal = true;
+        config.markdown.mermaid_renderer = Some("merman".into());
+        let mut app = crate::test_support::app_with_config(
+            "before\n```mermaid\nflowchart TD\nA --> B\n```\nafter",
+            config,
+        );
+        app.run_substitute(None, r"/before\n```mermaid\nflowchart TD/X/c", false);
+        assert!(app.substitute_prompt().is_some());
+        assert_eq!(app.active_set(None), ActiveSet { start: 0, end: 4 });
+    }
+
+    #[test]
+    fn mermaid_source_reveals_on_motions_visual_and_search() {
+        let mut config = crate::config::Config::default();
+        config.layout.conceal = true;
+        config.markdown.mermaid_renderer = Some("merman".into());
+        let mut app = crate::test_support::app_with_config(
+            "before\n```mermaid\nflowchart TD\n```\nafter",
+            config,
+        );
+        let fence = ActiveSet { start: 1, end: 3 };
+
+        for (from, direction, to) in [(0, Motion::Down, 1), (4, Motion::Up, 3)] {
+            app.buffer.cursor = Cursor::new(from, 0);
+            app.move_by(direction, 1);
+            assert_eq!(app.buffer.cursor.line, to);
+            assert_eq!(app.active_set(None), fence);
+        }
+
+        app.mode = Mode::Visual;
+        app.buffer.cursor = Cursor::new(2, 0);
+        assert_eq!(app.active_set(Some(Cursor::new(0, 0))), ActiveSet { start: 0, end: 3 });
+
+        app.mode = Mode::Normal;
+        app.buffer.cursor = Cursor::new(0, 0);
+        assert!(app.set_search("flowchart".into(), false));
+        app.search_move(false);
+        assert_eq!(app.buffer.cursor.line, 2);
+        assert_eq!(app.active_set(None), fence);
+
+        app.config.markdown.mermaid_renderer = None;
+        assert_eq!(app.active_set(None), ActiveSet { start: 2, end: 2 });
     }
 }

@@ -31,6 +31,8 @@ the block shows all of its TeX. See [Math](math.md).
 [`examples/formatting.md`](../examples/formatting.md) exercises all of it;
 [`math.md`](../examples/math.md), [`quoted-list.md`](../examples/quoted-list.md)
 and [`tab-list.md`](../examples/tab-list.md) beside it show one thing each.
+Closed Mermaid fences can show text or PNG diagrams with an explicitly
+configured local renderer. See [Mermaid](mermaid.md) for setup and examples.
 
 ## Details
 

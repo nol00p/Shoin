@@ -50,12 +50,22 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   of their own to stretch, so they refuse it.
 - PDF export needs `pandoc` and a layout engine. If one is missing, the error
   names which.
-- HTML export needs no tool, but uses `pandoc` when it is on your `PATH` to
-  turn math into MathML, which browsers draw without a script. Without it
+- HTML export uses `pandoc` when it is on your `PATH` to turn math into
+  MathML, which browsers draw without a script. Without it
   the formulas stay TeX, between `\(` `\)` and `\[` `\]`, and the export
   adds `math left as TeX: no pandoc` to its message (on stderr from the
   shell). See [Math](math.md#printing-and-export).
-- `--stdout` works for the text formats only.
+- With a configured Mermaid renderer, HTML and PDF export replace supported
+  Mermaid fences with static diagrams.
+  Missing or failed diagrams keep their source and report a diagnostic.
+  Markdown and plain text retain Mermaid source. See [Mermaid](mermaid.md#export-diagrams).
+- `--stdout` works for the text formats only. To pipe a PDF, give
+  `--out /dev/stdout`: `shoin --export notes.md --format pdf --out
+  /dev/stdout | lpr`.
+- `--out` also takes a character device such as `/dev/null` or a tty, a
+  named pipe, or a descriptor such as `/dev/fd/4` or `>(lpr)`, written as
+  it is. A named pipe nothing is reading fails at once instead of waiting.
+  Export refuses a directory, a socket and a block device.
 - Export is clean by default: math as math, tables as tables, code
   highlighted, whatever your `[markdown]` settings show in the editor. With
   `export_follows_settings = true` under `[markdown]`, `txt` and `html`
@@ -63,6 +73,9 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   exports as plain text; `math = false` then also reaches `pdf`, where `$`
   stays a dollar sign.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
+- File export writes through symlinks and overwrites existing files in place.
+  It uses the destination file’s write permissions.
+  A write error after truncation can leave an existing destination empty or partially written.
 - Export refuses a destination that is the document itself or any note or
   picture it embeds, under any name: through `..`, a symlink or a hard link.
   `html` and `pdf` also refuse a picture the document links to

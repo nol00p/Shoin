@@ -279,13 +279,23 @@ impl App {
         Some(format!("replace with {} (y/n/a/q/l/^E/^Y)?", pending.replacement))
     }
 
-    pub(crate) fn substitute_highlight(&self, line: usize) -> Option<Range<usize>> {
+    fn substitute_match_range(&self) -> Option<Range<usize>> {
         let pending = self.confirmation.as_ref()?;
         if pending.doc != self.dot_mark() {
             return None;
         }
         let edit = pending.matches.get(pending.next)?;
-        let range = pending.change.range(edit);
+        Some(pending.change.range(edit))
+    }
+
+    pub(super) fn substitute_match_last_line(&self) -> Option<usize> {
+        let range = self.substitute_match_range()?;
+        let last = range.start.max(range.end.saturating_sub(1));
+        Some(self.buffer.rope.char_to_line(last))
+    }
+
+    pub(crate) fn substitute_highlight(&self, line: usize) -> Option<Range<usize>> {
+        let range = self.substitute_match_range()?;
         let rope = &self.buffer.rope;
         let base = rope.line_to_char(line);
         let end = base + self.buffer.line_len(line);

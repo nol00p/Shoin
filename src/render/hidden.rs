@@ -7,10 +7,10 @@
 //! hit-testing all skip it without knowing why it is hidden.
 //!
 //! The set is built by `of` from every source of hidden lines: closed folds,
-//! and display math blocks laid out over several rows (#77). A laid-out block
-//! draws its layout as rows of its opening `$$` line, the way an embed draws
-//! its target, and the lines after it take zero rows. `math_blocks` and
-//! `math_block_at` find the blocks that can be laid out: the CLOSED ones.
+//! display math, and Mermaid previews. A laid-out block draws its layout as
+//! rows of its opening line, the way an embed draws its target, and the lines
+//! after it take zero rows. `math_blocks` and `mermaid_blocks` identify closed
+//! blocks from the Markdown classification.
 
 use std::ops::Range;
 
@@ -91,7 +91,7 @@ impl Hidden {
 
 /// Every line that takes no rows this frame: the lines closed folds hide, and
 /// the lines after the opening line of each display block in `laid_out` (whole
-/// blocks, as `math_blocks` gives them). Fold motions pass no blocks: `j`, `dd`
+/// blocks including their delimiters). Fold motions pass no blocks: `j`, `dd`
 /// and `zc` see folds only.
 pub fn of(folds: &Folds, laid_out: &[Range<usize>]) -> Hidden {
     Hidden::from_ranges(folds.ranges().chain(laid_out.iter().map(|b| b.start + 1..b.end)))
@@ -110,6 +110,41 @@ pub fn math_blocks(blocks: &BlockCache) -> &[Range<usize>] {
     blocks.closed_math.get_or_init(|| scan(blocks))
 }
 
+/// Closed fences whose first info-string token is `mermaid`, in source order.
+/// Each range includes both delimiters. The classifier decides which lines
+/// open and close a fence, including inside list items.
+pub fn mermaid_blocks(blocks: &BlockCache) -> &[Range<usize>] {
+    blocks.closed_mermaid.get_or_init(|| {
+        let mut found = Vec::new();
+        let mut start = None;
+        for (line, kind) in blocks.kinds.iter().enumerate() {
+            match kind {
+                BlockKind::FenceOpen(info) => {
+                    start = (info.split_whitespace().next() == Some("mermaid")).then_some(line);
+                }
+                BlockKind::FenceClose => {
+                    if let Some(start) = start.take() {
+                        found.push(start..line + 1);
+                    }
+                }
+                BlockKind::FenceBody { .. } => {}
+                _ => start = None,
+            }
+        }
+        found
+    })
+}
+
+/// The closed Mermaid fence holding `line`.
+pub fn mermaid_block_at(blocks: &BlockCache, line: usize) -> Option<Range<usize>> {
+    match blocks.kinds.get(line)? {
+        BlockKind::FenceOpen(_) | BlockKind::FenceBody { .. } | BlockKind::FenceClose => {
+            block_at(mermaid_blocks(blocks), line)
+        }
+        _ => None,
+    }
+}
+
 /// The closed display math block holding `line`, if there is one: a binary
 /// search of `math_blocks`.
 ///
@@ -120,7 +155,10 @@ pub fn math_block_at(blocks: &BlockCache, line: usize) -> Option<Range<usize>> {
     if blocks.kinds.get(line) != Some(&BlockKind::MathBlock) {
         return None;
     }
-    let found = math_blocks(blocks);
+    block_at(math_blocks(blocks), line)
+}
+
+fn block_at(found: &[Range<usize>], line: usize) -> Option<Range<usize>> {
     let i = found.partition_point(|b| b.end <= line);
     found.get(i).filter(|b| b.start <= line).cloned()
 }
@@ -193,6 +231,71 @@ mod tests {
         b.insert_exact(crate::text::cursor::Cursor::new(0, 0), text);
         let c = BlockCache::build(&b, true, 4);
         (math_blocks(&c).to_vec(), c)
+    }
+
+    #[test]
+    fn mermaid_discovery_uses_classified_fence_boundaries() {
+        let mut b = Buffer::empty();
+        b.insert_str(
+            crate::text::cursor::Cursor::new(0, 0),
+            concat!(
+                "````mermaid title\n```\n~~~~\n`````\n",
+                "10. item\n    ~~~ mermaid\n    graph TD\n    ~~~~\n",
+                "````text\n```mermaid\n```\n````\n",
+                "```Mermaid\n```\n",
+                "```mermaid-extra\n```\n",
+                "> ```mermaid\n> ```\n",
+                "```mermaid\n``` trailing text",
+            ),
+        );
+        let c = BlockCache::build(&b, true, 4);
+        assert_eq!(mermaid_blocks(&c), &[0..4, 5..8]);
+        assert_eq!(mermaid_block_at(&c, 0), Some(0..4));
+        assert_eq!(mermaid_block_at(&c, 6), Some(5..8));
+        assert_eq!(mermaid_block_at(&c, 7), Some(5..8));
+        assert_eq!(mermaid_block_at(&c, 9), None);
+        assert_eq!(mermaid_block_at(&c, 19), None);
+    }
+
+    /// A fence whose only closer is indented four columns is not closed, so
+    /// it is never a diagram; three columns still close it.
+    #[test]
+    fn an_over_indented_closer_leaves_the_mermaid_fence_open() {
+        let mut b = Buffer::empty();
+        b.insert_str(crate::text::cursor::Cursor::new(0, 0), "~~~mermaid\ngraph TD\nA-->B\n    ~~~");
+        assert!(mermaid_blocks(&BlockCache::build(&b, true, 4)).is_empty());
+        let mut b = Buffer::empty();
+        b.insert_str(crate::text::cursor::Cursor::new(0, 0), "~~~mermaid\ngraph TD\n   ~~~");
+        assert_eq!(mermaid_blocks(&BlockCache::build(&b, true, 4)).to_vec(), vec![0..3]);
+        let mut b = Buffer::empty();
+        b.insert_str(
+            crate::text::cursor::Cursor::new(0, 0),
+            "- item\n  ```mermaid\n  graph TD\n      ```\n",
+        );
+        assert!(mermaid_blocks(&BlockCache::build(&b, true, 4)).is_empty(), "four past the item's text");
+    }
+
+    #[test]
+    fn mermaid_discovery_tracks_incremental_edits() {
+        use crate::text::cursor::Cursor;
+        let mut b = Buffer::empty();
+        b.insert_str(Cursor::new(0, 0), "```text\nflowchart TD\n``");
+        let mut c = BlockCache::build(&b, true, 4);
+        b.clear_dirty();
+        assert!(mermaid_blocks(&c).is_empty());
+
+        b.insert_str(Cursor::new(0, 0), "intro\n");
+        b.insert_str(Cursor::new(1, 3), "mermaid ");
+        b.insert_str(Cursor::new(3, 2), "`");
+        let (first, last) = b.take_dirty().unwrap();
+        c.invalidate_from(&b, first, last);
+        assert_eq!(mermaid_blocks(&c).len(), 1);
+        assert_eq!(mermaid_block_at(&c, 3), Some(1..4));
+
+        b.insert_str(Cursor::new(3, 3), " text");
+        let (first, last) = b.take_dirty().unwrap();
+        c.invalidate_from(&b, first, last);
+        assert!(mermaid_blocks(&c).is_empty());
     }
 
     /// Closed blocks, one-line blocks and blocks that run into each other are

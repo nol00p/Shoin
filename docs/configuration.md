@@ -66,7 +66,7 @@ root = "file"             # where <leader>fe / ff open: "file" (the edited
 | `[editor]` | indenting, pairs, list numbering and `Tab`, saving, autosave, autoreload, clipboard |
 | `[tree]` | file-tree options |
 | `[transclude]` | how embeds resolve and display |
-| `[markdown]` | which syntax is styled: tags, wiki links, highlight, tables, code, math; whether export follows those |
+| `[markdown]` | syntax styling, export settings, and [Mermaid previews and export](mermaid.md) |
 | `[glyphs]` | bullets, task boxes, bars and icons; `nerd_fonts = false` for plain fallbacks |
 | `[status]` | whether the status line appears, for how long, and what it shows |
 | `[hints]` | the hint bar: the keys that matter right now, in the status line's row |
@@ -106,6 +106,8 @@ The first of these that exists wins:
 4. `./shoin/` (a folder of `*.conf`)
 5. `$XDG_CONFIG_HOME/shoin/`
 6. `~/.config/shoin/`
+
+Working-directory config (steps 3 and 4) cannot enable `mermaid_renderer`.
 
 ## Details
 

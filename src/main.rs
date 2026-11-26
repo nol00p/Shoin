@@ -147,6 +147,10 @@ fn main() -> Result<()> {
     }
 
     let config = config::load(explicit.as_deref())?;
+    #[cfg(unix)]
+    if cli.render.is_some() || cli.export.is_some() {
+        watch_cli_signals()?;
+    }
 
     if cli.print_config {
         println!("{config:#?}");
@@ -214,6 +218,9 @@ fn main() -> Result<()> {
     // Batch export skips terminal setup, so errors go to stderr and the
     // command exits with a failure status.
     if let Some(src) = &cli.export {
+        for warning in config::validate(&config) {
+            eprintln!("config: {warning}");
+        }
         let format = export_format(&cli.format, cli.justify)?;
         let page = export::html::Page {
             theme: render::theme::Theme::authored(&config.theme).unwrap_or_default(),
@@ -234,7 +241,7 @@ fn main() -> Result<()> {
             match format {
                 export::Format::Text => print_out(&export::plain::render(&flat, page.measure, page.justify, &page.md))?,
                 export::Format::Html => {
-                    let (html, note) = export::html::render_math(&flat, &title, &page);
+                    let (html, note) = export::render_stdout_html(&flat, &title, &page)?;
                     if let Some(note) = note {
                         eprintln!("{note}");
                     }
@@ -248,7 +255,7 @@ fn main() -> Result<()> {
             .out
             .clone()
             .unwrap_or_else(|| export::default_path(src, format));
-        // The math note (`export::write`) goes to stderr with the path, so
+        // Export diagnostics go to stderr with the path, so
         // the export still composes in a script.
         let note = export::write(src, &dest, format, &config.transclude, &page)?;
         eprintln!("{}", dest.display());
@@ -282,7 +289,9 @@ fn main() -> Result<()> {
         app.set_zen(true);
     }
     if cli.read_only {
+        let startup = app.flash.take();
         app.set_view(true);
+        app.flash = startup.or(app.flash);
     }
 
     // The standard hook, which prints the panic message, taken before
@@ -349,6 +358,7 @@ fn main() -> Result<()> {
                 recover::restore_terminal();
                 print_panic(info);
                 recover::report();
+                finish_external_work();
                 std::process::exit(recover::signal_status());
             }
             recover::OnPanic::Wait => {
@@ -383,6 +393,7 @@ fn main() -> Result<()> {
         recover::settle();
         recover::restore_terminal();
         recover::report();
+        finish_external_work();
         std::process::exit(recover::signal_status());
     });
     let ended = app.run_loop(&mut terminal);
@@ -401,7 +412,26 @@ fn main() -> Result<()> {
     recover::restore_terminal();
     recover::report();
 
+    finish_external_work();
     ended.map(|_| ())
+}
+
+fn finish_external_work() {
+    export::shutdown();
+}
+
+#[cfg(unix)]
+fn watch_cli_signals() -> Result<()> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+
+    let mut signals = signal_hook::iterator::Signals::new([SIGHUP, SIGINT, SIGTERM])?;
+    std::thread::Builder::new().name("export-signals".into()).spawn(move || {
+        if let Some(signal) = signals.forever().next() {
+            finish_external_work();
+            std::process::exit(128 + signal);
+        }
+    })?;
+    Ok(())
 }
 
 /// `-` is stdin, as it is for most tools that take a file.

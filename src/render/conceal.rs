@@ -1476,7 +1476,7 @@ mod tests {
         // The closing fence needs the carry state that says we are inside one.
         let close = shown_in(
             "```",
-            &Carry::from(Open::InFence { fence: "```".into(), lang: None, cont: Default::default() }),
+            &Carry::from(Open::InFence { fence: "```".into(), lang: None, cont: Default::default(), base: 0 }),
         );
         assert_eq!(display_width(&close), MEASURE);
     }

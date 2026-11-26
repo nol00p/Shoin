@@ -91,3 +91,79 @@ fn perf_large_doc() {
         assert!(took < limit, "{what} took {took:?} at 100,000 lines");
     }
 }
+
+/// `j` in prose above hundreds of Mermaid fences: each move changes the
+/// active line, so the row index is rebuilt, and that must not read every
+/// fence body again. The fences are never on screen, and the renderer is
+/// a path with nothing there, so no diagram is drawn: what is timed is the
+/// row index's walk over them, against the same document with no renderer.
+#[test]
+#[ignore]
+fn perf_mermaid_fences() {
+    let fence = format!("```mermaid\nflowchart TD\n{}```\n\n", "  Alpha --> Beta[\"a longer label\"]\n".repeat(40));
+    let doc = format!("{}{}", "prose line\n".repeat(200), fence.repeat(500));
+    let time = |renderer: Option<&str>| {
+        let mut config = crate::config::Config::default();
+        config.layout.conceal = true;
+        config.markdown.mermaid_renderer = renderer.map(Into::into);
+        let mut app = crate::test_support::app_with_config(&doc, config);
+        app.term_size = (100, 40);
+        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        app.refresh_blocks();
+        term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+        let indexes = app.cache.borrow().indexes();
+        let moved = median((0..41).map(|_| keystroke(&mut app, &mut term, KeyCode::Char('j'))).collect());
+        assert!(app.cache.borrow().indexes() >= indexes + 41, "each move rebuilt the row index");
+        moved
+    };
+    let without = time(None);
+    let with = time(Some("/nonexistent/shoin-perf-merman"));
+    eprintln!("perf_mermaid_fences: j over 500 offscreen fences, median {with:?}; no renderer {without:?}");
+    if !cfg!(debug_assertions) {
+        assert!(with < without * 2 + Duration::from_micros(200), "j cost {with:?} against {without:?}");
+    }
+}
+
+/// A very long wrapped paragraph whose last rows are at the top of the
+/// pane, with the cursor in the prose under it and no Mermaid: each frame
+/// keeps the view's top where it was in the text, and that must cost what
+/// the rows on screen cost, not what the paragraph's length does. A redraw
+/// and a `j` `k` there are timed.
+///
+/// ```sh
+/// cargo test --release -- --ignored perf_long_wrapped_top --nocapture
+/// ```
+#[test]
+#[ignore]
+fn perf_long_wrapped_top() {
+    let para = "Some *emphasis* and a [link](x) in a very long paragraph. ".repeat(20_000);
+    let doc = format!("{para}\n{}", "prose line\n".repeat(20));
+    let mut config = crate::config::Config::default();
+    config.layout.conceal = true;
+    let mut app = crate::test_support::app_with_config(&doc, config);
+    app.term_size = (100, 40);
+    let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    app.refresh_blocks();
+    term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+    keystroke(&mut app, &mut term, KeyCode::Char('G'));
+    let top = |app: &App| app.focused_pane().unwrap().scroll.get();
+    let line = |app: &App| app.cache.borrow().row(top(app)).unwrap().line();
+    assert_eq!(line(&app), 0, "the paragraph's last rows are on top");
+    assert!(top(&app) > 1000, "far into it");
+    let redraw = median(
+        (0..41)
+            .map(|_| {
+                let t = Instant::now();
+                term.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+                t.elapsed()
+            })
+            .collect(),
+    );
+    let moved = median(
+        (0..41)
+            .map(|i| keystroke(&mut app, &mut term, KeyCode::Char(if i % 2 == 0 { 'k' } else { 'j' })))
+            .collect(),
+    );
+    assert_eq!(line(&app), 0, "and stay there");
+    eprintln!("perf_long_wrapped_top: redraw median {redraw:?}, j/k median {moved:?}");
+}

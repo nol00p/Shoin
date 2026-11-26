@@ -349,7 +349,7 @@ pub fn write_text(path: &Path, text: &str, line_ending: LineEnding) -> Result<Sy
 /// the system follows one, up to [`MAX_LINKS`]: past that it is a loop, and
 /// an error. A folder on the way that is missing is left to the write to
 /// report: no folder is made.
-fn through_links(path: &Path) -> Result<PathBuf> {
+pub(crate) fn through_links(path: &Path) -> Result<PathBuf> {
     if !path.is_symlink() {
         return Ok(path.to_path_buf());
     }
