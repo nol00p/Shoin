@@ -1074,9 +1074,9 @@ fn undo_splits_an_insert_session_at_word_boundaries() {
     let mut app = app_with("");
     feed(&mut app, "ihello world");
     esc(&mut app);
-    assert_eq!(text(&app), "hello world");
+    assert_eq!(text(&app), "hello world\n");
     feed(&mut app, "u");
-    assert_eq!(text(&app), "hello");
+    assert_eq!(text(&app), "hello\n");
     feed(&mut app, "u");
     assert_eq!(text(&app), "");
 }
@@ -1250,6 +1250,24 @@ fn diff_on_a_matching_file_opens_nothing() {
     app.open_diff();
     assert!(app.diff.is_none());
     assert!(flash_text(&app).contains("matches the file"), "got: {}", flash_text(&app));
+    let _ = std::fs::remove_file(path);
+}
+
+/// A carriage return the file holds before a newline, in a file of LF
+/// lines, is the line's own character: a merge keeps it, as `:w` would.
+#[test]
+fn diff_keeps_a_literal_carriage_return() {
+    let path = saved_file(&mut app_with("draft\n"), "diff-cr");
+    write_settled(&path, "a\nb\r\n");
+    let mut app = App::new(Config::default(), Some(path.clone()), None).unwrap();
+    feed(&mut app, "GoZ");
+    esc(&mut app);
+    write_settled(&path, "c\na\nb\r\n");
+    app.open_diff();
+    assert!(app.diff.is_some(), "the files differ");
+    diff_key(&mut app, 'b');
+    diff_key(&mut app, 'w');
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "c\na\nb\r\nZ\n");
     let _ = std::fs::remove_file(path);
 }
 
@@ -1740,7 +1758,7 @@ fn a_file_written_this_instant_waits_for_the_next_poll() {
     f.set_modified(std::time::SystemTime::now() - Duration::from_secs(5)).unwrap();
     drop(f);
     assert!(app.check_disk());
-    assert_eq!(text(&app), "half-writ");
+    assert_eq!(text(&app), "half-writ\n", "its one line, no final newline on disk");
     let _ = std::fs::remove_file(path);
 }
 
@@ -1814,6 +1832,35 @@ fn revert_takes_the_file_but_only_with_a_bang() {
     assert!(!app.buffer.conflict);
     assert!(flash_text(&app).contains("reverted"), "got: {}", flash_text(&app));
     let _ = std::fs::remove_file(path);
+}
+
+/// `:revert!` of a modified buffer whose lines match the file's, the
+/// file having changed only in its final newline, marks it clean: it
+/// holds the file's lines and takes the file's flag, so `:q` quits and
+/// `:w` writes the file's bytes. Either way round, and the same when the
+/// lines matched all along.
+#[test]
+fn revert_marks_clean_when_only_the_final_newline_differs() {
+    for (before, after) in [("abc", "abc\n"), ("abc\n", "abc"), ("abc\n", "abc\n")] {
+        let path = saved_file(&mut app_with("draft\n"), "revert-eol");
+        write_settled(&path, before);
+        let mut app = App::new(Config::default(), Some(path.clone()), None).unwrap();
+        feed(&mut app, "iX");
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        esc(&mut app);
+        assert!(app.buffer.modified, "{before:?}: an edit, undone by hand");
+        write_settled(&path, after);
+        app.check_disk();
+        ex(&mut app, "revert!");
+        assert!(!app.buffer.modified, "{before:?} → {after:?}: clean after :revert!");
+        assert!(!app.buffer.conflict, "{before:?} → {after:?}");
+        assert_eq!(app.buffer.final_newline, after.ends_with('\n'), "{before:?} → {after:?}");
+        ex(&mut app, "w");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after, "{before:?} → {after:?}");
+        ex(&mut app, "q");
+        assert!(app.quit, "{before:?} → {after:?}: `:q` quits");
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// A conflicted buffer is skipped by autosave. The guard would refuse it
@@ -2057,7 +2104,12 @@ fn saving_after_deletion_matches_neovim_at_eof() {
                 }
                 let case = (before, policy, autosave);
                 assert_eq!(std::fs::read(&path).unwrap(), want.as_bytes(), "{case:?}");
-                assert_eq!(text(&app), want.replace("\r\n", "\n"), "{case:?}");
+                // The buffer keeps its lines, each with its newline: the
+                // final one is the bytes' only when the file gets one.
+                let eol = policy == "always" || (policy == "preserve" && before.ends_with('\n'));
+                let lines = want.replace("\r\n", "\n");
+                let lines = if empty || eol { lines } else { format!("{lines}\n") };
+                assert_eq!(text(&app), lines, "{case:?}");
                 assert!(!app.buffer.modified, "{case:?}");
             }
         }
@@ -2259,7 +2311,7 @@ fn the_escape_alias_leaves_insert_mode() {
     let mut app = app_with("");
     feed(&mut app, "i");
     feed(&mut app, "j");
-    assert_eq!(text(&app), "j", "the first character lands immediately");
+    assert_eq!(text(&app), "j\n", "the first character lands immediately");
     assert!(matches!(app.mode, Mode::Insert));
 
     feed(&mut app, "k");
@@ -2274,7 +2326,7 @@ fn the_escape_alias_leaves_insert_mode() {
 fn the_escape_alias_leaves_ordinary_typing_alone() {
     let mut app = app_with("");
     feed(&mut app, "ijazz");
-    assert_eq!(text(&app), "jazz");
+    assert_eq!(text(&app), "jazz\n");
     assert!(matches!(app.mode, Mode::Insert), "no k followed the j");
 
     // A word ending in `j` then a Backspace then `k` is not the sequence.
@@ -2283,7 +2335,7 @@ fn the_escape_alias_leaves_ordinary_typing_alone() {
     app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
     app.sync_after_input();
     feed(&mut app, "k");
-    assert_eq!(text(&app), "k");
+    assert_eq!(text(&app), "k\n");
     assert!(matches!(app.mode, Mode::Insert), "backspace broke the run");
 }
 
@@ -2294,7 +2346,7 @@ fn the_escape_alias_times_out_between_characters() {
     let mut app = app_with("");
     app.config.input.sequence_timeout_ms = 0;
     feed(&mut app, "ijk");
-    assert_eq!(text(&app), "jk", "a lapsed run is just typing");
+    assert_eq!(text(&app), "jk\n", "a lapsed run is just typing");
     assert!(matches!(app.mode, Mode::Insert));
 }
 
@@ -2304,7 +2356,7 @@ fn an_empty_escape_alias_is_off() {
     let mut app = app_with("");
     app.config.input.escape_alias = String::new();
     feed(&mut app, "ijk");
-    assert_eq!(text(&app), "jk");
+    assert_eq!(text(&app), "jk\n");
     assert!(matches!(app.mode, Mode::Insert));
 }
 
@@ -2323,7 +2375,7 @@ fn the_insert_keymap_is_consulted() {
     app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
     app.sync_after_input();
     assert!(matches!(app.mode, Mode::Normal), "the bound chord ran");
-    assert_eq!(text(&app), "ab", "and typed nothing");
+    assert_eq!(text(&app), "ab\n", "and typed nothing");
 }
 
 /// An UNBOUND control chord types nothing. Crossterm delivers `<C-a>` as
@@ -2345,13 +2397,13 @@ fn auto_pair_closes_and_steps_over() {
     let mut app = app_with("");
     app.config.editor.auto_pair = true;
     feed(&mut app, "i(");
-    assert_eq!(text(&app), "()");
+    assert_eq!(text(&app), "()\n");
     assert_eq!(app.buffer.cursor.col, 1, "cursor sits between them");
 
     feed(&mut app, "x");
-    assert_eq!(text(&app), "(x)");
+    assert_eq!(text(&app), "(x)\n");
     feed(&mut app, ")");
-    assert_eq!(text(&app), "(x)", "typing the closer steps over it");
+    assert_eq!(text(&app), "(x)\n", "typing the closer steps over it");
     assert_eq!(app.buffer.cursor.col, 3);
 
     // Backspace between an empty pair takes both.
@@ -2360,7 +2412,7 @@ fn auto_pair_closes_and_steps_over() {
     feed(&mut app, "i[");
     app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
     app.sync_after_input();
-    assert_eq!(text(&app), "");
+    assert_eq!(text(&app), "\n", "the line typed on stays, empty");
 }
 
 /// The reason it is off by default: prose is full of unmatched quotes. An
@@ -2370,12 +2422,12 @@ fn auto_pair_leaves_prose_punctuation_alone() {
     let mut app = app_with("");
     app.config.editor.auto_pair = true;
     feed(&mut app, "idon't");
-    assert_eq!(text(&app), "don't", "an apostrophe after a word is punctuation");
+    assert_eq!(text(&app), "don't\n", "an apostrophe after a word is punctuation");
 
     let mut app = app_with("");
     app.config.editor.auto_pair = true;
     feed(&mut app, "i\"hi");
-    assert_eq!(text(&app), "\"hi\"", "…but an opening quote still pairs");
+    assert_eq!(text(&app), "\"hi\"\n", "…but an opening quote still pairs");
 }
 
 /// Nothing pairs directly in front of a word — that would split it.
@@ -2393,7 +2445,7 @@ fn auto_pair_is_off_unless_asked_for() {
     let mut app = app_with("");
     assert!(!app.config.editor.auto_pair);
     feed(&mut app, "i(");
-    assert_eq!(text(&app), "(");
+    assert_eq!(text(&app), "(\n");
 }
 
 /// `editor.auto_indent` is described as continuing list markers and quote
@@ -3069,7 +3121,7 @@ fn fixlist_in_insert_is_one_step_and_keeps_the_session_grouped() {
     let mut cfg = Config::default();
     cfg.keys.insert.insert("<C-l>".into(), "fix_list".into());
     let mut app = App::new(cfg, None, None).unwrap();
-    app.buffer.insert_str(Cursor::new(0, 0), &t);
+    app.buffer.insert_exact(Cursor::new(0, 0), &t);
     app.buffer.cursor = Cursor::new(9, 0);
     app.blocks = BlockCache::build(&app.buffer, app.config.markdown.math, app.config.editor.tab_width);
     feed(&mut app, "Axy");
@@ -4306,8 +4358,9 @@ fn dap_on_the_last_paragraph_takes_the_blank_lines_before_it() {
     assert_eq!(text(&app), "x\n");
 }
 
-/// Insert mode may still sit on the line an Enter at the very end opens,
-/// where there was no trailing newline to begin with.
+/// Insert mode may still sit on the line an Enter at the very end opens:
+/// in an empty text the first line typed gets its newline, so the new one
+/// is a line of its own.
 #[test]
 fn insert_mode_can_type_on_the_line_after_the_last_newline() {
     let mut app = app_with("");
@@ -4316,7 +4369,7 @@ fn insert_mode_can_type_on_the_line_after_the_last_newline() {
     app.sync_after_input();
     assert_eq!(app.buffer.cursor.line, 1, "not clamped back while inserting");
     feed(&mut app, "b");
-    assert_eq!(text(&app), "a\nb");
+    assert_eq!(text(&app), "a\nb\n");
 }
 
 /// Trailing whitespace after the last word still goes, as in vim.
@@ -7605,7 +7658,7 @@ fn a_refused_window_key_in_insert_stays_out_of_the_session() {
     ctrl(&mut app, 'g');
     feed(&mut app, "c");
     esc(&mut app);
-    assert_eq!(text(&app), "abc");
+    assert_eq!(text(&app), "abc\n");
     assert_eq!(dot_keys(&app), "iabc<Esc>");
 }
 
@@ -9780,19 +9833,47 @@ type NvCase = (&'static str, &'static str, (usize, usize), Option<(usize, usize)
 
 /// A fresh app on `text` with a 30-row window, after `keys`: plain
 /// characters, but `\t` is the Tab key, `\r` Enter, `\u{1b}` Esc, `\u{8}`
-/// Backspace and `\u{12}` Ctrl-r.
+/// Backspace, `\u{12}` Ctrl-r, `\u{3}` Ctrl-c, the arrows `←` `↑` `→` `↓` the arrow keys,
+/// `⇱` Home and `⇲` End. The text starts unmodified, as a file just read.
 fn nv_keys(cfg: Config, text: &str, keys: &str) -> App {
     let mut app = app_with_config(text, cfg);
     app.buffer.history = Default::default();
+    app.buffer.modified = false;
     app.term_size = (80, 30);
+    nv_type(&mut app, keys);
+    app
+}
+
+/// [`nv_keys`] on a file with no final newline: `text`'s lines, each with
+/// its newline as a file's are once read, and `final_newline` off.
+fn nv_noeol_keys(text: &str, keys: &str) -> App {
+    let mut app = nv_keys(Config::default(), &format!("{text}\n"), "");
+    app.buffer.final_newline = false;
+    nv_type(&mut app, keys);
+    app
+}
+
+/// Type `keys` as [`nv_keys`] spells them.
+fn nv_type(app: &mut App, keys: &str) {
+    let app = &mut *app;
     for c in keys.chars() {
         let code = match c {
             '\t' => KeyCode::Tab,
             '\r' => KeyCode::Enter,
             '\u{1b}' => KeyCode::Esc,
             '\u{8}' => KeyCode::Backspace,
+            '←' => KeyCode::Left,
+            '↑' => KeyCode::Up,
+            '→' => KeyCode::Right,
+            '↓' => KeyCode::Down,
+            '⇱' => KeyCode::Home,
+            '⇲' => KeyCode::End,
             '\u{12}' => {
-                ctrl(&mut app, 'r');
+                ctrl(app, 'r');
+                continue;
+            }
+            '\u{3}' => {
+                ctrl(app, 'c');
                 continue;
             }
             c => KeyCode::Char(c),
@@ -9800,15 +9881,19 @@ fn nv_keys(cfg: Config, text: &str, keys: &str) -> App {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
         app.sync_after_input();
     }
-    app
 }
 
 /// Run each case on a fresh app and list every one that differs from
 /// Neovim, so one run shows them all.
 fn nv_misses(cfg: impl Fn() -> Config, text: &str, cases: &[NvCase]) -> Vec<String> {
+    nv_misses_on(|keys| nv_keys(cfg(), text, keys), cases)
+}
+
+/// [`nv_misses`] with each case's app from `run(keys)`.
+fn nv_misses_on(run: impl Fn(&str) -> App, cases: &[NvCase]) -> Vec<String> {
     let mut misses = Vec::new();
     for &(keys, want_text, want, then, reg) in cases {
-        let mut app = nv_keys(cfg(), text, keys);
+        let mut app = run(keys);
         let got_text = app.buffer.rope.to_string();
         let got = (app.buffer.cursor.line, app.buffer.cursor.col);
         let got_reg = app.registers.get(&'"').map(|r| (r.text.clone(), r.linewise));
@@ -10380,5 +10465,430 @@ fn search_and_substitute_set_the_goal_as_neovim() {
         (":s/foo/b/\rj$&xj", "zb zzzz\nzb zzzzz\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 7)), Some(("z", false))),
         (":s/foo/b/\rj$:&&\rrXj", "zb zzzz\nzb zzzzzX\nab\nxyzxyzxyzxyz\n", (2, 1), Some((3, 8)), None),
     ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// One case where the undo state matters: keys, the whole text after them,
+/// the cursor, and whether the text counts as modified.
+type NvUndoCase = (&'static str, &'static str, (usize, usize), bool);
+
+/// `nv_misses` for [`NvUndoCase`]s: text, cursor and the modified flag.
+fn nv_undo_misses(text: &str, cases: &[NvUndoCase]) -> Vec<String> {
+    let mut misses = Vec::new();
+    for &(keys, want_text, want, modified) in cases {
+        let app = nv_keys(Config::default(), text, keys);
+        let got_text = app.buffer.rope.to_string();
+        let got = (app.buffer.cursor.line, app.buffer.cursor.col);
+        let mut wrong = Vec::new();
+        if got_text != want_text {
+            wrong.push(format!("text {got_text:?}, Neovim {want_text:?}"));
+        }
+        if got != want {
+            wrong.push(format!("cursor {got:?}, Neovim {want:?}"));
+        }
+        if app.buffer.modified != modified {
+            wrong.push(format!("modified {}, Neovim {modified}", app.buffer.modified));
+        }
+        if !wrong.is_empty() {
+            misses.push(format!("{keys:?}: {}", wrong.join("; ")));
+        }
+    }
+    misses
+}
+
+/// A new empty last line in a file with no final newline stays, with the
+/// cursor on it, as Neovim's: `o` `Esc`, `A` `Enter` `Esc`, a count, `.`,
+/// an indent Enter laid down and Esc took back. It is a line like any
+/// other; whether the file ends in a newline is `final_newline`'s, which
+/// only the bytes written follow (`saving_at_the_end_of_a_file_writes_what_neovim_writes`).
+#[test]
+fn a_new_empty_last_line_without_a_final_newline_stays_as_neovim() {
+    let noeol = |text: &'static str| move |keys: &str| nv_noeol_keys(text, keys);
+    let mut misses = nv_misses_on(noeol("abc"), &[
+        ("o\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("A\r\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("O\u{1b}", "\nabc\n", (0, 0), Some((1, 0)), None),
+        ("o\u{1b}x", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("o\u{1b}k", "abc\n\n", (0, 0), Some((1, 0)), None),
+        ("ox\u{8}\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("ox\r\u{1b}", "abc\nx\n\n", (2, 0), Some((2, 0)), None),
+        ("ox\ry\u{8}\u{8}\u{1b}", "abc\nx\n", (1, 0), Some((1, 0)), None),
+        ("ox\u{1b}", "abc\nx\n", (1, 0), Some((1, 0)), None),
+        ("A\r\r\u{1b}", "abc\n\n\n", (2, 0), Some((2, 0)), None),
+        ("o\u{1b}.", "abc\n\n\n", (2, 0), Some((2, 0)), None),
+        ("3o\u{1b}", "abc\n\n\n\n", (3, 0), Some((3, 0)), None),
+        ("o\u{1b}kA\r\u{1b}", "abc\n\n\n", (1, 0), Some((2, 0)), None),
+        ("o↑\u{1b}", "abc\n\n", (0, 0), Some((1, 0)), None),
+        ("A\r↑\u{1b}", "abc\n\n", (0, 0), Some((1, 0)), None),
+        ("o\u{1b}u", "abc\n", (0, 0), Some((0, 0)), None),
+    ]);
+    misses.extend(nv_misses_on(noeol("  abc"), &[
+        ("A\r\u{1b}", "  abc\n\n", (1, 0), Some((1, 0)), None),
+        ("A\r\u{1b}k", "  abc\n\n", (0, 2), Some((1, 0)), None),
+    ]));
+    misses.extend(nv_misses_on(noeol("abc\nxyz"), &[
+        ("jo\u{1b}", "abc\nxyz\n\n", (2, 0), Some((2, 0)), None),
+        ("jA\r\u{1b}", "abc\nxyz\n\n", (2, 0), Some((2, 0)), None),
+    ]));
+    misses.extend(nv_misses(Config::default, "abc\n", &[
+        ("o\u{1b}", "abc\n\n", (1, 0), Some((1, 0)), None),
+        ("A→\u{1b}", "abc\n", (0, 2), Some((0, 2)), None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// Bytes on disk, keys typed into the file opened from them, then the
+/// bytes a `:w` writes with Neovim's `nofixeol` (Shoin's `preserve`) and
+/// `fixeol` (`always`), and Neovim's cursor after it. The keys may hold
+/// `:` commands, saves among them.
+type EofCase = (&'static str, &'static str, [&'static str; 2], (usize, usize));
+
+/// The end of a file, as Neovim models it: lines, and a flag for whether
+/// the last one ends in a newline. A new empty last line is a line like
+/// any other, however it was made, and a save writes the bytes the flag
+/// and the policy give, leaving the lines as they are: `o<Esc>:w` then
+/// `Aq<Esc>:w` writes `abc\nq`. Every value is Neovim's.
+const EOF_SAVES: &[EofCase] = &[
+    ("abc", "o\u{1b}", ["abc\n", "abc\n\n"], (1, 0)),
+    ("abc", "o\u{1b}:w\rAq\u{1b}", ["abc\nq", "abc\nq\n"], (1, 0)),
+    ("x\nabc", "GccX\u{1b}", ["x\nX", "x\nX\n"], (1, 0)),
+    ("abc", "A\r\u{1b}", ["abc\n", "abc\n\n"], (1, 0)),
+    ("abc", "O\u{1b}", ["\nabc", "\nabc\n"], (0, 0)),
+    ("abc", "ox\r\u{1b}", ["abc\nx\n", "abc\nx\n\n"], (2, 0)),
+    ("abc", "3o\u{1b}", ["abc\n\n\n", "abc\n\n\n\n"], (3, 0)),
+    ("abc", "o↑\u{1b}", ["abc\n", "abc\n\n"], (0, 0)),
+    ("  abc", "A\r\u{1b}", ["  abc\n", "  abc\n\n"], (1, 0)),
+    ("abc\n", "o\u{1b}", ["abc\n\n", "abc\n\n"], (1, 0)),
+    ("", "o\u{1b}", ["\n\n", "\n\n"], (1, 0)),
+    ("", "ix\r\u{1b}", ["x\n\n", "x\n\n"], (1, 0)),
+    ("", "ix\u{8}\u{1b}", ["\n", "\n"], (0, 0)),
+    ("", "ix\u{1b}", ["x\n", "x\n"], (0, 0)),
+    ("", "ix\u{1b}u", ["", ""], (0, 0)),
+    ("", "", ["", ""], (0, 0)),
+    ("abc", "o\u{1b}xu", ["abc\n", "abc\n\n"], (1, 0)),
+    ("abc", "yyp", ["abc\nabc", "abc\nabc\n"], (1, 0)),
+    ("abc", ":t $\r", ["abc\nabc", "abc\nabc\n"], (1, 0)),
+    ("abc", ":s/c/c\\r/\r", ["abc\n", "abc\n\n"], (1, 0)),
+    ("abc", "vlcX⇲\r\u{1b}", ["Xc\n", "Xc\n\n"], (1, 0)),
+    ("abc", "cc\u{1b}", ["", "\n"], (0, 0)),
+    ("abc", "dd", ["", ""], (0, 0)),
+    ("", "yyp", ["\n\n", "\n\n"], (1, 0)),
+    ("abc", "$r\r", ["ab\n", "ab\n\n"], (1, 0)),
+    ("abc", "o\u{1b}:w\ru", ["abc", "abc\n"], (0, 0)),
+    ("abc", "ggdGix\u{1b}", ["x", "x\n"], (0, 0)),
+    ("a\r\nb", "o\u{1b}", ["a\r\n\r\nb", "a\r\n\r\nb\r\n"], (1, 0)),
+    ("a\r\nb", "Gdd", ["a", "a\r\n"], (0, 0)),
+    ("abc", "ccX\r\u{1b}", ["X\n", "X\n\n"], (1, 0)),
+    ("abc", "Vc\r\u{1b}", ["\n", "\n\n"], (1, 0)),
+    ("abc", "o\u{1b}kJ", ["abc", "abc\n"], (0, 2)),
+    ("abc\n\n", "GJ", ["abc\n\n", "abc\n\n"], (1, 0)),
+    ("abc", "o\u{1b}dd", ["abc", "abc\n"], (0, 0)),
+    ("abc", "Go\u{1b}:1d\r", ["", "\n"], (0, 0)),
+    ("", "2ix\u{1b}", ["xx\n", "xx\n"], (0, 1)),
+    ("", "2ax\u{1b}", ["xx\n", "xx\n"], (0, 1)),
+    ("", "2Ax\u{1b}", ["xx\n", "xx\n"], (0, 1)),
+    ("", "3ix\r\u{1b}", ["x\nx\nx\n\n", "x\nx\nx\n\n"], (3, 0)),
+    ("", "c$x\r\u{1b}", ["x\n\n", "x\n\n"], (1, 0)),
+    ("abc\r", "AX\u{1b}", ["abc\rX", "abc\rX\n"], (0, 4)),
+    ("a\nb\r\n", "GAX\u{1b}", ["a\nb\rX\n", "a\nb\rX\n"], (1, 2)),
+    ("abc\r\ndef\r", "GAX\u{1b}", ["abc\r\ndef\rX", "abc\r\ndef\rX\r\n"], (1, 4)),
+];
+
+/// Each [`EOF_SAVES`] case, from a file, under `preserve` and `always`:
+/// the bytes written, the cursor, and a clean buffer after the save.
+#[test]
+fn saving_at_the_end_of_a_file_writes_what_neovim_writes() {
+    let path = saved_file(&mut app_with("draft\n"), "eof-saves");
+    let mut misses = Vec::new();
+    for &(before, keys, expected, cursor) in EOF_SAVES {
+        for (policy, want) in ["preserve", "always"].into_iter().zip(expected) {
+            std::fs::write(&path, before).unwrap();
+            let mut cfg = Config::default();
+            cfg.editor.final_newline = policy.into();
+            let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+            app.term_size = (80, 30);
+            nv_type(&mut app, keys);
+            ex(&mut app, "w");
+            let got = std::fs::read_to_string(&path).unwrap();
+            let at = (app.buffer.cursor.line, app.buffer.cursor.col);
+            let case = format!("{before:?} {keys:?} {policy}");
+            if got != want {
+                misses.push(format!("{case}: wrote {got:?}, Neovim {want:?}"));
+            }
+            if at != cursor {
+                misses.push(format!("{case}: cursor {at:?}, Neovim {cursor:?}"));
+            }
+            if app.buffer.modified {
+                misses.push(format!("{case}: modified after the save"));
+            }
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A change in a selection the mouse made, at the end of a file with no
+/// final newline, keeps the empty last line its Enter opened, as a
+/// selection made with `v` does (Neovim's `vlcX<End><CR><Esc>`).
+#[test]
+fn a_dragged_change_keeps_a_new_last_line() {
+    let path = saved_file(&mut app_with("draft\n"), "eof-drag");
+    for (policy, want) in [("preserve", "Xc\n"), ("always", "Xc\n\n")] {
+        std::fs::write(&path, "abc").unwrap();
+        let mut cfg = Config::default();
+        cfg.editor.final_newline = policy.into();
+        let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+        app.term_size = (60, 12);
+        let row = (0..12).find(|&r| {
+            press(&mut app, 30, r);
+            app.buffer.cursor.line == 0 && app.buffer.cursor.col == 2
+        });
+        let row = row.expect("a row that holds line 0");
+        let col = (0..60).find(|&c| {
+            press(&mut app, c + 1, row);
+            app.buffer.cursor.col == 1
+        });
+        let col = col.expect("the column of `a`");
+        press(&mut app, col, row);
+        drag(&mut app, col + 1, row);
+        release(&mut app, col + 1, row);
+        assert_eq!(app.mode, Mode::Visual, "{policy}");
+        nv_type(&mut app, "cX⇲\r\u{1b}");
+        assert_eq!(text(&app).trim_end_matches('\n'), "Xc", "{policy}");
+        assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), (1, 0), "{policy}");
+        ex(&mut app, "w");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{policy}");
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+/// A redo list that holds only steps which changed no text (`x` on an
+/// empty line, then `u`) does not stop a save from leaving the buffer
+/// clean, with or without the edits `trim_on_save` takes.
+#[test]
+fn a_redo_of_unchanged_steps_does_not_keep_a_save_modified() {
+    let path = saved_file(&mut app_with("draft\n"), "redo-noop");
+    for (before, keys, trim, want) in [
+        ("abc", "o\u{1b}xu", false, "abc\n"),
+        ("abc  \n\nz\n", "jxu", true, "abc\n\nz\n"),
+    ] {
+        std::fs::write(&path, before).unwrap();
+        let mut cfg = Config::default();
+        cfg.editor.trim_on_save = trim;
+        let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+        app.term_size = (80, 30);
+        nv_type(&mut app, keys);
+        ex(&mut app, "w");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{keys:?}");
+        assert!(!app.buffer.modified, "{keys:?}: clean after the save");
+        ex(&mut app, "q");
+        assert!(app.quit, "{keys:?}: `:q` quits");
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+/// The indent an Enter lays down goes when nothing is typed after it and
+/// the session ends (`Esc`, `Ctrl-c`), another Enter comes or the cursor
+/// moves to another line; anything typed, a space too, keeps it, and so
+/// does moving along the line. As Neovim's 'autoindent'.
+#[test]
+fn an_unused_autoindent_goes_as_neovim() {
+    let mut misses = nv_misses(Config::default, "  abc\n", &[
+        ("A\r \u{1b}", "  abc\n   \n", (1, 2), None, None),
+        ("A\r \r\u{1b}", "  abc\n   \n\n", (2, 0), None, None),
+        ("A\r\r\u{1b}", "  abc\n\n\n", (2, 0), None, None),
+        ("A\rx\u{8}\u{1b}", "  abc\n  \n", (1, 1), None, None),
+        ("A\r\u{3}", "  abc\n\n", (1, 0), None, None),
+        ("A\r↑\u{1b}", "  abc\n\n", (0, 1), None, None),
+        ("A\r↑\u{3}", "  abc\n\n", (0, 1), None, None),
+        ("A\r↑↓x\u{1b}", "  abc\nx\n", (1, 0), None, None),
+        ("A\r←x\u{1b}", "  abc\n x \n", (1, 1), None, None),
+        ("A\r←\u{1b}", "  abc\n  \n", (1, 0), None, None),
+        ("A\r⇱\u{1b}", "  abc\n  \n", (1, 0), None, None),
+        ("A\r⇲\u{1b}", "  abc\n  \n", (1, 1), None, None),
+        ("A\r←↑\u{1b}", "  abc\n  \n", (0, 0), None, None),
+    ]);
+    misses.extend(nv_misses(Config::default, "  abc\nzzzz\n", &[
+        ("A\r↓\u{1b}", "  abc\n\nzzzz\n", (2, 1), None, None),
+    ]));
+    misses.extend(nv_misses(Config::default, "q\n  abc\n", &[
+        ("jA\r↑↑\u{1b}", "q\n  abc\n\n", (0, 0), None, None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// An autosave mid-insert that trims another line is no typing: the
+/// indent the Enter laid down, which the save keeps as the line being
+/// typed, is still unused, and goes at `Esc` or at a move to another
+/// line, as without the save.
+#[test]
+fn a_save_that_trims_another_line_keeps_an_unused_indent_pending() {
+    let path = saved_file(&mut app_with("draft\n"), "indent-trim");
+    for (keys, want, cursor) in [
+        ("GA\r|\u{1b}", "x\n  abc\n\n", (2, 0)),
+        ("GA\r|↑\u{1b}", "x\n  abc\n\n", (1, 1)),
+        ("GA\r|y\u{1b}", "x\n  abc\n  y\n", (2, 2)),
+    ] {
+        std::fs::write(&path, "x \n  abc\n").unwrap();
+        let mut cfg = Config::default();
+        cfg.editor.trim_on_save = true;
+        let mut app = App::new(cfg, Some(path.clone()), None).unwrap();
+        app.term_size = (80, 30);
+        let (before, after) = keys.split_once('|').unwrap();
+        nv_type(&mut app, before);
+        assert!(app.autosave_now(), "{keys:?}: autosaved");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\n  abc\n  \n", "{keys:?}: the save");
+        nv_type(&mut app, after);
+        assert_eq!(text(&app), want, "{keys:?}");
+        assert_eq!((app.buffer.cursor.line, app.buffer.cursor.col), cursor, "{keys:?}");
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+/// Held `x` on an empty line: Neovim keeps a step per press, each taking
+/// a `u` to pass, each landing on the line. Shoin keeps one step and a
+/// count, and lands the same way.
+#[test]
+fn repeated_unchanged_steps_are_counted_not_stored() {
+    let t = "a\n\nb\n";
+    let misses = nv_undo_misses(t, &[
+        ("jxxx", t, (1, 0), false),
+        ("jxxxu", t, (1, 0), false),
+        ("jxxxuu", t, (1, 0), false),
+        ("jxxxuuu", t, (1, 0), false),
+        ("jxxxjuuu", t, (1, 0), false),
+        ("jxkxjxuu", t, (0, 0), false),
+        ("jxkxjxuuu", t, (1, 0), false),
+        ("jxxxuuu\u{12}\u{12}G\u{12}", t, (1, 0), false),
+        ("ixyz\u{1b}jxxxuuuu", "a\n\nb\n", (0, 0), false),
+        ("ixyz\u{1b}jxxxuuu", "xyza\n\nb\n", (1, 0), true),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+
+    let mut app = nv_keys(Config::default(), t, "jxxxxx");
+    assert_eq!(app.buffer.history.undo_entries(), 1, "five presses, one entry");
+    feed(&mut app, "uu");
+    assert_eq!(app.buffer.history.undo_entries(), 1, "three left");
+    assert_eq!(app.buffer.history.redo_entries(), 1, "two to redo, as one");
+}
+
+/// A change on an empty line enters Insert, as Neovim's, whatever the
+/// motion: `c$`, `C`, `cl`, `cw` and the rest, `2C` as `c2$`. Undo and redo of what
+/// was typed land where Neovim's do.
+#[test]
+fn a_change_on_an_empty_line_enters_insert_as_neovim() {
+    let misses = nv_misses(Config::default, "abc\n\nxyz\n", &[
+        ("jc$Q\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jCQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jclQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jcwQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("\n", true))),
+        ("jcWQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("\n", true))),
+        ("jceQ\u{1b}", "abc\nQ\n", (1, 0), Some((1, 0)), Some(("\nxyz", false))),
+        ("jcbQ\u{1b}", "Q\n\nxyz\n", (0, 0), Some((1, 0)), Some(("abc\n", true))),
+        ("jchQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jc0Q\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jc^Q\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), None),
+        ("jciwQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jccQ\u{1b}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("\n", true))),
+        ("j2c$Q\u{1b}", "abc\nQ\n", (1, 0), Some((1, 0)), Some(("\nxyz", false))),
+        ("j2CQ\u{1b}", "abc\nQ\n", (1, 0), Some((1, 0)), Some(("\nxyz", false))),
+        ("jc$Q\u{1b}j.", "abc\nQ\nQ\n", (2, 0), Some((2, 0)), Some(("xyz", false))),
+        ("jc$Q\u{1b}u", "abc\n\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jc$Q\u{1b}u\u{12}", "abc\nQ\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+        ("jc$ Q\u{1b}u", "abc\n\nxyz\n", (1, 0), Some((2, 0)), Some(("", false))),
+    ]);
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// Insert's `End` sets the line-end goal, as Neovim's (`curswant` MAXCOL):
+/// `Up` and `Down` then go to the end of each line until a character is
+/// typed or the cursor moves along the line. `Home` sets column 0. Esc
+/// ends it, as Neovim's.
+#[test]
+fn insert_end_keeps_to_the_line_end_as_neovim() {
+    let mut misses = nv_misses(Config::default, "abcdef\nab\nabcdefgh\n", &[
+        ("ji⇲↑x\u{1b}", "abcdefx\nab\nabcdefgh\n", (0, 6), Some((1, 1)), None),
+        ("ja⇲↑x\u{1b}", "abcdefx\nab\nabcdefgh\n", (0, 6), Some((1, 1)), None),
+        ("ji⇲↓x\u{1b}", "abcdef\nab\nabcdefghx\n", (2, 8), None, None),
+        ("ji⇲↑↓↓x\u{1b}", "abcdef\nab\nabcdefghx\n", (2, 8), None, None),
+        ("ji⇲↑↑x\u{1b}", "abcdefx\nab\nabcdefgh\n", (0, 6), Some((1, 1)), None),
+        ("ji⇲\u{1b}k", "abcdef\nab\nabcdefgh\n", (0, 1), Some((1, 1)), None),
+        ("ji⇲←↑x\u{1b}", "axbcdef\nab\nabcdefgh\n", (0, 1), Some((1, 1)), None),
+        ("ji⇲y↑x\u{1b}", "abcxdef\naby\nabcdefgh\n", (0, 3), Some((1, 2)), None),
+        ("$i⇱↓x\u{1b}", "abcdef\nxab\nabcdefgh\n", (1, 0), Some((2, 0)), None),
+        ("$i⇱↓↓x\u{1b}", "abcdef\nab\nxabcdefgh\n", (2, 0), None, None),
+    ]);
+    misses.extend(nv_misses(Config::default, "  abcdef\nab\nabcdefgh\n", &[
+        ("$i⇱↓↓x\u{1b}", "  abcdef\nab\nxabcdefgh\n", (2, 0), None, None),
+    ]));
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
+}
+
+/// A case change that changes nothing (`g~w` on a space, `gUU` on capitals,
+/// `guiw` on digits, `~` on a digit) is still an undo step, as Neovim's,
+/// one that leaves the text unmodified: `u` and `Ctrl-r` take the cursor
+/// back to where the range starts. So are `x` and `X` on an empty line.
+/// `>>` and `<<` that move nothing and `r` with the same character are
+/// steps too, and Neovim counts those as modifying. `J` on the last line
+/// is no step.
+#[test]
+fn an_edit_that_changes_nothing_is_an_undo_step_as_neovim() {
+    let t = "ab cd\n\nEF\n12 x\n";
+    let misses = nv_undo_misses(t, &[
+        ("llg~w", t, (0, 2), false),
+        ("llg~w$u", t, (0, 2), false),
+        ("llg~w$u$\u{12}", t, (0, 2), false),
+        ("jjgUU", t, (2, 0), false),
+        ("jjgUUGu", t, (2, 0), false),
+        ("jjgUUGuG\u{12}", t, (2, 0), false),
+        ("jjgUUGxu", t, (3, 0), false),
+        ("jjgUUGxuu", t, (2, 0), false),
+        ("jjgUUj.", "ab cd\n\nEF\n12 X\n", (3, 0), true),
+        ("jjgUUj.uGu", t, (2, 0), false),
+        ("jlgUUGu", t, (1, 0), false),
+        ("Gguiw$u", t, (3, 0), false),
+        ("Glguiw$u$\u{12}", t, (3, 0), false),
+        ("jjvUGu", t, (2, 0), false),
+        ("jjVUGu", t, (2, 0), false),
+        ("jjv~Gu", t, (2, 0), false),
+        ("jjg~~Gu", t, (2, 0), false),
+        ("G~", t, (3, 1), false),
+        ("G~ggu", t, (3, 0), false),
+        ("G~ggu$\u{12}", t, (3, 0), false),
+        ("Gl~ggu", t, (3, 1), false),
+        ("jxGu", t, (1, 0), false),
+        ("jxGuG\u{12}", t, (1, 0), false),
+        ("j3xGu", t, (1, 0), false),
+        ("jXGu", t, (1, 0), false),
+        ("j>>", t, (1, 0), true),
+        ("j>>Gu", t, (1, 0), false),
+        ("j>>GuG\u{12}", t, (1, 0), true),
+        ("jj<<", t, (2, 0), true),
+        ("jj<<G$u", t, (2, 0), false),
+        ("jj<<G$uG$\u{12}", t, (2, 0), true),
+        ("jv>Gu", t, (1, 0), false),
+        ("jjlrF", t, (2, 1), true),
+        ("jjlrFggu", t, (2, 1), false),
+        ("jjlrFgguG\u{12}", t, (2, 1), true),
+        ("jc$\u{1b}Gu", t, (1, 0), false),
+        ("jC\u{1b}GuG\u{12}", t, (1, 0), false),
+        ("jcl\u{1b}Gu", t, (1, 0), false),
+        ("jcw\u{1b}", t, (1, 0), true),
+        ("jcw\u{1b}Gu", t, (1, 0), false),
+        ("jcc\u{1b}Gu", t, (1, 0), false),
+        ("jji\u{1b}Gu", t, (3, 0), false),
+        ("jgUiwGu", t, (1, 0), false),
+        ("jdiwGu", t, (3, 0), false),
+        ("j~Gu", t, (3, 0), false),
+        ("jd$Gu", t, (3, 0), false),
+        ("jDGu", t, (3, 0), false),
+        ("jdlGu", t, (1, 0), false),
+        ("jjdhGu", t, (2, 0), false),
+        ("jjd0Gu", t, (2, 0), false),
+        ("jgUlGu", t, (1, 0), false),
+        ("jgU$Gu", t, (1, 0), false),
+        ("GJ", t, (3, 0), false),
+        ("GJgg0u", t, (0, 0), false),
+    ]);
     assert!(misses.is_empty(), "{}", misses.join("\n"));
 }

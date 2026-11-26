@@ -78,6 +78,11 @@ impl App {
                     if self.mode == Mode::Insert && self.focus_pane != pane_before {
                         self.buffer.history.begin_group(Some(cursor));
                     }
+                    // A click off the line an unused indent is on takes it
+                    // back, as `Up` does.
+                    if self.mode == Mode::Insert && self.focus_pane == pane_before {
+                        self.settle_indent();
+                    }
                     // A click abandons any half-typed command.
                     self.pending.reset();
                     // ...and drops any selection, rather than extending it to

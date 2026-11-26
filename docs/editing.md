@@ -370,6 +370,18 @@ middle or the bottom of the pane. The cursor stays where it is.
   fewer than five characters to the line's end, or `2dd`, `2yy`, `2>>`,
   `2g~~` or `3J` on the last line. Higher up, `5dd` with two lines left
   deletes them both.
+- In a file with no final newline, a new empty last line (`o` then `Esc`,
+  `A` `Enter` `Esc`, `p`, `:t $`, a change ending in `Enter`) stays a line
+  with the cursor on it, and saving writes it, as in Vim. In Insert, `End`
+  keeps to the end of each line `Up` and `Down` reach, as `$` does.
+- The indent `Enter` or `cc` lays down goes again when nothing is typed
+  after it before `Esc`, `Ctrl-c`, another `Enter` or a move to another
+  line, as Vim's `autoindent`. Anything typed keeps it, a space too, and so
+  does `Home`, `End` or a move along the line.
+- An edit that changes nothing is still a step for `u`, as in Vim: `gUU` on
+  a line already in capitals, `~` on a digit, `x` on an empty line. `u`
+  brings the cursor back to it, and the file is not marked modified; `>>`
+  on an empty line and `r` with the same character do mark it.
 - The escape alias is `input.escape_alias` (default `jk`); set it to `""` to
   turn it off.
 - With the mouse on, a drag selects text the way `mouse=a` does in Vim, and

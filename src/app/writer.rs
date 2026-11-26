@@ -300,7 +300,7 @@ impl App {
 
     pub(super) fn enter_insert(&mut self) {
         self.insert_repeat = None;
-        self.cc_indent_line = None;
+        self.cc_indent = None;
         self.mode = Mode::Insert;
         self.touch_status();
     }
@@ -325,11 +325,17 @@ impl App {
         self.enter_insert();
     }
 
-    /// `x`: delete `count` characters from under the cursor, on this line only.
+    /// `x`: delete `count` characters from under the cursor, on this line
+    /// only. On an empty line it deletes nothing, but is an undo step all
+    /// the same, as Neovim's.
     pub(super) fn delete_chars_under(&mut self, count: usize) {
         let c = self.buffer.cursor;
         let len = self.buffer.line_len(c.line);
-        if len == 0 || c.col >= len {
+        if len == 0 {
+            self.buffer.record_unchanged(c, false);
+            return;
+        }
+        if c.col >= len {
             return;
         }
         let end_col = c.col.saturating_add(count).min(len);
@@ -342,10 +348,12 @@ impl App {
         }
     }
 
-    /// `X`: delete `count` characters before the cursor, on this line.
+    /// `X`: delete `count` characters before the cursor, on this line. At
+    /// its start it deletes nothing, but is an undo step, as Neovim's.
     pub(super) fn delete_chars_before(&mut self, count: usize) {
         let c = self.buffer.cursor;
         if c.col == 0 {
+            self.buffer.record_unchanged(c, false);
             return;
         }
         let start_col = c.col.saturating_sub(count);
@@ -403,8 +411,14 @@ impl App {
         let revision = self.buffer.revision;
         let a = self.buffer.char_index(cur);
         let b = self.buffer.char_index(Cursor::new(cur.line, cur.col + n));
-        self.buffer.delete_chars(a, b);
-        self.buffer.insert_str(cur, &out);
+        // On no letter (`~` on a digit) nothing changes, but it is an undo
+        // step that leaves the text unmodified, as Neovim's.
+        if chars[cur.col..cur.col + n].iter().copied().eq(out.chars()) {
+            self.buffer.record_unchanged(cur, false);
+        } else {
+            self.buffer.delete_chars(a, b);
+            self.buffer.insert_str(cur, &out);
+        }
         let len = self.buffer.line_len(cur.line);
         let col = cur.col + out.chars().count();
         self.buffer.cursor = Cursor::new(cur.line, col.min(len.saturating_sub(1)));
@@ -481,15 +495,35 @@ impl App {
         self.enter_insert();
     }
 
-    /// `D` / `C`: operate from the cursor to the end of the line.
-    pub(super) fn change_or_delete_to_eol(&mut self, op: Operator) {
+    /// `D` / `C`: operate from the cursor to the end of the line, or with a
+    /// count to the end of the line `count - 1` below, as `d$` and `c$`.
+    /// On an empty line `D` does nothing and `C` types there, its undo step
+    /// unmodified when nothing is typed and the register left empty, as
+    /// Neovim's.
+    pub(super) fn change_or_delete_to_eol(&mut self, op: Operator, count: usize) {
+        if count > 1 {
+            return self.apply_operator(op, Motion::LineEnd, count);
+        }
         let c = self.buffer.cursor;
         let len = self.buffer.line_len(c.line);
         if len > c.col {
             self.operate_charwise(op, c, Cursor::new(c.line, len - 1), true);
         } else if op == Operator::Change {
-            self.enter_insert();
+            self.change_nothing(c, true);
         }
+    }
+
+    /// A change over no text (`c$` or `cl` on an empty line, `ch` at a
+    /// line's start): Insert at `at`, in an undo step that stays one, and
+    /// unmodified, if nothing is typed, as Neovim's. A change to the line's
+    /// end (`inclusive`) still leaves the empty text in the register.
+    pub(super) fn change_nothing(&mut self, at: Cursor, inclusive: bool) {
+        if inclusive {
+            self.store_register(String::new(), false, true);
+        }
+        self.buffer.cursor = Cursor::new(at.line, at.col);
+        self.buffer.record_unchanged(at, false);
+        self.enter_insert();
     }
 
     /// `r`: overwrite `count` characters with `ch`, each a base character
@@ -617,10 +651,16 @@ impl App {
         end = end.min(self.buffer.rope.len_chars());
         if start >= end {
             // An empty range changes nothing, but `c` still starts typing
-            // there, as vim's `cT(` next to the `(` does.
-            if op == Operator::Change {
-                self.buffer.cursor = lo;
-                self.enter_insert();
+            // there, as vim's `cT(` next to the `(` does, and every operator
+            // but a yank is an undo step that leaves the text unmodified,
+            // as Neovim's (`dh` at a line's start, `gUl` on an empty line).
+            match op {
+                Operator::Change => self.change_nothing(lo, false),
+                Operator::Yank => {}
+                _ => {
+                    self.buffer.record_unchanged(lo, false);
+                    self.buffer.cursor = Cursor::new(lo.line, lo.col);
+                }
             }
             return;
         }
@@ -709,14 +749,15 @@ impl App {
                 };
                 self.buffer.delete_chars(start_idx, end);
                 self.store_register(text, true, true);
-                // Leave one line to type into.
+                // Leave one line to type into: a whole line, its newline
+                // with it, even where the change took every line.
                 let at = Cursor::new(a.min(self.buffer.line_count().saturating_sub(1)), 0);
-                self.buffer.insert_str(at, &format!("{indent}\n"));
+                self.buffer.insert_exact(at, &format!("{indent}\n"));
                 let line = a.min(self.buffer.line_count().saturating_sub(1));
                 self.buffer.cursor = Cursor::new(line, indent.chars().count());
                 self.enter_insert();
                 if !indent.is_empty() {
-                    self.cc_indent_line = Some(line);
+                    self.lay_indent();
                 }
             }
             Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
@@ -736,6 +777,12 @@ impl App {
                 // The same screen column, not the same character, as
                 // Neovim's `>>`: the text moves under the cursor.
                 self.shift_lines(a, b, op == Operator::Outdent);
+                // Lines with nothing to shift (`>>` on an empty line, `<<`
+                // on one with no indent) are still a step, and Neovim counts
+                // it as a modification.
+                if self.buffer.revision == revision {
+                    self.buffer.record_unchanged(Cursor::new(a, 0), true);
+                }
                 self.buffer.cursor = Cursor::new(a, motion::col_at_cells(&self.buffer, a, cells, tw));
                 self.land_for_redo(revision);
             }
@@ -844,6 +891,10 @@ impl App {
             }),
         };
         if mapped == text {
+            // Nothing to change (`gUU` on capitals), but Neovim still makes
+            // it an undo step, one that leaves the text unmodified.
+            let at = self.idx_to_cursor(start);
+            self.buffer.record_unchanged(at, false);
             return;
         }
         let at = self.idx_to_cursor(start);

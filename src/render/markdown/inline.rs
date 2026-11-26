@@ -1100,6 +1100,11 @@ fn body_style(kind: Inline, base: Style, theme: &Theme) -> Style {
         // The backslash is the marker; the escaped char shows in the base style.
         Inline::Escape => {}
     }
+    // A glyph on a highlight in the highlight's own slot (a heading or bold
+    // colour on an indexed terminal) takes the highlight's foreground.
+    if s.bg == theme.highlight_bg && s.fg == s.bg && theme.highlight_fg != Color::None {
+        s.fg = theme.highlight_fg;
+    }
     s
 }
 

@@ -68,6 +68,9 @@ struct Snapshot {
     path: Option<PathBuf>,
     rope: Rope,
     crlf: bool,
+    /// [`Buffer::final_newline`]: whether the file's last line ends in a
+    /// newline. The rope's last line always has one.
+    eol: bool,
     revision: u64,
 }
 
@@ -77,12 +80,17 @@ impl Snapshot {
             path: b.path.clone(),
             rope: b.rope.clone(),
             crlf: b.line_ending == LineEnding::Crlf,
+            eol: b.final_newline,
             revision: b.revision,
         }
     }
 
     fn is_of(&self, b: &Buffer) -> bool {
-        self.revision == b.revision && self.rope.len_chars() == b.rope.len_chars() && self.path == b.path
+        self.revision == b.revision
+            && self.rope.len_chars() == b.rope.len_chars()
+            && self.path == b.path
+            && self.crlf == (b.line_ending == LineEnding::Crlf)
+            && self.eol == b.final_newline
     }
 }
 
@@ -739,6 +747,13 @@ fn write_partial(s: &Snapshot, partial: &Path) -> Option<PathBuf> {
 const PARTIAL_TRIES: u32 = 100;
 
 /// Write one snapshot, readable by its owner only: it is somebody's draft.
+///
+/// The bytes are those a save under `final_newline = "preserve"` writes,
+/// untrimmed: the file's line ending, and a final newline only when the
+/// file has one (the rope's last `\n` is the last line's, there either
+/// way). So copying the file back, or opening it and `:saveas`, gives the
+/// file's own end back. A recovery file is plain text with no header, so
+/// one an older Shoin wrote reads as it always did.
 fn write(target: &Path, s: &Snapshot) -> std::io::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -748,7 +763,11 @@ fn write(target: &Path, s: &Snapshot) -> std::io::Result<()> {
         opts.mode(0o600);
     }
     let mut out = std::io::BufWriter::new(opts.open(target)?);
-    for chunk in s.rope.chunks() {
+    let len = s.rope.len_chars();
+    let ends_in_newline = len > 0 && s.rope.char(len - 1) == '\n';
+    let body = s.rope.slice(..len - usize::from(ends_in_newline && !s.eol));
+    let close = (len > 0 && s.eol && !ends_in_newline).then_some("\n");
+    for chunk in body.chunks().chain(close) {
         if s.crlf {
             out.write_all(chunk.replace('\n', "\r\n").as_bytes())?;
         } else {
@@ -1189,7 +1208,7 @@ mod tests {
     }
 
     fn snap(path: Option<PathBuf>, text: &str, crlf: bool) -> Snapshot {
-        Snapshot { path, rope: Rope::from_str(text), crlf, revision: 1 }
+        Snapshot { path, rope: Rope::from_str(text), crlf, eol: true, revision: 1 }
     }
 
     #[test]
@@ -1235,7 +1254,7 @@ mod tests {
         let mut clean = Buffer::open(d.join("clean.md"), &[]).unwrap();
         clean.modified = false;
         let mut dirty = Buffer::open(d.join("dirty.md"), &[]).unwrap();
-        dirty.insert_str(crate::text::cursor::Cursor::new(0, 0), "typed");
+        dirty.insert_exact(crate::text::cursor::Cursor::new(0, 0), "typed");
         assert!(dirty.modified);
         refresh([&clean, &dirty].into_iter());
         {
@@ -1265,6 +1284,36 @@ mod tests {
         let second = notice([&n, &m].into_iter()).expect("the other file's turn");
         assert!(second.contains("m.md.shoin-recover"), "{second}");
         assert_eq!(notice([&n, &m].into_iter()), None, "each named once per session");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A recovery file holds the bytes a save of the buffer would write
+    /// under `preserve`: its line ending and its final newline or none, so
+    /// copying it back, or opening it and `:saveas`, gives the file's own
+    /// end back. Read again, it is the same lines with the same flag.
+    #[test]
+    fn a_recovery_file_keeps_the_end_of_the_file() {
+        let d = dir("eol");
+        let cases: [(&[u8], &str); 5] = [
+            (b"abc", "abcX"),
+            (b"abc\n", "abcX\n"),
+            (b"a\r\nbc", "a\r\nbcX"),
+            (b"a\r\nbc\r\n", "a\r\nbcX\r\n"),
+            (b"abc\r", "abc\rX"),
+        ];
+        for (i, (bytes, want)) in cases.into_iter().enumerate() {
+            let mut b = Buffer::unnamed(bytes.to_vec()).unwrap();
+            let last = b.last_line();
+            b.insert_str(crate::text::cursor::Cursor::new(last, b.line_len(last)), "X");
+            b.path = Some(d.join(format!("{i}.md")));
+            let written = dump(&[Snapshot::of(&b)], &d.join("state"));
+            let got = std::fs::read(&written[0]).unwrap();
+            assert_eq!(String::from_utf8_lossy(&got), want, "{bytes:?}");
+            let back = Buffer::unnamed(got).unwrap();
+            assert_eq!(back.rope.to_string(), b.rope.to_string(), "{bytes:?} read back");
+            assert_eq!(back.final_newline, b.final_newline, "{bytes:?} read back");
+            assert_eq!(back.line_ending, b.line_ending, "{bytes:?} read back");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

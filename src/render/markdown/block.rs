@@ -887,7 +887,7 @@ mod tests {
 
     fn buf(text: &str) -> Buffer {
         let mut b = Buffer::empty();
-        b.insert_str(Cursor::new(0, 0), text);
+        b.insert_exact(Cursor::new(0, 0), text);
         b
     }
 
@@ -1098,7 +1098,7 @@ mod tests {
         let mut cache = BlockCache::build(&b, true, 4);
         assert_eq!(cache.kinds[1], BlockKind::Paragraph);
 
-        b.insert_str(Cursor::new(0, 0), "```\n");
+        b.insert_exact(Cursor::new(0, 0), "```\n");
         // Rescan from the edited first line.
         cache.invalidate_from(&b, 0, 0);
 
@@ -1296,7 +1296,7 @@ mod tests {
             assert_eq!(cache.carry, BlockCache::build(&b, true, 4).carry);
         }
         // What the head of the file opens still reaches as far as it goes.
-        b.insert_str(Cursor::new(0, 0), "```\n");
+        b.insert_exact(Cursor::new(0, 0), "```\n");
         let (first, last) = b.take_dirty().unwrap();
         cache.invalidate_from(&b, first, last);
         assert_eq!(cache.kinds, BlockCache::build(&b, true, 4).kinds);

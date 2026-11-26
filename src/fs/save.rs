@@ -171,8 +171,11 @@ impl Autosave {
 /// The text as a save writes it, before the line ending is applied: trimmed
 /// and with its final newline settled as `opts` asks.
 ///
-/// Only ever shortens lines and adds or removes the one final newline, which
-/// is what lets `Buffer` replay the result as a few small edits.
+/// The text's last `\n` ends its last line, and the final newline the file
+/// gets is `opts.final_newline`'s answer, as Neovim's 'eol' and 'fixeol':
+/// the lines are the same either way. So the newline is settled in the
+/// bytes only, and `cuts` holds the trimming alone: those are the edits a
+/// buffer takes to agree with what was written, and the newline is not one.
 pub fn outgoing(text: String, opts: &SaveOptions) -> Outgoing {
     let mut out = if opts.trim_trailing_whitespace {
         trim_lines(&text, opts)
@@ -183,49 +186,35 @@ pub fn outgoing(text: String, opts: &SaveOptions) -> Outgoing {
     if opts.final_newline {
         if !out.text.ends_with('\n') {
             out.text.push('\n');
-            out.added_newline = true;
         }
     } else if out.text.ends_with('\n') {
         // One newline, not all of them: blank lines at the end are text the
         // writer put there. And none while the cursor sits on the empty line
-        // after it, where Insert mode is about to type.
+        // after it, where Insert mode is typing: that line is one the text
+        // has no newline for yet.
         let last_line = out.text.matches('\n').count();
         if opts.keep_line != Some(last_line) {
             out.text.pop();
-            // The newline dropped is the one before the INPUT's last line,
-            // which may have held spaces that trimming took (`foo\n  `): it
-            // sits just before that line's start, in the input's positions.
-            let start = match opts.trim_trailing_whitespace {
-                true => out.last_start,
-                false => out.text.chars().count() + 1,
-            };
-            match out.cuts.last_mut() {
-                Some(c) if c.start == start => c.start -= 1,
-                _ => out.cuts.push(start - 1..start),
-            }
         }
     }
     out.cuts.reverse();
     out
 }
 
-/// What a save writes, and the edits that turn the text it was given into
-/// that, so the buffer can take exactly the same ones.
+/// What a save writes, and the trimming edits that turn the text it was
+/// given into that, so the buffer can take exactly the same ones.
 #[derive(Debug, Default, PartialEq)]
 pub struct Outgoing {
     /// The text, still with `\n` endings.
     pub text: String,
-    /// Char ranges of the input that were dropped, last first, so each can be
-    /// cut without moving the next.
+    /// Char ranges of the input that trimming dropped, last first, so each
+    /// can be cut without moving the next.
     pub cuts: Vec<std::ops::Range<usize>>,
-    /// Whether a newline was added at the end of the input.
-    pub added_newline: bool,
-    /// Where the input's last line starts, in chars (set by trimming).
-    last_start: usize,
 }
 
 impl Outgoing {
     /// `text` written as it stands, with no edits.
+    #[cfg(test)]
     pub fn unchanged(text: String) -> Outgoing {
         Outgoing { text, ..Outgoing::default() }
     }
@@ -244,7 +233,6 @@ fn trim_lines(text: &str, opts: &SaveOptions) -> Outgoing {
             out.text.push('\n');
             at += 1;
         }
-        out.last_start = at;
         let chars = line.chars().count();
         // Fences are Markdown's: in a plain file a stray ``` is just text,
         // and must not stop trimming for the rest of it.
@@ -789,16 +777,16 @@ mod tests {
     fn out(text: &str, o: &SaveOptions) -> String {
         let got = outgoing(text.to_string(), o);
         let mut replayed: Vec<char> = text.chars().collect();
-        if got.added_newline {
-            replayed.push('\n');
-        }
         let mut last = usize::MAX;
         for c in &got.cuts {
             assert!(c.end <= last, "cuts run last first: {:?}", got.cuts);
             last = c.start;
             replayed.drain(c.clone());
         }
-        assert_eq!(replayed.into_iter().collect::<String>(), got.text, "edits for {text:?}");
+        // The final newline is the bytes' alone: the text the edits leave
+        // saves to the same bytes, with nothing more to trim.
+        let replayed = outgoing(replayed.into_iter().collect(), o);
+        assert_eq!(replayed, Outgoing::unchanged(got.text.clone()), "edits for {text:?}");
         got.text
     }
 

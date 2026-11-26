@@ -355,7 +355,7 @@ mod tests {
     fn app() -> App {
         let cfg = crate::config::parse("").unwrap();
         let mut app = App::new(cfg, None, None).unwrap();
-        app.buffer.insert_str(Cursor::new(0, 0), "some text\n");
+        app.buffer.insert_exact(Cursor::new(0, 0), "some text\n");
         app.buffer.cursor = Cursor::new(0, 0);
         app
     }
@@ -466,7 +466,7 @@ mod tests {
     fn app_with(keys_conf: &str) -> App {
         let cfg = crate::config::parse(keys_conf).unwrap();
         let mut app = App::new(cfg, None, None).unwrap();
-        app.buffer.insert_str(Cursor::new(0, 0), "some text\n");
+        app.buffer.insert_exact(Cursor::new(0, 0), "some text\n");
         app.buffer.cursor = Cursor::new(0, 0);
         app
     }
@@ -544,7 +544,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.keys.normal.insert("<leader>x".into(), "toggle_zen".into());
         let mut app = App::new(cfg, None, None).unwrap();
-        app.buffer.insert_str(Cursor::new(0, 0), "t\n");
+        app.buffer.insert_exact(Cursor::new(0, 0), "t\n");
         press(&mut app, ' ');
         assert!(hints(&app).contains(&("x".into(), "zen".into())));
     }

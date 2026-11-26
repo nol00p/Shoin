@@ -38,14 +38,23 @@ pub fn decode(bytes: Vec<u8>, what: &str, syntax: Syntax) -> Result<Loaded> {
     })?;
 
     let line_ending = detect_line_ending(&text);
-    let final_newline = text.ends_with('\n');
+    // An empty file has no line yet, and Neovim gives it 'eol': the lines
+    // typed into it end in a newline, as a new file's do.
+    let final_newline = text.is_empty() || text.ends_with('\n');
 
     // The rope always holds \n only; the original ending is reapplied on save.
-    let normalized = if line_ending == LineEnding::Crlf {
+    let mut normalized = if line_ending == LineEnding::Crlf {
         text.replace("\r\n", "\n")
     } else {
         text
     };
+    // And every line ends in one, the last too: Neovim's lines, with
+    // `final_newline` its 'eol', which the save consults for the bytes. So a
+    // new empty last line is a line like any other, `abc` and `o` giving
+    // `abc\n\n`, whatever the file had.
+    if !final_newline {
+        normalized.push('\n');
+    }
 
     Ok(Loaded {
         rope: Rope::from_str(&normalized),

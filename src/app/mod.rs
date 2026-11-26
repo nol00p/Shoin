@@ -358,9 +358,10 @@ pub struct App {
     insert_repeat: Option<InsertRepeat>,
     /// True while `repeat_insert` replays: the escape alias stays out of it.
     replaying_insert: bool,
-    /// The line `cc` left its indent on, so an `Esc` with nothing typed takes
-    /// the unused indent back (vim's 'autoindent').
-    cc_indent_line: Option<usize>,
+    /// The indent `cc` or Enter left, while nothing has been typed after
+    /// it: Esc, Ctrl-C, Enter or moving to another line take it back
+    /// (vim's 'autoindent'). See [`App::settle_indent`].
+    cc_indent: Option<insert::LaidIndent>,
 
     /// User `[keys.*]` bindings overlaid on the built-in grammar.
     keymap: Keymap,
@@ -994,7 +995,7 @@ impl App {
             replaying: false,
             insert_repeat: None,
             replaying_insert: false,
-            cc_indent_line: None,
+            cc_indent: None,
             keymap,
             image_protocol: crate::image::detect(),
             images: std::cell::RefCell::new(Vec::new()),
@@ -1579,8 +1580,8 @@ impl App {
             }
             Action::DeleteChar => self.delete_chars_under(count),
             Action::DeleteCharBack => self.delete_chars_before(count),
-            Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete),
-            Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change),
+            Action::DeleteToEol => self.change_or_delete_to_eol(Operator::Delete, count),
+            Action::ChangeToEol => self.change_or_delete_to_eol(Operator::Change, count),
             // `Y` is `yy`, its count and closed folds counted the same, and
             // `2Y` on the last line yanks nothing, as `2yy`.
             Action::YankLine => self.operate(Operator::Yank, Target::Line, count),

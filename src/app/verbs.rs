@@ -408,6 +408,19 @@ impl App {
     /// behavior.
     pub(super) fn operate_object(&mut self, op: Operator, obj: char, around: bool, count: usize) {
         let Some((first, mut last, linewise)) = self.object_bounds(obj, around) else {
+            // `ciw` on an empty line types there, as Neovim's, the empty
+            // word in the register, and `gUiw` is an undo step that leaves
+            // the text unmodified; `diw` and `yiw` do nothing.
+            let at = self.buffer.cursor;
+            if !around && matches!(obj, 'w' | 'W') && self.buffer.line_len(at.line) == 0 {
+                match op {
+                    Operator::Change => self.change_nothing(at, true),
+                    Operator::Lowercase | Operator::Uppercase | Operator::ToggleCase => {
+                        self.buffer.record_unchanged(at, false);
+                    }
+                    _ => {}
+                }
+            }
             return;
         };
         // `d2aw`: a count takes that many words, each one resolved from just
@@ -482,7 +495,7 @@ impl App {
             _ => motion::resolve(&self.buffer, m, count, page, true, self.config.editor.tab_width),
         };
         let Some(res) = res else {
-            return;
+            return self.operate_on_nothing(op, m);
         };
         if res.kind == Linewise {
             let start = self.linewise_start(from, res.target);
@@ -515,6 +528,32 @@ impl App {
         // forgets `$`'s, as Neovim's does.
         let (start, end) = (Cursor::new(start.line, start.col), Cursor::new(end.line, end.col));
         self.operate_charwise(op, start, end, inclusive)
+    }
+
+    /// An operator whose motion cannot move from here, which Neovim runs
+    /// over no text rather than failing: `h` at a line's start, `0` and `^`
+    /// where they already are, `l` and `$` on an empty line. `c` types
+    /// there and the others are an undo step that leaves the text
+    /// unmodified (`operate_charwise` on an empty range), except `d$`,
+    /// which Neovim's empty-line check stops before the undo is saved.
+    fn operate_on_nothing(&mut self, op: Operator, m: Motion) {
+        let at = self.buffer.cursor;
+        let empty = self.buffer.line_len(at.line) == 0;
+        let runs = match m {
+            Motion::Left => at.col == 0,
+            Motion::Right => empty,
+            Motion::LineStart | Motion::LineFirstNonBlank => true,
+            Motion::LineEnd => empty,
+            _ => false,
+        };
+        if !runs || matches!(op, Operator::Indent | Operator::Outdent) {
+            return;
+        }
+        match (op, m) {
+            (Operator::Change, Motion::LineEnd) => self.change_nothing(at, true),
+            (Operator::Delete | Operator::Yank, Motion::LineEnd) => {}
+            _ => self.operate_charwise(op, at, at, false),
+        }
     }
 
     /// vim's `op_delete` rule: a charwise delete over more than one line that
