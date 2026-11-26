@@ -872,7 +872,9 @@ fn a_matched_line_break_is_drawn_as_neovim() {
     ];
     let mut out = Vec::new();
     for &(text, keys, needle, want) in cases {
-        let mut app = fresh(text, 4);
+        let rope = if text.ends_with('\n') { text.to_owned() } else { format!("{text}\n") };
+        let mut app = fresh(&rope, 4);
+        app.buffer.final_newline = text.ends_with('\n');
         feed(&mut app, keys);
         let hl = app.theme.search_match.to_ratatui();
         if (bg_after(&app, needle).0 == hl) != want {
@@ -897,16 +899,17 @@ fn a_matched_line_break_is_drawn_as_neovim() {
     if bg_after(&app, "ab").1 != sel {
         out.push(":s/\\n//c: the empty line's break it asks about is not drawn".into());
     }
-    // The last line's break in a file without one: the match takes it,
-    // though the replacement stops at the end of the text.
-    let mut app = fresh("ab\ncd", 4);
-    feed(&mut app, ":%s/d\\n/Z/c\r");
-    if bg_after(&app, "cd").0 != sel {
-        out.push(":s/d\\n/Z/c: the missing last break it asks about is not drawn".into());
-    }
-    feed(&mut app, "y");
-    if app.buffer.rope != "ab\ncZ" {
-        out.push(format!(":s/d\\n/Z/c then y: {:?}, Neovim \"ab\\ncZ\"", app.buffer.rope.to_string()));
+    // The last line's break stays in the rope and the file's flag is preserved.
+    for final_newline in [false, true] {
+        let mut app = fresh("ab\ncd\n", 4);
+        app.buffer.final_newline = final_newline;
+        feed(&mut app, ":%s/d\\n/Z/c\r");
+        if bg_after(&app, "cd").0 != sel {
+            out.push(format!(":%s/d\\n/Z/c: the last break is not drawn (eol={final_newline})"));
+        }
+        feed(&mut app, "y");
+        assert_eq!(app.buffer.rope, "ab\ncZ\n");
+        assert_eq!(app.buffer.final_newline, final_newline);
     }
     assert!(out.is_empty(), "{}", out.join("\n"));
 }

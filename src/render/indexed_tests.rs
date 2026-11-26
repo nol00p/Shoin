@@ -158,6 +158,38 @@ fn the_substitute_confirm_match_is_distinct_and_readable() {
     }
 }
 
+/// A matched break uses the same overlay colours as the adjacent match text.
+#[test]
+fn a_matched_line_break_uses_the_match_overlay_colours() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+    for depth in DEPTHS {
+        for final_newline in [false, true] {
+            let mut app = app_at("ab\nlast\n", "", depth);
+            app.buffer.final_newline = final_newline;
+            search(&mut app, r"last\n");
+            let search_pair = (app.theme.search_match_fg.to_ratatui(), app.theme.search_match.to_ratatui());
+            let confirm_pair = (app.theme.selection_fg.to_ratatui(), app.theme.selection.to_ratatui());
+            for (confirm, expected) in [(false, search_pair), (true, confirm_pair)] {
+                if confirm {
+                    for ch in r":%s/last\n/Z/c".chars() {
+                        app.on_key(KeyEvent::from(KeyCode::Char(ch)));
+                    }
+                    app.on_key(KeyEvent::from(KeyCode::Enter));
+                    assert!(app.substitute_prompt().is_some());
+                }
+                let buf = render(&app);
+                let y = row_of(&buf, "last");
+                let xs = cells(&buf, y, "last");
+                for x in xs.start..=xs.end {
+                    let cell = &buf[(x, y)];
+                    assert_eq!((cell.fg, cell.bg), expected, "{depth:?}, eol={final_newline}, confirm={confirm}, x={x}");
+                }
+            }
+        }
+    }
+}
+
 /// A selected line break is one blank selected cell; on a fenced code row it
 /// has to differ from the slab it sits on, or nothing shows.
 #[test]

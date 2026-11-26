@@ -10549,6 +10549,9 @@ type EofCase = (&'static str, &'static str, [&'static str; 2], (usize, usize));
 /// and the policy give, leaving the lines as they are: `o<Esc>:w` then
 /// `Aq<Esc>:w` writes `abc\nq`. Every value is Neovim's.
 const EOF_SAVES: &[EofCase] = &[
+    ("a\n  b", "G>>", ["a\n      b", "a\n      b\n"], (1, 0)),
+    ("a\n   ", "G<<", ["a\n", "a\n\n"], (1, 0)),
+    ("a\n   ", ">G", ["    a\n       ", "    a\n       \n"], (0, 0)),
     ("abc", "o\u{1b}", ["abc\n", "abc\n\n"], (1, 0)),
     ("abc", "o\u{1b}:w\rAq\u{1b}", ["abc\nq", "abc\nq\n"], (1, 0)),
     ("x\nabc", "GccX\u{1b}", ["x\nX", "x\nX\n"], (1, 0)),
@@ -10660,6 +10663,19 @@ fn a_dragged_change_keeps_a_new_last_line() {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{policy}");
     }
     std::fs::remove_file(path).unwrap();
+}
+
+/// A no-op shift on the empty final line is still a modifying step, even
+/// when that line's break only exists in the rope.
+#[test]
+fn shifting_an_empty_last_line_is_an_undo_step() {
+    for (keys, modified) in [("G>>", true), ("G>>u", false), ("G>>u\u{12}", true), ("G>Gu", false)] {
+        let app = nv_noeol_keys("a\n", keys);
+        assert_eq!(app.buffer.rope, "a\n\n", "{keys:?}");
+        assert_eq!(app.buffer.cursor, Cursor::new(1, 0), "{keys:?}");
+        assert_eq!(app.buffer.modified, modified, "{keys:?}");
+        assert!(!app.buffer.final_newline, "{keys:?}");
+    }
 }
 
 /// A redo list that holds only steps which changed no text (`x` on an
