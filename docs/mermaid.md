@@ -84,6 +84,13 @@ terminal graphics support.
 
 ## Details
 
+- A preview render gets two seconds. A diagram that runs out of time shows
+  `Mermaid render timed out` and is not tried again until you change the
+  fence or reload the config (`:reload`). A missing renderer is tried again
+  every few seconds, so installing it takes effect without a restart.
+- Shoin stops its renderer processes when it exits. On Linux they also stop
+  if Shoin is killed. On macOS a renderer left by a killed Shoin runs until
+  it finishes on its own.
 - Shoin checks PNG chunk types, CRCs, and size limits. The configured renderer
   can still produce corrupt compressed pixels with matching CRCs. Browsers,
   terminals, and PDF engines decode the pixels.
