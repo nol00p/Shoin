@@ -7,7 +7,7 @@
 
 pub mod html;
 mod mermaid;
-mod pdf_assets;
+pub(crate) mod pdf_assets;
 pub mod plain;
 
 use std::path::{Path, PathBuf};
@@ -77,8 +77,7 @@ pub fn default_path(source: &Path, format: Format) -> PathBuf {
 
 /// Flatten `source` and write it to `dest` in `format`.
 ///
-/// `page` only reaches HTML, which is the one format with a look of its own to
-/// get right; the others are text and are the same on every machine.
+/// `page` supplies rendering settings. HTML also uses its theme.
 ///
 /// A returned note describes content the export kept as source.
 pub fn write(
@@ -87,6 +86,17 @@ pub fn write(
     format: Format,
     cfg: &TranscludeConfig,
     page: &html::Page,
+) -> Result<Option<String>> {
+    write_with_renderer(source, dest, format, cfg, page, Default::default())
+}
+
+pub(crate) fn write_with_renderer(
+    source: &Path,
+    dest: &Path,
+    format: Format,
+    cfg: &TranscludeConfig,
+    page: &html::Page,
+    renderer: crate::render::mermaid::MermaidRenderer,
 ) -> Result<Option<String>> {
     // Every file the compile read is part of what is being exported, so
     // writing onto any of them would destroy the document: the source, an
@@ -126,13 +136,13 @@ pub fn write(
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "document".into());
-            let (html, note) = html::render_with_mermaid(&flat, &title, page);
+            let (html, note) = html::render_with_mermaid(&flat, &title, page, renderer);
             std::fs::write(dest, html).with_context(|| short(dest))?;
             return Ok(note);
         }
         Format::Pdf => {
             let flat = rebase_images(&flat, source, None, &page.md);
-            return write_pdf(&flat, source, dest, &page.md);
+            return write_pdf(&flat, source, dest, &page.md, renderer);
         }
     }
     Ok(None)
@@ -500,7 +510,9 @@ fn short(p: &Path) -> String {
 /// DELIBERATELY not built in. A PDF writer means a layout engine and embedded
 /// fonts inside a terminal text editor, for output worse than what the tools
 /// people already have produce. Shoin passes the Markdown to `pandoc`.
-fn write_pdf(markdown: &str, source: &Path, dest: &Path, md: &MarkdownConfig) -> Result<Option<String>> {
+fn write_pdf(
+    markdown: &str, source: &Path, dest: &Path, md: &MarkdownConfig, renderer: crate::render::mermaid::MermaidRenderer,
+) -> Result<Option<String>> {
     let Some(tool) = which("pandoc") else {
         // Short on purpose: this is read on a one-row status line, and a
         // message that does not fit loses its ending — which is the half that
@@ -515,7 +527,7 @@ fn write_pdf(markdown: &str, source: &Path, dest: &Path, md: &MarkdownConfig) ->
         bail!("{NO_ENGINE}");
     };
 
-    write_pdf_with(markdown, source, dest, md, &tool, engine)
+    write_pdf_with(markdown, source, dest, md, &tool, engine, renderer)
 }
 
 fn write_pdf_with(
@@ -525,12 +537,13 @@ fn write_pdf_with(
     md: &MarkdownConfig,
     tool: &Path,
     engine: &str,
+    renderer: crate::render::mermaid::MermaidRenderer,
 ) -> Result<Option<String>> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
     // Hold the generated PNGs through the converter and its page engine.
-    let prepared = pdf_assets::prepare(markdown, md);
+    let prepared = pdf_assets::prepare(markdown, md, renderer);
     let mut child = Command::new(tool)
         // pandoc reads `$…$` as math by default; with `math = false` followed
         // into export, it is the text the editor shows.
@@ -1268,7 +1281,7 @@ printf '%%PDF-fake\n' > "$dest"
         );
         for filename in ["out.pdf", "fail.pdf"] {
             let dest = d.join(filename);
-            let result = write_pdf_with(markdown, &d.join("source.md"), &dest, &md, &pandoc, "typst");
+            let result = write_pdf_with(markdown, &d.join("source.md"), &dest, &md, &pandoc, "typst", Default::default());
             if filename == "out.pdf" {
                 let message = result.unwrap().unwrap();
                 assert!(message.contains("rendering failed"), "{message}");

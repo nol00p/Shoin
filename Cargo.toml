@@ -50,6 +50,11 @@ anyhow = "1.0"
 # TestBackend, which the frame tests render into, ships with ratatui's default
 # features — so there are no dev-dependencies at all.
 
+[target.'cfg(unix)'.dependencies]
+# Both already come in through crossterm. Use their Unix process and signal APIs.
+libc = "0.2"
+signal-hook = "0.3"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

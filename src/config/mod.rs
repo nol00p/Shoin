@@ -50,7 +50,7 @@ fn resolve(path: &Path) -> Vec<PathBuf> {
 ///   4. `./shoin/`            (project-local conf.d directory)
 ///   5. `$XDG_CONFIG_HOME/shoin/`
 ///   6. `~/.config/shoin/`
-fn candidates(explicit: Option<&Path>) -> Vec<(PathBuf, bool)> {
+fn candidates(explicit: Option<&Path>, cwd: &Path) -> Vec<(PathBuf, bool)> {
     if let Some(p) = explicit {
         return vec![(p.to_path_buf(), true)];
     }
@@ -58,8 +58,8 @@ fn candidates(explicit: Option<&Path>) -> Vec<(PathBuf, bool)> {
     if let Ok(p) = std::env::var("SHOIN_CONFIG") {
         c.push((PathBuf::from(p), true));
     }
-    c.push((PathBuf::from("shoin.conf"), false));
-    c.push((PathBuf::from("shoin"), false));
+    c.push((cwd.join("shoin.conf"), false));
+    c.push((cwd.join("shoin"), false));
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         c.push((PathBuf::from(xdg).join("shoin"), true));
     }
@@ -70,7 +70,11 @@ fn candidates(explicit: Option<&Path>) -> Vec<(PathBuf, bool)> {
 }
 
 fn located(explicit: Option<&Path>) -> Option<Located> {
-    for (cand, allow_renderer) in candidates(explicit) {
+    locate(candidates(explicit, Path::new("")))
+}
+
+fn locate(candidates: Vec<(PathBuf, bool)>) -> Option<Located> {
+    for (cand, allow_renderer) in candidates {
         let files = resolve(&cand);
         if !files.is_empty() {
             return Some(Located { files, watch: cand, allow_renderer });
@@ -87,13 +91,45 @@ pub fn discover(explicit: Option<&Path>) -> Vec<PathBuf> {
 /// Resolve and merge the config, falling back to defaults for anything absent.
 pub fn load(explicit: Option<&Path>) -> Result<Config> {
     let Some(location) = located(explicit) else { return merge_files(&[]) };
+    load_location(&location)
+}
+
+fn load_location(location: &Located) -> Result<Config> {
     let mut config = merge_files(&location.files)?;
-    // Working-directory configuration is picked up implicitly, so it cannot
-    // opt into executing a command. Explicit and user config can.
-    if !location.allow_renderer {
-        config.markdown.mermaid_renderer = None;
-    }
+    resolve_renderer(&mut config, location.allow_renderer);
     Ok(config)
+}
+
+fn resolve_renderer(config: &mut Config, trusted: bool) {
+    let Some(raw) = config.markdown.mermaid_renderer.take() else {
+        return;
+    };
+    // Working-directory configuration is discovered implicitly.
+    if !trusted {
+        config.mermaid_warning = Some("set mermaid_renderer in user config or with --config");
+        return;
+    }
+    let path = Path::new(&raw);
+    config.markdown.mermaid_renderer = if raw.chars().any(char::is_control) {
+        None
+    } else if let Some(relative) = raw.strip_prefix("~/") {
+        std::env::var_os("HOME").map(PathBuf::from)
+            .filter(|home| home.is_absolute() && !relative.is_empty())
+            .map(|home| home.join(relative))
+            .filter(|path| path.is_absolute() && !Path::new(relative).has_root())
+            .and_then(|path| path.into_os_string().into_string().ok())
+    } else if path.is_absolute()
+        || (!raw.starts_with('~') && !raw.contains(['/', '\\'])
+            && matches!(path.components().next(), Some(std::path::Component::Normal(_)))
+            && path.components().count() == 1)
+    {
+        Some(raw)
+    } else {
+        None
+    };
+    if config.markdown.mermaid_renderer.is_none() {
+        config.mermaid_warning = Some("mermaid_renderer needs a PATH name, absolute path, or ~/ path");
+    }
 }
 
 /// Parse one TOML string over the defaults. Every real config path merges a
@@ -102,7 +138,9 @@ pub fn load(explicit: Option<&Path>) -> Result<Config> {
 pub fn parse(text: &str) -> Result<Config> {
     let mut merged = shipped_keys();
     merge_tables(&mut merged, toml::from_str(text)?);
-    from_table(merged)
+    let mut config = from_table(merged)?;
+    resolve_renderer(&mut config, true);
+    Ok(config)
 }
 
 /// The shipped `keys.conf`, as the table every config merges over.
@@ -139,9 +177,7 @@ fn from_table(table: toml::Table) -> Result<Config> {
         .try_into()
         .context("resolving merged config")?;
     cfg.glyphs.apply_ascii_fallback(|key| set.contains(key));
-    cfg.markdown.mermaid_renderer = cfg
-        .markdown
-        .mermaid_renderer
+    cfg.markdown.mermaid_renderer = cfg.markdown.mermaid_renderer
         .filter(|renderer| !renderer.trim().is_empty());
     Ok(cfg)
 }
@@ -159,7 +195,7 @@ fn from_table(table: toml::Table) -> Result<Config> {
 /// setting, in one place, whether anyone understood it.
 pub fn validate(cfg: &Config) -> Vec<String> {
     use crate::values::{dot_list, ALIGN_VALUES, EMBED_VALUES, FOCUS_VALUES, NUMBER_VALUES};
-    let mut out = Vec::new();
+    let mut out: Vec<_> = cfg.mermaid_warning.into_iter().map(str::to_owned).collect();
     let mut check = |name: &str, value: &str, ok: bool, legal: &str| {
         if !ok {
             out.push(format!("{name}: {legal}, not {value:?}"));
@@ -377,6 +413,42 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shoin-cfg-{tag}-{t}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn discovered_project_config_cannot_enable_mermaid_on_load_or_reload() {
+        let root = tmpdir("project-mermaid");
+        let project_dir = root.join("shoin");
+        std::fs::create_dir(&project_dir).unwrap();
+        for path in [root.join("shoin.conf"), project_dir.join("input.conf")] {
+            let write = |renderer| {
+                std::fs::write(&path, format!("[markdown]\nmermaid_renderer = '{renderer}'")).unwrap();
+            };
+            let load_project = || {
+                let candidates = candidates(None, &root).into_iter()
+                    .filter(|(path, _)| path.starts_with(&root)).collect();
+                let location = locate(candidates).unwrap();
+                load_location(&location).unwrap()
+            };
+            write("merman-cli");
+            let first = load_project();
+            assert!(first.markdown.mermaid_renderer.is_none());
+            assert!(validate(&first)[0].contains("user config"));
+            write("another-renderer");
+            let reloaded = load_project();
+            assert!(reloaded.markdown.mermaid_renderer.is_none());
+            assert!(validate(&reloaded)[0].contains("--config"));
+            assert_eq!(load(Some(&path)).unwrap().markdown.mermaid_renderer.as_deref(), Some("another-renderer"));
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn relative_mermaid_executable_is_disabled_with_a_warning() {
+        let config = parse("[markdown]\nmermaid_renderer = 'tools/merman-cli'").unwrap();
+        assert!(config.markdown.mermaid_renderer.is_none());
+        assert!(validate(&config).iter().any(|warning| warning.contains("mermaid_renderer")));
     }
 
     #[test]

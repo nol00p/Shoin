@@ -1,10 +1,16 @@
 //! Asynchronous Unicode and PNG previews from a configured local Merman CLI.
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -20,6 +26,7 @@ const MAX_ROW_BYTES: usize = 4096;
 const MAX_EXECUTABLE_BYTES: usize = 4096;
 pub(crate) const MAX_CACHE_ENTRIES: usize = 32;
 const MAX_JOBS: usize = 2;
+const TRANSIENT_TTL: Duration = Duration::from_secs(3);
 const TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -68,7 +75,7 @@ impl Output {
 }
 
 type Rendered = RenderState<Output>;
-type Cache = VecDeque<(Arc<Key>, Rendered)>;
+type Cache = VecDeque<(Arc<Key>, Rendered, Option<Instant>)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Failure {
@@ -80,6 +87,7 @@ pub(crate) enum Failure {
     TooLarge,
     UnsafeOutput,
     InvalidPng,
+    AssetWrite,
 }
 
 impl Failure {
@@ -92,6 +100,7 @@ impl Failure {
             Self::Unsupported => "Unsupported Mermaid text diagram",
             Self::TooLarge => "Mermaid diagram too large",
             Self::UnsafeOutput => "Mermaid renderer returned invalid terminal text",
+            Self::AssetWrite => "Could not write a temporary Mermaid PNG",
             Self::InvalidPng => "Mermaid renderer returned an invalid PNG",
         }
     }
@@ -123,11 +132,18 @@ struct Job {
 pub(crate) struct MermaidRenderer {
     caches: [Cache; 2],
     jobs: Vec<Job>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl MermaidRenderer {
     pub(crate) fn poll(&mut self) -> bool {
         let mut changed = false;
+        for cache in &mut self.caches {
+            let before = cache.len();
+            let now = Instant::now();
+            cache.retain(|(_, _, expires)| expires.is_none_or(|expires| now < expires));
+            changed |= cache.len() != before;
+        }
         self.jobs.retain_mut(|job| {
             // Check thread completion before receiving, so a worker finishing
             // during this poll cannot have its final message discarded.
@@ -156,6 +172,13 @@ impl MermaidRenderer {
         self.cached_output(executable, source, Format::Unicode).map(|state| state.map(Output::rows))
     }
 
+    pub(crate) fn with_cached_pngs(&self) -> Self {
+        let mut renderer = Self::default();
+        renderer.caches[Format::Png as usize] = self.caches[Format::Png as usize]
+            .iter().filter(|(_, output, _)| matches!(output, Rendered::Ready(_))).cloned().collect();
+        renderer
+    }
+
     pub(crate) fn cached_png(&self, executable: &str, source: &str) -> Option<PicturePreview> {
         self.cached_output(executable, source, Format::Png).map(|state| state.map(Output::png))
     }
@@ -163,8 +186,9 @@ impl MermaidRenderer {
     fn cached_output(&self, executable: &str, source: &str, format: Format) -> Option<Rendered> {
         self.caches[format as usize]
             .iter()
-            .find(|(key, _)| key.matches(executable, source, format))
-            .map(|(_, output)| output.clone())
+            .find(|(key, _, expires)| key.matches(executable, source, format)
+                && expires.is_none_or(|expires| Instant::now() < expires))
+            .map(|(_, output, _)| output.clone())
     }
 
     pub(crate) fn request(&mut self, executable: &str, source: &str) -> Preview {
@@ -183,7 +207,9 @@ impl MermaidRenderer {
             return Rendered::Failed(Failure::Unavailable);
         }
         let cache = &mut self.caches[format as usize];
-        if let Some(index) = cache.iter().position(|(key, _)| key.matches(executable, source, format)) {
+        let now = Instant::now();
+        cache.retain(|(_, _, expires)| expires.is_none_or(|expires| now < expires));
+        if let Some(index) = cache.iter().position(|(key, _, _)| key.matches(executable, source, format)) {
             let entry = cache.remove(index).expect("cache index exists");
             let output = entry.1.clone();
             cache.push_back(entry);
@@ -197,10 +223,11 @@ impl MermaidRenderer {
 
         let key = Arc::new(Key { executable: executable.into(), source: source.into(), format });
         let worker_key = Arc::clone(&key);
+        let cancelled = Arc::clone(&self.cancelled);
         let (send, receive) = mpsc::sync_channel(1);
         match thread::Builder::new()
             .name("mermaid-render".into())
-            .spawn(move || render(&worker_key, TIMEOUT, send))
+            .spawn(move || render(&worker_key, TIMEOUT, &cancelled, send))
         {
             Ok(thread) => {
                 self.jobs.push(Job {
@@ -219,20 +246,80 @@ impl MermaidRenderer {
     }
 }
 
+impl Drop for MermaidRenderer {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        for job in self.jobs.drain(..) {
+            let _ = job.thread.join();
+        }
+    }
+}
+
 fn remember(cache: &mut Cache, key: Arc<Key>, preview: Rendered) {
     if cache.len() == MAX_CACHE_ENTRIES {
         cache.pop_front();
     }
-    cache.push_back((key, preview));
+    let expires = matches!(preview, Rendered::Failed(
+        Failure::MissingExecutable | Failure::Unavailable | Failure::Timeout
+    )).then(|| Instant::now() + TRANSIENT_TTL);
+    cache.push_back((key, preview, expires));
 }
 
-fn render(key: &Key, timeout: Duration, send: mpsc::SyncSender<Rendered>) {
-    let deadline = Instant::now() + timeout;
+// Covers exits from the signal thread, where App and export stacks cannot drop.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static ACTIVE: Mutex<usize> = Mutex::new(0);
+static IDLE: Condvar = Condvar::new();
+
+pub(crate) fn shutdown() {
+    let workers = ACTIVE.lock().unwrap();
+    SHUTTING_DOWN.store(true, Ordering::Release);
+    drop(IDLE.wait_while(workers, |workers| *workers != 0).unwrap());
+}
+
+struct Active;
+
+impl Active {
+    fn enter() -> Option<Self> {
+        let mut workers = ACTIVE.lock().unwrap();
+        if SHUTTING_DOWN.load(Ordering::Acquire) {
+            return None;
+        }
+        *workers += 1;
+        Some(Self)
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        *ACTIVE.lock().unwrap() -= 1;
+        IDLE.notify_all();
+    }
+}
+
+fn render(key: &Key, timeout: Duration, cancelled: &AtomicBool, send: mpsc::SyncSender<Rendered>) {
+    let result = if let Some(_active) = Active::enter() {
+        render_job(key, Instant::now() + timeout, cancelled)
+    } else {
+        Err(Failure::Unavailable)
+    };
+    let _ = send.send(match result {
+        Ok(output) => Rendered::Ready(output),
+        Err(failure) => Rendered::Failed(failure),
+    });
+}
+
+#[cfg(not(unix))]
+fn render_job(_: &Key, _: Instant, _: &AtomicBool) -> Result<Output, Failure> {
+    Err(Failure::Unavailable)
+}
+
+#[cfg(unix)]
+fn render_job(key: &Key, deadline: Instant, cancelled: &AtomicBool) -> Result<Output, Failure> {
     let mut command = Command::new(&key.executable);
     command.args(["render", "-", "--format"]);
     let stdout_limit = match key.format {
         Format::Unicode => {
-            command.args(["unicode", "--ascii-color", "plain"]);
+            command.args(["unicode", "--ascii-color", "plain", "--resource-profile", "constrained"]);
             MAX_TEXT_BYTES
         }
         Format::Png => {
@@ -261,146 +348,186 @@ fn render(key: &Key, timeout: Duration, send: mpsc::SyncSender<Rendered>) {
         .stderr(Stdio::piped());
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        let parent = std::process::id() as libc::pid_t;
+        // SAFETY: this runs after fork and uses only syscalls; the parent check
+        // closes the race where Shoin died before the death signal was armed.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(
+                    libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong,
+                    0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong,
+                ) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let stopped = || cancelled.load(Ordering::Acquire) || SHUTTING_DOWN.load(Ordering::Acquire);
+    if stopped() {
+        return Err(Failure::Unavailable);
+    }
     // A renderer being replaced can briefly be open for writing on Unix.
     let child = command.spawn().or_else(|error| {
-        if error.kind() == std::io::ErrorKind::ExecutableFileBusy {
+        if error.kind() == io::ErrorKind::ExecutableFileBusy && !stopped() {
             thread::sleep(POLL_INTERVAL * 2);
             command.spawn()
         } else {
             Err(error)
         }
-    });
-    let mut child = match child {
-        Ok(child) => child,
-        Err(error) => {
-            let failure = if error.kind() == std::io::ErrorKind::NotFound {
-                Failure::MissingExecutable
-            } else {
-                Failure::Unavailable
-            };
-            let _ = send.send(Rendered::Failed(failure));
-            return;
+    }).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => Failure::MissingExecutable,
+        _ => Failure::Unavailable,
+    })?;
+    let mut child = RendererChild(Some(child));
+    let process = child.0.as_mut().expect("spawned renderer");
+    let mut stdin = process.stdin.take();
+    let mut stdout = process.stdout.take();
+    let mut stderr = process.stderr.take();
+    nonblocking(stdin.as_ref().expect("piped stdin"))?;
+    nonblocking(stdout.as_ref().expect("piped stdout"))?;
+    nonblocking(stderr.as_ref().expect("piped stderr"))?;
+
+    let mut source = key.source.as_bytes();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    loop {
+        if stopped() {
+            return Err(Failure::Unavailable);
         }
-    };
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-
-    thread::scope(|scope| {
-        let (out_send, out_receive) = mpsc::sync_channel(1);
-        let (err_send, err_receive) = mpsc::sync_channel(1);
-        let input = thread::Builder::new()
-            .spawn_scoped(scope, move || stdin.write_all(key.source.as_bytes()));
-        let output = thread::Builder::new().spawn_scoped(scope, move || {
-            let _ = out_send.send(read_capped(stdout, stdout_limit));
-        });
-        let diagnostics = thread::Builder::new().spawn_scoped(scope, move || {
-            let _ = err_send.send(read_capped(stderr, MAX_DIAGNOSTIC_BYTES));
-        });
-
-        let mut exited = false;
-        let result = if input.is_ok() && output.is_ok() && diagnostics.is_ok() {
-            let mut out = None;
-            let mut err = None;
-            loop {
-                if Instant::now() >= deadline {
-                    break Err(Failure::Timeout);
+        if Instant::now() >= deadline {
+            return Err(Failure::Timeout);
+        }
+        let mut progressed = false;
+        if let Some(pipe) = &mut stdin {
+            if !source.is_empty() {
+                match pipe.write(source) {
+                    Ok(written) => {
+                        source = &source[written..];
+                        progressed = written > 0;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => source = &[],
+                    Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => {}
+                    Err(_) => return Err(Failure::Invalid),
                 }
-                if let Err(failure) = collect(&out_receive, &mut out)
-                    .and_then(|()| collect(&err_receive, &mut err))
-                {
-                    break Err(failure);
-                }
-                if let (Some(out), Some(err)) = (&out, &err) {
-                    let status = match child.try_wait() {
-                        Ok(Some(status)) => status,
-                        Ok(None) => {
-                            thread::sleep(POLL_INTERVAL);
-                            continue;
-                        }
-                        Err(_) => break Err(Failure::Invalid),
-                    };
-                    exited = true;
-                    break if status.success() {
-                        match key.format {
-                            Format::Unicode => literal_rows(out).map(Output::Rows),
-                            Format::Png => validate_png(out).map(|()| Output::Png(Arc::from(out.as_slice()))),
-                        }
-                    } else {
-                        let diagnostic = String::from_utf8_lossy(err).to_ascii_lowercase();
-                        Err(if diagnostic.contains("unsupported")
-                            || diagnostic.contains("not supported")
-                        {
-                            Failure::Unsupported
-                        } else {
-                            Failure::Invalid
-                        })
-                    };
-                }
-                thread::sleep(POLL_INTERVAL);
             }
-        } else {
-            Err(Failure::Unavailable)
-        };
-        // Publish promptly even if an unrelated process inherited a pipe.
-        // Scoped I/O threads retain this job's slot until all pipes close.
-        if !exited {
-            terminate(&mut child);
+            if source.is_empty() {
+                stdin = None;
+            }
         }
-        let _ = send.send(match result {
-            Ok(output) => Rendered::Ready(output),
-            Err(failure) => Rendered::Failed(failure),
-        });
-    });
-}
-
-fn terminate(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn kill(pid: std::ffi::c_int, signal: std::ffi::c_int) -> std::ffi::c_int;
+        progressed |= drain(&mut stdout, &mut out, stdout_limit)?;
+        progressed |= drain(&mut stderr, &mut err, MAX_DIAGNOSTIC_BYTES)?;
+        if stdout.is_none() && stderr.is_none() && child.exited()? {
+            break;
         }
-        const SIGKILL: std::ffi::c_int = 9;
-        // SAFETY: process_group(0) makes the unreaped child's ID its group ID.
-        // A negative ID confines the signal to that group, including wrappers'
-        // children that still hold the renderer's pipes.
-        if let Ok(group) = std::ffi::c_int::try_from(child.id()) {
-            unsafe { kill(-group, SIGKILL) };
+        if !progressed {
+            thread::sleep(POLL_INTERVAL);
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    let status = child.finish().map_err(|_| Failure::Invalid)?;
+    if status.success() {
+        return match key.format {
+            Format::Unicode => literal_rows(&out).map(Output::Rows),
+            Format::Png => validate_png(&out).map(|()| Output::Png(out.into())),
+        };
+    }
+
+    let diagnostic = String::from_utf8_lossy(&err).to_ascii_lowercase();
+    Err(if diagnostic.contains("resource limit") {
+        Failure::TooLarge
+    } else if diagnostic.contains("unsupported")
+        || diagnostic.contains("not supported")
+        || diagnostic.contains("does not support")
+    {
+        Failure::Unsupported
+    } else {
+        Failure::Invalid
+    })
 }
 
-fn collect(
-    receive: &mpsc::Receiver<Result<Vec<u8>, Failure>>,
-    result: &mut Option<Vec<u8>>,
-) -> Result<(), Failure> {
-    if result.is_none() {
-        match receive.try_recv() {
-            Ok(bytes) => *result = Some(bytes?),
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => return Err(Failure::Invalid),
+#[cfg(unix)]
+struct RendererChild(Option<Child>);
+
+#[cfg(unix)]
+impl RendererChild {
+    fn exited(&self) -> Result<bool, Failure> {
+        let child = self.0.as_ref().expect("unreaped renderer");
+        // SAFETY: waitid initializes the record on success. A zero pid means
+        // there is nothing to report. WNOWAIT keeps the group ID reserved
+        // until finish signals any descendants and reaps the group leader.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        if result == 0 {
+            Ok(unsafe { info.si_pid() } != 0)
+        } else if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err(Failure::Invalid)
         }
+    }
+
+    fn finish(&mut self) -> io::Result<ExitStatus> {
+        let mut child = self.0.take().expect("unreaped renderer");
+        // SAFETY: process_group(0) gave the unreaped child its own group.
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        let _ = child.kill();
+        child.wait()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RendererChild {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            let _ = self.finish();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn nonblocking(pipe: &impl AsRawFd) -> Result<(), Failure> {
+    // SAFETY: the parent owns this end of the pipe. The renderer has the
+    // other end, which keeps its normal blocking semantics.
+    if unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+        return Err(Failure::Unavailable);
     }
     Ok(())
 }
 
-fn read_capped(input: impl Read, limit: usize) -> Result<Vec<u8>, Failure> {
-    let mut bytes = Vec::new();
-    input
-        .take((limit + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Failure::Invalid)?;
-    if bytes.len() > limit {
-        return Err(Failure::TooLarge);
+#[cfg(unix)]
+fn drain(pipe: &mut Option<impl Read>, output: &mut Vec<u8>, limit: usize) -> Result<bool, Failure> {
+    let Some(reader) = pipe else { return Ok(false) };
+    let mut buffer = [0; 8192];
+    // Read at most one chunk per turn so a busy stream cannot starve stdin,
+    // cancellation, timeouts, or the other output stream.
+    match reader.read(&mut buffer) {
+        Ok(0) => {
+            *pipe = None;
+            Ok(false)
+        }
+        Ok(n) if n <= limit - output.len() => {
+            output.extend_from_slice(&buffer[..n]);
+            Ok(true)
+        }
+        Ok(_) => Err(Failure::TooLarge),
+        Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => Ok(false),
+        Err(_) => Err(Failure::Invalid),
     }
-    Ok(bytes)
 }
 
 /// Accept the static 8-bit RGBA PNG emitted by Merman. Dimensions are
-/// bounded before the terminal decodes the pixels, and the chunk whitelist
-/// excludes metadata, animation, and any trailing data.
+/// bounded before decompression. The chunk whitelist excludes metadata,
+/// animation, and any trailing data.
+#[cfg(unix)]
 fn validate_png(bytes: &[u8]) -> Result<(), Failure> {
     let Some(header) = bytes.get(..33) else { return Err(Failure::InvalidPng) };
     if !header.starts_with(b"\x89PNG\r\n\x1a\n")
@@ -417,21 +544,64 @@ fn validate_png(bytes: &[u8]) -> Result<(), Failure> {
         return Err(Failure::TooLarge);
     }
 
+    if !valid_png_crc(&header[12..]) {
+        return Err(Failure::InvalidPng);
+    }
+
     let mut chunks = &bytes[33..];
-    let mut image_bytes = 0;
+    let mut compressed = Vec::new();
     while let Some(header) = chunks.get(..8) {
         let size = u32::from_be_bytes(header[..4].try_into().expect("chunk size")) as usize;
-        let Some(tail) = size.checked_add(12).and_then(|end| chunks.get(end..)) else {
+        let end = size.checked_add(12).ok_or(Failure::InvalidPng)?;
+        let chunk = chunks.get(..end).ok_or(Failure::InvalidPng)?;
+        if !valid_png_crc(&chunk[4..]) {
             return Err(Failure::InvalidPng);
-        };
+        }
+        chunks = &chunks[end..];
         match &header[4..8] {
-            b"IDAT" => image_bytes += size,
-            b"IEND" if size == 0 && tail.is_empty() && image_bytes != 0 => return Ok(()),
+            b"IDAT" => compressed.extend_from_slice(&chunk[8..end - 4]),
+            b"IEND" if size == 0 && chunks.is_empty() && !compressed.is_empty() => {
+                return decode_scanlines(&compressed, info.width, info.height);
+            }
             _ => break,
         }
-        chunks = tail;
     }
     Err(Failure::InvalidPng)
+}
+
+#[cfg(unix)]
+#[link(name = "z")]
+unsafe extern "C" {
+    fn crc32(crc: libc::c_ulong, bytes: *const u8, len: libc::c_uint) -> libc::c_ulong;
+    fn uncompress(dest: *mut u8, len: *mut libc::c_ulong, source: *const u8, size: libc::c_ulong) -> libc::c_int;
+}
+
+#[cfg(unix)]
+fn valid_png_crc(chunk: &[u8]) -> bool {
+    let (bytes, checksum) = chunk.split_at(chunk.len() - 4);
+    let expected = u32::from_be_bytes(checksum.try_into().expect("PNG checksum"));
+    // SAFETY: the bytes are valid for the supplied length, capped at 1 MiB.
+    unsafe { crc32(0, bytes.as_ptr(), bytes.len() as libc::c_uint) == expected.into() }
+}
+
+#[cfg(unix)]
+fn decode_scanlines(compressed: &[u8], width: u32, height: u32) -> Result<(), Failure> {
+    // Each row has one filter byte and one byte per channel. Every filter is
+    // reversible for a complete row, so there is no need to retain pixels.
+    let stride = 1 + width as usize * 4;
+    let mut filtered = vec![0; stride * height as usize];
+    let mut len = filtered.len() as libc::c_ulong;
+    // SAFETY: both slices are live and disjoint, and the arguments give zlib
+    // their full lengths. zlib checks the deflate stream and Adler checksum.
+    let status = unsafe {
+        uncompress(filtered.as_mut_ptr(), &mut len, compressed.as_ptr(), compressed.len() as libc::c_ulong)
+    };
+    if status != 0 || len as usize != filtered.len()
+        || filtered.chunks_exact(stride).any(|row| row[0] > 4)
+    {
+        return Err(Failure::InvalidPng);
+    }
+    Ok(())
 }
 
 fn literal_rows(bytes: &[u8]) -> Result<Arc<[String]>, Failure> {
@@ -518,14 +688,14 @@ mod tests {
     fn run(executable: String, timeout: Duration) -> Preview {
         let (send, receive) = mpsc::sync_channel(1);
         let key = Key { executable, source: "graph LR".into(), format: Format::Unicode };
-        render(&key, timeout, send);
+        render(&key, timeout, &AtomicBool::new(false), send);
         receive.recv().unwrap().map(Output::rows)
     }
 
     #[test]
     fn passes_literal_stdin_and_reuses_exact_source_and_executable() {
         let fake = FakeRenderer::new(
-            r#"[ "$*" = 'render - --format unicode --ascii-color plain --output -' ] || exit 2
+            r#"[ "$*" = 'render - --format unicode --ascii-color plain --resource-profile constrained --output -' ] || exit 2
 cat"#,
         );
         let executable = fake.executable();
@@ -581,6 +751,11 @@ esac"#,
         assert_eq!(renderer.cached(&executable, source), Some(Preview::Ready(vec![source.into()].into())));
         assert_eq!(renderer.cached_png(&executable, source), Some(PicturePreview::Ready(TEST_PNG.into())));
 
+        let png_snapshot = renderer.with_cached_pngs();
+        assert!(png_snapshot.jobs.is_empty());
+        assert_eq!(png_snapshot.cached_png(&executable, source), Some(PicturePreview::Ready(TEST_PNG.into())));
+        assert_eq!(png_snapshot.cached(&executable, source), None);
+
         fs::write(fake.0.join("sample.png"), b"<svg/>").unwrap();
         assert_eq!(renderer.request_png(&executable, "new source"), PicturePreview::Pending);
         settle(&mut renderer);
@@ -609,6 +784,39 @@ esac"#,
     }
 
     #[test]
+    fn rejects_corrupt_compressed_pixels() {
+        let mut corrupt = TEST_PNG.to_vec();
+        corrupt[41..52].fill(0);
+        let checksum = unsafe { crc32(0, corrupt[37..52].as_ptr(), 15) } as u32;
+        corrupt[52..56].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(validate_png(&corrupt), Err(Failure::InvalidPng));
+    }
+
+    #[test]
+    fn dropping_renderer_kills_and_reaps_active_child() {
+        let fake = FakeRenderer::new(r#"echo $$ > "$(dirname "$0")/pid"; exec sleep 30"#);
+        let mut renderer = MermaidRenderer::default();
+        renderer.request(&fake.executable(), "");
+        let deadline = Instant::now() + TIMEOUT;
+        let pid = loop {
+            if let Ok(pid) = fs::read_to_string(fake.0.join("pid")) {
+                if !pid.trim().is_empty() {
+                    break pid;
+                }
+            }
+            assert!(Instant::now() < deadline, "renderer did not start");
+            thread::sleep(POLL_INTERVAL);
+        };
+        drop(renderer);
+        let alive = Command::new("kill").args(["-0", pid.trim()])
+            .stderr(Stdio::null()).status().unwrap().success();
+        if alive {
+            let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+        }
+        assert!(!alive, "renderer survived drop");
+    }
+
+    #[test]
     fn caches_failures_and_evicts_the_least_recently_used_entry() {
         let fake = FakeRenderer::new("exit 1");
         let executable = fake.executable();
@@ -628,6 +836,24 @@ esac"#,
         assert_eq!(renderer.request(&executable, ""), Preview::Failed(Failure::Invalid));
         assert_eq!(renderer.request(&executable, "1"), Preview::Pending);
         settle(&mut renderer);
+    }
+
+    #[test]
+    fn transient_failures_expire_and_can_be_retried() {
+        let fake = FakeRenderer::new("cat");
+        let executable = fake.executable();
+        let source = "graph LR";
+        let mut renderer = MermaidRenderer::default();
+        let cache = &mut renderer.caches[Format::Unicode as usize];
+        let key = Arc::new(Key { executable: executable.clone(), source: source.into(), format: Format::Unicode });
+        remember(cache, key, Rendered::Failed(Failure::MissingExecutable));
+        assert!(cache[0].2.is_some());
+        cache[0].2 = Some(Instant::now());
+        assert!(renderer.poll());
+        assert_eq!(renderer.cached(&executable, source), None);
+        assert_eq!(renderer.request(&executable, source), Preview::Pending);
+        settle(&mut renderer);
+        assert_eq!(renderer.cached(&executable, source), Some(Preview::Ready(vec![source.into()].into())));
     }
 
     #[test]
@@ -664,9 +890,31 @@ esac"#,
         assert!(start.elapsed() < Duration::from_secs(5));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_descendant_holding_pipes_does_not_keep_a_job_slot() {
+        let fake = FakeRenderer::new(r#"
+setsid sh -c 'echo $$ > "$1"; exec sleep 30' sh "$0.detached" &
+wait
+"#);
+        let start = Instant::now();
+        let result = run(fake.executable(), Duration::from_millis(200));
+        if let Ok(pid) = fs::read_to_string(fake.0.join("renderer.detached")) {
+            let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+        }
+        assert_eq!(result, Preview::Failed(Failure::Timeout));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn maps_merman_resource_limit_errors_to_too_large() {
+        let fake = FakeRenderer::new("printf 'ASCII resource limit exceeded\n' >&2; exit 1");
+        assert_eq!(run(fake.executable(), TIMEOUT), Preview::Failed(Failure::TooLarge));
+    }
+
     #[test]
     fn reports_safe_failures() {
-        let fake = FakeRenderer::new("printf 'unsupported diagram\n' >&2; exit 1");
+        let fake = FakeRenderer::new("printf 'ASCII rendering does not support diagram type pie\n' >&2; exit 1");
         assert_eq!(run(fake.executable(), TIMEOUT), Preview::Failed(Failure::Unsupported));
         assert_eq!(
             run(format!("{}/missing", fake.0.display()), TIMEOUT),
