@@ -69,6 +69,7 @@ instead: it prints the page as the editor shows it, styled, with pictures.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
 - File export writes through symlinks and overwrites existing files in place.
   It uses the destination file’s write permissions.
+  A write error after truncation can leave an existing destination empty or partially written.
 - Export refuses a destination that is the document itself or any note or
   picture it embeds, under any name: through `..`, a symlink or a hard link.
   `html` and `pdf` also refuse a picture the document links to

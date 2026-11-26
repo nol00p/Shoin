@@ -38,22 +38,27 @@ pub(super) fn drain() {
 
 pub(super) struct Destination {
     path: PathBuf,
+    original: Option<Metadata>,
     // Preserve the identity seen before the editor can rename or replace a file.
     inputs: Vec<(PathBuf, Option<Metadata>)>,
     compiled: usize,
 }
 
 impl Destination {
-    pub(super) fn new(path: PathBuf, mut sources: Vec<PathBuf>, pictures: Vec<PathBuf>) -> Result<Self> {
-        let compiled = sources.len();
+    pub(super) fn new(path: PathBuf) -> Result<Self> {
+        let original = inspect(&path)?;
+        Ok(Self { path, original, inputs: Vec::new(), compiled: 0 })
+    }
+
+    pub(super) fn with_inputs(mut self, mut sources: Vec<PathBuf>, pictures: Vec<PathBuf>) -> Result<Self> {
+        self.compiled = sources.len();
         sources.extend(pictures);
-        let inputs = sources.into_iter().map(|source| {
+        self.inputs = sources.into_iter().map(|source| {
             let meta = fs::metadata(&source).ok();
             (source, meta)
         }).collect();
-        let dest = Self { path, inputs, compiled };
-        dest.check(inspect(&dest.path)?.as_ref())?;
-        Ok(dest)
+        self.check(self.original.as_ref())?;
+        Ok(self)
     }
 
     pub(super) fn path(&self) -> &Path {
@@ -83,31 +88,67 @@ impl Destination {
         if cancelled() || crate::recover::stopping() {
             bail!("export cancelled");
         }
+        self.revalidate()?;
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", short(parent)))?;
         }
-        self.check(inspect(&self.path)?.as_ref())?;
-
-        // Open through the destination path as usual, including dangling links.
-        // Check the opened inode before truncating so a path swap cannot redirect
-        // the write into a captured input between the check and the open.
+        // Open an existing file without creating or truncating it. For an
+        // absent file, resolve dangling links explicitly so exclusive creation
+        // still works through them.
         let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(false);
+        options.write(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             // Avoid blocking on a FIFO swapped in after the path check.
             options.custom_flags(libc::O_NONBLOCK);
         }
-        let mut file = options.open(&self.path).with_context(|| short(&self.path))?;
-        let opened = file.metadata().with_context(|| short(&self.path))?;
-        if !opened.is_file() {
-            bail!("{} is not a regular file", short(&self.path));
-        }
-        self.check(Some(&opened))?;
-        file.set_len(0).with_context(|| short(&self.path))?;
+        let mut file = if let Some(original) = &self.original {
+            let file = match options.open(&self.path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(self.changed()),
+                result => result.with_context(|| short(&self.path))?,
+            };
+            self.revalidate()?;
+            let opened = file.metadata().with_context(|| short(&self.path))?;
+            if !opened.is_file() || !same_version(original, &opened) {
+                return Err(self.changed());
+            }
+            self.check(Some(&opened))?;
+            file.set_len(0).with_context(|| short(&self.path))?;
+            file
+        } else {
+            let target = crate::fs::save::through_links(&self.path)?;
+            self.revalidate()?;
+            match options.create_new(true).open(&target) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(self.changed()),
+                result => result.with_context(|| short(&self.path))?,
+            }
+        };
         write(&mut file).with_context(|| short(&self.path))
     }
+
+    fn revalidate(&self) -> Result<()> {
+        let current = inspect(&self.path)?;
+        self.check(current.as_ref())?;
+        match (&self.original, &current) {
+            (None, None) => {}
+            (Some(before), Some(now)) if same_version(before, now) => {}
+            _ => return Err(self.changed()),
+        }
+        Ok(())
+    }
+
+    fn changed(&self) -> anyhow::Error {
+        anyhow::anyhow!("{} changed while exporting", short(&self.path))
+    }
+}
+
+fn same_version(before: &Metadata, now: &Metadata) -> bool {
+    #[cfg(unix)]
+    if !same_inode(before, now) {
+        return false;
+    }
+    before.len() == now.len() && before.modified().ok() == now.modified().ok()
 }
 
 /// The name a dangling link or a path in an existing directory would create.

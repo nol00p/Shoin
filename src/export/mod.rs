@@ -131,12 +131,13 @@ impl Job {
     pub(crate) fn new(
         source: &Path, dest: PathBuf, format: Format, cfg: &TranscludeConfig, page: &html::Page,
     ) -> Result<Self> {
+        let dest = Destination::new(dest)?;
         let (flat, sources) = crate::transclude::compile::compile_with_sources(source, cfg)?;
         let pictures = match format {
             Format::Html | Format::Pdf => linked_pictures(&flat, &page.base, &page.md),
             _ => Vec::new(),
         };
-        let dest = Destination::new(dest, sources, pictures)?;
+        let dest = dest.with_inputs(sources, pictures)?;
         Ok(Self { source: source.to_path_buf(), dest, flat, format })
     }
 
@@ -632,14 +633,14 @@ fn write_pdf_with(
 
     let status = loop {
         if destination::cancelled() {
-            let _ = stop_pandoc(&mut child);
+            stop_pandoc(&mut child)?;
             bail!("export cancelled");
         }
         match pandoc_exited(&mut child) {
-            Ok(true) => break stop_pandoc(&mut child).context("waiting for pandoc")?,
+            Ok(true) => break stop_pandoc(&mut child)?,
             Ok(false) => std::thread::sleep(std::time::Duration::from_millis(10)),
             Err(e) => {
-                let _ = stop_pandoc(&mut child);
+                stop_pandoc(&mut child)?;
                 return Err(e).context("waiting for pandoc");
             }
         }
@@ -686,30 +687,56 @@ fn pandoc_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
     child.try_wait().map(|status| status.is_some())
 }
 
+const PANDOC_STOP_FAILED: &str = "converter process could not be stopped";
+
 fn stop_pandoc(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(2);
     #[cfg(unix)]
-    {
-        let group = child.id() as libc::pid_t;
-        // SAFETY: process_group(0) made the still-unreaped child the leader.
-        unsafe { libc::kill(-group, libc::SIGKILL) };
-        #[cfg(target_os = "linux")]
-        while linux_group_running(group) {
-            // A member may have forked just as the first signal was sent.
-            unsafe { libc::kill(-group, libc::SIGKILL) };
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        let status = child.wait();
-        #[cfg(not(target_os = "linux"))]
-        while unsafe { libc::kill(-group, 0) } == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        status
-    }
+    let group = child.id() as libc::pid_t;
+    // SAFETY: process_group(0) made the still-unreaped child the leader.
+    #[cfg(unix)]
+    unsafe { libc::kill(-group, libc::SIGKILL) };
     #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-        child.wait()
+    let _ = child.kill();
+
+    loop {
+        #[cfg(target_os = "linux")]
+        let can_reap = !linux_group_running(group);
+        #[cfg(not(target_os = "linux"))]
+        let can_reap = true;
+        let status = if can_reap { child.try_wait()? } else { None };
+        if let Some(status) = status {
+            // On other Unix systems the group probe counts the leader's
+            // zombie until it has been reaped.
+            #[cfg(all(unix, not(target_os = "linux")))]
+            let drained = unsafe { libc::kill(-group, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            #[cfg(any(target_os = "linux", not(unix)))]
+            let drained = true;
+            if drained {
+                return Ok(status);
+            }
+        }
+        if Instant::now() >= deadline {
+            // Reap the leader if possible even when another member is stuck.
+            let _ = child.try_wait();
+            break;
+        }
+        #[cfg(target_os = "linux")]
+        if !can_reap {
+            // Keep the group ID reserved while signalling a member that
+            // forked just as the first signal was sent.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
+    if destination::cancelled() {
+        // Shutdown drains the worker and exits without displaying its result.
+        eprintln!("{PANDOC_STOP_FAILED}");
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, PANDOC_STOP_FAILED))
 }
 
 #[cfg(target_os = "linux")]
@@ -791,7 +818,7 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
         .spawn()
         .map_err(|_| PANDOC_FAILED)?;
     let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        let _ = stop_pandoc(&mut child);
+        stop_pandoc(&mut child).map_err(pandoc_stop_note)?;
         return Err(PANDOC_FAILED);
     };
     // Writing and reading on threads of their own: a long page cannot fill
@@ -810,14 +837,14 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
     let left = || deadline.saturating_duration_since(std::time::Instant::now());
     let status = loop {
         match pandoc_exited(&mut child) {
-            Ok(true) => break stop_pandoc(&mut child).map_err(|_| PANDOC_FAILED)?,
+            Ok(true) => break stop_pandoc(&mut child).map_err(pandoc_stop_note)?,
             Ok(false) if left().is_zero() || destination::cancelled() => {
-                let _ = stop_pandoc(&mut child);
+                stop_pandoc(&mut child).map_err(pandoc_stop_note)?;
                 return Err(PANDOC_TIMED_OUT);
             }
             Ok(false) => std::thread::sleep(std::time::Duration::from_millis(2)),
             Err(_) => {
-                let _ = stop_pandoc(&mut child);
+                stop_pandoc(&mut child).map_err(pandoc_stop_note)?;
                 return Err(PANDOC_FAILED);
             }
         }
@@ -828,6 +855,10 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
     let out = receive_pandoc(&read, left)?;
     let wrote = receive_pandoc(&wrote, left)?;
     out.filter(|_| wrote).ok_or(PANDOC_FAILED)
+}
+
+fn pandoc_stop_note(error: std::io::Error) -> &'static str {
+    if error.kind() == std::io::ErrorKind::TimedOut { PANDOC_STOP_FAILED } else { PANDOC_FAILED }
 }
 
 fn receive_pandoc<T>(
