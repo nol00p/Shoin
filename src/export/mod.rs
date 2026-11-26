@@ -92,6 +92,16 @@ pub fn write(
         .and_then(|job| job.render(page, Default::default()))
         .and_then(Completed::commit)
         .map(|(_, note)| note);
+    finish_batch(result)
+}
+
+pub(crate) fn render_stdout_html(flat: &str, title: &str, page: &html::Page) -> Result<(String, Option<String>)> {
+    let result = destination::start()
+        .map(|_worker| html::render_with_mermaid(flat, title, page, Default::default()));
+    finish_batch(result)
+}
+
+fn finish_batch<T>(result: Result<T>) -> Result<T> {
     #[cfg(unix)]
     if destination::cancelled() {
         // The signal thread exits once it has drained the workers and scratch files.
@@ -170,17 +180,20 @@ impl Completed {
     pub(crate) fn commit(self) -> Result<(String, Option<String>)> {
         use std::io::Write;
 
-        self.dest.commit(|file| match &self.output {
+        match self.output {
             Output::Markdown { flat, source, md } => {
-                let flat = rebase_images(flat, source, Some(self.dest.path()), md);
-                file.write_all(flat.as_bytes())
+                // Rebase after creating the destination directory.
+                self.dest.commit(|file| {
+                    let flat = rebase_images(&flat, &source, Some(self.dest.path()), &md);
+                    file.write_all(flat.as_bytes())
+                })?;
             }
-            Output::Text(text) => file.write_all(text.as_bytes()),
+            Output::Text(text) => self.dest.commit(|file| file.write_all(text.as_bytes()))?,
             Output::Pdf(scratch) => {
                 let mut pdf = std::fs::File::open(scratch.path().join(PDF_OUTPUT))?;
-                std::io::copy(&mut pdf, file).map(|_| ())
+                self.dest.commit(|file| std::io::copy(&mut pdf, file).map(|_| ()))?;
             }
-        })?;
+        }
         let path = self.dest.path();
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
         Ok((name, self.note))
@@ -619,14 +632,14 @@ fn write_pdf_with(
 
     let status = loop {
         if destination::cancelled() {
-            stop_pandoc(&mut child);
+            let _ = stop_pandoc(&mut child);
             bail!("export cancelled");
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        match pandoc_exited(&mut child) {
+            Ok(true) => break stop_pandoc(&mut child).context("waiting for pandoc")?,
+            Ok(false) => std::thread::sleep(std::time::Duration::from_millis(10)),
             Err(e) => {
-                stop_pandoc(&mut child);
+                let _ = stop_pandoc(&mut child);
                 return Err(e).context("waiting for pandoc");
             }
         }
@@ -652,16 +665,73 @@ fn pandoc_command(tool: &Path) -> std::process::Command {
     command
 }
 
-fn stop_pandoc(child: &mut std::process::Child) {
+fn pandoc_exited(child: &mut std::process::Child) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
-        // SAFETY: the child was spawned as the leader of this process group
-        // and we have yet to reap it, so the ID cannot have been recycled.
-        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        // Leave the leader unreaped so its ID stays reserved while we signal
+        // any descendants that inherited its process group.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        if result == 0 {
+            Ok(unsafe { info.si_pid() } != 0)
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted { Ok(false) } else { Err(error) }
+        }
     }
     #[cfg(not(unix))]
-    let _ = child.kill();
-    let _ = child.wait();
+    child.try_wait().map(|status| status.is_some())
+}
+
+fn stop_pandoc(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(unix)]
+    {
+        let group = child.id() as libc::pid_t;
+        // SAFETY: process_group(0) made the still-unreaped child the leader.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+        #[cfg(target_os = "linux")]
+        while linux_group_running(group) {
+            // A member may have forked just as the first signal was sent.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let status = child.wait();
+        #[cfg(not(target_os = "linux"))]
+        while unsafe { libc::kill(-group, 0) } == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        status
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+        child.wait()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_group_running(group: libc::pid_t) -> bool {
+    // Orphans belong to the OS's reaper. In containers PID 1 may leave
+    // zombies indefinitely, so count only processes still able to use scratch files.
+    let Ok(entries) = std::fs::read_dir("/proc") else { return false };
+    entries.filter_map(Result::ok).any(|entry| {
+        if entry.file_name().as_encoded_bytes().iter().any(|b| !b.is_ascii_digit()) {
+            return false;
+        }
+        let Ok(stat) = std::fs::read(entry.path().join("stat")) else { return false };
+        // The command name can contain spaces, parentheses and non-UTF-8 bytes.
+        let Some(end) = stat.iter().rposition(|&byte| byte == b')') else { return false };
+        let Ok(fields) = std::str::from_utf8(&stat[end + 1..]) else { return false };
+        let mut fields = fields.split_whitespace();
+        let state = fields.next();
+        let in_group = fields.nth(1).and_then(|pgrp| pgrp.parse().ok()) == Some(group);
+        // Between pgrp and num_threads there are fourteen fields. A zombie
+        // thread-group leader can still have running threads.
+        in_group && (!matches!(state, Some("Z" | "X")) || fields.nth(14).and_then(|n| n.parse::<u32>().ok()) > Some(1))
+    })
 }
 
 /// The HTML page's formulas as MathML, through `pandoc` (an
@@ -721,7 +791,7 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
         .spawn()
         .map_err(|_| PANDOC_FAILED)?;
     let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        stop_pandoc(&mut child);
+        let _ = stop_pandoc(&mut child);
         return Err(PANDOC_FAILED);
     };
     // Writing and reading on threads of their own: a long page cannot fill
@@ -738,26 +808,26 @@ fn run_until(tool: &Path, args: &[&str], input: String, deadline: std::time::Ins
         read_tx.send(ok.then_some(out))
     });
     let left = || deadline.saturating_duration_since(std::time::Instant::now());
-    let mut finish = || {
-        let out = receive_pandoc(&read, left)?;
-        let wrote = receive_pandoc(&wrote, left)?;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return Ok((out, wrote, status)),
-                Ok(None) if left().is_zero() || destination::cancelled() => return Err(PANDOC_TIMED_OUT),
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
-                Err(_) => return Err(PANDOC_FAILED),
+    let status = loop {
+        match pandoc_exited(&mut child) {
+            Ok(true) => break stop_pandoc(&mut child).map_err(|_| PANDOC_FAILED)?,
+            Ok(false) if left().is_zero() || destination::cancelled() => {
+                let _ = stop_pandoc(&mut child);
+                return Err(PANDOC_TIMED_OUT);
+            }
+            Ok(false) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            Err(_) => {
+                let _ = stop_pandoc(&mut child);
+                return Err(PANDOC_FAILED);
             }
         }
     };
-    match finish() {
-        Ok((Some(page), true, status)) if status.success() => Ok(page),
-        Ok(_) => Err(PANDOC_FAILED),
-        Err(note) => {
-            stop_pandoc(&mut child);
-            Err(note)
-        }
+    if !status.success() {
+        return Err(PANDOC_FAILED);
     }
+    let out = receive_pandoc(&read, left)?;
+    let wrote = receive_pandoc(&wrote, left)?;
+    out.filter(|_| wrote).ok_or(PANDOC_FAILED)
 }
 
 fn receive_pandoc<T>(

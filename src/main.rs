@@ -241,7 +241,7 @@ fn main() -> Result<()> {
             match format {
                 export::Format::Text => print_out(&export::plain::render(&flat, page.measure, page.justify, &page.md))?,
                 export::Format::Html => {
-                    let (html, note) = export::html::render_with_mermaid(&flat, &title, &page, Default::default());
+                    let (html, note) = export::render_stdout_html(&flat, &title, &page)?;
                     if let Some(note) = note {
                         eprintln!("{note}");
                     }

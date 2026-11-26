@@ -67,6 +67,8 @@ instead: it prints the page as the editor shows it, styled, with pictures.
   exports as plain text; `math = false` then also reaches `pdf`, where `$`
   stays a dollar sign.
 - An unresolved embed exports as a visible placeholder, never a silent gap.
+- File export writes through symlinks and overwrites existing files in place.
+  It uses the destination file’s write permissions.
 - Export refuses a destination that is the document itself or any note or
   picture it embeds, under any name: through `..`, a symlink or a hard link.
   `html` and `pdf` also refuse a picture the document links to

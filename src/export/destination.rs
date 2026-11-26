@@ -1,6 +1,6 @@
-//! Protect the inputs and publish a completed export by rename.
+//! Protect the inputs when writing a completed export.
 
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard};
@@ -39,7 +39,6 @@ pub(super) fn drain() {
 pub(super) struct Destination {
     path: PathBuf,
     // Preserve the identity seen before the editor can rename or replace a file.
-    original: Option<Metadata>,
     inputs: Vec<(PathBuf, Option<Metadata>)>,
     compiled: usize,
 }
@@ -52,9 +51,8 @@ impl Destination {
             let meta = fs::metadata(&source).ok();
             (source, meta)
         }).collect();
-        let original = inspect(&path)?;
-        let dest = Self { path, original, inputs, compiled };
-        dest.check(dest.original.as_ref())?;
+        let dest = Self { path, inputs, compiled };
+        dest.check(inspect(&dest.path)?.as_ref())?;
         Ok(dest)
     }
 
@@ -63,9 +61,12 @@ impl Destination {
     }
 
     fn check(&self, current: Option<&Metadata>) -> Result<()> {
+        let missing = if current.is_none() { missing_name(&self.path)? } else { None };
         for (index, (source, original)) in self.inputs.iter().enumerate() {
             if current.zip(original.as_ref()).is_some_and(|(a, b)| same_inode(a, b))
+                || current.zip(fs::metadata(source).ok().as_ref()).is_some_and(|(a, b)| same_inode(a, b))
                 || same_file(&self.path, source)
+                || missing.as_ref().is_some_and(|name| missing_name(source).ok().flatten().as_ref() == Some(name))
             {
                 match index {
                     0 => bail!("that would overwrite the document you are exporting"),
@@ -82,38 +83,39 @@ impl Destination {
         if cancelled() || crate::recover::stopping() {
             bail!("export cancelled");
         }
-        let current = self.revalidate()?;
-        // Retain an existing symlink and atomically replace its target.
-        let target = if current.is_some() { fs::canonicalize(&self.path)? } else { self.path.clone() };
-        let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", short(parent)))?;
-        let (path, mut file) = crate::fs::save::create_beside(&target, parent, "tmp")
-            .with_context(|| short(&self.path))?;
-        let staged = StagedFile(path);
-        if let Some(meta) = current {
-            file.set_permissions(meta.permissions()).with_context(|| short(&self.path))?;
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", short(parent)))?;
         }
-        write(&mut file).with_context(|| short(&self.path))?;
-        drop(file);
-        self.revalidate()?;
-        if crate::recover::stopping() {
-            bail!("export cancelled");
-        }
-        fs::rename(&staged.0, target).with_context(|| short(&self.path))
-    }
+        self.check(inspect(&self.path)?.as_ref())?;
 
-    fn revalidate(&self) -> Result<Option<Metadata>> {
-        let current = inspect(&self.path)?;
-        self.check(current.as_ref())?;
-        if match (&self.original, &current) {
-            (None, None) => false,
-            (Some(before), Some(now)) => changed(before, now),
-            _ => true,
-        } {
-            bail!("{} changed while exporting", short(&self.path));
+        // Open through the destination path as usual, including dangling links.
+        // Check the opened inode before truncating so a path swap cannot redirect
+        // the write into a captured input between the check and the open.
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Avoid blocking on a FIFO swapped in after the path check.
+            options.custom_flags(libc::O_NONBLOCK);
         }
-        Ok(current)
+        let mut file = options.open(&self.path).with_context(|| short(&self.path))?;
+        let opened = file.metadata().with_context(|| short(&self.path))?;
+        if !opened.is_file() {
+            bail!("{} is not a regular file", short(&self.path));
+        }
+        self.check(Some(&opened))?;
+        file.set_len(0).with_context(|| short(&self.path))?;
+        write(&mut file).with_context(|| short(&self.path))
     }
+}
+
+/// The name a dangling link or a path in an existing directory would create.
+fn missing_name(path: &Path) -> Result<Option<PathBuf>> {
+    let target = crate::fs::save::through_links(path)?;
+    let Some(name) = target.file_name() else { return Ok(None) };
+    let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    Ok(fs::canonicalize(parent).ok().map(|dir| dir.join(name)))
 }
 
 fn inspect(path: &Path) -> Result<Option<Metadata>> {
@@ -123,14 +125,6 @@ fn inspect(path: &Path) -> Result<Option<Metadata>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| short(path)),
     }
-}
-
-fn changed(before: &Metadata, now: &Metadata) -> bool {
-    #[cfg(unix)]
-    if !same_inode(before, now) {
-        return true;
-    }
-    before.len() != now.len() || before.modified().ok() != now.modified().ok()
 }
 
 fn same_inode(a: &Metadata, b: &Metadata) -> bool {
@@ -143,13 +137,5 @@ fn same_inode(a: &Metadata, b: &Metadata) -> bool {
     {
         let _ = (a, b);
         false
-    }
-}
-
-struct StagedFile(PathBuf);
-
-impl Drop for StagedFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
     }
 }
