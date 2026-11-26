@@ -26,6 +26,8 @@ const MAX_ROW_BYTES: usize = 4096;
 const MAX_EXECUTABLE_BYTES: usize = 4096;
 pub(crate) const MAX_CACHE_ENTRIES: usize = 32;
 const MAX_JOBS: usize = 2;
+/// How long a missing or unstartable renderer is believed before the next
+/// request tries it again. A timeout is not retried: see [`remember`].
 const TRANSIENT_TTL: Duration = Duration::from_secs(3);
 const TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -75,7 +77,36 @@ impl Output {
 }
 
 type Rendered = RenderState<Output>;
-type Cache = VecDeque<(Arc<Key>, Rendered, Option<Instant>)>;
+type Cache = VecDeque<Entry>;
+
+#[derive(Clone, Debug)]
+struct Entry {
+    key: Arc<Key>,
+    output: Rendered,
+    retry: Retry,
+}
+
+/// When a cached result is tried again. Until the retry's own result
+/// arrives, the old one is still what the cache answers, so a status row
+/// stays on screen instead of dropping out for a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retry {
+    Never,
+    At(Instant),
+    /// Past its time, and [`MermaidRenderer::poll`] has said so once: the
+    /// next request for it starts the retry.
+    Due,
+}
+
+impl Entry {
+    fn due(&self, now: Instant) -> bool {
+        match self.retry {
+            Retry::Never => false,
+            Retry::At(at) => now >= at,
+            Retry::Due => true,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Failure {
@@ -138,11 +169,14 @@ pub(crate) struct MermaidRenderer {
 impl MermaidRenderer {
     pub(crate) fn poll(&mut self) -> bool {
         let mut changed = false;
-        for cache in &mut self.caches {
-            let before = cache.len();
-            let now = Instant::now();
-            cache.retain(|(_, _, expires)| expires.is_none_or(|expires| now < expires));
-            changed |= cache.len() != before;
+        let now = Instant::now();
+        for entry in self.caches.iter_mut().flatten() {
+            if matches!(entry.retry, Retry::At(at) if now >= at) {
+                // Redraw once so the fence is asked for again; it draws the
+                // same result meanwhile.
+                entry.retry = Retry::Due;
+                changed = true;
+            }
         }
         self.jobs.retain_mut(|job| {
             // Check thread completion before receiving, so a worker finishing
@@ -175,7 +209,7 @@ impl MermaidRenderer {
     pub(crate) fn with_cached_pngs(&self) -> Self {
         let mut renderer = Self::default();
         renderer.caches[Format::Png as usize] = self.caches[Format::Png as usize]
-            .iter().filter(|(_, output, _)| matches!(output, Rendered::Ready(_))).cloned().collect();
+            .iter().filter(|entry| matches!(entry.output, Rendered::Ready(_))).cloned().collect();
         renderer
     }
 
@@ -186,9 +220,8 @@ impl MermaidRenderer {
     fn cached_output(&self, executable: &str, source: &str, format: Format) -> Option<Rendered> {
         self.caches[format as usize]
             .iter()
-            .find(|(key, _, expires)| key.matches(executable, source, format)
-                && expires.is_none_or(|expires| Instant::now() < expires))
-            .map(|(_, output, _)| output.clone())
+            .find(|entry| entry.key.matches(executable, source, format))
+            .map(|entry| entry.output.clone())
     }
 
     pub(crate) fn request(&mut self, executable: &str, source: &str) -> Preview {
@@ -207,18 +240,22 @@ impl MermaidRenderer {
             return Rendered::Failed(Failure::Unavailable);
         }
         let cache = &mut self.caches[format as usize];
-        let now = Instant::now();
-        cache.retain(|(_, _, expires)| expires.is_none_or(|expires| now < expires));
-        if let Some(index) = cache.iter().position(|(key, _, _)| key.matches(executable, source, format)) {
+        let mut stale = None;
+        if let Some(index) = cache.iter().position(|entry| entry.key.matches(executable, source, format)) {
             let entry = cache.remove(index).expect("cache index exists");
-            let output = entry.1.clone();
+            let output = entry.output.clone();
+            let due = entry.due(Instant::now());
             cache.push_back(entry);
-            return output;
+            if !due {
+                return output;
+            }
+            stale = Some(output);
         }
+        let waiting = stale.unwrap_or(Rendered::Pending);
         if self.jobs.len() >= MAX_JOBS
             || self.jobs.iter().any(|job| job.key.matches(executable, source, format))
         {
-            return Rendered::Pending;
+            return waiting;
         }
 
         let key = Arc::new(Key { executable: executable.into(), source: source.into(), format });
@@ -235,7 +272,7 @@ impl MermaidRenderer {
                     result: Some(receive),
                     thread,
                 });
-                Rendered::Pending
+                waiting
             }
             Err(_) => {
                 let preview = Rendered::Failed(Failure::Unavailable);
@@ -255,14 +292,27 @@ impl Drop for MermaidRenderer {
     }
 }
 
+/// Cache a result, in place of any earlier one for the same key.
+///
+/// A missing or unstartable renderer can be fixed while Shoin runs, and
+/// trying it again costs a failed spawn, so those are retried after
+/// [`TRANSIENT_TTL`]. Every other result stands until the cache is reset
+/// (a config reload) or evicts it, a timeout included: the same source given
+/// to the same renderer takes as long again, and retrying it on a timer
+/// would spend [`TIMEOUT`] of a core every few seconds for as long as the
+/// fence is in view.
 fn remember(cache: &mut Cache, key: Arc<Key>, preview: Rendered) {
+    cache.retain(|entry| !entry.key.matches(&key.executable, &key.source, key.format));
     if cache.len() == MAX_CACHE_ENTRIES {
         cache.pop_front();
     }
-    let expires = matches!(preview, Rendered::Failed(
-        Failure::MissingExecutable | Failure::Unavailable | Failure::Timeout
-    )).then(|| Instant::now() + TRANSIENT_TTL);
-    cache.push_back((key, preview, expires));
+    let retry = match preview {
+        Rendered::Failed(Failure::MissingExecutable | Failure::Unavailable) => {
+            Retry::At(Instant::now() + TRANSIENT_TTL)
+        }
+        _ => Retry::Never,
+    };
+    cache.push_back(Entry { key, output: preview, retry });
 }
 
 // Covers exits from the signal thread, where App and export stacks cannot drop.
@@ -850,21 +900,56 @@ esac"#,
     }
 
     #[test]
-    fn transient_failures_expire_and_can_be_retried() {
+    fn transient_failures_are_retried_without_leaving_the_screen() {
+        let fake = FakeRenderer::new("cat");
+        let executable = fake.executable();
+        let source = "graph LR";
+        let missing = Preview::Failed(Failure::MissingExecutable);
+        let mut renderer = MermaidRenderer::default();
+        let cache = &mut renderer.caches[Format::Unicode as usize];
+        let key = Arc::new(Key { executable: executable.clone(), source: source.into(), format: Format::Unicode });
+        remember(cache, key, Rendered::Failed(Failure::MissingExecutable));
+        let Retry::At(at) = cache[0].retry else { panic!("{:?}", cache[0].retry) };
+        assert!(at > Instant::now() + TRANSIENT_TTL - Duration::from_secs(1));
+        // Not yet due: answered from the cache, no job, no redraw.
+        assert!(!renderer.poll());
+        assert_eq!(renderer.request(&executable, source), missing);
+        assert!(renderer.jobs.is_empty());
+
+        renderer.caches[Format::Unicode as usize][0].retry = Retry::At(Instant::now());
+        assert!(renderer.poll(), "a due retry asks for one redraw");
+        assert!(!renderer.poll(), "and only one");
+        // Every frame until the retry's result arrives draws the old one.
+        assert_eq!(renderer.cached(&executable, source), Some(missing.clone()));
+        assert_eq!(renderer.request(&executable, source), missing);
+        assert_eq!(renderer.request(&executable, source), missing);
+        assert_eq!(renderer.jobs.len(), 1, "one retry at a time");
+        assert_eq!(renderer.cached(&executable, source), Some(missing));
+        settle(&mut renderer);
+        assert_eq!(renderer.cached(&executable, source), Some(Preview::Ready(vec![source.into()].into())));
+        assert_eq!(renderer.caches[Format::Unicode as usize].len(), 1);
+        assert_eq!(renderer.caches[Format::Unicode as usize][0].retry, Retry::Never);
+    }
+
+    #[test]
+    fn timeouts_are_not_retried_on_a_timer() {
         let fake = FakeRenderer::new("cat");
         let executable = fake.executable();
         let source = "graph LR";
         let mut renderer = MermaidRenderer::default();
         let cache = &mut renderer.caches[Format::Unicode as usize];
         let key = Arc::new(Key { executable: executable.clone(), source: source.into(), format: Format::Unicode });
-        remember(cache, key, Rendered::Failed(Failure::MissingExecutable));
-        assert!(cache[0].2.is_some());
-        cache[0].2 = Some(Instant::now());
-        assert!(renderer.poll());
-        assert_eq!(renderer.cached(&executable, source), None);
+        remember(cache, key, Rendered::Failed(Failure::Timeout));
+        assert_eq!(cache[0].retry, Retry::Never);
+        for _ in 0..3 {
+            assert!(!renderer.poll());
+            assert_eq!(renderer.request(&executable, source), Preview::Failed(Failure::Timeout));
+            assert!(renderer.jobs.is_empty(), "a timeout must not start another render");
+        }
+        // A reset (config reload) is what tries it again.
+        let mut renderer = MermaidRenderer::default();
         assert_eq!(renderer.request(&executable, source), Preview::Pending);
         settle(&mut renderer);
-        assert_eq!(renderer.cached(&executable, source), Some(Preview::Ready(vec![source.into()].into())));
     }
 
     #[test]

@@ -222,7 +222,7 @@ impl App {
         if dest.is_empty() {
             return;
         }
-        let dest = self.typed_path(dest);
+        let (shown, dest) = (dest.to_owned(), self.typed_path(dest));
         // HTML is drawn from the theme AS AUTHORED, not from the running one:
         // `self.theme` has been adapted to this terminal's color depth, and a
         // page has no such limit to be adapted to.
@@ -241,7 +241,7 @@ impl App {
             return self.notify("export already in progress", FlashKind::Info);
         }
 
-        let job = match crate::export::Job::new(source, dest, format, &self.config.transclude, &page) {
+        let job = match crate::export::Job::new(source, dest, shown, format, &self.config.transclude, &page) {
             Ok(job) => job,
             Err(e) => return self.show_export_result(Err(e)),
         };

@@ -303,3 +303,64 @@ fn running(pid: libc::pid_t) -> bool {
         alive(pid)
     }
 }
+
+fn is_char_device(path: &str) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::metadata(path).is_ok_and(|meta| meta.file_type().is_char_device())
+}
+
+#[test]
+fn export_writes_to_dev_null() {
+    if !is_char_device("/dev/null") {
+        return;
+    }
+    let vault = Vault::new("dev-null");
+    fs::write(vault.0.join("note.md"), "hello\n").unwrap();
+    let out = vault.command().args(["--export", "note.md", "--format", "txt", "--out", "/dev/null"])
+        .output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "/dev/null\n");
+}
+
+#[test]
+fn pdf_export_writes_to_dev_stdout() {
+    if fs::metadata("/dev/stdout").is_err() {
+        return;
+    }
+    let vault = Vault::new("dev-stdout");
+    fs::write(vault.0.join("note.md"), "hello\n").unwrap();
+    let script = vault.0.join("pandoc");
+    fs::write(&script, "#!/bin/sh\nwhile [ \"$1\" != --output ]; do shift; done\necho converted > \"$2\"\n").unwrap();
+    fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(vault.0.join("typst"), "").unwrap();
+    fs::set_permissions(vault.0.join("typst"), fs::Permissions::from_mode(0o700)).unwrap();
+    // `output()` gives the child a pipe for stdout, as `| lpr` would.
+    for format in ["pdf", "txt"] {
+        let out = vault.command().env("PATH", vault.fixture_path())
+            .args(["--export", "note.md", "--format", format, "--out", "/dev/stdout"])
+            .output().unwrap();
+        assert!(out.status.success(), "{format}: {out:?}");
+        let expected: &[u8] = if format == "pdf" { b"converted\n" } else { b"hello\n" };
+        assert_eq!(out.stdout, expected, "{format}: {out:?}");
+    }
+}
+
+#[test]
+fn export_refuses_named_pipes_and_directories() {
+    let vault = Vault::new("fifo");
+    fs::write(vault.0.join("note.md"), "hello\n").unwrap();
+    let fifo = vault.0.join("pipe");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a NUL-terminated path inside the test's own directory.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    fs::create_dir(vault.0.join("dir")).unwrap();
+    for (dest, message) in [("./pipe", "./pipe is a named pipe"), ("dir", "dir is a directory")] {
+        let start = Instant::now();
+        let out = vault.command().args(["--export", "note.md", "--format", "txt", "--out", dest])
+            .output().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(5), "{dest}: export blocked");
+        assert!(!out.status.success(), "{dest}: {out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(message), "{dest}: {out:?}");
+    }
+    assert!(fs::metadata(&fifo).is_ok());
+}

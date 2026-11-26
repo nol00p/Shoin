@@ -88,7 +88,7 @@ pub fn write(
     cfg: &TranscludeConfig,
     page: &html::Page,
 ) -> Result<Option<String>> {
-    let result = Job::new(source, dest.to_path_buf(), format, cfg, page)
+    let result = Job::new(source, dest.to_path_buf(), dest.display().to_string(), format, cfg, page)
         .and_then(|job| job.render(page, Default::default()))
         .and_then(Completed::commit)
         .map(|(_, note)| note);
@@ -129,9 +129,9 @@ pub(crate) struct Job {
 impl Job {
     /// Compile and snapshot file identities before returning control to the editor.
     pub(crate) fn new(
-        source: &Path, dest: PathBuf, format: Format, cfg: &TranscludeConfig, page: &html::Page,
+        source: &Path, dest: PathBuf, shown: String, format: Format, cfg: &TranscludeConfig, page: &html::Page,
     ) -> Result<Self> {
-        let dest = Destination::new(dest)?;
+        let dest = Destination::new(dest, shown)?;
         let (flat, sources) = crate::transclude::compile::compile_with_sources(source, cfg)?;
         let pictures = match format {
             Format::Html | Format::Pdf => linked_pictures(&flat, &page.base, &page.md),
