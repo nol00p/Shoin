@@ -165,7 +165,7 @@ fn raster_batch(
             }
             // The async worker enforces its own per-call timeout. Finish the
             // export when the overall budget expires even if more jobs remain.
-            if Instant::now() >= deadline {
+            if super::destination::cancelled() || Instant::now() >= deadline {
                 return results;
             }
             match renderer.request_png(executable, source) {

@@ -77,8 +77,11 @@ terminal graphics support.
 
 ## Details
 
-- HTML uses validated PNGs. Supporting SVG would require validating the XML,
-  CSS, and resource references before embedding renderer output.
+- Shoin checks PNG chunk types, CRCs, and size limits. The configured renderer
+  can still produce corrupt compressed pixels with matching CRCs. Browsers,
+  terminals, and PDF engines decode the pixels.
+- Supporting SVG would require validating the XML, CSS, and resource
+  references before embedding renderer output.
 - The Phase 0 comparison with mermaid-ascii and mmdc remains open.
   The [stress fixtures](../examples/mermaid/stress.md) cover a cyclic branch,
   a long Unicode label, and nested sequence frames.

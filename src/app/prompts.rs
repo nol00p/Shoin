@@ -241,22 +241,18 @@ impl App {
             return self.notify("export already in progress", FlashKind::Info);
         }
 
-        let export = move |source: &Path, config: &crate::config::schema::TranscludeConfig, renderer| {
-            let note = crate::export::write_with_renderer(source, &dest, format, config, &page, renderer)?;
-            let name = dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy();
-            let note = note.map(|n| format!(" · {n}")).unwrap_or_default();
-            Ok(format!("{name} exported{note}"))
+        let job = match crate::export::Job::new(source, dest, format, &self.config.transclude, &page) {
+            Ok(job) => job,
+            Err(e) => return self.show_export_result(Err(e)),
         };
         if !matches!(format, Format::Html | Format::Pdf) {
-            return self.show_export_result(export(source, &self.config.transclude, Default::default()));
+            return self.show_export_result(job.render(&page, Default::default()));
         }
 
-        let source = source.to_path_buf();
-        let config = self.config.transclude.clone();
         let renderer = self.mermaid.get_mut().with_cached_pngs();
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         match std::thread::Builder::new().name("export".into()).spawn(move || {
-            let result = export(&source, &config, renderer);
+            let result = job.render(&page, renderer);
             let _ = send.send(result);
         }) {
             Ok(_) => {
@@ -278,10 +274,13 @@ impl App {
         self.show_export_result(result);
     }
 
-    fn show_export_result(&mut self, result: anyhow::Result<String>) {
-        match result {
+    fn show_export_result(&mut self, result: anyhow::Result<crate::export::Completed>) {
+        match result.and_then(crate::export::Completed::commit) {
             Err(e) => self.notify(format!("export: {e}"), FlashKind::Error),
-            Ok(message) => self.notify(message, FlashKind::Info),
+            Ok((name, note)) => {
+                let note = note.map(|n| format!(" · {n}")).unwrap_or_default();
+                self.notify(format!("{name} exported{note}"), FlashKind::Info);
+            }
         }
         self.needs_redraw = true;
     }

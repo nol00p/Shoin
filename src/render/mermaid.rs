@@ -525,8 +525,9 @@ fn drain(pipe: &mut Option<impl Read>, output: &mut Vec<u8>, limit: usize) -> Re
 }
 
 /// Accept the static 8-bit RGBA PNG emitted by Merman. Dimensions are
-/// bounded before decompression. The chunk whitelist excludes metadata,
-/// animation, and any trailing data.
+/// bounded and the chunk whitelist excludes metadata, animation, and trailing data.
+/// The renderer is user-configured. Corrupt compressed pixels with matching
+/// CRCs can pass because we leave decompression to the PNG consumer.
 #[cfg(unix)]
 fn validate_png(bytes: &[u8]) -> Result<(), Failure> {
     let Some(header) = bytes.get(..33) else { return Err(Failure::InvalidPng) };
@@ -549,7 +550,7 @@ fn validate_png(bytes: &[u8]) -> Result<(), Failure> {
     }
 
     let mut chunks = &bytes[33..];
-    let mut compressed = Vec::new();
+    let mut has_pixels = false;
     while let Some(header) = chunks.get(..8) {
         let size = u32::from_be_bytes(header[..4].try_into().expect("chunk size")) as usize;
         let end = size.checked_add(12).ok_or(Failure::InvalidPng)?;
@@ -559,9 +560,9 @@ fn validate_png(bytes: &[u8]) -> Result<(), Failure> {
         }
         chunks = &chunks[end..];
         match &header[4..8] {
-            b"IDAT" => compressed.extend_from_slice(&chunk[8..end - 4]),
-            b"IEND" if size == 0 && chunks.is_empty() && !compressed.is_empty() => {
-                return decode_scanlines(&compressed, info.width, info.height);
+            b"IDAT" => has_pixels |= size != 0,
+            b"IEND" if size == 0 && chunks.is_empty() && has_pixels => {
+                return Ok(());
             }
             _ => break,
         }
@@ -570,38 +571,33 @@ fn validate_png(bytes: &[u8]) -> Result<(), Failure> {
 }
 
 #[cfg(unix)]
-#[link(name = "z")]
-unsafe extern "C" {
-    fn crc32(crc: libc::c_ulong, bytes: *const u8, len: libc::c_uint) -> libc::c_ulong;
-    fn uncompress(dest: *mut u8, len: *mut libc::c_ulong, source: *const u8, size: libc::c_ulong) -> libc::c_int;
-}
-
-#[cfg(unix)]
 fn valid_png_crc(chunk: &[u8]) -> bool {
     let (bytes, checksum) = chunk.split_at(chunk.len() - 4);
-    let expected = u32::from_be_bytes(checksum.try_into().expect("PNG checksum"));
-    // SAFETY: the bytes are valid for the supplied length, capped at 1 MiB.
-    unsafe { crc32(0, bytes.as_ptr(), bytes.len() as libc::c_uint) == expected.into() }
+    png_crc32(bytes).to_be_bytes() == checksum
 }
 
 #[cfg(unix)]
-fn decode_scanlines(compressed: &[u8], width: u32, height: u32) -> Result<(), Failure> {
-    // Each row has one filter byte and one byte per channel. Every filter is
-    // reversible for a complete row, so there is no need to retain pixels.
-    let stride = 1 + width as usize * 4;
-    let mut filtered = vec![0; stride * height as usize];
-    let mut len = filtered.len() as libc::c_ulong;
-    // SAFETY: both slices are live and disjoint, and the arguments give zlib
-    // their full lengths. zlib checks the deflate stream and Adler checksum.
-    let status = unsafe {
-        uncompress(filtered.as_mut_ptr(), &mut len, compressed.as_ptr(), compressed.len() as libc::c_ulong)
+fn png_crc32(bytes: &[u8]) -> u32 {
+    const TABLE: [u32; 256] = {
+        let mut table = [0; 256];
+        let mut index = 0;
+        while index < table.len() {
+            let mut crc = index as u32;
+            let mut bit = 0;
+            while bit < 8 {
+                crc = (crc >> 1) ^ if crc & 1 == 1 { 0xedb8_8320 } else { 0 };
+                bit += 1;
+            }
+            table[index] = crc;
+            index += 1;
+        }
+        table
     };
-    if status != 0 || len as usize != filtered.len()
-        || filtered.chunks_exact(stride).any(|row| row[0] > 4)
-    {
-        return Err(Failure::InvalidPng);
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc = (crc >> 8) ^ TABLE[((crc as u8) ^ byte) as usize];
     }
-    Ok(())
+    !crc
 }
 
 fn literal_rows(bytes: &[u8]) -> Result<Arc<[String]>, Failure> {
@@ -784,12 +780,27 @@ esac"#,
     }
 
     #[test]
-    fn rejects_corrupt_compressed_pixels() {
-        let mut corrupt = TEST_PNG.to_vec();
-        corrupt[41..52].fill(0);
-        let checksum = unsafe { crc32(0, corrupt[37..52].as_ptr(), 15) } as u32;
-        corrupt[52..56].copy_from_slice(&checksum.to_be_bytes());
-        assert_eq!(validate_png(&corrupt), Err(Failure::InvalidPng));
+    fn png_crc_matches_the_standard_check_value() {
+        assert_eq!(png_crc32(b"123456789"), 0xcbf4_3926);
+    }
+
+    #[test]
+    fn bad_png_crc_keeps_mermaid_source() {
+        let fake = FakeRenderer::new(r#"cat "$0.png""#);
+        let mut bad = TEST_PNG.to_vec();
+        bad[52] ^= 1;
+        assert_eq!(validate_png(&bad), Err(Failure::InvalidPng));
+        fs::write(format!("{}.png", fake.executable()), bad).unwrap();
+
+        let mut page = crate::export::html::Page::default();
+        page.md.mermaid_renderer = Some(fake.executable());
+        let markdown = "```mermaid\ngraph LR\nA-->B\n```";
+        let (html, note) = crate::export::html::render_with_mermaid(
+            markdown, "Test", &page, MermaidRenderer::default(),
+        );
+        assert!(html.contains("A--&gt;B"));
+        assert!(!html.contains("data:image/png"));
+        assert!(note.unwrap().contains("1 Mermaid diagram left as source"));
     }
 
     #[test]

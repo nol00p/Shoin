@@ -218,6 +218,9 @@ fn main() -> Result<()> {
     // Batch export skips terminal setup, so errors go to stderr and the
     // command exits with a failure status.
     if let Some(src) = &cli.export {
+        for warning in config::validate(&config) {
+            eprintln!("config: {warning}");
+        }
         let format = export_format(&cli.format, cli.justify)?;
         let page = export::html::Page {
             theme: render::theme::Theme::authored(&config.theme).unwrap_or_default(),
@@ -414,8 +417,7 @@ fn main() -> Result<()> {
 }
 
 fn finish_external_work() {
-    render::mermaid::shutdown();
-    export::pdf_assets::cleanup();
+    export::shutdown();
 }
 
 #[cfg(unix)]

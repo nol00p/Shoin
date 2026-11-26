@@ -8540,6 +8540,45 @@ fn html_export_waits_for_mermaid_off_the_editor_thread() {
     std::fs::remove_dir_all(d).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn html_export_refuses_a_source_renamed_to_the_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (d, mut app) = vault(
+        "start\n\n```mermaid\ngraph LR\nA-->B\n```\n",
+        &[("renderer", "#!/bin/sh\ntouch \"$0.ready\"; while [ ! -f \"$0.go\" ]; do sleep .01; done\nexit 1\n")],
+    );
+    let executable = d.join("renderer");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    app.config.markdown.mermaid_renderer = executable.to_str().map(str::to_owned);
+
+    let dest = d.join("note.html");
+    cmd(&mut app, ":export html");
+    assert!(matches!(app.mode, Mode::Prompt(_)));
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.export_result.is_some(), "export should return while the renderer waits");
+    assert!(!dest.exists());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !d.join("renderer.ready").exists() {
+        assert!(Instant::now() < deadline, "renderer did not start");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let source = app.buffer.path.clone().unwrap();
+    let before = std::fs::read(&source).unwrap();
+    app.move_path(&source, &dest).unwrap();
+    std::fs::write(&source, "replacement").unwrap();
+    std::fs::write(d.join("renderer.go"), "").unwrap();
+    while app.export_result.is_some() {
+        assert!(Instant::now() < deadline, "export did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+        app.poll_export();
+    }
+    assert_eq!(std::fs::read(&dest).unwrap(), before);
+    assert!(app.flash.unwrap().text.unwrap().contains("overwrite the document"));
+    std::fs::remove_dir_all(d).unwrap();
+}
+
 /// Turning `[markdown] math` on by saving the watched config, with the
 /// cursor on a block's opening line and no key pressed, shows the whole
 /// block raw on the next frame: the reload widens the active set over the

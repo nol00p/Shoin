@@ -371,7 +371,7 @@ pub struct App {
     pub image_protocol: crate::image::Protocol,
     pub(crate) mermaid: RefCell<crate::render::mermaid::MermaidRenderer>,
     pub(crate) mermaid_revision: u64,
-    export_result: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
+    export_result: Option<std::sync::mpsc::Receiver<anyhow::Result<crate::export::Completed>>>,
     /// Where the last frame put its pictures. Filled while the frame is built
     /// (hence the cell: rendering only has `&App`) and drained by the painter
     /// straight after.

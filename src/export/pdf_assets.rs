@@ -75,21 +75,25 @@ pub(super) fn prepare<'a>(
     Prepared { markdown: Cow::Owned(out), note, _assets: Some(assets) }
 }
 
-// A signal can exit the process without running the export worker's Drop.
-static LIVE: Mutex<Option<Vec<PathBuf>>> = Mutex::new(Some(Vec::new()));
+// A completed PDF can still be queued for the editor when a signal exits
+// the process. Shutdown drains the workers before deleting queued files.
+static LIVE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-pub(crate) fn cleanup() {
-    if let Some(paths) = LIVE.lock().unwrap().take() {
-        for path in paths {
-            let _ = fs::remove_dir_all(path);
-        }
+pub(super) fn cleanup() {
+    for path in LIVE.lock().unwrap().drain(..) {
+        let _ = fs::remove_dir_all(path);
     }
 }
 
-struct Assets(PathBuf);
+/// A private scratch directory owned by the export worker.
+pub(super) struct Assets(PathBuf);
 
 impl Assets {
-    fn create() -> io::Result<Self> {
+    pub(super) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub(super) fn create() -> io::Result<Self> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = std::path::absolute(std::env::temp_dir())?;
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -101,14 +105,12 @@ impl Assets {
             builder.mode(0o700);
             builder
         };
-        let mut live = LIVE.lock().unwrap();
-        let paths = live.as_mut().ok_or_else(|| io::Error::from(io::ErrorKind::Interrupted))?;
         for _ in 0..8 {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let path = root.join(format!("shoin-pdf-{}-{timestamp:x}-{serial}", std::process::id()));
             match builder.create(&path) {
                 Ok(()) => {
-                    paths.push(path.clone());
+                    LIVE.lock().unwrap().push(path.clone());
                     return Ok(Self(path));
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -134,9 +136,10 @@ impl Assets {
 
 impl Drop for Assets {
     fn drop(&mut self) {
-        if let Some(paths) = LIVE.lock().unwrap().as_mut() {
+        let mut live = LIVE.lock().unwrap();
+        if let Some(index) = live.iter().position(|p| *p == self.0) {
             let _ = fs::remove_dir_all(&self.0);
-            paths.retain(|path| path != &self.0);
+            live.swap_remove(index);
         }
     }
 }
