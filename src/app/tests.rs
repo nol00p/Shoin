@@ -2663,6 +2663,29 @@ fn set_tab_width_redraws_tabbed_lines() {
     assert_eq!(draw(&app), (10, 8, 8), "at 8");
 }
 
+/// With `tab_width` below 4, a fence opened and closed by `` \t``` `` closes:
+/// the prose and heading after it are drawn as prose, not as code.
+#[test]
+fn a_tab_indented_fence_closes_at_a_small_tab_width() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut app = app_with("# Title\n\n\t```rust\n\tlet x = 1;\n\t```\n\nAfter **bold** prose.\n\n## Heading\n");
+    for tab in [1, 2, 3] {
+        cmd(&mut app, &format!(":set tab_width {tab}"));
+        app.refresh_blocks();
+        assert_eq!(app.blocks.kinds[4], BlockKind::FenceClose, "tab {tab}");
+        assert_eq!(app.blocks.kinds[6], BlockKind::Paragraph, "tab {tab}");
+        assert_eq!(app.blocks.kinds[8], BlockKind::Heading(2), "tab {tab}");
+        let mut t = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        t.draw(|f| crate::render::frame::render(f, &app)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let screen: String = (0..12u16)
+            .map(|y| (0..60u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        assert!(screen.contains("After bold prose."), "tab {tab}, `**` concealed:\n{screen}");
+        assert!(!screen.contains("## Heading"), "tab {tab}, the heading styled:\n{screen}");
+    }
+}
+
 /// `:number [relative|absolute]` — an explicit mode sets it directly, and
 /// with no argument it TOGGLES, returning to whichever mode was last
 /// chosen rather than defaulting to absolute (mirrors `:embed`).

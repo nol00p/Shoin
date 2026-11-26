@@ -48,6 +48,13 @@ fenced source. If Shoin cannot find the configured executable, it shows an
 installation hint at the fence. Styled `--render` output waits briefly for
 previews. Redirected plain output uses the Mermaid source.
 
+At most 32 diagrams render at once, and split panes share that limit: each
+pane gets an equal part of it (16 each with two panes), counted from the top
+of the pane. Fences past a pane's part show their source until scrolling
+brings them nearer its top. In read-only mode, a search that lands inside a
+diagram shows its source with the match highlighted. Scrolling away, or Esc,
+shows the diagram again.
+
 
 ## Show diagrams as images
 
