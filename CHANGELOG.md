@@ -102,6 +102,26 @@
 - A search match or `:s///c` match that takes a line break (`/b\n`) is
   drawn with one highlighted cell after the line's text, also on the
   last line of a file without a final newline (#192).
+- Mermaid fences preview as text diagrams, drawn by a local Merman CLI
+  you name with `mermaid_renderer` under `[markdown]`, in user config or
+  `--config`: a config found in the working directory cannot set it and
+  says so. Moving the cursor into a fence, a Visual selection, a search
+  or an `:s` match shows its whole source, as does concealment off. A
+  diagram that fails, times out or does not fit keeps its source, with a
+  status row above it saying why. Previews work in `-R`, `--render` and
+  expanded embeds, and `mermaid_graphics = true` draws PNGs on Kitty and
+  iTerm2 terminals (#188).
+- At most 32 diagrams render at once, shared between split panes; the
+  others show their source. A diagram that timed out waits for an edit
+  or `:reload`; a missing renderer is tried again every few seconds, so
+  installing it needs no restart (#188).
+- HTML and PDF export draw Mermaid diagrams as PNGs when
+  `mermaid_renderer` is set. A diagram that fails keeps its source, and
+  the message gives how many and the first line. Markdown and text
+  export keep the source (#188).
+- The view keeps the same text on top when the rows around it change
+  height or re-wrap: a diagram arriving or going, a resize, a split, a
+  new measure (#188).
 
 **Reading**
 
@@ -109,12 +129,19 @@
   embed or a wrapped line taller than the window, and on to the lines
   below it. `j` `k` move a screen row, as in `less`, and `Ctrl-f` `Ctrl-b`
   a page (#174).
+- In read-only mode, a search that lands inside a Mermaid diagram shows
+  its source with the match highlighted, until the view moves or `Esc`
+  (#188).
 
 **Docs**
 
 - A Math page: inline and display math, editing a block, when a block is
   not laid out, export, and the supported commands, with a recording
   (#170).
+- A Mermaid page: setting up Merman CLI (tested with 0.11.0), text and
+  PNG previews, export and the limits, with demo notes in
+  `examples/mermaid/` for seven diagram families and three stress cases
+  (#188).
 
 **Fixes**
 
@@ -136,6 +163,18 @@
 - `:revert!` marks the buffer clean when its text already matched the
   file, when only the final newline or line ending changed on disk
   (#193).
+- A closing fence indented four or more columns past its list item's
+  text, or past the margin, is part of the code, as in CommonMark (#188).
+- `shoin --render` no longer prints the hint bar under the page (#188).
+- `--export` prints config warnings on stderr (#188).
+- `:export html` and `:export pdf` run in the background, so you can keep
+  editing. Before writing, an export checks again that its destination
+  has not changed since it started and has not become, by a rename, the
+  document or a note it embeds (#188).
+- `--out` writes every format, PDF too, to a device, a named pipe or a
+  descriptor: `--out /dev/stdout | lpr`, `/dev/null`, `>(cmd)`. A named
+  pipe nothing reads fails at once instead of hanging, and a directory,
+  socket or block device is refused (#188).
 
 ## 0.2.5
 
