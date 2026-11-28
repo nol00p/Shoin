@@ -1,0 +1,44 @@
+name: Dependency audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/audit.yml
+  schedule:
+    # Advisories can appear even when the lockfile hasn't changed.
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    env:
+      CARGO_AUDIT_VERSION: '0.22.2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Build from a pinned version with its published lockfile so installing
+      # the tool only needs Cargo. Cache the executable to skip repeat builds.
+      - uses: actions/cache@v4
+        id: cargo-audit-cache
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo +stable install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+
+      # Fetch the advisory database on every run. Vulnerabilities fail the
+      # check, while unmaintained and unsound advisories stay visible as warnings.
+      - run: cargo +stable audit --file Cargo.lock
